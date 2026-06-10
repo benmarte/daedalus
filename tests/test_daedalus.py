@@ -675,7 +675,7 @@ def test_task_body_no_slack():
     check("_task_body does NOT mention hermes send",
           "hermes send" not in body)
     check("_task_body mentions dispatcher handles Slack",
-          "dispatcher handles Slack delivery" in body)
+          "dispatcher" in body and "Slack" in body)
     check("_task_body mentions gh pr comment",
           "gh pr comment" in body)
     check("_task_body mentions Agent: documentation prefix",

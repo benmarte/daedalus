@@ -101,7 +101,8 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"one-line note per file), how it was resolved, the PR link, and step-by-step instructions to "
         f"test it manually. Use clear Markdown with a heading and a file-change table. "
         f"Prefix the comment with `**Agent: documentation**` so the dispatcher can locate it. "
-        f"NOTE: the dispatcher handles Slack delivery — you do NOT need to call `hermes send`.\n\n"
+        f"NOTE: Slack delivery is handled automatically by the dispatcher — do NOT attempt to "
+        f"deliver the report yourself.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
 

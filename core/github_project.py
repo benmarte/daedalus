@@ -71,7 +71,7 @@ def pr_state_for_issue(repo: str, issue_number: int) -> Optional[str]:
     body reference (``#<n>``). Prefers merged over open.
     """
     pr = _pr_for_issue(repo, issue_number)
-    return pr.get("state") if pr else None
+    return (pr.get("state") or "").lower() if pr else None
 
 
 def _pr_for_issue(repo: str, issue_number: int) -> Optional[Dict[str, Any]]:
