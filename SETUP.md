@@ -2,7 +2,7 @@
 
 This repo provisions a **lean roster of specialist Hermes agents** that take a GitHub Project
 "Ready" issue and drive it to a reviewed, ready-to-merge PR — using **native Hermes Kanban**
-(decompose → role profiles → dispatch → review), no custom daedalus plugin.
+(decompose → role profiles → dispatch → review), no custom plugin.
 
 Roster: **project-manager · planner · developer · reviewer · security-analyst · documentation**
 (each loads only its lifecycle agent-skills). See `tasks/RUNBOOK-native-pipeline.md` for the run flow.

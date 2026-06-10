@@ -3,7 +3,7 @@
 Flag a GitHub issue **Ready**, and a roster of AI agents implements it, reviews it,
 security-audits it, documents it, and opens a **green, mergeable PR** — with quality
 gates that *cannot* be skipped, full board/issue tracking, and zero babysitting.
-One daedalus drives **many repos**.
+A single Daedalus deployment drives **many repos**.
 
 ```
 GitHub issue → "Ready"
@@ -69,7 +69,7 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
 4. Each tick **auto-advances** any stage that's blocked on review once its PR's CI is
    green — the chain flows hands-off.
 5. When you **merge** the PR, the next tick sets the card **Done** and **closes the
-   issue** (GitHub doesn't auto-close on a non-default-branch merge, so the daedalus
+   issue** (GitHub doesn't auto-close on a non-default-branch merge, so the dispatcher
    does it).
 
 The board and GitHub status are bookkept **in code on every tick**, so tracking is
@@ -226,22 +226,19 @@ hermes cron add daedalus --schedule "every 3m" \
 
 ## Uninstall / reset
 
-To completely remove the daedalus and all its host-side state:
+To completely remove Daedalus and all its host-side state:
 
 ```bash
 # HERMES_HOME defaults to ~/.hermes — set it if yours is elsewhere
-# 1. Clean up host-side artifacts (config, registry, hooks, cron jobs)
+# 1. Clean up host-side artifacts (config, registry, hooks, cron jobs, boards, profiles)
+#    Shows a data-loss summary first — review it, then confirm, or use -y for scripting:
 bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh"
 
-# Use --roster to also delete the 6 agent profiles:
-bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --roster
+# Use --keep-profiles to keep the 6 agent profiles:
+bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-profiles
 
 # 2. Remove the plugin package itself
 hermes plugins uninstall daedalus
-
-# 3. Remove kanban boards (one per project)
-hermes kanban boards ls              # list boards
-hermes kanban boards rm <slug>       # remove each
 ```
 
 The uninstall script is idempotent — safe to re-run; absent items are skipped without error.
