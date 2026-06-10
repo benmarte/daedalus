@@ -135,44 +135,103 @@ for role in "${ROLES[@]}"; do
 done
 
 # ── 3. Daedalus cron jobs ────────────────────────────────────────────────────
+# Parse the cron list into blocks.  A new block starts at a line matching
+#   ^\s*[0-9a-fA-F]{6,}\s+\[
+# (e.g. "  ba57e4afbba0 [active]").  Inside each block, capture the Name:
+# and Script: values.  Collect the name from any block whose Name ends in
+# "-daedalus" OR whose Script matches "daedalus-*.sh".
 FOUND_CRON=()
 CRON_LIST="$(hermes cron list --all 2>/dev/null || true)"
 if [[ -n "$CRON_LIST" ]]; then
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    # Match: Script is daedalus-*.sh or name ends -daedalus
-    if echo "$line" | grep -qE 'daedalus-[^ ]*\.sh|/[^ ]*-daedalus'; then
-      JOB_NAME="${line%% *}"
-      FOUND_CRON+=("$JOB_NAME")
+  _in_block=false
+  _cron_name=""
+  _cron_script=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*[0-9a-fA-F]{6,}[[:space:]]+\[ ]]; then
+      # Flush previous block
+      if $_in_block && [[ -n "$_cron_name" ]]; then
+        if [[ "$_cron_name" == *-daedalus ]] || [[ "$_cron_script" =~ daedalus-[^/]*\.sh$ ]]; then
+          FOUND_CRON+=("$_cron_name")
+        fi
+      fi
+      _in_block=true
+      _cron_name=""
+      _cron_script=""
+      continue
     fi
-  done < <(echo "$CRON_LIST" | grep -iF 'daedalus' || true)
+    if $_in_block; then
+      # Extract Name: and Script: fields from the block
+      if [[ "$line" =~ ^[[:space:]]*Name:[[:space:]]+(.*) ]]; then
+        _cron_name="${BASH_REMATCH[1]}"
+        _cron_name="${_cron_name%%[[:space:]]*}"  # trim trailing whitespace
+      elif [[ "$line" =~ ^[[:space:]]*Script:[[:space:]]+(.*) ]]; then
+        _cron_script="${BASH_REMATCH[1]}"
+        _cron_script="${_cron_script%%[[:space:]]*}"  # trim trailing whitespace
+      fi
+    fi
+  done <<< "$CRON_LIST"
+  # Flush the final block
+  if $_in_block && [[ -n "$_cron_name" ]]; then
+    if [[ "$_cron_name" == *-daedalus ]] || [[ "$_cron_script" =~ daedalus-[^/]*\.sh$ ]]; then
+      FOUND_CRON+=("$_cron_name")
+    fi
+  fi
+  # Dedup (in case name and script both matched the same block)
+  FOUND_CRON=( $(printf '%s\n' "${FOUND_CRON[@]}" | sort -u) )
 fi
 
-# ── 4. Kanban boards (never default) ─────────────────────────────────────────
+# ── 4. Kanban boards (only registry-derived daedalus slugs) ───────────────────
+# Before removing the registry (step 1 below), read registered project paths
+# and derive their board slugs the same way the dispatcher does
+# (_board_slug = org/repo -> org-repo, lowercased, non-alnum -> -).
+# Only remove these slugs — never "default", never the table header/footer,
+# never boards not derived from a registered daedalus project.
+# If the registry file is already gone, skip board removal entirely.
+_build_board_slug() {
+  # $1 = repo (org/repo), $2 = fallback name
+  local _slug="${1:-$2}"
+  _slug="${_slug//\//-}"
+  _slug="$(echo "$_slug" | tr '[:upper:]' '[:lower:]')"
+  _slug="$(echo "$_slug" | sed 's/[^a-z0-9_-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')"
+  echo "${_slug:-$2}"
+}
+
 FOUND_BOARDS=()
-BOARDS_OUT="$(hermes kanban boards ls 2>/dev/null || true)"
-if [[ -n "$BOARDS_OUT" ]]; then
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    # Skip header line
-    [[ "$line" =~ ^SLUG ]] && continue
-    # Skip "Current board:" footer line
-    [[ "$line" =~ ^Current ]] && continue
-    # Strip leading bullet/indent, then take first word as slug
-    CLEAN="${line#●}"
-    CLEAN="${CLEAN#"${CLEAN%%[![:space:]]*}"}"  # lstrip whitespace
-    SLUG="${CLEAN%% *}"
-    [[ -z "$SLUG" ]] && continue
-    [[ "$SLUG" == "default" ]] && continue
-    FOUND_BOARDS+=("$SLUG")
-  done <<< "$BOARDS_OUT"
+REGISTRY_FILE="$HERMES/daedalus/projects"
+if [[ -f "$REGISTRY_FILE" ]]; then
+  # Read registered workdir paths, derive repo + board slug for each
+  while IFS= read -r workdir_line || [[ -n "$workdir_line" ]]; do
+    workdir_line="$(echo "$workdir_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$workdir_line" || "$workdir_line" == \#* ]] && continue
+
+    # Try to read the daedalus.yaml in the workdir to get the repo
+    repo=""
+    name=""
+    if [[ -f "$workdir_line/.hermes/daedalus.yaml" ]]; then
+      repo="$(grep -E '^[[:space:]]*repo:' "$workdir_line/.hermes/daedalus.yaml" 2>/dev/null | head -1 | sed 's/.*repo:[[:space:]]*//;s/[[:space:]]*$//')"
+      name="$(grep -E '^[[:space:]]*name:' "$workdir_line/.hermes/daedalus.yaml" 2>/dev/null | head -1 | sed 's/.*name:[[:space:]]*//;s/[[:space:]]*$//')"
+    fi
+
+    if [[ -n "$repo" ]]; then
+      board_slug="$(_build_board_slug "$repo" "$name")"
+      if [[ -n "$board_slug" && "$board_slug" != "default" ]]; then
+        FOUND_BOARDS+=("$board_slug")
+      fi
+    fi
+  done < "$REGISTRY_FILE"
+
+  # Dedup
+  if [[ ${#FOUND_BOARDS[@]} -gt 0 ]]; then
+    FOUND_BOARDS=( $(printf '%s\n' "${FOUND_BOARDS[@]}" | sort -u) )
+  fi
 fi
 
 # ── 5. Dashboard tab ─────────────────────────────────────────────────────────
-DASHBOARD_ENABLED=false
-if hermes plugins list --enabled 2>/dev/null | grep -qi 'daedalus'; then
-  DASHBOARD_ENABLED=true
-fi
+# Always attempt to disable — gating on the enablement list is unreliable
+# (daedalus may not show as "enabled" even when listed in config.yaml
+# plugins.enabled).  The disable command is idempotent, so calling it
+# unconditionally is safe.
+DASHBOARD_DISABLE=true
 
 # ── Check ship-gate hook config ──────────────────────────────────────────────
 CONFIG_HOOK_REF=false
@@ -241,12 +300,8 @@ fi
 
 echo ""
 echo "Dashboard tab:"
-if $DASHBOARD_ENABLED; then
-  echo "  • will run: hermes plugins disable daedalus"
-  any_found=true
-else
-  echo "  (not enabled)"
-fi
+echo "  • will run: hermes plugins disable daedalus"
+any_found=true
 
 echo ""
 echo "Plugin package:"
@@ -269,7 +324,7 @@ echo "⚠  This permanently removes the above Daedalus data and cannot be undone
 echo ""
 
 # If nothing was found at all, exit early.
-if ! $any_found && ! $DASHBOARD_ENABLED && ! $CONFIG_HOOK_REF; then
+if ! $any_found && ! $CONFIG_HOOK_REF; then
   echo "Nothing to remove — daedalus is already cleaned up."
   echo ""
   exit 0
@@ -320,16 +375,16 @@ if [[ -d "$SHIP_GATE_D" ]]; then
   REMOVED+=("$SHIP_GATE_D/")
 fi
 
-# ── 2. Dashboard tab: disable plugin ─────────────────────────────────────────
-if $DASHBOARD_ENABLED; then
-  if hermes plugins disable daedalus >/dev/null 2>&1; then
-    REMOVED+=("dashboard tab (hermes plugins disable daedalus)")
-    echo ""
-    echo "NOTE: The daedalus dashboard tab has been disabled."
-    echo "  Restart the dashboard for the change to take effect."
-  else
-    SKIPPED+=("dashboard tab (hermes plugins disable daedalus failed — try manually)")
-  fi
+# ── 2. Dashboard tab: disable plugin (unconditional — idempotent) ───────────
+if hermes plugins disable daedalus >/dev/null 2>&1; then
+  REMOVED+=("dashboard tab (hermes plugins disable daedalus)")
+  echo ""
+  echo "NOTE: The daedalus dashboard tab has been disabled."
+  echo "  Restart the dashboard for the change to take effect."
+else
+  # May fail if daedalus is already disabled or the command is unavailable;
+  # this is harmless — report as skipped rather than error.
+  SKIPPED+=("dashboard tab (hermes plugins disable daedalus failed — may already be disabled)")
 fi
 
 # ── 3. Cron jobs ─────────────────────────────────────────────────────────────
