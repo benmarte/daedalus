@@ -258,3 +258,32 @@ bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" -y
 
 The uninstall script is idempotent — safe to re-run; absent items are skipped
 without error.
+
+---
+
+## Known limitations
+
+- **Restart the dashboard server after install/update.** The Hermes dashboard loads
+  each plugin's `plugin_api.py` once at startup and does NOT hot-reload. After
+  `hermes plugins install/update daedalus`, you must restart the dashboard server
+  **and** reload the browser tab for backend changes (e.g. saving/creating a cron job)
+  to take effect. Restarting the gateway alone is not enough.
+
+- **Uninstall with `scripts/uninstall.sh`, not `hermes plugins uninstall` alone.**
+  Core Hermes has no plugin-uninstall hook — `hermes plugins uninstall daedalus` only
+  deletes the plugin folder and leaves roster profiles, cron jobs, kanban boards, and
+  config behind. Use [`scripts/uninstall.sh`](scripts/uninstall.sh) for a complete
+  uninstall (see [Uninstall / reset](#uninstall--reset)).
+
+- **macOS gateway: no launchd in some setups.** `hermes gateway restart` can't use
+  launchd on some macOS versions and falls back to a background process. It works, but
+  won't auto-restart on crash or auto-start at login.
+
+- **Agents can't send to Slack directly.** Notifications and reports are delivered by
+  the deterministic dispatcher (root cron context), not by individual agents. Set the
+  channel via the config modal's deliver dropdown and use the **Send test message**
+  button to verify connectivity.
+
+- **Single-machine validation.** This beta has been dogfooded on one machine.
+  Cross-machine and multi-user behavior is exactly what beta feedback should surface —
+  please report anything unexpected.
