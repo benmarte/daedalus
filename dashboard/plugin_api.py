@@ -774,6 +774,80 @@ async def get_notifications(request: Request) -> dict[str, list[str]]:
     return _list_notification_methods()
 
 
+_TEST_MESSAGE = (
+    "\u2705 Daedalus test \u2014 your notification target works."
+    " (sent from the project config)"
+)
+
+
+@meta_router.post("/test-deliver")
+async def test_deliver(request: Request) -> dict[str, Any]:
+    """Send a one-shot test message to a delivery target via ``hermes send``.
+
+    Accepts JSON body ``{"deliver": "<target>"}`` (e.g. ``slack:tasks``,
+    ``discord:#general``).  Runs ``hermes send -t <deliver> "<test message>"``
+    via ``subprocess.run`` with LIST-ARGS (no shell, 10s timeout) in root
+    context.
+
+    Returns:
+        ``{"ok": bool, "target": "<deliver>", "error": <str|None>}``
+
+        * ``ok=true`` if the command succeeds (exit 0 and output contains
+          "sent").
+        * ``ok=false`` with a short ``error`` string otherwise.
+        * If ``deliver`` is empty or missing, returns
+          ``{"ok": false, "error": "no delivery target selected"}`` without
+          running the send command.
+
+    This endpoint NEVER raises — all errors are returned in the response body.
+    No secrets are logged.
+    """
+    # Parse the body — degrade gracefully on bad JSON.
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "target": "", "error": "invalid JSON body"}
+
+    if not isinstance(body, dict):
+        return {"ok": False, "target": "", "error": "body must be a JSON object"}
+
+    deliver = (body.get("deliver") or "").strip()
+    if not deliver:
+        return {"ok": False, "target": "", "error": "no delivery target selected"}
+
+    try:
+        result = subprocess.run(
+            ["hermes", "send", "-t", deliver, _TEST_MESSAGE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        combined = (result.stdout + result.stderr).lower()
+        if result.returncode == 0 and "sent" in combined:
+            return {"ok": True, "target": deliver, "error": None}
+        else:
+            error = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit code {result.returncode}"
+            )[:500]
+            return {"ok": False, "target": deliver, "error": error}
+    except FileNotFoundError:
+        return {"ok": False, "target": deliver, "error": "hermes CLI not found"}
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "target": deliver,
+            "error": "hermes send timed out after 10s",
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "target": deliver,
+            "error": f"hermes send failed: {exc}"[:500],
+        }
+
+
 # ── Meta helpers ─────────────────────────────────────────────────────────────
 
 

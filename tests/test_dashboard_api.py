@@ -1183,6 +1183,185 @@ class TestMetaNotificationsEndpoint:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# POST /meta/test-deliver endpoint tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMetaTestDeliverEndpoint:
+    """HTTP-level tests for POST /meta/test-deliver."""
+
+    @pytest.fixture
+    def deliver_client(self):
+        """Create a FastAPI TestClient with the meta router mounted."""
+        from dashboard.plugin_api import meta_router
+
+        app = FastAPI()
+        app.include_router(meta_router, prefix="/api/plugins/daedalus")
+        return TestClient(app)
+
+    def test_success(self, deliver_client):
+        """A successful send returns ok=true with no error."""
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=0, stdout="  sent to slack:#tasks\n", stderr=""
+            )
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": "slack:#tasks"},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is True
+            assert data["target"] == "slack:#tasks"
+            assert data["error"] is None
+
+    def test_failure_nonzero_exit(self, deliver_client):
+        """A non-zero exit is captured as ok=false with error."""
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=1, stdout="", stderr="could not resolve target"
+            )
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": "bad-target"},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is False
+            assert data["target"] == "bad-target"
+            assert "could not resolve" in data["error"]
+
+    def test_empty_target(self, deliver_client):
+        """Empty deliver returns 'no delivery target selected' without running send."""
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": ""},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is False
+            assert data["error"] == "no delivery target selected"
+            # subprocess.run must NOT have been called
+            mock_run.assert_not_called()
+
+    def test_missing_deliver_key(self, deliver_client):
+        """Missing deliver key in body returns 'no delivery target selected'."""
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is False
+            assert data["error"] == "no delivery target selected"
+            mock_run.assert_not_called()
+
+    def test_whitespace_only_target(self, deliver_client):
+        """Whitespace-only deliver is treated as empty."""
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": "   "},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is False
+            assert data["error"] == "no delivery target selected"
+            mock_run.assert_not_called()
+
+    def test_hermes_cli_not_found(self, deliver_client):
+        """FileNotFoundError maps to 'hermes CLI not found'."""
+        with mock.patch(
+            "dashboard.plugin_api.subprocess.run",
+            side_effect=FileNotFoundError("hermes not on PATH"),
+        ):
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": "slack:tasks"},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is False
+            assert data["error"] == "hermes CLI not found"
+
+    def test_timeout(self, deliver_client):
+        """TimeoutExpired maps to a timeout error."""
+        with mock.patch(
+            "dashboard.plugin_api.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["hermes"], timeout=10),
+        ):
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": "slack:tasks"},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is False
+            assert "timed out" in data["error"]
+
+    def test_oserror(self, deliver_client):
+        """OSError is captured."""
+        with mock.patch(
+            "dashboard.plugin_api.subprocess.run",
+            side_effect=OSError("permission denied"),
+        ):
+            resp = deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": "slack:tasks"},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data["ok"] is False
+            assert "permission denied" in data["error"]
+
+    def test_invalid_json_body(self, deliver_client):
+        """Non-JSON body returns ok=false."""
+        resp = deliver_client.post(
+            "/api/plugins/daedalus/meta/test-deliver",
+            content=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert "invalid JSON" in data["error"]
+
+    def test_body_not_a_dict(self, deliver_client):
+        """Body that parses as non-dict returns ok=false."""
+        resp = deliver_client.post(
+            "/api/plugins/daedalus/meta/test-deliver",
+            json=["not", "a", "dict"],
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert "body must be a JSON object" in data["error"]
+
+    def test_command_is_list_args_no_shell(self, deliver_client):
+        """Verify the command uses list-args (no shell injection)."""
+        from dashboard.plugin_api import _TEST_MESSAGE
+
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=0, stdout="  sent\n", stderr=""
+            )
+            deliver_client.post(
+                "/api/plugins/daedalus/meta/test-deliver",
+                json={"deliver": "slack:#general"},
+            )
+            # Check the first positional argument is a list (not a string)
+            call_args = mock_run.call_args[0][0]
+            assert isinstance(call_args, list), (
+                f"Expected list-args, got {type(call_args)}"
+            )
+            assert call_args == [
+                "hermes", "send", "-t", "slack:#general", _TEST_MESSAGE
+            ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Mount-level integration test — validates that the single top-level router
 # exposes all child routes when mounted with a prefix.
 # ═══════════════════════════════════════════════════════════════════════════════
