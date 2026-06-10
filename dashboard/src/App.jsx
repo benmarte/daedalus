@@ -36,6 +36,11 @@ var SdkCheckbox = SdkComponents.Checkbox || null;
 // Pure cascade helper (own module so it can be unit-tested in plain node).
 var deriveMethodFromDeliver = require("./deriveMethod").deriveMethodFromDeliver;
 
+// Cron schedule parse/build helpers (own module for unit-testing).
+var cronSchedule = require("./cronSchedule");
+var parseSchedule = cronSchedule.parseSchedule;
+var buildSchedule = cronSchedule.buildSchedule;
+
 // Resolve a JSON-returning fetch from whatever the SDK exposes.
 var fetchJSON = SDK.fetchJSON;
 if (!fetchJSON && SDK.authedFetch) {
@@ -374,6 +379,232 @@ function ProjectCard(props) {
   );
 }
 
+// ── CronSchedule component ──────────────────────────────────────────────────
+// Replaces the free-text cron schedule input with structured dropdowns that
+// only emit schedules Hermes cron accepts.
+var CRON_UNITS = ["Minutes", "Hours", "Days", "Weekly", "Monthly", "Custom (cron)"];
+
+var MINUTE_VALUES = ["1", "2", "3", "5", "10", "15", "20", "30", "45", "60"];
+var HOUR_VALUES = ["1", "2", "3", "4", "6", "8", "12"];
+var DAY_VALUES = ["1", "2", "3", "5", "7"];
+
+var HOUR_OPTIONS = [];
+for (var hi = 0; hi < 24; hi++) { HOUR_OPTIONS.push(String(hi)); }
+var DOM_OPTIONS = [];
+for (var di = 1; di <= 28; di++) { DOM_OPTIONS.push(String(di)); }
+
+var DOW_LABELS = {
+  "0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday",
+  "4": "Thursday", "5": "Friday", "6": "Saturday"
+};
+
+function CronSchedule(props) {
+  var savedValue = props.value || "";
+  var parsed = parseSchedule(savedValue);
+
+  // Local state so the dropdowns feel responsive before emitting.
+  var u = useState(parsed.unit || "Minutes");
+  var unit = u[0], setUnit = u[1];
+  var nv = useState(parsed.n || "60");
+  var n = nv[0], setN = nv[1];
+  var dv = useState(parsed.dow || "1");
+  var dow = dv[0], setDow = dv[1];
+  var hv = useState(parsed.hour || "9");
+  var hour = hv[0], setHour = hv[1];
+  var mv = useState(parsed.minute || "0");
+  var minute = mv[0], setMinute = mv[1];
+  var domv = useState(parsed.dom || "1");
+  var dom = domv[0], setDom = domv[1];
+  var rv = useState(parsed.raw || "");
+  var customRaw = rv[0], setCustomRaw = rv[1];
+
+  // Sync local state when saved value changes from outside (e.g. config reload).
+  useEffect(function () {
+    var p = parseSchedule(savedValue);
+    setUnit(p.unit || "Minutes");
+    setN(p.n || "60");
+    setDow(p.dow || "1");
+    setHour(p.hour || "9");
+    setMinute(p.minute || "0");
+    setDom(p.dom || "1");
+    setCustomRaw(p.raw || "");
+  }, [savedValue]);
+
+  // Emit the built schedule whenever any dropdown changes.
+  function emit(u, n, dow, hour, minute, dom, raw) {
+    var state = { unit: u, n: n, dow: dow, hour: hour, minute: minute, dom: dom, raw: raw };
+    var schedule = buildSchedule(state);
+    if (props.onChange) props.onChange(schedule);
+  }
+
+  function onUnitChange(nextUnit) {
+    setUnit(nextUnit);
+    emit(nextUnit, n, dow, hour, minute, dom, customRaw);
+  }
+
+  function onNChange(nextN) {
+    setN(nextN);
+    emit(unit, nextN, dow, hour, minute, dom, customRaw);
+  }
+
+  function onDowChange(nextDow) {
+    setDow(nextDow);
+    emit(unit, n, nextDow, hour, minute, dom, customRaw);
+  }
+
+  function onHourChange(nextHour) {
+    setHour(nextHour);
+    emit(unit, n, dow, nextHour, minute, dom, customRaw);
+  }
+
+  function onMinuteChange(nextMinute) {
+    setMinute(nextMinute);
+    emit(unit, n, dow, hour, nextMinute, dom, customRaw);
+  }
+
+  function onDomChange(nextDom) {
+    setDom(nextDom);
+    emit(unit, n, dow, hour, minute, nextDom, customRaw);
+  }
+
+  function onCustomChange(val) {
+    setCustomRaw(val);
+    // For Custom, emit the raw text verbatim.
+    if (props.onChange) props.onChange(val);
+  }
+
+  // Build the second control row based on unit selection.
+  var secondRow = null;
+
+  if (unit === "Minutes" || unit === "Hours" || unit === "Days") {
+    var values;
+    if (unit === "Minutes") values = MINUTE_VALUES;
+    else if (unit === "Hours") values = HOUR_VALUES;
+    else values = DAY_VALUES;
+
+    secondRow = React.createElement("label", { style: S.field },
+      React.createElement("span", { style: S.fieldLabel }, "Every"),
+      React.createElement("select", {
+        style: S.select,
+        value: n,
+        onChange: function (e) { onNChange(e.target.value); }
+      },
+        values.map(function (v) {
+          return React.createElement("option", { key: v, value: v }, v);
+        })
+      )
+    );
+  } else if (unit === "Weekly") {
+    secondRow = [
+      React.createElement("label", { key: "dow", style: S.field },
+        React.createElement("span", { style: S.fieldLabel }, "Day"),
+        React.createElement("select", {
+          style: S.select,
+          value: dow,
+          onChange: function (e) { onDowChange(e.target.value); }
+        },
+          ["0","1","2","3","4","5","6"].map(function (d) {
+            return React.createElement("option", { key: d, value: d }, DOW_LABELS[d]);
+          })
+        )
+      ),
+      React.createElement("label", { key: "hour", style: S.field },
+        React.createElement("span", { style: S.fieldLabel }, "Time (hour)"),
+        React.createElement("select", {
+          style: S.select,
+          value: hour,
+          onChange: function (e) { onHourChange(e.target.value); }
+        },
+          HOUR_OPTIONS.map(function (h) {
+            var padded = h.length === 1 ? "0" + h : h;
+            return React.createElement("option", { key: h, value: h }, padded + ":00");
+          })
+        )
+      ),
+      React.createElement("label", { key: "minute", style: { display: "flex", flexDirection: "column", flex: "0 0 80px", minWidth: "80px" } },
+        React.createElement("span", { style: S.fieldLabel }, "Minute"),
+        React.createElement("select", {
+          style: S.select,
+          value: minute,
+          onChange: function (e) { onMinuteChange(e.target.value); }
+        },
+          ["0", "15", "30", "45"].map(function (m) {
+            var paddedM = m.length === 1 ? "0" + m : m;
+            return React.createElement("option", { key: m, value: m }, ":" + paddedM);
+          })
+        )
+      )
+    ];
+  } else if (unit === "Monthly") {
+    secondRow = [
+      React.createElement("label", { key: "dom", style: S.field },
+        React.createElement("span", { style: S.fieldLabel }, "Day of Month"),
+        React.createElement("select", {
+          style: S.select,
+          value: dom,
+          onChange: function (e) { onDomChange(e.target.value); }
+        },
+          DOM_OPTIONS.map(function (d) {
+            return React.createElement("option", { key: d, value: d }, d);
+          })
+        )
+      ),
+      React.createElement("label", { key: "hour", style: S.field },
+        React.createElement("span", { style: S.fieldLabel }, "Time (hour)"),
+        React.createElement("select", {
+          style: S.select,
+          value: hour,
+          onChange: function (e) { onHourChange(e.target.value); }
+        },
+          HOUR_OPTIONS.map(function (h) {
+            var padded = h.length === 1 ? "0" + h : h;
+            return React.createElement("option", { key: h, value: h }, padded + ":00");
+          })
+        )
+      ),
+      React.createElement("label", { key: "minute", style: { display: "flex", flexDirection: "column", flex: "0 0 80px", minWidth: "80px" } },
+        React.createElement("span", { style: S.fieldLabel }, "Minute"),
+        React.createElement("select", {
+          style: S.select,
+          value: minute,
+          onChange: function (e) { onMinuteChange(e.target.value); }
+        },
+          ["0", "15", "30", "45"].map(function (m) {
+            var paddedM = m.length === 1 ? "0" + m : m;
+            return React.createElement("option", { key: m, value: m }, ":" + paddedM);
+          })
+        )
+      )
+    ];
+  } else if (unit === "Custom (cron)") {
+    secondRow = React.createElement("label", { style: S.field },
+      React.createElement("span", { style: S.fieldLabel }, "Cron Expression"),
+      React.createElement("input", {
+        style: S.input,
+        value: customRaw,
+        placeholder: "e.g. */5 * * * * or every 2h",
+        onChange: function (e) { onCustomChange(e.target.value); }
+      })
+    );
+  }
+
+  return React.createElement("div", { style: S.fieldRow },
+    React.createElement("label", { style: S.field },
+      React.createElement("span", { style: S.fieldLabel }, "Frequency"),
+      React.createElement("select", {
+        style: S.select,
+        value: unit,
+        onChange: function (e) { onUnitChange(e.target.value); }
+      },
+        CRON_UNITS.map(function (u) {
+          return React.createElement("option", { key: u, value: u }, u);
+        })
+      )
+    ),
+    secondRow
+  );
+}
+
 // ── config modal ────────────────────────────────────────────────────────────
 // Human-friendly field label map: raw key → display title
 var FIELD_LABELS = {
@@ -414,7 +645,7 @@ function ConfigModal(props) {
     fetchJSON(apiProjectConfig(name)).then(function (data) {
       // Seed sensible default values for editable fields that are empty/missing
       if (!data.cron) data.cron = {};
-      if (!data.cron.schedule) data.cron.schedule = "60m";
+      if (!data.cron.schedule) data.cron.schedule = "every 60m";
       // cron.deliver is intentionally NOT seeded — empty means no notification
       if (!data.vcs) data.vcs = {};
       if (!data.vcs.target_branch) data.vcs.target_branch = "main";
@@ -693,17 +924,11 @@ function ConfigModal(props) {
 
       // Editable: Cron
       React.createElement("div", { style: S.section }, "Cron"),
+      React.createElement(CronSchedule, {
+        value: getIn(config, ["cron", "schedule"], ""),
+        onChange: function (v) { updateField("cron.schedule", v); }
+      }),
       React.createElement("div", { style: S.fieldRow },
-        React.createElement("label", { style: S.field },
-          React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.schedule),
-          React.createElement("input", {
-            style: S.input,
-            value: getIn(config, ["cron", "schedule"], ""),
-            placeholder: "60m",
-            onChange: function (e) { updateField("cron.schedule", e.target.value); }
-          })
-        ),
-
         // Cascade deliver: method → channel. Built from /meta/notifications endpoint.
         (function () {
           var methodNames = Object.keys(notifications).sort();
