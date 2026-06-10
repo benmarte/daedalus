@@ -817,6 +817,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var notifications = ns[0], setNotifications = ns[1];
     var sm = useState("");
     var selectedMethod = sm[0], setSelectedMethod = sm[1];
+    var td = useState(null);
+    var testDeliverStatus = td[0], setTestDeliverStatus = td[1];
     var br = useState([]);
     var branches = br[0], setBranches = br[1];
     var la = useState([]);
@@ -961,6 +963,27 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         } else {
           setResult({ ok: false, errors: [String(err && err.message || err)] });
         }
+      });
+    }
+    function testDeliver() {
+      var deliver = getIn(config, ["cron", "deliver"], "");
+      if (!deliver) {
+        setTestDeliverStatus({ ok: false, msg: "no delivery target selected" });
+        return;
+      }
+      setTestDeliverStatus({ ok: null, msg: "Sending\u2026" });
+      fetchJSON("/api/plugins/daedalus/meta/test-deliver", {
+        method: "POST",
+        body: { deliver }
+      }).then(function(r2) {
+        if (r2 && r2.ok) {
+          setTestDeliverStatus({ ok: true, msg: "\u2713 Sent to " + r2.target });
+        } else {
+          var errMsg = r2 && r2.error || "send failed";
+          setTestDeliverStatus({ ok: false, msg: "\u2717 " + errMsg });
+        }
+      }).catch(function(err) {
+        setTestDeliverStatus({ ok: false, msg: "\u2717 " + String(err && err.message || err) });
       });
     }
     if (loading) return React.createElement(
@@ -1233,6 +1256,31 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                   }
                 })
               ) : null
+            ];
+          })(),
+          // "Send test message" button — uses current in-modal deliver value
+          (function() {
+            var currentDeliver = getIn(config, ["cron", "deliver"], "");
+            var hasTarget = !!currentDeliver;
+            var isSending = testDeliverStatus && testDeliverStatus.ok === null;
+            var statusStyle = null;
+            if (testDeliverStatus && testDeliverStatus.ok === true) {
+              statusStyle = Object.assign({}, S.ok, { fontSize: "12px", marginLeft: "8px" });
+            } else if (testDeliverStatus && testDeliverStatus.ok === false) {
+              statusStyle = Object.assign({}, S.err, { fontSize: "12px", marginLeft: "8px" });
+            }
+            return [
+              React.createElement(
+                "label",
+                { key: "test-deliver-btn", style: Object.assign({}, S.field, { flex: "0 0 auto", justifyContent: "flex-end", minWidth: "auto" }) },
+                React.createElement("button", {
+                  style: Object.assign({}, S.btnSmall, { opacity: hasTarget && !isSending ? 1 : 0.5, marginTop: "20px" }),
+                  disabled: !hasTarget || isSending,
+                  onClick: testDeliver,
+                  type: "button"
+                }, isSending ? "Sending\u2026" : "Send test message")
+              ),
+              testDeliverStatus ? React.createElement("span", { key: "test-deliver-status", style: statusStyle }, testDeliverStatus.msg) : null
             ];
           })()
         ),
