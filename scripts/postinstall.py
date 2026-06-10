@@ -81,6 +81,29 @@ def _check_gh_auth() -> tuple[bool, str]:
         )
 
 
+# ── cron wrapper ─────────────────────────────────────────────────────────────
+
+
+def _install_cron_wrapper() -> tuple[bool, str]:
+    """Write ~/.hermes/scripts/daedalus-cron.sh (idempotent, chmod +x)."""
+    real_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+    scripts_dir = real_home / ".hermes" / "scripts"
+    wrapper = scripts_dir / "daedalus-cron.sh"
+
+    script_content = (
+        "#!/usr/bin/env bash\n"
+        'exec python3 "$HOME/.hermes/plugins/daedalus/scripts/daedalus_dispatch.py" "$@"\n'
+    )
+
+    try:
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        wrapper.write_text(script_content)
+        wrapper.chmod(0o755)
+        return True, f"OK: cron wrapper installed at {wrapper}"
+    except OSError as exc:
+        return False, f"FAIL: could not write cron wrapper at {wrapper}: {exc}"
+
+
 # ── provision ────────────────────────────────────────────────────────────────
 
 def _run_provision(script_dir: Path) -> tuple[bool, str]:
@@ -145,6 +168,12 @@ def main(check_only: bool = False) -> int:
     if not all_ok:
         print("\u2717 Prerequisites NOT met. Fix the issues above and re-run.")
         return 1
+
+    # Install the cron wrapper script (idempotent, non-fatal)
+    ok, msg = _install_cron_wrapper()
+    print(msg)
+    print()
+    # Note: non-fatal — a wrapper failure is logged but doesn't block setup.
 
     if check_only:
         print("\u2713 All prerequisites met (--check only, skipping provision).")

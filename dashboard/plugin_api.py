@@ -596,6 +596,79 @@ def _resolve_project_path(name: str) -> Path:
     raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
 
 
+def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
+    """Reconcile the real ``hermes cron`` job with the config on save.
+
+    Cron job name = ``f"{project_name}-daedalus"``.  Idempotent — remove any
+    existing job first, then re-create if ``cron_cfg.schedule`` is non-empty.
+    A cron CLI failure is captured as an error string; this function NEVER raises, so
+    a broken ``hermes`` binary cannot fail the config save.
+
+    Args:
+        project_name: The project name from the config.
+        cron_cfg: The ``cron`` dict from the resolved project config.
+            Keys used: ``schedule`` (str), ``deliver`` (str, optional).
+
+    Returns:
+        ``{"cron": "<created|updated|removed|skipped>", "name": "<cron_name>",
+        "error": <str|None>}``
+    """
+    cron_name = f"{project_name}-daedalus"
+    result: dict[str, Any] = {
+        "cron": "skipped",
+        "name": cron_name,
+        "error": None,
+    }
+
+    # 1. Remove any existing job (ignore "not found").
+    try:
+        subprocess.run(
+            ["hermes", "cron", "remove", cron_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        pass  # non-fatal — the remove is best-effort
+
+    # 2. If a schedule is set, re-create.
+    schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
+    if not schedule:
+        result["cron"] = "removed"
+        return result
+
+    deliver = cron_cfg.get("deliver", "").strip() if cron_cfg else ""
+
+    cmd = [
+        "hermes", "cron", "create", schedule,
+        "--name", cron_name,
+        "--script", "daedalus-cron.sh",
+        "--no-agent",
+    ]
+    if deliver:
+        cmd += ["--deliver", deliver]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            result["error"] = (proc.stderr + proc.stdout).strip()[:500] or f"exit code {proc.returncode}"
+        else:
+            result["cron"] = "created" if "created" in (proc.stdout + proc.stderr).lower() else "updated"
+    except FileNotFoundError:
+        result["error"] = "hermes CLI not found"
+    except subprocess.TimeoutExpired:
+        result["error"] = "hermes cron create timed out after 10s"
+    except OSError as exc:
+        result["error"] = f"hermes cron create failed: {exc}"
+
+    return result
+
+
 @project_config_router.get("/{name}/config")
 async def get_project_config(request: Request, name: str) -> dict[str, Any]:
     """Return the resolved per-project config, stripped of secrets.
@@ -678,7 +751,11 @@ async def post_project_config(request: Request, name: str) -> dict[str, Any]:
     except OSError:
         raise HTTPException(status_code=500, detail="Failed to write config file")
 
-    return {"status": "saved", "path": str(cfg_path)}
+    # Reconcile the cron job AFTER the YAML is safely on disk.
+    cron_cfg = merged.get("cron") or {}
+    cron_result = _reconcile_cron(name, cron_cfg)
+
+    return {"status": "saved", "path": str(cfg_path), "cron": cron_result}
 
 
 # ── Meta endpoints ───────────────────────────────────────────────────────────

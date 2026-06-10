@@ -544,7 +544,21 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       fetchJSON(apiProjectConfig(name), { method: "POST", body }).then(function(res) {
         setSaving(false);
         if (res && res.status === "saved") {
-          props.onClose();
+          if (res.cron) {
+            var cr = res.cron;
+            var cronMsg = cr.name || "";
+            if (cr.error) {
+              cronMsg += " \xB7 \u26A0\uFE0F " + cr.error;
+            } else if (cr.cron && cr.cron !== "skipped") {
+              cronMsg += " \xB7 cron " + cr.cron;
+            }
+            setResult({ ok: true, msg: "Saved \xB7 " + cronMsg });
+          } else {
+            setResult({ ok: true, msg: "Saved" });
+          }
+          setTimeout(function() {
+            props.onClose();
+          }, 1200);
         } else {
           setResult({ ok: false, errors: ["Unexpected response"] });
         }
