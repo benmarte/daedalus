@@ -3,25 +3,31 @@
 # uninstall.sh — clean up daedalus host-side artifacts
 #
 # Usage:
-#   bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh [--roster] [--help]
+#   bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--roster] [--help]
 #
 # What it cleans (idempotent — safe to re-run):
 #   - $HERMES_HOME/daedalus.yaml   (legacy global multi-project config)
 #   - $HERMES_HOME/daedalus/        (registry dir / projects file)
 #   - $HERMES_HOME/agent-hooks/ship-gate.sh + ship-gate.d/
 #   - Daedalus cron jobs (script "daedalus-*.sh" or name ends "-daedalus")
+#   - Daedalus kanban boards (non-default boards found via hermes kanban boards ls)
+#   - Roster profiles (by default; skip with --keep-profiles)
+#   - Dashboard tab (hermes plugins disable daedalus)
 #
-# With --roster: also deletes the 6 role profiles.
+# The script now shows a data-loss summary BEFORE removing anything and
+# requires confirmation (unless -y/--yes). --roster is a no-op alias for
+# back-compat — profiles are removed by default now; use --keep-profiles to
+# keep them.
 #
 # Manual follow-ups (NOT done automatically — destructive/data):
 #   - hermes plugins uninstall daedalus
-#   - hermes profile delete <role> -y  for 6 roles  (automated with --roster)
-#   - hermes kanban boards rm <slug>
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Safety: fail on unset variables and pipe failures, but NOT blanket -e —
+# Safety: fail on pipe failures, but NOT blanket -e or -u —
 # we want to keep going past missing files so re-runs are no-ops.
-set -uo pipefail
+# -u is too aggressive — empty arrays in discovery-phase loops trip
+# "unbound variable" when hermes CLI calls fail in minimal test setups.
+set -o pipefail
 
 # ── Safety guard: refuse to operate on an unsafe HERMES path ────────────────
 # Defense-in-depth — a bad HERMES_HOME must never turn the rm -rf steps below
@@ -52,140 +58,311 @@ if ! _is_hermes_home; then
   exit 1
 fi
 
-ROSTER=false
+# ── Parse flags ──────────────────────────────────────────────────────────────
+YES=false
+KEEP_PROFILES=false
 HELP=false
 
-# ── Parse flags ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --roster) ROSTER=true; shift ;;
-    --help)   HELP=true; shift ;;
-    -h)       HELP=true; shift ;;
+    --roster) shift ;;             # no-op alias for back-compat (profiles now removed by default)
+    --keep-profiles) KEEP_PROFILES=true; shift ;;
+    -y|--yes) YES=true; shift ;;
+    --help|-h) HELP=true; shift ;;
     *)        echo "Unknown option: $1" >&2
-              echo "Usage: bash scripts/uninstall.sh [--roster] [--help]" >&2
+              echo "Usage: bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--roster] [--help]" >&2
               exit 2 ;;
   esac
 done
 
 if $HELP; then
-  echo "Usage: bash scripts/uninstall.sh [--roster] [--help]"
+  echo "Usage: bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--roster] [--help]"
   echo ""
   echo "Clean up daedalus host-side artifacts from \$HERMES_HOME."
   echo "Idempotent — safe to re-run; absent items are skipped, not errors."
+  echo ""
+  echo "Shows a data-loss summary BEFORE removing anything. Requires"
+  echo "confirmation (interactive) unless -y/--yes is passed."
   echo ""
   echo "Cleans:"
   echo "  \$HERMES_HOME/daedalus.yaml     (legacy global config)"
   echo "  \$HERMES_HOME/daedalus/          (registry dir)"
   echo "  \$HERMES_HOME/agent-hooks/ship-gate.sh + ship-gate.d/"
   echo "  Daedalus cron jobs (script 'daedalus-*.sh' or name *-daedalus)"
+  echo "  Daedalus kanban boards (never removes 'default')"
+  echo "  Roster profiles (by default; skip with --keep-profiles)"
+  echo "  Dashboard tab (hermes plugins disable daedalus)"
   echo ""
   echo "Options:"
-  echo "  --roster   Also delete the 6 role profiles (developer, reviewer,"
-  echo "             security-analyst, documentation, planner, project-manager)"
-  echo "  --help     Show this help and exit"
+  echo "  -y, --yes        Skip confirmation prompt (non-interactive)"
+  echo "  --keep-profiles  Keep the 6 role profiles (developer, reviewer,"
+  echo "                   security-analyst, documentation, planner, project-manager)"
+  echo "  --roster         Accepted no-op (back-compat — profiles now removed by default)"
+  echo "  --help           Show this help and exit"
   echo ""
   echo "Manual follow-ups (NOT done automatically):"
   echo "  hermes plugins uninstall daedalus"
-  echo "  hermes kanban boards rm <slug>"
   exit 0
 fi
 
-# ── Track what happened ──────────────────────────────────────────────────────
-REMOVED=()
-SKIPPED=()
+# ══════════════════════════════════════════════════════════════════════════════
+# DISCOVERY PHASE — discover what WILL be removed (do NOT modify anything)
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── 1. Legacy global config ──────────────────────────────────────────────────
-if [[ -f "$HERMES/daedalus.yaml" ]]; then
-  rm -f "$HERMES/daedalus.yaml"
-  REMOVED+=("$HERMES/daedalus.yaml")
-else
-  SKIPPED+=("$HERMES/daedalus.yaml (not present)")
-fi
-
-# ── 2. Registry dir ──────────────────────────────────────────────────────────
-if [[ -d "$HERMES/daedalus" ]]; then
-  rm -rf "$HERMES/daedalus"
-  REMOVED+=("$HERMES/daedalus/")
-else
-  SKIPPED+=("$HERMES/daedalus/ (not present)")
-fi
-
-# ── 3. Ship-gate hook ────────────────────────────────────────────────────────
+# ── 1. Host artifacts ────────────────────────────────────────────────────────
+HOST_ARTIFACTS=()
+[[ -f "$HERMES/daedalus.yaml" ]] && HOST_ARTIFACTS+=("$HERMES/daedalus.yaml")
+[[ -d "$HERMES/daedalus" ]] && HOST_ARTIFACTS+=("$HERMES/daedalus/")
 SHIP_GATE_SH="$HERMES/agent-hooks/ship-gate.sh"
 SHIP_GATE_D="$HERMES/agent-hooks/ship-gate.d"
+[[ -f "$SHIP_GATE_SH" ]] && HOST_ARTIFACTS+=("$SHIP_GATE_SH")
+[[ -d "$SHIP_GATE_D" ]] && HOST_ARTIFACTS+=("$SHIP_GATE_D/")
 
-if [[ -f "$SHIP_GATE_SH" ]]; then
-  rm -f "$SHIP_GATE_SH"
-  REMOVED+=("$SHIP_GATE_SH")
-else
-  SKIPPED+=("$SHIP_GATE_SH (not present)")
+# ── 2. Roster profiles ───────────────────────────────────────────────────────
+ROLES=(
+  developer
+  reviewer
+  security-analyst
+  documentation
+  planner
+  project-manager
+)
+FOUND_PROFILES=()
+for role in "${ROLES[@]}"; do
+  if hermes profile list 2>/dev/null | grep -qw "$role"; then
+    FOUND_PROFILES+=("$role")
+  fi
+done
+
+# ── 3. Daedalus cron jobs ────────────────────────────────────────────────────
+FOUND_CRON=()
+CRON_LIST="$(hermes cron list --all 2>/dev/null || true)"
+if [[ -n "$CRON_LIST" ]]; then
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    # Match: Script is daedalus-*.sh or name ends -daedalus
+    if echo "$line" | grep -qE 'daedalus-[^ ]*\.sh|/[^ ]*-daedalus'; then
+      JOB_NAME="${line%% *}"
+      FOUND_CRON+=("$JOB_NAME")
+    fi
+  done < <(echo "$CRON_LIST" | grep -iF 'daedalus' || true)
 fi
 
-if [[ -d "$SHIP_GATE_D" ]]; then
-  rm -rf "$SHIP_GATE_D"
-  REMOVED+=("$SHIP_GATE_D/")
-else
-  SKIPPED+=("$SHIP_GATE_D/ (not present)")
+# ── 4. Kanban boards (never default) ─────────────────────────────────────────
+FOUND_BOARDS=()
+BOARDS_OUT="$(hermes kanban boards ls 2>/dev/null || true)"
+if [[ -n "$BOARDS_OUT" ]]; then
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    # Skip header line
+    [[ "$line" =~ ^SLUG ]] && continue
+    # Skip "Current board:" footer line
+    [[ "$line" =~ ^Current ]] && continue
+    # Strip leading bullet/indent, then take first word as slug
+    CLEAN="${line#●}"
+    CLEAN="${CLEAN#"${CLEAN%%[![:space:]]*}"}"  # lstrip whitespace
+    SLUG="${CLEAN%% *}"
+    [[ -z "$SLUG" ]] && continue
+    [[ "$SLUG" == "default" ]] && continue
+    FOUND_BOARDS+=("$SLUG")
+  done <<< "$BOARDS_OUT"
 fi
 
-# Check for the hook config entry — just tell the user, don't edit YAML in bash.
+# ── 5. Dashboard tab ─────────────────────────────────────────────────────────
+DASHBOARD_ENABLED=false
+if hermes plugins list --enabled 2>/dev/null | grep -qi 'daedalus'; then
+  DASHBOARD_ENABLED=true
+fi
+
+# ── Check ship-gate hook config ──────────────────────────────────────────────
+CONFIG_HOOK_REF=false
 if [[ -f "$HERMES/config.yaml" ]]; then
   if grep -q 'ship-gate' "$HERMES/config.yaml" 2>/dev/null; then
-    echo ""
-    echo "NOTE: A 'ship-gate' reference was detected in $HERMES/config.yaml."
-    echo "  Remove the hooks.pre_tool_call entry for 'ship-gate' manually if it's"
-    echo "  still there — this script does NOT hand-edit YAML."
+    CONFIG_HOOK_REF=true
   fi
 fi
 
-# ── 4. Daedalus cron jobs ────────────────────────────────────────────────
-# Detect jobs whose Script is daedalus-*.sh OR whose name ends in -daedalus.
-CRON_LIST="$(hermes cron list --all 2>/dev/null || true)"
-if [[ -n "$CRON_LIST" ]]; then
-  # Extract job names from the list output. The format looks like:
-  #   jobname │ schedule │ script │ status
-  # We grep for daedalus patterns in the Script column or name column.
-  while IFS= read -r line; do
-    # Skip header/footer lines
-    [[ -z "$line" ]] && continue
-    # Extract job name (first word/field)
-    JOB_NAME="${line%% *}"
-    # Check if it matches daedalus patterns
-    if echo "$line" | grep -qE 'daedalus-[^ ]*\.sh|/[^ ]*-daedalus[^ ]*'; then
-      if hermes cron remove "$JOB_NAME" 2>/dev/null; then
-        REMOVED+=("cron job: $JOB_NAME")
-      else
-        SKIPPED+=("cron job: $JOB_NAME (removal failed)")
-      fi
-    fi
-  done < <(echo "$CRON_LIST" | grep -i 'daedalus')
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA-LOSS SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+
+echo ""
+echo "══════════════════════════════════════════"
+echo "  daedalus uninstall — what will be removed"
+echo "══════════════════════════════════════════"
+echo ""
+
+any_found=false
+
+echo "Host artifacts:"
+if [[ ${#HOST_ARTIFACTS[@]} -gt 0 ]]; then
+  for item in "${HOST_ARTIFACTS[@]}"; do
+    echo "  • $item"
+  done
+  any_found=true
+else
+  echo "  (none found)"
 fi
 
-# ── 5. --roster: delete role profiles ────────────────────────────────────────
-if $ROSTER; then
-  # ── Source-of-truth note: the 6 role names here MUST match provision_roster.sh.
-  #     Update both if the roster changes so they don't silently drift.
-  ROLES=(
-    developer
-    reviewer
-    security-analyst
-    documentation
-    planner
-    project-manager
-  )
-  for role in "${ROLES[@]}"; do
-    # Attempt the delete and classify by exit code — robust against the table
-    # format of `hermes profile list` (a grep pre-check on the listing is
-    # fragile: each row is "<name>   <model>   <gateway> ...", not a bare name).
+echo ""
+echo "Roster profiles"
+if $KEEP_PROFILES; then
+  echo "  (kept — --keep-profiles flag is set)"
+elif [[ ${#FOUND_PROFILES[@]} -gt 0 ]]; then
+  for role in "${FOUND_PROFILES[@]}"; do
+    echo "  • profile: $role"
+  done
+  any_found=true
+else
+  echo "  (none found)"
+fi
+
+echo ""
+echo "Cron jobs:"
+if [[ ${#FOUND_CRON[@]} -gt 0 ]]; then
+  for job in "${FOUND_CRON[@]}"; do
+    echo "  • $job"
+  done
+  any_found=true
+else
+  echo "  (none found)"
+fi
+
+echo ""
+echo "Kanban boards (never removes 'default'):"
+if [[ ${#FOUND_BOARDS[@]} -gt 0 ]]; then
+  for board in "${FOUND_BOARDS[@]}"; do
+    echo "  • $board"
+  done
+  any_found=true
+else
+  echo "  (none found)"
+fi
+
+echo ""
+echo "Dashboard tab:"
+if $DASHBOARD_ENABLED; then
+  echo "  • will run: hermes plugins disable daedalus"
+  any_found=true
+else
+  echo "  (not enabled)"
+fi
+
+if $CONFIG_HOOK_REF; then
+  echo ""
+  echo "  NOTE: A 'ship-gate' reference was detected in $HERMES/config.yaml."
+  echo "  Remove the hooks.pre_tool_call entry for 'ship-gate' manually if it's"
+  echo "  still there — this script does NOT hand-edit YAML."
+fi
+
+echo ""
+echo "⚠  This permanently removes the above Daedalus data and cannot be undone."
+echo ""
+
+# If nothing was found at all, exit early.
+if ! $any_found && ! $DASHBOARD_ENABLED && ! $CONFIG_HOOK_REF; then
+  echo "Nothing to remove — daedalus is already cleaned up."
+  echo ""
+  echo "Manual follow-ups (not done by this script):"
+  echo "  hermes plugins uninstall daedalus"
+  echo ""
+  exit 0
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIRMATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+if $YES; then
+  echo "Proceeding (--yes flag set)..."
+  echo ""
+else
+  echo -n "Continue? [y/N] "
+  read -r CONFIRM
+  if [[ ! "$CONFIRM" =~ ^[yY]$ ]]; then
+    echo ""
+    echo "Aborted, nothing removed."
+    exit 0
+  fi
+  echo ""
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REMOVAL PHASE
+# ══════════════════════════════════════════════════════════════════════════════
+
+REMOVED=()
+SKIPPED=()
+
+# ── 1. Host artifacts ────────────────────────────────────────────────────────
+for item in "${HOST_ARTIFACTS[@]}"; do
+  if [[ -f "$item" ]]; then
+    rm -f "$item"
+    REMOVED+=("$item")
+  elif [[ -d "$item" ]]; then
+    rm -rf "$item"
+    REMOVED+=("$item")
+  fi
+done
+# Also check ship-gate even if not in the discovered list (race-safe):
+if [[ -f "$SHIP_GATE_SH" ]]; then
+  rm -f "$SHIP_GATE_SH"
+  REMOVED+=("$SHIP_GATE_SH")
+fi
+if [[ -d "$SHIP_GATE_D" ]]; then
+  rm -rf "$SHIP_GATE_D"
+  REMOVED+=("$SHIP_GATE_D/")
+fi
+
+# ── 2. Dashboard tab: disable plugin ─────────────────────────────────────────
+if $DASHBOARD_ENABLED; then
+  if hermes plugins disable daedalus >/dev/null 2>&1; then
+    REMOVED+=("dashboard tab (hermes plugins disable daedalus)")
+    echo ""
+    echo "NOTE: The daedalus dashboard tab has been disabled."
+    echo "  Restart the dashboard for the change to take effect."
+  else
+    SKIPPED+=("dashboard tab (hermes plugins disable daedalus failed — try manually)")
+  fi
+fi
+
+# ── 3. Cron jobs ─────────────────────────────────────────────────────────────
+for job_name in "${FOUND_CRON[@]}"; do
+  if hermes cron remove "$job_name" 2>/dev/null; then
+    REMOVED+=("cron job: $job_name")
+  else
+    SKIPPED+=("cron job: $job_name (removal failed)")
+  fi
+done
+
+# ── 4. Profiles (removed by default unless --keep-profiles) ──────────────────
+if ! $KEEP_PROFILES; then
+  for role in "${FOUND_PROFILES[@]}"; do
     if hermes profile delete "$role" -y >/dev/null 2>&1; then
       REMOVED+=("profile: $role")
     else
-      SKIPPED+=("profile: $role (not present)")
+      SKIPPED+=("profile: $role (deletion failed)")
     fi
   done
 fi
 
-# ── Summary ──────────────────────────────────────────────────────────────────
+# ── 5. Kanban boards (never default) ─────────────────────────────────────────
+for board in "${FOUND_BOARDS[@]}"; do
+  if [[ "$board" == "default" ]]; then
+    SKIPPED+=("kanban board: default (never removed)")
+    continue
+  fi
+  if hermes kanban boards rm "$board" >/dev/null 2>&1; then
+    REMOVED+=("kanban board: $board")
+  else
+    SKIPPED+=("kanban board: $board (removal failed — may not exist)")
+  fi
+done
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FINAL SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+
 echo ""
 echo "══════════════════════════════════════════"
 echo "  daedalus uninstall — summary"
@@ -201,7 +378,7 @@ if [[ ${#REMOVED[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#SKIPPED[@]} -gt 0 ]]; then
-  echo "Skipped (already clean):"
+  echo "Skipped:"
   for item in "${SKIPPED[@]}"; do
     echo "  - $item"
   done
@@ -209,23 +386,20 @@ if [[ ${#SKIPPED[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#REMOVED[@]} -eq 0 ]] && [[ ${#SKIPPED[@]} -gt 0 ]]; then
-  echo "Nothing to remove — daedalus is already cleaned up."
+  echo "Nothing was removed."
 fi
 
 echo ""
 echo "Manual follow-ups (not done by this script):"
-echo "  1. Uninstall the plugin package:"
-echo "       hermes plugins uninstall daedalus"
+echo "  hermes plugins uninstall daedalus"
 echo ""
-echo "  2. Remove kanban boards:"
-echo "       hermes kanban boards ls              # list boards"
-echo "       hermes kanban boards rm <slug>       # remove each"
-echo ""
-echo "  3. If you used the ship-gate hook, remove its entry from"
-echo "     hooks.pre_tool_call in $HERMES/config.yaml"
-echo ""
-if ! $ROSTER; then
-  echo "  4. To also delete the 6 role profiles, re-run with --roster"
+
+if $KEEP_PROFILES; then
+  echo "  Profiles were kept (--keep-profiles). To remove them later:"
+  for role in "${ROLES[@]}"; do
+    echo "    hermes profile delete $role -y"
+  done
+  echo ""
 fi
-echo ""
+
 echo "Re-run this script any time — it's idempotent."

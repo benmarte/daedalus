@@ -5,6 +5,8 @@ Verifies:
 - Guard rejects unsafe HERMES_HOME values (empty, /, $HOME, non-dir, non-hermes).
 - Guard accepts a valid Hermes home (config.yaml present or dir named .hermes).
 - --help flag works.
+- Confirmation flow: n/empty aborts, -y proceeds, --keep-profiles keeps profiles.
+- Summary is printed before confirmation.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ _script = (
 
 
 @pytest.fixture(scope="module")
-def script_path() -> Path:
+def script_path():
     """Ensure the script exists and is executable."""
     assert _script.exists(), f"Script not found: {_script}"
     _script.chmod(_script.stat().st_mode | stat.S_IEXEC)
@@ -36,6 +38,22 @@ def _run(script_path: Path, *, hermes_home: str, extra_args: list[str] | None = 
     return subprocess.run(
         ["bash", str(script_path)] + (extra_args or []),
         capture_output=True, text=True, timeout=30, env=env,
+    )
+
+
+def _run_stdin(
+    script_path: Path,
+    *,
+    hermes_home: str,
+    stdin_text: str = "",
+    extra_args: list[str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run uninstall.sh with stdin piped (for confirmation prompts)."""
+    env = {**os.environ, "HERMES_HOME": hermes_home}
+    return subprocess.run(
+        ["bash", str(script_path)] + (extra_args or []),
+        capture_output=True, text=True, timeout=30, env=env,
+        input=stdin_text,
     )
 
 
@@ -129,8 +147,9 @@ class TestGuardAccepts:
         r = _run(script_path, hermes_home=str(d))
         assert r.returncode == 0
         assert "FATAL" not in r.stderr
-        # Should show summary, with most things skipped
-        assert "summary" in (r.stdout + r.stderr).lower()
+        # Should show discovery output (aborts if stdin is not a tty)
+        combined = (r.stdout + r.stderr).lower()
+        assert "what will be removed" in combined or "aborted" in combined
 
     def test_dot_hermes_no_config_passes_guard(self, script_path, tmp_path):
         """A dir named .hermes passes even without config.yaml (basename check)."""
@@ -155,6 +174,145 @@ class TestFlags:
         assert "Usage:" in r.stdout
 
 
+# ── Confirmation flow ──────────────────────────────────────────────────────
+
+class TestConfirmationAbort:
+    """Declining the confirmation must abort with nothing removed."""
+
+    def test_n_aborts_nothing_removed(self, script_path, tmp_path):
+        """Typing 'n' aborts — daedalus.yaml stays, script exits 0."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run_stdin(script_path, hermes_home=str(d), stdin_text="n\n")
+        assert r.returncode == 0
+        assert "Aborted" in r.stdout
+        assert (d / "daedalus.yaml").exists(), "File should NOT be removed on abort"
+
+    def test_empty_input_aborts(self, script_path, tmp_path):
+        """Empty input (just Enter) defaults to No — aborts."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run_stdin(script_path, hermes_home=str(d), stdin_text="\n")
+        assert r.returncode == 0
+        assert "Aborted" in r.stdout
+        assert (d / "daedalus.yaml").exists()
+
+    def test_random_input_aborts(self, script_path, tmp_path):
+        """Non-y input aborts (anything other than y/Y)."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run_stdin(script_path, hermes_home=str(d), stdin_text="maybe\n")
+        assert r.returncode == 0
+        assert "Aborted" in r.stdout
+        assert (d / "daedalus.yaml").exists()
+
+
+class TestConfirmationProceed:
+    """--yes/-y skips the interactive prompt and proceeds."""
+
+    def test_y_flag_proceeds(self, script_path, tmp_path):
+        """-y removes files without prompting."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y"])
+        assert r.returncode == 0
+        assert not (d / "daedalus.yaml").exists()
+        assert "Aborted" not in r.stdout
+
+    def test_yes_long_flag_proceeds(self, script_path, tmp_path):
+        """--yes removes files without prompting."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["--yes"])
+        assert r.returncode == 0
+        assert not (d / "daedalus.yaml").exists()
+        assert "Aborted" not in r.stdout
+
+    def test_y_flag_removes_daedalus_dir(self, script_path, tmp_path):
+        """-y removes daedalus/ directory."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus").mkdir()
+        (d / "daedalus" / "projects.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y"])
+        assert r.returncode == 0
+        assert not (d / "daedalus").exists()
+
+
+class TestKeepProfiles:
+    """--keep-profiles leaves profiles intact; --roster is a no-op alias."""
+
+    def test_keep_profiles_flag_accepted(self, script_path, tmp_path):
+        """--keep-profiles doesn't crash the script."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y", "--keep-profiles"])
+        assert r.returncode == 0
+        assert not (d / "daedalus.yaml").exists()
+
+    def test_roster_noop_accepted(self, script_path, tmp_path):
+        """--roster is accepted as a no-op (profiles removed by default now)."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y", "--roster"])
+        assert r.returncode == 0
+        assert not (d / "daedalus.yaml").exists()
+
+
+class TestSummaryBeforeConfirmation:
+    """The data-loss summary must appear before the confirmation prompt."""
+
+    def test_summary_contains_permanent_warning(self, script_path, tmp_path):
+        """Summary must show permanent data-loss warning before prompting."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run_stdin(script_path, hermes_home=str(d), stdin_text="n\n")
+        assert r.returncode == 0
+        combined = r.stdout + r.stderr
+        assert "permanently" in combined.lower()
+        assert "cannot be undone" in combined.lower()
+
+    def test_continue_prompt_appears(self, script_path, tmp_path):
+        """The Continue? [y/N] prompt must appear."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run_stdin(script_path, hermes_home=str(d), stdin_text="n\n")
+        assert r.returncode == 0
+        combined = r.stdout + r.stderr
+        assert "Continue?" in combined
+        assert "y/N" in combined
+
+    def test_y_skips_prompt(self, script_path, tmp_path):
+        """-y must NOT show the interactive Continue? prompt."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y"])
+        assert r.returncode == 0
+        # The summary may still print, but there should be no interactive prompt
+        assert "Continue?" not in r.stdout
+
+
 # ── Regression: valid home still cleans up idempotently ────────────────────
 
 class TestIdempotentCleanup:
@@ -165,7 +323,7 @@ class TestIdempotentCleanup:
         d.mkdir()
         (d / "config.yaml").write_text("model: fake\n")
         (d / "daedalus.yaml").write_text("projects: []\n")
-        r = _run(script_path, hermes_home=str(d))
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y"])
         assert r.returncode == 0
         assert not (d / "daedalus.yaml").exists()
 
@@ -174,10 +332,10 @@ class TestIdempotentCleanup:
         d.mkdir()
         (d / "config.yaml").write_text("model: fake\n")
         # First run — remove daedalus.yaml if present
-        r1 = _run(script_path, hermes_home=str(d))
+        r1 = _run(script_path, hermes_home=str(d), extra_args=["-y"])
         assert r1.returncode == 0
         # Second run — still succeeds (idempotent)
-        r2 = _run(script_path, hermes_home=str(d))
+        r2 = _run(script_path, hermes_home=str(d), extra_args=["-y"])
         assert r2.returncode == 0
         assert "FATAL" not in r2.stderr
 
