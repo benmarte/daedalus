@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -79,7 +81,6 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
     n = issue.get("number")
     title = issue.get("title", "")
     body = (issue.get("body") or "").strip()
-    deliver = f" via `hermes send -t {notify_target}`" if notify_target else " to the team Slack channel"
     return (
         f"Deliver GitHub issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
@@ -94,11 +95,13 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"3. SECURITY-ANALYST — audit the PR diff for vulnerabilities (authz, secrets, injection, "
         f"input validation); flag findings or sign off.\n"
         f"4. DOCUMENTATION — after the PR is open and reviewed, write a detailed completion report and "
-        f"post it in TWO places: (a) as a comment on the GitHub issue "
-        f"(`gh issue comment {n} --repo {repo} --body-file <report.md>`), and (b) to Slack{deliver}. "
+        f"post it as a comment on the GitHub PR (`gh pr comment <pr> --repo {repo} --body-file <report.md>`). "
+        f"Use the PR number from the chain above (developer/reviewer cards carry it). "
         f"The report MUST cover: the issue (#{n} + summary), what was fixed, the files edited (with a "
         f"one-line note per file), how it was resolved, the PR link, and step-by-step instructions to "
-        f"test it manually. Use clear Markdown with a heading and a file-change table.\n\n"
+        f"test it manually. Use clear Markdown with a heading and a file-change table. "
+        f"Prefix the comment with `**Agent: documentation**` so the dispatcher can locate it. "
+        f"NOTE: the dispatcher handles Slack delivery — you do NOT need to call `hermes send`.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
 
@@ -189,6 +192,15 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     if any(c > 0 for c in iterate_counts.values()) and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
+    # ── Slack doc-report delivery ────────────────────────────────────────────
+    # The dispatcher delivers documentation reports (PR comments prefixed
+    # `**Agent: documentation**`) to the configured notify_target, because
+    # agents run in isolated profile HOMEs without Slack config. Idempotent
+    # via a hidden PR comment sentinel.
+    slack_delivered = _deliver_doc_reports(
+        slug, repo, notify_target, dry_run=dry_run,
+    )
+
     created, reconciled, completed = [], [], []
     issues: List[Dict[str, Any]] = []
 
@@ -205,7 +217,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         summary = {"board": slug, "mode": "kanban", "created": created,
                    "reconciled": reconciled, "completed": completed,
                    "advance_prs": advance_prs, "routed_actions": routed_actions,
-                   "issues_seen": 0, "spec_created": spec_created}
+                   "issues_seen": 0, "spec_created": spec_created,
+                   "slack_delivered": slack_delivered}
         logger.info("dispatch summary: %s", summary)
         return summary
 
@@ -279,7 +292,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     summary = {"board": slug, "mode": "github", "created": created, "reconciled": reconciled,
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),
-               "spec_created": spec_created}
+               "spec_created": spec_created, "slack_delivered": slack_delivered}
     logger.info("dispatch summary: %s", summary)
     return summary
 
@@ -316,12 +329,185 @@ def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False) 
                 bits.append("🔧 " + ", ".join(parts))
         if s.get("reconciled"):
             bits.append("🔄 " + ", ".join(f"#{n}→{st}" for n, st in s["reconciled"]))
+        if s.get("slack_delivered"):
+            bits.append("📨 Slack " + ", ".join(f"PR #{pr}" for pr in s["slack_delivered"]))
         if bits:
             lines.append(f"• *{name}* ({s.get('mode', '?')}): " + "; ".join(bits))
     if not lines:
         return ""  # nothing happened -> silent
     header = "*🤖 Daedalus dispatch*" + (" _(dry-run)_" if dry_run else "")
     return header + "\n" + "\n".join(lines)
+
+
+# ── Slack delivery (dispatcher context, NOT agent) ──────────────────────────
+
+
+def _send_via_hermes(notify_target: str, report_body: str) -> bool:
+    """Send a report to Slack via `hermes send` from the dispatcher's root context.
+
+    Runs ``hermes send -t <notify_target> --file <tmpfile>`` via subprocess
+    (list-args, no shell). A temporary file is created for the body and cleaned
+    up afterwards. Returns True on success; False is logged gracefully.
+    """
+    import tempfile
+
+    if not notify_target or not report_body.strip():
+        return False
+
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                         encoding="utf-8") as tf:
+            tf.write(report_body)
+            tmp = tf.name
+        r = subprocess.run(
+            ["hermes", "send", "-t", notify_target, "--file", tmp, "-q"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "dispatch: hermes send to %s failed (rc=%s): %s",
+                notify_target, r.returncode, (r.stderr or "").strip(),
+            )
+            return False
+        logger.info("dispatch: delivered doc report to %s", notify_target)
+        return True
+    except Exception as e:
+        logger.warning("dispatch: hermes send to %s raised: %s", notify_target, e)
+        return False
+    finally:
+        if tmp:
+            try:
+                Path(tmp).unlink()
+            except OSError:
+                pass
+
+
+def _deliver_doc_reports(
+    slug: str, repo: str, notify_target: str,
+    *, dry_run: bool = False,
+) -> List[int]:
+    """Deliver completed documentation reports to Slack from the dispatcher.
+
+    Scans the board's DONE cards for documentation cards whose linked PR has a
+    ``**Agent: documentation**`` comment. For each such PR, fetches the report
+    body from the comment and sends it to ``notify_target`` via ``hermes send``.
+
+    Idempotent: posts a hidden sentinel PR comment
+    (``<!-- daedalus:slack-delivered -->``) after delivery; skips PRs that already
+    have it.
+
+    Degrades gracefully: ``hermes send`` failure logs a warning and does NOT
+    post the sentinel, so the next tick will retry.
+
+    Returns the list of PR numbers that were successfully delivered (for the
+    human summary).
+    """
+    if not notify_target:
+        return []
+
+    delivered: List[int] = []
+    doc_cards = kanban.list_tasks(slug, status="done")
+
+    for card in doc_cards:
+        assignee = (card.get("assignee") or "").strip()
+        if assignee != "documentation":
+            continue
+
+        # Resolve the PR number: try the card's body/events for a PR reference,
+        # then fall back to the issue number on the parent triage card.
+        pr_number = _parse_pr_from_card(card)
+        if pr_number is None:
+            # Try parent → issue number → PR
+            pr_number = _resolve_pr_from_parents(slug, repo, card)
+
+        if pr_number is None:
+            logger.debug(
+                "dispatch: doc card %s has no resolvable PR — skipping Slack delivery",
+                card.get("id"),
+            )
+            continue
+
+        # Idempotence: skip if already delivered
+        if gp.pr_has_delivery_marker(repo, pr_number):
+            logger.debug(
+                "dispatch: PR #%s already has slack-delivered marker — skipping",
+                pr_number,
+            )
+            continue
+
+        # Find the **Agent: documentation** comment on the PR
+        report_body = _find_doc_comment(repo, pr_number)
+        if not report_body:
+            logger.debug(
+                "dispatch: PR #%s has no **Agent: documentation** comment yet — skipping",
+                pr_number,
+            )
+            continue
+
+        if dry_run:
+            logger.info(
+                "[dry-run] would deliver doc report for PR #%s to %s",
+                pr_number, notify_target,
+            )
+            delivered.append(pr_number)
+            continue
+
+        # Deliver to Slack via dispatcher's root context
+        if not _send_via_hermes(notify_target, report_body):
+            # Send failure → do NOT post the sentinel (retry next tick)
+            continue
+
+        # Post sentinel so we never re-deliver
+        if not gp.pr_post_delivery_marker(repo, pr_number, report_body):
+            # Sentinel post failure is noisy but not fatal — we delivered.
+            # Next tick might re-deliver but the dedup sentinel is best-effort.
+            logger.warning(
+                "dispatch: delivered PR #%s but sentinel post failed — may re-deliver",
+                pr_number,
+            )
+
+        delivered.append(pr_number)
+        logger.info(
+            "dispatch: delivered doc report for PR #%s to %s", pr_number, notify_target,
+        )
+
+    return delivered
+
+
+def _parse_pr_from_card(card: dict) -> Optional[int]:
+    """Extract a PR number from a card's body + latest summary."""
+    body = (card.get("body") or "".strip())
+    summary = (card.get("latest_summary") or "").strip()
+    text = f"{body}\n{summary}"
+    m = re.search(r"PR #(\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def _resolve_pr_from_parents(slug: str, repo: str, card: dict) -> Optional[int]:
+    """Walk parent cards to find an issue number, then resolve to a PR."""
+    parents = card.get("parents") or []
+    for pid in parents:
+        parent = kanban.show_card(slug, pid)
+        if not parent:
+            continue
+        # Try to find an issue number in the parent's title
+        m = re.search(r"#(\d+)", (parent.get("title") or ""))
+        if m:
+            issue_num = int(m.group(1))
+            pr = gp.pr_number_for_issue(repo, issue_num)
+            if pr:
+                return pr
+    return None
+
+
+def _find_doc_comment(repo: str, pr_number: int) -> str:
+    """Return the body of the first ``**Agent: documentation**`` PR comment, or ''."""
+    for c in gp.pr_comments(repo, pr_number):
+        body = c.get("body") or ""
+        if "**Agent: documentation**" in body:
+            return body
+    return ""
 
 
 def main() -> int:
