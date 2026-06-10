@@ -70,6 +70,16 @@ def pr_state_for_issue(repo: str, issue_number: int) -> Optional[str]:
     Matches a PR to the issue by branch name (``…issue-<n>…`` / ``…/<n>-…``) or by
     body reference (``#<n>``). Prefers merged over open.
     """
+    pr = _pr_for_issue(repo, issue_number)
+    return (pr.get("state") or "").lower() if pr else None
+
+
+def _pr_for_issue(repo: str, issue_number: int) -> Optional[Dict[str, Any]]:
+    """Return the PR dict (number, state, headRefName) linking to an issue, or None.
+
+    Prefers merged over open. Internal helper — callers use pr_state_for_issue or
+    pr_number_for_issue.
+    """
     data = _gh_json([
         "pr", "list", "--repo", repo, "--state", "all", "--limit", "50",
         "--json", "number,state,headRefName,body",
@@ -77,11 +87,8 @@ def pr_state_for_issue(repo: str, issue_number: int) -> Optional[str]:
     if not data:
         return None
     n = str(issue_number)
-    # A PR resolves an issue only via a closing keyword (Closes/Fixes/Resolves #n)
-    # or the issue-branch convention — NOT a bare "#n" mention (which is just a
-    # reference and must not flip the card to In review/Done).
     closing = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#" + n + r"\b")
-    open_found = False
+    open_pr: Optional[Dict[str, Any]] = None
     for pr in data:
         head = pr.get("headRefName", "") or ""
         body = pr.get("body", "") or ""
@@ -91,10 +98,16 @@ def pr_state_for_issue(repo: str, issue_number: int) -> Optional[str]:
             continue
         state = (pr.get("state") or "").lower()
         if state == "merged":
-            return "merged"
-        if state == "open":
-            open_found = True
-    return "open" if open_found else None
+            return pr
+        if state == "open" and open_pr is None:
+            open_pr = pr
+    return open_pr
+
+
+def pr_number_for_issue(repo: str, issue_number: int) -> Optional[int]:
+    """Return the PR number linked to an issue, or None."""
+    pr = _pr_for_issue(repo, issue_number)
+    return pr.get("number") if pr else None
 
 
 class GitHubProject:
@@ -233,3 +246,47 @@ def reconcile_status(project: "GitHubProject", repo: str, issue_number: int) -> 
     if state == "open":
         return "In review" if project.set_status(issue_number, "In review") else None
     return None
+
+
+def pr_comments(repo: str, pr_number: int) -> List[Dict[str, Any]]:
+    """Fetch all PR comments (review comments excluded). Returns JSON list, or [] on failure.
+
+    Uses ``gh pr view --comments --json comments`` which returns a list of dicts
+    with keys: ``id``, ``author`` (login), ``body``, ``createdAt``, ``url``.
+    """
+    data = _gh_json([
+        "pr", "view", str(pr_number), "--repo", repo,
+        "--comments", "--json", "comments",
+    ])
+    if isinstance(data, dict) and "comments" in data:
+        return data["comments"] or []
+    if isinstance(data, list):
+        return data
+    return []
+
+
+_SLACK_DELIVERED_MARKER = "<!-- daedalus:slack-delivered -->"
+
+
+def pr_has_delivery_marker(repo: str, pr_number: int) -> bool:
+    """True if any PR comment contains the Slack delivery sentinel."""
+    for c in pr_comments(repo, pr_number):
+        if _SLACK_DELIVERED_MARKER in (c.get("body") or ""):
+            return True
+    return False
+
+
+def pr_post_delivery_marker(repo: str, pr_number: int, report_body: str = "") -> bool:
+    """Post the Slack-delivered sentinel as a PR comment.
+
+    Includes the delivered report body as context so the human can see what was
+    sent. Returns True on success, False (logged) otherwise.
+    """
+    rc, _, err = _gh([
+        "pr", "comment", str(pr_number), "--repo", repo,
+        "--body", f"{_SLACK_DELIVERED_MARKER}\n\nDelivered to Slack:\n\n{report_body}",
+    ])
+    if rc != 0:
+        logger.warning("pr_post_delivery_marker: PR #%s failed: %s", pr_number, (err or "").strip())
+        return False
+    return True
