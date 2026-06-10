@@ -15,7 +15,7 @@ DEFAULTS = {
         "channel": "slack",            # slack:C0B7PS0BTT7, discord:999888777, etc.
     },
     "cron": {
-        "schedule": "60m",             # 60m, every 2h, 0 9 * * *, ISO timestamp
+        "schedule": "every 60m",             # every 60m, every 2h, 0 9 * * *, ISO timestamp
     },
     "issues": {
         "filters": {

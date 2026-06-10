@@ -36,5 +36,5 @@ sources:
 
 # ── Cron ─────────────────────────────────────────────────────────────────────
 cron:
-  schedule: "60m"                       # How often the daedalus polls (60m, every 2h, 0 9 * * *)
+  schedule: "every 60m"                       # How often the daedalus polls (every 60m, every 2h, 0 9 * * *)
   deliver: ""                           # Notification target: slack, discord, telegram:chat_id, etc.
