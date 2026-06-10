@@ -692,3 +692,80 @@ class TestDashboardAlwaysDisabled:
         # The old guard was: `hermes plugins list --enabled 2>/dev/null | grep -qi 'daedalus'`
         # The full pipeline shouldn't appear; a mention in a comment is fine.
         assert "grep -qi" not in script_text or "'daedalus'" not in script_text
+
+
+class TestConfigEntryStripped:
+    """The lingering plugins.enabled/.disabled daedalus entry is removed from config.yaml,
+    while comments and unrelated entries are preserved (targeted line edit, never a YAML round-trip)."""
+
+    # A realistic config.yaml: plugins block with daedalus in BOTH lists, plus
+    # surrounding comments and unrelated keys/plugins that MUST survive untouched.
+    _config = (
+        "model: fake\n"
+        "\n"
+        "# ── Plugins ──────────────────────────────────────────────\n"
+        "plugins:\n"
+        "  enabled:\n"
+        "  - agent-skills\n"
+        "  - daedalus\n"
+        "  - disk-cleanup\n"
+        "  disabled:\n"
+        "  - daedalus\n"
+        "  - some-other-plugin\n"
+        "\n"
+        "# ── Fallback Model ───────────────────────────────────────\n"
+        "fallback:\n"
+        "  - daedalus-lookalike-key: keep-me\n"
+    )
+
+    def _strip(self, script_path: Path, tmp_path: Path):
+        d = tmp_path / ".hermes"
+        d.mkdir()
+        cfg = d / "config.yaml"
+        cfg.write_text(self._config)
+        r = _run(script_path, hermes_home=str(d),
+                 extra_args=["-y", "--keep-profiles", "--keep-plugin"])
+        assert r.returncode == 0, (r.stdout + r.stderr)
+        return cfg, cfg.read_text(), r
+
+    def test_daedalus_removed_from_both_lists(self, script_path, tmp_path):
+        _, after, _ = self._strip(script_path, tmp_path)
+        # Neither the enabled nor the disabled list still carries a `- daedalus` item.
+        assert "  - daedalus\n" not in after
+
+    def test_unrelated_plugins_preserved(self, script_path, tmp_path):
+        _, after, _ = self._strip(script_path, tmp_path)
+        assert "  - agent-skills\n" in after
+        assert "  - disk-cleanup\n" in after
+        assert "  - some-other-plugin\n" in after
+
+    def test_comments_and_other_keys_preserved(self, script_path, tmp_path):
+        _, after, _ = self._strip(script_path, tmp_path)
+        assert "# ── Plugins ──────────────────────────────────────────────" in after
+        assert "# ── Fallback Model ───────────────────────────────────────" in after
+        assert "model: fake" in after
+        # A non-list-item line that merely contains "daedalus" is NOT touched.
+        assert "  - daedalus-lookalike-key: keep-me\n" in after
+
+    def test_summary_reports_config_cleanup(self, script_path, tmp_path):
+        _, _, r = self._strip(script_path, tmp_path)
+        assert "config.yaml plugins.enabled/.disabled daedalus entry" in (r.stdout + r.stderr)
+
+    def test_backup_written(self, script_path, tmp_path):
+        cfg, _, _ = self._strip(script_path, tmp_path)
+        bak = cfg.parent / "config.yaml.daedalus-uninstall.bak"
+        assert bak.exists()
+        assert "  - daedalus\n" in bak.read_text()  # backup keeps the original
+
+    def test_idempotent_when_no_entry(self, script_path, tmp_path):
+        """A config with no daedalus list entry is left byte-for-byte unchanged (no backup churn)."""
+        d = tmp_path / ".hermes"
+        d.mkdir()
+        cfg = d / "config.yaml"
+        clean = "model: fake\nplugins:\n  enabled:\n  - agent-skills\n"
+        cfg.write_text(clean)
+        r = _run(script_path, hermes_home=str(d),
+                 extra_args=["-y", "--keep-profiles", "--keep-plugin"])
+        assert r.returncode == 0, (r.stdout + r.stderr)
+        assert cfg.read_text() == clean
+        assert not (d / "config.yaml.daedalus-uninstall.bak").exists()

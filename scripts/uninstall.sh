@@ -387,6 +387,31 @@ else
   SKIPPED+=("dashboard tab (hermes plugins disable daedalus failed — may already be disabled)")
 fi
 
+# ── 2b. Strip the lingering plugins.enabled/.disabled entry from config.yaml ──
+# `hermes plugins disable` only MOVES daedalus from plugins.enabled to
+# plugins.disabled, and `hermes plugins remove` (core) never touches either list
+# — so a `- daedalus` entry lingers in config.yaml after a full uninstall. Remove
+# it with a TARGETED line edit (never round-trip the YAML through a parser) so all
+# comments and unrelated structure are preserved. Only ever drops a line that is
+# exactly `  - daedalus` inside the plugins: block under enabled:/disabled:.
+_CFG="$HERMES/config.yaml"
+if [[ -f "$_CFG" ]] && grep -qE '^[[:space:]]+-[[:space:]]+daedalus[[:space:]]*$' "$_CFG"; then
+  _cfg_tmp="$(mktemp)"
+  if awk '
+    /^[^[:space:]#]/ { if ($0 ~ /^plugins:/) { inp=1; inlist=0 } else { inp=0; inlist=0 } }
+    inp && /^[[:space:]]+enabled:/  { inlist=1; print; next }
+    inp && /^[[:space:]]+disabled:/ { inlist=1; print; next }
+    inp && inlist && /^[[:space:]]+-[[:space:]]+daedalus[[:space:]]*$/ { next }
+    { print }
+  ' "$_CFG" > "$_cfg_tmp" && [[ -s "$_cfg_tmp" ]] && ! cmp -s "$_CFG" "$_cfg_tmp"; then
+    cp "$_CFG" "$_CFG.daedalus-uninstall.bak" 2>/dev/null || true
+    mv "$_cfg_tmp" "$_CFG"
+    REMOVED+=("config.yaml plugins.enabled/.disabled daedalus entry")
+  else
+    rm -f "$_cfg_tmp"
+  fi
+fi
+
 # ── 3. Cron jobs ─────────────────────────────────────────────────────────────
 for job_name in "${FOUND_CRON[@]}"; do
   if hermes cron remove "$job_name" 2>/dev/null; then
