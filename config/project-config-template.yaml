@@ -1,0 +1,253 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Daedalus Configuration — Multi-Project Template
+#
+# This file follows the ConfigLoader schema:
+#   - `defaults`: base values inherited by all projects
+#   - `projects`: per-project overrides (deep-merged with defaults)
+#
+# Usage:
+#   1. Copy to .hermes/daedalus.yaml in your project root
+#   2. Edit the `defaults` section for global settings
+#   3. Add/modify entries in `projects[]` for repo-specific overrides
+#   4. Validate: python3 ~/.hermes/scripts/daedalus/cli.py --config .hermes/daedalus.yaml config validate
+#   5. Run: python3 ~/.hermes/scripts/daedalus/cli.py --config .hermes/daedalus.yaml run
+#
+# ── CLI CRUD Operations ──────────────────────────────────────────────────────
+#   python3 cli.py projects list                          # List all projects
+#   python3 cli.py projects add --name myapp --repo org/repo --workdir /path
+#   python3 cli.py projects edit myapp --schedule 30m --channel slack
+#   python3 cli.py projects clone myapp --name myapp-staging
+#   python3 cli.py projects remove myapp
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Default Values (inherited by all projects) ───────────────────────────────
+# Projects can override any of these. Unset fields fall through to defaults.
+
+defaults:
+
+  # ── Cron Job Settings ─────────────────────────────────────────────────────
+  # How often the daedalus cron job runs, model, and delivery.
+  cron:
+    schedule: "60m"                        # 60m, every 2h, 0 9 * * *, or ISO timestamp
+    model:
+      provider: "anthropic"                # anthropic, openai, google, custom
+      name: "claude-sonnet-4-6"
+      temperature: 0.2
+    profile: "daedalus"
+    deliver: "slack"                       # slack, discord, telegram, or platform:chat_id
+    toolsets:
+      - terminal
+      - file
+      - web
+      - browser
+
+  # ── Issue Filters ────────────────────────────────────────────────────────
+  # Which issues to process. All filters must pass for an issue to be handled.
+  issues:
+    filters:
+      state: "open"                        # open, closed, all
+      labels: []                           # Only process issues with these labels
+      exclude_labels:                      # Skip issues with these labels
+        - "daedalus"
+        - "duplicate"
+        - "wontfix"
+      title_prefixes: []                   # Only process titles starting with these
+      exclude_title_prefixes: []           # Skip titles starting with these
+      search_terms: []                     # Additional search terms for query
+      assignees: [null]                    # null = unassigned only; [username] = specific
+      limit: 20
+
+    skip_patterns:                         # Regex patterns to skip issues
+      - "Chrome Extension"
+      - "duplicate"
+      - "wontfix"
+
+    thresholds:
+      max_body_chars: 800                  # Skip issues with body > this length
+      enhancement_body_chars: 300         # Skip enhancement issues with body > this
+
+    retry:
+      max_attempts: 2                      # Retry failed issues this many times
+      backoff_seconds: 300
+
+    processing:
+      max_issues_per_run: 20               # Max issues to process per cron run
+      sequential: true                     # Process one at a time (git branch safety)
+      branch_prefix: "fix"                 # Git branch prefix: fix-issue-123-desc
+      commit_prefix: "fix:"               # Commit message prefix
+      large_issue_label: "backlog"        # Label for issues exceeding body thresholds
+
+  # ── Lifecycle Phases ─────────────────────────────────────────────────────
+  # The 8-phase lifecycle applied to each issue.
+  lifecycle:
+    phases:
+      - name: "Triage"
+        order: 0
+        toolsets: ["terminal", "file"]
+        description: "Dedup, check existing fix, reproduce, route to fix-or-close"
+        auto_advance: false
+      - name: "Spec"
+        order: 1
+        toolsets: ["terminal", "file"]
+        description: "Write detailed spec"
+        auto_advance: true
+      - name: "Plan"
+        order: 2
+        toolsets: ["terminal", "file"]
+        description: "Break spec into ordered implementation tasks"
+        auto_advance: true
+      - name: "Build"
+        order: 3
+        toolsets: ["terminal", "file", "web"]
+        description: "Implement per plan on feature branch"
+        auto_advance: false
+      - name: "Test"
+        order: 4
+        toolsets: ["terminal", "file"]
+        description: "Write and run tests"
+        auto_advance: false
+      - name: "Review"
+        order: 5
+        toolsets: ["terminal", "file"]
+        description: "Code review and audit"
+        auto_advance: false
+      - name: "Simplify"
+        order: 6
+        toolsets: ["terminal", "file"]
+        description: "Simplify code without behavior change"
+        auto_advance: true
+      - name: "Ship"
+        order: 7
+        toolsets: ["terminal", "file"]
+        description: "Run pre-commit, create PR/MR/ticket transition"
+        auto_advance: false
+      - name: "Review-PR"
+        order: 8
+        toolsets: ["terminal", "file", "web"]
+        merge_policy: "review-only"
+        description: "Review PR — approve or request changes (no merge)"
+        auto_advance: false
+
+    kanban:
+      enabled: true
+      idempotency_prefix: "github-issue-"
+      comment_format: "{emoji} Phase {n} ({name}): {status}"
+
+    auto_close: true                       # Auto-close issues when PR is merged
+    manual_close: false                    # Never close issues manually
+
+  # ── VCS / PR Settings ────────────────────────────────────────────────────
+  vcs:
+    target_branch: "main"                  # Base branch for PRs
+    branch_prefix: "fix"                   # Branch name prefix
+    commit_prefix: "fix:"                 # Commit message prefix
+    pr_title_prefix: "fix:"               # PR title prefix
+    pr_labels:
+      - "daedalus"
+      - "auto-generated"
+
+  # ── Sources ──────────────────────────────────────────────────────────────
+  sources:
+    github:
+      enabled: true
+      token_env: "GH_TOKEN"
+    gitlab:
+      enabled: false
+    jira:
+      enabled: false
+    linear:
+      enabled: false
+
+  # ── Notification ─────────────────────────────────────────────────────────
+  notification:
+    deliver: "slack"
+    channels:
+      default: "slack"
+      on_failure: "slack"
+
+  # ── Platform ─────────────────────────────────────────────────────────────
+  platform:
+    name: "github"                         # github, gitlab, jira, linear, local
+    multi: false
+    fallback: "github"
+
+  # ── Lint ─────────────────────────────────────────────────────────────────
+  # Commands run during Ship phase. Auto-detected if tech_stack: "auto".
+  lint:
+    python: true
+    frontend: true
+    commands:
+      python: "black . && isort ."
+      frontend: "biome check ."
+
+  # ── Test ─────────────────────────────────────────────────────────────────
+  test:
+    commands:
+      python: "pytest"
+      frontend: "bun test"
+    framework: "pytest"
+
+  # ── Tech Stack ───────────────────────────────────────────────────────────
+  tech_stack: "auto"                       # "auto" or explicit config above
+
+
+# ── Per-Project Overrides ────────────────────────────────────────────────────
+# Each project inherits `defaults` and overrides what it needs.
+# Identity fields: name, repo, workdir (never merged, always project-specific).
+
+projects:
+  # ── Example: Dycotomic App ──────────────────────────────────────────────
+  - name: "dycotomic"
+    repo: "RIZQ-TECH/dycotomic.app"
+    workdir: "/Users/benmarte/Documents/github/rizq/dycotomic.app"
+    cron:
+      schedule: "120m"
+      model:
+        provider: "anthropic"
+        name: "claude-sonnet-4-6"
+    delivery:
+      channel: "slack"
+    issues:
+      filters:
+        state: "open"
+        labels: ["backlog"]
+        exclude_labels: ["daedalus", "duplicate"]
+        title_prefixes: []
+        limit: 20
+      skip_patterns:
+        - "Chrome Extension"
+        - "adblock"
+        - "privacy badger"
+        - "Ghostery"
+        - "uBlock"
+        - "duplicate"
+        - "wontfix"
+      thresholds:
+        max_body_chars: 800
+        enhancement_body_chars: 300
+    lifecycle:
+      kanban:
+        enabled: true
+        idempotency_prefix: "github-issue-"
+      auto_close: true
+    platform:
+      name: "github"
+
+  # ── Example: Stock Trading Agent ────────────────────────────────────────
+  # Uncomment and customize for another project:
+  # - name: "stock-trading-agent"
+  #   repo: "owner/stock-trading-agent"
+  #   workdir: "/path/to/stock-trading-agent"
+  #   cron:
+  #     schedule: "30m"
+  #   issues:
+  #     filters:
+  #       labels: ["bug", "priority"]
+  #       exclude_labels: ["wontfix"]
+  #   vcs:
+  #     target_branch: "develop"
+  #     branch_prefix: "trading"
+  #   lifecycle:
+  #     auto_close: true
+  #     kanban:
+  #       idempotency_prefix: "github-issue-trading-"

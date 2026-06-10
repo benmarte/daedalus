@@ -1,0 +1,4 @@
+name: daedalus
+version: 1.0.0
+description: "Hermes Daedalus — native issue/spec → reviewed-PR automation with kanban dispatch and GitHub project syncing."
+author: "Ben Marte"

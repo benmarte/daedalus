@@ -1,0 +1,342 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Daedalus Config — Single Source of Truth
+#
+# This file configures the autonomous issue lifecycle for ANY source type.
+# Copy to your project's `.hermes/daedalus.yaml` and customize.
+#
+# Usage:
+#   1. Copy to <project>/.hermes/daedalus.yaml
+#   2. Edit source, notifications, lifecycle settings
+#   3. Run: python3 ~/.hermes/scripts/daedalus/core/__init__.py
+#
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Project Identity ─────────────────────────────────────────────────────────
+project:
+  name: "my-project"              # Human-readable project name
+  id: "my-project-id"             # Unique ID for notifications
+  description: "Project description"
+  
+# ── Data Sources ─────────────────────────────────────────────────────────────
+# Configure ANY combination of sources. Daedalus processes them all.
+sources:
+  # ── GitHub ───────────────────────────────────────────────────────────────
+  github:
+    enabled: true
+    config:
+      repo: "OWNER/REPO"          # GitHub repo (owner/name)
+      org: "OWNER"                # GitHub org (optional)
+      token: "${GITHUB_TOKEN}"    # Env var or direct value
+      filters:
+        state: "open"             # "open", "closed", "all"
+        labels: []                # Only these labels (empty = all)
+        exclude_labels:           # Skip these labels
+          - "daedalus"
+          - "duplicate"
+        title_prefixes: []        # Only these title prefixes (empty = all)
+        exclude_title_prefixes:   # Skip these prefixes
+          - "[WIP]"
+          - "[META]"
+        assignees: [null]         # null = unassigned, ["user1"] = specific
+        limit: 50                 # Max issues per fetch
+      project_board:
+        id: "12"                  # GitHub Project Board ID (optional)
+        enabled: false            # Sync to board (optional)
+
+  # ── GitLab ───────────────────────────────────────────────────────────────
+  gitlab:
+    enabled: false
+    config:
+      api_base: "https://gitlab.com"
+      project_url: null           # e.g. "https://gitlab.com/group/project"
+      project_id: null
+      token: "${GITLAB_TOKEN}"    # Env var or direct value
+      filters:
+        state: "opened"           # "opened", "closed", "all"
+        assignees: null
+        labels: []
+        exclude_labels: []
+        limit: 50
+
+  # ── Jira ─────────────────────────────────────────────────────────────────
+  jira:
+    enabled: false
+    config:
+      base_url: null              # e.g. "https://your-org.atlassian.net"
+      project_key: null           # e.g. "PROJ"
+      username: null              # Email for API access
+      token: "${JIRA_TOKEN}"      # Env var or direct value
+      filters:
+        labels: []
+        assignees: null
+        status: "To Do"           # Jira status
+        limit: 50
+      board:
+        id: "1"                   # Jira Board ID (optional)
+        enabled: false            # Sync to board (optional)
+
+  # ── Linear ───────────────────────────────────────────────────────────────
+  linear:
+    enabled: false
+    config:
+      api_key: "${LINEAR_API_KEY}"  # Env var or direct value
+      team_id: null
+      filters:
+        state: "triage"           # Linear state
+        assignees: null
+        labels: []
+        limit: 50
+      project:
+        id: "PRJ123"              # Linear Project ID (optional)
+        enabled: false            # Sync to project (optional)
+
+  # ── Local Files ──────────────────────────────────────────────────────────
+  local:
+    enabled: false
+    config:
+      pending_dir: ".hermes/pending/"  # Dir for pending spec/plan files
+      kanban_dir: ".hermes/kanban/"    # Dir for kanban cards
+      file_patterns:              # File patterns to watch
+        - "spec.md"
+        - "plan.md"
+        - "task.md"
+
+# ── Issue Processing ─────────────────────────────────────────────────────────
+# Common settings applied to ALL sources
+issues:
+  filters:
+    state: "open"
+    labels: []
+    exclude_labels: []
+    title_prefixes: []
+    exclude_title_prefixes: []
+    limit: 50
+  
+  skip_patterns:                  # Skip issues matching these patterns
+    - "Chrome Extension"
+    - "adblock"
+    - "privacy badger"
+    - "Ghostery"
+    - "uBlock"
+    - "duplicate"
+    - "wontfix"
+  
+  thresholds:
+    max_body_chars: 800           # Truncate issue body to this length
+    enhancement_body_chars: 300   # Shorter truncation for enhancements
+  
+  retry:
+    max_attempts: 2               # Max retry attempts for failed processing
+    delay_seconds: 30             # Delay between retries
+  
+  dedup:
+    enabled: true                 # Deduplicate issues by title/content
+    similarity_threshold: 0.8     # 0.0-1.0, higher = stricter
+
+# ── Lifecycle Phases ─────────────────────────────────────────────────────────
+# The 8-phase lifecycle applied to every issue
+lifecycle:
+  phases:
+    - name: "Triage"
+      order: 0
+      toolsets: [web, search, file]
+      prompt: |
+        Triage the issue:
+        1. Analyze the issue content
+        2. Determine if it's a bug, feature, or improvement
+        3. Check if it duplicates existing issues
+        4. Assign priority (P0, P1, P2, P3)
+        5. Create triage notes
+      auto_advance: false         # Manual review required
+    
+    - name: "Spec"
+      order: 1
+      toolsets: [file, terminal]
+      prompt: |
+        Write a spec for the issue:
+        1. Understand the requirements
+        2. Define the technical approach
+        3. Create detailed implementation plan
+        4. Write spec.md in .hermes/specs/
+      auto_advance: true
+    
+    - name: "Plan"
+      order: 2
+      toolsets: [file, terminal]
+      prompt: |
+        Create implementation plan:
+        1. Break spec into tasks
+        2. Order tasks by dependency
+        3. Write plan.md in .hermes/plans/
+      auto_advance: true
+    
+    - name: "Build"
+      order: 3
+      toolsets: [terminal, file, git]
+      prompt: |
+        Implement the feature/fix:
+        1. Create branch from target_branch
+        2. Implement changes per plan
+        3. Write/modify code
+        4. Commit changes
+      auto_advance: false
+    
+    - name: "Test"
+      order: 4
+      toolsets: [terminal, file]
+      prompt: |
+        Test the implementation:
+        1. Run existing tests
+        2. Write new tests if needed
+        3. Verify changes work
+        4. Document test results
+      auto_advance: false
+    
+    - name: "Review"
+      order: 5
+      toolsets: [web, file]
+      prompt: |
+        Review the implementation:
+        1. Check code quality
+        2. Verify tests pass
+        3. Check for edge cases
+        4. Suggest improvements
+      auto_advance: false
+    
+    - name: "Simplify"
+      order: 6
+      toolsets: [file]
+      prompt: |
+        Simplify the code:
+        1. Remove dead code
+        2. Improve readability
+        3. Optimize performance if needed
+        4. Refactor complex logic
+      auto_advance: false
+    
+    - name: "Ship"
+      order: 7
+      toolsets: [git, file]
+      prompt: |
+        Ship the changes:
+        1. Create PR/merge request
+        2. Update status in source system
+        3. Notify team
+        4. Close issue if applicable
+      auto_advance: false
+  
+  kanban:
+    enabled: false              # Enable Kanban board sync
+    columns:                    # Columns for each phase
+      triage: "Triage"
+      spec: "Spec"
+      plan: "Planning"
+      build: "In Progress"
+      test: "Testing"
+      review: "Review"
+      simplify: "Simplifying"
+      ship: "Shipped"
+  
+  auto_close: true              # Auto-close issues after ship
+  manual_close: false           # Require manual close confirmation
+
+# ── VCS Settings ─────────────────────────────────────────────────────────────
+vcs:
+  target_branch: "dev"          # Base branch for PRs
+  branch_prefix: "fix"          # Branch name prefix
+  commit_prefix: "fix:"         # Commit message prefix
+  pr:
+    title_prefix: "fix:"        # PR title prefix
+    labels: ["automated"]       # Auto-add labels to PR
+    reviewers: []               # Auto-assign reviewers (optional)
+    assignees: []               # Auto-assign PR author
+
+# ── Notifications ────────────────────────────────────────────────────────────
+# Per-project notification channels. Configure any combination.
+notifications:
+  enabled: true
+  channels:
+    # ── Slack ──────────────────────────────────────────────────────────────
+    slack:
+      enabled: true
+      channel: "#my-project-updates"  # Slack channel name or ID
+      events:
+        - "triage_complete"
+        - "spec_complete"
+        - "plan_complete"
+        - "build_complete"
+        - "test_complete"
+        - "review_complete"
+        - "simplify_complete"
+        - "ship_complete"
+        - "error"
+    
+    # ── Discord ────────────────────────────────────────────────────────────
+    discord:
+      enabled: false
+      channel: "#dev-updates"     # Discord channel name
+      events:
+        - "error"
+        - "ship_complete"
+    
+    # ── Telegram ───────────────────────────────────────────────────────────
+    telegram:
+      enabled: false
+      chat_id: "-1001234567890"   # Telegram chat ID
+      events:
+        - "error"
+    
+    # ── Email ──────────────────────────────────────────────────────────────
+    email:
+      enabled: false
+      to: ["team@example.com"]
+      events:
+        - "ship_complete"
+        - "error"
+    
+    # ── Webhook ────────────────────────────────────────────────────────────
+    webhook:
+      enabled: false
+      url: "https://your-webhook-url.com"
+      events:
+        - "error"
+        - "ship_complete"
+  
+  templates:                    # Notification templates
+    triage_complete: |
+      ✅ Triage complete for {{issue.title}}
+      Priority: {{issue.priority}}
+      Category: {{issue.category}}
+    spec_complete: |
+      📝 Spec ready for {{issue.title}}
+      Location: {{spec_path}}
+    error: |
+      ❌ Error processing {{issue.title}}
+      Error: {{error.message}}
+
+# ── Model & Execution Settings ───────────────────────────────────────────────
+model:
+  provider: "anthropic"         # "anthropic", "openrouter", "openai", "custom:<name>"
+  name: "claude-sonnet-4-6"     # Model name
+  temperature: 0.2              # Lower = more deterministic
+  max_tokens: 4096              # Max tokens per response
+
+execution:
+  toolsets:                     # Default toolsets for all phases
+    - terminal
+    - file
+    - web
+    - browser
+  concurrency: 1                # Process issues sequentially (1) or in parallel (>1)
+  timeout: 300                  # Timeout per issue (seconds)
+  debug: false                  # Enable debug logging
+
+# ── Telemetry ────────────────────────────────────────────────────────────────
+telemetry:
+  enabled: true                 # Track metrics
+  metrics:
+    - "issues_processed"
+    - "issues_skipped"
+    - "errors"
+    - "time_per_phase"
+  output: ".hermes/metrics.json"  # Metrics output file

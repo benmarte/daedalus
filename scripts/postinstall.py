@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+postinstall.py — Prerequisite checker + roster provisioner for the daedalus plugin.
+
+Checks that the host environment is ready (default profile, agent-skills plugin, gh auth),
+then runs scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
+
+Usage:
+    python3 scripts/postinstall.py          # check + provision
+    python3 scripts/postinstall.py --check  # check only, don't provision
+
+Exit codes:
+    0 — all prereqs met (and provision succeeded if not --check)
+    1 — one or more prereqs failed
+    2 — provision failed
+
+Import-safe: the module does nothing at import time. Call main() to run checks.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+
+
+# ── prerequisite checks ──────────────────────────────────────────────────────
+
+def _check_default_profile() -> tuple[bool, str]:
+    """Verify a usable 'default' profile exists (per-profile dir OR root config)."""
+    prof = _HERMES_HOME / "profiles" / "default" / "config.yaml"
+    root = _HERMES_HOME / "config.yaml"
+    if prof.is_file():
+        return True, f"OK: default profile found at {prof}"
+    if root.is_file():
+        return True, f"OK: default profile (root config) found at {root}"
+    return False, (
+        f"MISSING: no default profile ({prof} or {root})\n"
+        f"  Fix: run 'hermes setup' first."
+    )
+
+
+def _check_agent_skills() -> tuple[bool, str]:
+    """Verify the agent-skills plugin is installed with its skills directory."""
+    skills_dir = _HERMES_HOME / "plugins" / "agent-skills" / "skills"
+    if skills_dir.is_dir():
+        return True, f"OK: agent-skills plugin installed at {skills_dir}"
+    return False, (
+        f"MISSING: agent-skills plugin not found at {skills_dir}\n"
+        f"  Fix: install the agent-skills plugin —\n"
+        f"       hermes plugins install nousresearch/hermes-agent-skills --enable"
+    )
+
+
+def _check_gh_auth() -> tuple[bool, str]:
+    """Verify 'gh auth status' reports authenticated."""
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return True, f"OK: gh auth status passed\n{result.stderr.strip()}"
+        return False, (
+            f"FAIL: gh auth status returned code {result.returncode}\n"
+            f"{result.stderr.strip()}\n"
+            f"  Fix: run 'gh auth login' with a token that has repo + workflow scopes."
+        )
+    except FileNotFoundError:
+        return False, (
+            "MISSING: 'gh' CLI not found on PATH.\n"
+            "  Fix: install gh (https://cli.github.com) and run 'gh auth login'."
+        )
+    except subprocess.TimeoutExpired:
+        return False, (
+            "TIMEOUT: 'gh auth status' hung for 30s.\n"
+            "  Fix: check network / gh API reachability."
+        )
+
+
+# ── provision ────────────────────────────────────────────────────────────────
+
+def _run_provision(script_dir: Path) -> tuple[bool, str]:
+    """Invoke provision_roster.sh and return (success, stdout+stderr)."""
+    provision_script = script_dir / "provision_roster.sh"
+    if not provision_script.is_file():
+        return False, f"MISSING: provision script not found at {provision_script}"
+
+    try:
+        result = subprocess.run(
+            ["bash", str(provision_script)],
+            capture_output=True, text=True, timeout=120,
+            cwd=str(script_dir),
+        )
+        output = result.stdout + result.stderr
+        if result.returncode == 0:
+            return True, output
+        return False, f"Provision failed (exit code {result.returncode}):\n{output}"
+    except subprocess.TimeoutExpired:
+        return False, "Provision timed out after 120s."
+    except Exception as exc:
+        return False, f"Provision crashed: {exc}"
+
+
+def _extract_profiles_from_output(output: str) -> list[str]:
+    """Pull profile names from provision_roster.sh output (e.g. '=== developer ===').
+    Filter out non-profile lines like '=== roster provisioned ==='."""
+    _SKIP = {"roster provisioned", "roster"}
+    profiles = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("=== ") and stripped.endswith(" ==="):
+            name = stripped[4:-4].strip()
+            if name.lower() not in _SKIP:
+                profiles.append(name)
+    return profiles
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main(check_only: bool = False) -> int:
+    """Run prerequisite checks, then (optionally) provision the roster.
+
+    Returns 0 on success, 1 on prereq failure, 2 on provision failure.
+    """
+    script_dir = Path(__file__).resolve().parent
+
+    checks = [
+        ("default profile", _check_default_profile),
+        ("agent-skills plugin", _check_agent_skills),
+        ("gh auth", _check_gh_auth),
+    ]
+
+    all_ok = True
+    for label, check_fn in checks:
+        ok, msg = check_fn()
+        print(msg)
+        if not ok:
+            all_ok = False
+        print()
+
+    if not all_ok:
+        print("\u2717 Prerequisites NOT met. Fix the issues above and re-run.")
+        return 1
+
+    if check_only:
+        print("\u2713 All prerequisites met (--check only, skipping provision).")
+        return 0
+
+    print("\u2713 All prerequisites met. Running provision...\n")
+    ok, output = _run_provision(script_dir)
+    print(output)
+
+    if not ok:
+        print("\n\u2717 Provision failed.")
+        return 2
+
+    profiles = _extract_profiles_from_output(output)
+    if profiles:
+        print(f"\n\u2713 Roster provisioned successfully. Created/updated profiles: {', '.join(profiles)}")
+    else:
+        print("\n\u2713 Roster provisioned successfully.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(check_only="--check" in sys.argv))

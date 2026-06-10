@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, feat/ready-gating-decompose-dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install --quiet pyyaml fastapi pytest httpx
+      - name: Plain-script suite (real assertions via custom runner)
+        run: python3 tests/test_daedalus.py
+      - name: Pytest suites
+        run: pytest tests/ -q
+
+  ci-complete:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "all required checks passed"

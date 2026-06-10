@@ -1,0 +1,14 @@
+{
+  "name": "daedalus-dashboard",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Hermes dashboard tab for the Daedalus plugin. Source: src/App.jsx → dist/index-<hash>.js (esbuild IIFE, content-hashed for cache-busting). React is provided at runtime by the Hermes Plugin SDK and is never bundled.",
+  "scripts": {
+    "build": "node build.js",
+    "dev": "node build.js",
+    "test": "node test-derive.js && node test-build.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}

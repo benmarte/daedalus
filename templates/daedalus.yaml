@@ -1,0 +1,40 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Daedalus Per-Repo Configuration
+#
+# Scaffolded by scripts/setup.sh — edit to fit your project.
+# The daedalus reads this file to drive the autonomous issue→PR pipeline.
+#
+# Placeholders ({{…}}) are filled in by setup.sh on first run.
+# Re-running setup.sh is idempotent — it will not overwrite this file
+# unless you pass --force.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+name: "{{NAME}}"                        # Human-readable project name
+repo: "{{REPO}}"                        # GitHub owner/repo (derived from git remote)
+workdir: "{{WORKDIR}}"                  # Absolute path to the repo root
+
+# ── GitHub Project Board (optional) ──────────────────────────────────────────
+tracking:
+  # Uncomment and set to your GitHub Project board number to enable two-way
+  # status syncing (Hermes Kanban ↔ GitHub Project).
+  # github_project_number: 1
+
+# ── VCS ──────────────────────────────────────────────────────────────────────
+vcs:
+  target_branch: "main"                 # Base branch for PRs (dev, main, master…)
+
+# ── Sources ──────────────────────────────────────────────────────────────────
+# Toggle which issue/spec sources the daedalus watches for this repo.
+sources:
+  github_issues:
+    enabled: true                       # Scan GitHub Issues for this repo
+  local_specs:
+    enabled: false                      # Watch .hermes/pending/ for spec/plan files
+  kanban_triage:
+    enabled: false                      # Allow Kanban-only triage cards (no GitHub source)
+
+# ── Cron ─────────────────────────────────────────────────────────────────────
+cron:
+  schedule: "60m"                       # How often the daedalus polls (60m, every 2h, 0 9 * * *)
+  deliver: ""                           # Notification target: slack, discord, telegram:chat_id, etc.

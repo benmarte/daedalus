@@ -1,0 +1,189 @@
+"""
+Tests for scripts/uninstall.sh — HERMES_HOME safety guard and behavior.
+
+Verifies:
+- Guard rejects unsafe HERMES_HOME values (empty, /, $HOME, non-dir, non-hermes).
+- Guard accepts a valid Hermes home (config.yaml present or dir named .hermes).
+- --help flag works.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+# Absolute path to the script under test.
+_script = (
+    Path(__file__).resolve().parent.parent / "scripts" / "uninstall.sh"
+)
+
+
+@pytest.fixture(scope="module")
+def script_path() -> Path:
+    """Ensure the script exists and is executable."""
+    assert _script.exists(), f"Script not found: {_script}"
+    _script.chmod(_script.stat().st_mode | stat.S_IEXEC)
+    return _script
+
+
+def _run(script_path: Path, *, hermes_home: str, extra_args: list[str] | None = None) -> subprocess.CompletedProcess:
+    """Run uninstall.sh with the given HERMES_HOME and optional extra args."""
+    env = {**os.environ, "HERMES_HOME": hermes_home}
+    return subprocess.run(
+        ["bash", str(script_path)] + (extra_args or []),
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+
+
+def _run_no_hermes_home(script_path: Path, *, home: str, extra_args: list[str] | None = None) -> subprocess.CompletedProcess:
+    """Run uninstall.sh WITHOUT HERMES_HOME set — it must default to HOME/.hermes."""
+    env = {**os.environ, "HOME": home}
+    env.pop("HERMES_HOME", None)
+    return subprocess.run(
+        ["bash", str(script_path)] + (extra_args or []),
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+
+
+# ── Safety guard: reject unsafe HERMES_HOME ────────────────────────────────
+
+class TestGuardRejects:
+    """The safety guard must abort before any rm -rf when HERMES_HOME is unsafe."""
+
+    def test_empty_hermes_home_with_valid_home_default(self, script_path, tmp_path):
+        """When HERMES_HOME is unset, it defaults to HOME/.hermes and passes."""
+        d = tmp_path / ".hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        r = _run_no_hermes_home(script_path, home=str(tmp_path))
+        assert r.returncode == 0
+        assert "FATAL" not in r.stderr
+
+    def test_both_hermes_home_and_home_unset(self, script_path):
+        """When neither HERMES_HOME nor HOME is set, must FATAL."""
+        env = {**os.environ}
+        env.pop("HERMES_HOME", None)
+        env.pop("HOME", None)
+        r = subprocess.run(
+            ["bash", str(script_path)],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert r.returncode == 1
+        assert "FATAL" in r.stderr
+        assert "could not resolve" in r.stderr.lower()
+
+    def test_filesystem_root(self, script_path):
+        r = _run(script_path, hermes_home="/")
+        assert r.returncode == 1
+        assert "FATAL" in r.stderr
+        assert "unsafe" in r.stderr.lower()
+
+    def test_home_root(self, script_path):
+        r = _run(script_path, hermes_home=os.environ["HOME"])
+        assert r.returncode == 1
+        assert "FATAL" in r.stderr
+        assert "unsafe" in r.stderr.lower()
+
+    def test_non_directory(self, script_path, tmp_path):
+        """Pass a path that exists but is a file, not a directory."""
+        f = tmp_path / "not-a-dir"
+        f.write_text("hello\n")
+        r = _run(script_path, hermes_home=str(f))
+        assert r.returncode == 1
+        assert "FATAL" in r.stderr
+        assert "not a directory" in r.stderr.lower()
+
+    def test_non_hermes_dir_no_config_no_dot_hermes(self, script_path, tmp_path):
+        """A plain directory with no config.yaml and basename != .hermes."""
+        d = tmp_path / "random-dir"
+        d.mkdir()
+        r = _run(script_path, hermes_home=str(d))
+        assert r.returncode == 1
+        assert "FATAL" in r.stderr
+        assert "not a valid hermes home" in r.stderr.lower()
+
+    def test_dot_hermes_basename_no_config(self, script_path, tmp_path):
+        """A directory named .hermes (without config.yaml) passes the basename check."""
+        d = tmp_path / ".hermes"
+        d.mkdir()
+        r = _run(script_path, hermes_home=str(d))
+        # Should pass — basename is .hermes.  Then it'll skip items because none exist.
+        assert r.returncode == 0
+        assert "FATAL" not in r.stderr
+
+
+# ── Safety guard: accept valid HERMES_HOME ─────────────────────────────────
+
+class TestGuardAccepts:
+    """The guard should let execution proceed when HERMES_HOME is valid."""
+
+    def test_config_yaml_present(self, script_path, tmp_path):
+        """A dir with config.yaml is accepted as a Hermes home."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        r = _run(script_path, hermes_home=str(d))
+        assert r.returncode == 0
+        assert "FATAL" not in r.stderr
+        # Should show summary, with most things skipped
+        assert "summary" in (r.stdout + r.stderr).lower()
+
+    def test_dot_hermes_no_config_passes_guard(self, script_path, tmp_path):
+        """A dir named .hermes passes even without config.yaml (basename check)."""
+        d = tmp_path / ".hermes"
+        d.mkdir()
+        r = _run(script_path, hermes_home=str(d))
+        assert r.returncode == 0
+        assert "FATAL" not in r.stderr
+
+
+# ── Flags ──────────────────────────────────────────────────────────────────
+
+class TestFlags:
+    """Non-guard behavior: flags should still work as before."""
+
+    def test_help_flag(self, script_path, tmp_path):
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["--help"])
+        assert r.returncode == 0
+        assert "Usage:" in r.stdout
+
+
+# ── Regression: valid home still cleans up idempotently ────────────────────
+
+class TestIdempotentCleanup:
+    """When a valid home is provided, the script behaves normally."""
+
+    def test_removes_daedalus_yaml(self, script_path, tmp_path):
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d))
+        assert r.returncode == 0
+        assert not (d / "daedalus.yaml").exists()
+
+    def test_idempotent_rerun(self, script_path, tmp_path):
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        # First run — remove daedalus.yaml if present
+        r1 = _run(script_path, hermes_home=str(d))
+        assert r1.returncode == 0
+        # Second run — still succeeds (idempotent)
+        r2 = _run(script_path, hermes_home=str(d))
+        assert r2.returncode == 0
+        assert "FATAL" not in r2.stderr
+
+    def test_unknown_flag_rejected(self, script_path, tmp_path):
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["--bogus"])
+        assert r.returncode == 2

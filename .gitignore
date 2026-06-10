@@ -1,0 +1,41 @@
+# ── Large external repos (not part of this project) ──────────────────────────
+/ds4/
+/hermes-agent/
+/llama.cpp/
+
+# ── macOS ───────────────────────────────────────────────────────────────────
+.DS_Store
+._*
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+dashboard/node_modules/
+# Dashboard dist is COMMITTED — needed for the plugin to work without a build step.
+# The bundle lives at dashboard/dist/ (not plugin/dashboard/dist/), so un-ignore
+# that path; otherwise dist/index.js changes are silently dropped from commits.
+!dashboard/dist/
+dashboard/dist/*.map
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Hermes state ─────────────────────────────────────────────────────────────
+.hermes/
+
+# ── Tooling artifacts ────────────────────────────────────────────────────────
+.playwright-mcp/
