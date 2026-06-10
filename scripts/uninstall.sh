@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# uninstall.sh — clean up daedalus host-side artifacts
+# uninstall.sh — complete daedalus uninstaller (host state + plugin package)
 #
 # Usage:
-#   bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--roster] [--help]
+#   bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--keep-plugin] [--roster] [--help]
 #
 # What it cleans (idempotent — safe to re-run):
 #   - $HERMES_HOME/daedalus.yaml   (legacy global multi-project config)
@@ -13,14 +13,13 @@
 #   - Daedalus kanban boards (non-default boards found via hermes kanban boards ls)
 #   - Roster profiles (by default; skip with --keep-profiles)
 #   - Dashboard tab (hermes plugins disable daedalus)
+#   - Plugin package (by default; skip with --keep-plugin — removed deferred
+#     as the final action so the running script doesn't delete itself mid-run)
 #
-# The script now shows a data-loss summary BEFORE removing anything and
+# The script shows a data-loss summary BEFORE removing anything and
 # requires confirmation (unless -y/--yes). --roster is a no-op alias for
 # back-compat — profiles are removed by default now; use --keep-profiles to
 # keep them.
-#
-# Manual follow-ups (NOT done automatically — destructive/data):
-#   - hermes plugins uninstall daedalus
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Safety: fail on pipe failures, but NOT blanket -e or -u —
@@ -61,24 +60,26 @@ fi
 # ── Parse flags ──────────────────────────────────────────────────────────────
 YES=false
 KEEP_PROFILES=false
+KEEP_PLUGIN=false
 HELP=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --roster) shift ;;             # no-op alias for back-compat (profiles now removed by default)
     --keep-profiles) KEEP_PROFILES=true; shift ;;
+    --keep-plugin) KEEP_PLUGIN=true; shift ;;
     -y|--yes) YES=true; shift ;;
     --help|-h) HELP=true; shift ;;
     *)        echo "Unknown option: $1" >&2
-              echo "Usage: bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--roster] [--help]" >&2
+              echo "Usage: bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--keep-plugin] [--roster] [--help]" >&2
               exit 2 ;;
   esac
 done
 
 if $HELP; then
-  echo "Usage: bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--roster] [--help]"
+  echo "Usage: bash scripts/uninstall.sh [-y|--yes] [--keep-profiles] [--keep-plugin] [--roster] [--help]"
   echo ""
-  echo "Clean up daedalus host-side artifacts from \$HERMES_HOME."
+  echo "Clean up daedalus host-side artifacts from \$HERMES_HOME and remove the plugin."
   echo "Idempotent — safe to re-run; absent items are skipped, not errors."
   echo ""
   echo "Shows a data-loss summary BEFORE removing anything. Requires"
@@ -92,16 +93,15 @@ if $HELP; then
   echo "  Daedalus kanban boards (never removes 'default')"
   echo "  Roster profiles (by default; skip with --keep-profiles)"
   echo "  Dashboard tab (hermes plugins disable daedalus)"
+  echo "  Plugin package (by default; skip with --keep-plugin)"
   echo ""
   echo "Options:"
   echo "  -y, --yes        Skip confirmation prompt (non-interactive)"
   echo "  --keep-profiles  Keep the 6 role profiles (developer, reviewer,"
   echo "                   security-analyst, documentation, planner, project-manager)"
+  echo "  --keep-plugin    Keep the plugin package installed (skip deferred removal)"
   echo "  --roster         Accepted no-op (back-compat — profiles now removed by default)"
   echo "  --help           Show this help and exit"
-  echo ""
-  echo "Manual follow-ups (NOT done automatically):"
-  echo "  hermes plugins uninstall daedalus"
   exit 0
 fi
 
@@ -248,6 +248,15 @@ else
   echo "  (not enabled)"
 fi
 
+echo ""
+echo "Plugin package:"
+if $KEEP_PLUGIN; then
+  echo "  (kept — --keep-plugin flag is set)"
+else
+  echo "  • will run: hermes plugins remove daedalus (deferred)"
+  any_found=true
+fi
+
 if $CONFIG_HOOK_REF; then
   echo ""
   echo "  NOTE: A 'ship-gate' reference was detected in $HERMES/config.yaml."
@@ -262,9 +271,6 @@ echo ""
 # If nothing was found at all, exit early.
 if ! $any_found && ! $DASHBOARD_ENABLED && ! $CONFIG_HOOK_REF; then
   echo "Nothing to remove — daedalus is already cleaned up."
-  echo ""
-  echo "Manual follow-ups (not done by this script):"
-  echo "  hermes plugins uninstall daedalus"
   echo ""
   exit 0
 fi
@@ -390,16 +396,40 @@ if [[ ${#REMOVED[@]} -eq 0 ]] && [[ ${#SKIPPED[@]} -gt 0 ]]; then
 fi
 
 echo ""
-echo "Manual follow-ups (not done by this script):"
-echo "  hermes plugins uninstall daedalus"
-echo ""
+
+if $KEEP_PLUGIN; then
+  echo "Plugin package was kept (--keep-plugin). To remove it later:"
+  echo "  hermes plugins remove daedalus"
+  echo ""
+fi
 
 if $KEEP_PROFILES; then
-  echo "  Profiles were kept (--keep-profiles). To remove them later:"
+  echo "Profiles were kept (--keep-profiles). To remove them later:"
   for role in "${ROLES[@]}"; do
     echo "    hermes profile delete $role -y"
   done
   echo ""
 fi
 
+if $CONFIG_HOOK_REF; then
+  echo "  NOTE: A 'ship-gate' reference was detected in $HERMES/config.yaml."
+  echo "  Remove the hooks.pre_tool_call entry for 'ship-gate' manually if it's"
+  echo "  still there — this script does NOT hand-edit YAML."
+  echo ""
+fi
+
 echo "Re-run this script any time — it's idempotent."
+echo ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEFERRED PLUGIN REMOVAL (final action — runs AFTER script exits)
+# ══════════════════════════════════════════════════════════════════════════════
+if ! $KEEP_PLUGIN; then
+  echo "Removing the plugin package… (daedalus)"
+  # Spawn detached so the script's own directory survives until we exit.
+  # The subshell sleeps briefly to let this script finish, then runs the removal.
+  ( sleep 1; hermes plugins remove daedalus >/dev/null 2>&1 ) &
+  disown 2>/dev/null || true
+fi
+
+exit 0

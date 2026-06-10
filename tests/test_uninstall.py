@@ -274,6 +274,83 @@ class TestKeepProfiles:
         assert not (d / "daedalus.yaml").exists()
 
 
+class TestKeepPlugin:
+    """--keep-plugin skips the deferred plugin removal."""
+
+    def test_keep_plugin_flag_accepted(self, script_path, tmp_path):
+        """--keep-plugin doesn't crash the script and skips plugin removal."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y", "--keep-plugin"])
+        assert r.returncode == 0
+        assert not (d / "daedalus.yaml").exists()
+        # Should NOT spawn deferred removal
+        assert "Removing the plugin package" not in r.stdout
+        # Should mention plugin was kept
+        assert "kept" in r.stdout.lower() or "keep-plugin" in r.stdout.lower()
+
+    def test_keep_plugin_combined_with_keep_profiles(self, script_path, tmp_path):
+        """--keep-plugin --keep-profiles together work."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y", "--keep-plugin", "--keep-profiles"])
+        assert r.returncode == 0
+        assert not (d / "daedalus.yaml").exists()
+        assert "Removing the plugin package" not in r.stdout
+
+    def test_no_keep_plugin_includes_deferred_removal(self, script_path, tmp_path):
+        """Without --keep-plugin, the deferred removal message appears."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y"])
+        assert r.returncode == 0
+        assert "Removing the plugin package" in r.stdout
+
+    def test_keep_plugin_in_discovery_summary(self, script_path, tmp_path):
+        """Discovery phase shows plugin kept when --keep-plugin is set."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y", "--keep-plugin"])
+        assert r.returncode == 0
+        combined = r.stdout + r.stderr
+        assert "--keep-plugin" in combined.lower() or "kept" in combined.lower()
+
+    def test_keep_plugin_help_text(self, script_path, tmp_path):
+        """--help output mentions --keep-plugin."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["--help"])
+        assert r.returncode == 0
+        assert "--keep-plugin" in r.stdout
+
+
+class TestNoManualFollowups:
+    """The old 'Manual follow-ups' message with 'hermes plugins uninstall' is gone."""
+
+    def test_no_manual_followup_message(self, script_path, tmp_path):
+        """Output no longer tells user to run 'hermes plugins uninstall' as a manual step."""
+        d = tmp_path / "my-hermes"
+        d.mkdir()
+        (d / "config.yaml").write_text("model: fake\n")
+        (d / "daedalus.yaml").write_text("projects: []\n")
+        r = _run(script_path, hermes_home=str(d), extra_args=["-y"])
+        assert r.returncode == 0
+        assert "Manual follow-ups (not done by this script)" not in r.stdout
+        # The old standalone "hermes plugins uninstall daedalus" line should not appear
+        # as a manual instruction (it may appear inside the deferred removal message though)
+        # We check that the specific old phrasing is gone:
+        assert "Manual follow-ups" not in r.stdout
+
+
 class TestSummaryBeforeConfirmation:
     """The data-loss summary must appear before the confirmation prompt."""
 

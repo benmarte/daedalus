@@ -63,3 +63,18 @@ The pipeline reads a **GitHub Project** board and writes to a **Hermes Kanban bo
   and pass `--workspace dir:<path>` instead.
 - The built-in kanban worker tends to **`kanban_block` ("review-required")** instead of
   `kanban_complete`; to chain to the reviewer/security tasks, the developer task must *complete*.
+
+## Uninstall
+
+To completely remove Daedalus (profiles, cron jobs, kanban boards, config, and the plugin):
+
+```bash
+bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh
+```
+
+> **Do NOT use `hermes plugins uninstall daedalus` alone** — that only deletes
+> the plugin directory and leaves profiles, cron jobs, boards, config, and
+> hook artifacts behind. Hermes has no uninstall hook for plugins to clean up
+> after themselves. Use `uninstall.sh` for a complete uninstall.
+
+See the [README](README.md#uninstall--reset) for all options (`--keep-plugin`, `--keep-profiles`, `-y`).
