@@ -230,15 +230,31 @@ To completely remove Daedalus and all its host-side state:
 
 ```bash
 # HERMES_HOME defaults to ~/.hermes — set it if yours is elsewhere
-# 1. Clean up host-side artifacts (config, registry, hooks, cron jobs, boards, profiles)
-#    Shows a data-loss summary first — review it, then confirm, or use -y for scripting:
 bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh"
-
-# Use --keep-profiles to keep the 6 agent profiles:
-bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-profiles
-
-# 2. Remove the plugin package itself
-hermes plugins uninstall daedalus
 ```
 
-The uninstall script is idempotent — safe to re-run; absent items are skipped without error.
+This single command removes profiles, cron jobs, kanban boards, config, AND the
+plugin package in one go. It shows a data-loss summary first so you can review
+what will be removed before confirming (or use `-y` for scripting).
+
+> **Do NOT use `hermes plugins uninstall daedalus` alone** — that only deletes
+> the plugin directory and leaves profiles, cron jobs, boards, config, and
+> hook artifacts behind. Hermes has no uninstall hook for plugins to clean up
+> after themselves. Use `uninstall.sh` for a complete uninstall.
+
+```bash
+# Skip the plugin removal (keep daedalus installed, reset host state only):
+bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-plugin
+
+# Keep the 6 agent profiles:
+bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-profiles
+
+# Both — keep profiles AND the plugin, reset everything else:
+bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-profiles --keep-plugin
+
+# Non-interactive (scripting / CI):
+bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" -y
+```
+
+The uninstall script is idempotent — safe to re-run; absent items are skipped
+without error.
