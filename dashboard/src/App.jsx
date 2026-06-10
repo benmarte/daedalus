@@ -519,7 +519,21 @@ function ConfigModal(props) {
     fetchJSON(apiProjectConfig(name), { method: "POST", body: body }).then(function (res) {
       setSaving(false);
       if (res && res.status === "saved") {
-        props.onClose();
+        // Surface the cron reconciliation result if present
+        if (res.cron) {
+          var cr = res.cron;
+          var cronMsg = cr.name || "";
+          if (cr.error) {
+            cronMsg += " \u00b7 \u26a0\ufe0f " + cr.error;
+          } else if (cr.cron && cr.cron !== "skipped") {
+            cronMsg += " \u00b7 cron " + cr.cron;
+          }
+          setResult({ ok: true, msg: "Saved \u00b7 " + cronMsg });
+        } else {
+          setResult({ ok: true, msg: "Saved" });
+        }
+        // Close modal after a brief delay so the user can see the result
+        setTimeout(function () { props.onClose(); }, 1200);
       } else {
         setResult({ ok: false, errors: ["Unexpected response"] });
       }
