@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -79,7 +82,11 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
     n = issue.get("number")
     title = issue.get("title", "")
     body = (issue.get("body") or "").strip()
-    deliver = f" via `hermes send -t {notify_target}`" if notify_target else " to the team Slack channel"
+    deliver = (
+        f"\\nThe DISPATCHER will deliver the report to {notify_target} automatically "
+        f"when the documentation card completes; the agent does NOT need to call `hermes send`."
+        if notify_target else ""
+    )
     return (
         f"Deliver GitHub issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
@@ -94,8 +101,11 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"3. SECURITY-ANALYST — audit the PR diff for vulnerabilities (authz, secrets, injection, "
         f"input validation); flag findings or sign off.\n"
         f"4. DOCUMENTATION — after the PR is open and reviewed, write a detailed completion report and "
-        f"post it in TWO places: (a) as a comment on the GitHub issue "
-        f"(`gh issue comment {n} --repo {repo} --body-file <report.md>`), and (b) to Slack{deliver}. "
+        f"post it as a comment on the PR using "
+        f"`gh pr comment <PR-NUMBER> --repo {repo} --body-file <report.md>`. "
+        f"The comment must start with `**Agent: documentation**` so the dispatcher can find it. "
+        f"DO NOT attempt `hermes send` to Slack — the DISPATCHER will deliver the report "
+        f"to the configured channel automatically.{deliver}\\n"
         f"The report MUST cover: the issue (#{n} + summary), what was fixed, the files edited (with a "
         f"one-line note per file), how it was resolved, the PR link, and step-by-step instructions to "
         f"test it manually. Use clear Markdown with a heading and a file-change table.\n\n"
@@ -205,7 +215,9 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         summary = {"board": slug, "mode": "kanban", "created": created,
                    "reconciled": reconciled, "completed": completed,
                    "advance_prs": advance_prs, "routed_actions": routed_actions,
-                   "issues_seen": 0, "spec_created": spec_created}
+                   "issues_seen": 0, "spec_created": spec_created,
+                   "delivered": _deliver_doc_reports(slug, repo, notify_target,
+                                                      dry_run=dry_run)}
         logger.info("dispatch summary: %s", summary)
         return summary
 
@@ -279,7 +291,9 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     summary = {"board": slug, "mode": "github", "created": created, "reconciled": reconciled,
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),
-               "spec_created": spec_created}
+               "spec_created": spec_created,
+               "delivered": _deliver_doc_reports(slug, repo, notify_target,
+                                                  dry_run=dry_run)}
     logger.info("dispatch summary: %s", summary)
     return summary
 
@@ -316,12 +330,149 @@ def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False) 
                 bits.append("🔧 " + ", ".join(parts))
         if s.get("reconciled"):
             bits.append("🔄 " + ", ".join(f"#{n}→{st}" for n, st in s["reconciled"]))
+        if s.get("delivered"):
+            bits.append("📨 delivered report(s) for " + ", ".join(f"#{n}" for n in s["delivered"]))
         if bits:
             lines.append(f"• *{name}* ({s.get('mode', '?')}): " + "; ".join(bits))
     if not lines:
         return ""  # nothing happened -> silent
     header = "*🤖 Daedalus dispatch*" + (" _(dry-run)_" if dry_run else "")
     return header + "\n" + "\n".join(lines)
+
+
+SLACK_DELIVERED_MARKER = "<!-- daedalus:slack-delivered -->"
+
+
+def _subprocess_run(args: List[str], env: Optional[Dict[str, str]] = None,
+                    timeout: int = 30) -> tuple[int, str, str]:
+    """Run a subprocess; return (rc, stdout, stderr). Test-patchable."""
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+        return r.returncode, r.stdout, r.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _deliver_doc_reports(slug: str, repo: str, notify_target: str,
+                         board_cards: Optional[List[Dict[str, Any]]] = None,
+                         dry_run: bool = False) -> List[int]:
+    """Deliver documentation reports from completed cards to Slack via ``hermes send``.
+
+    For every ``done`` documentation card whose PR has a ``**Agent: documentation**``
+    comment, deliver that comment body to ``notify_target`` (the configured cron.deliver
+    channel). Dedup via a ``<!-- daedalus:slack-delivered -->`` PR comment so each
+    report is delivered at most once.
+
+    Args:
+        slug: Kanban board slug.
+        repo: GitHub repo (org/name).
+        notify_target: The cron.deliver channel (e.g. ``slack:tasks``).
+        board_cards: Pre-fetched list of all kanban cards (avoids extra CLI call).
+                     If None, list_tasks is called for the board.
+        dry_run: If True, log intentions without sending or posting comments.
+
+    Returns:
+        List of issue numbers whose reports were delivered (or would be on dry_run).
+    """
+    delivered: List[int] = []
+
+    if not notify_target or not repo:
+        return delivered
+
+    cards = board_cards if board_cards is not None else kanban.list_tasks(slug)
+    if not cards:
+        return delivered
+
+    for card in cards:
+        if (card.get("status") or "").lower() != "done":
+            continue
+        if (card.get("assignee") or "").strip().lower() != "documentation":
+            continue
+
+        title = card.get("title", "")
+        # Extract issue number from title (e.g. "#42 Some title")
+        m = re.search(r"#(\d+)", title)
+        if not m:
+            continue
+        issue_n = int(m.group(1))
+
+        pr_num = gp.pr_number_for_issue(repo, issue_n)
+        if not pr_num:
+            continue
+
+        # Dedup: check for the delivered marker on the PR
+        if gp.pr_find_comment(repo, pr_num, SLACK_DELIVERED_MARKER):
+            logger.debug("dispatch: PR #%s already has slack-delivered marker — skipping", pr_num)
+            # Still count as delivered (idempotent) but don't re-send
+            delivered.append(issue_n)
+            continue
+
+        # Find the documentation comment
+        doc_comment = gp.pr_find_comment(repo, pr_num, "**Agent: documentation**")
+        if not doc_comment:
+            continue
+
+        body = (doc_comment.get("body") or "").strip()
+        if not body:
+            continue
+
+        if dry_run:
+            logger.info(
+                "[dry-run] would deliver doc report for issue #%s (PR #%s) to %s",
+                issue_n, pr_num, notify_target,
+            )
+            delivered.append(issue_n)
+            continue
+
+        # Deliver via hermes send (dispatcher context, root HOME — works).
+        # Write the body to a temp file so large reports don't hit shell limits.
+        try:
+            import tempfile
+            tf = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".md", delete=False, encoding="utf-8",
+            )
+            tf.write(body)
+            tmp_path = tf.name
+            tf.close()
+            # Run hermes send from root context (no profile isolation).
+            hermes_env = os.environ.copy()
+            hermes_home = str(Path.home() / ".hermes")
+            if Path(hermes_home).is_dir():
+                hermes_env["HERMES_HOME"] = hermes_home
+            rc, out, err = _subprocess_run(
+                ["hermes", "send", "-t", notify_target, "--file", tmp_path],
+                env=hermes_env,
+            )
+            if rc != 0:
+                logger.warning(
+                    "dispatch: hermes send failed for issue #%s (PR #%s) — rc=%s: %s",
+                    issue_n, pr_num, rc, (err or out or "").strip(),
+                )
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            logger.info(
+                "dispatch: delivered doc report for issue #%s (PR #%s) to %s",
+                issue_n, pr_num, notify_target,
+            )
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        except Exception as e:
+            logger.warning(
+                "dispatch: hermes send exception for issue #%s (PR #%s): %s",
+                issue_n, pr_num, e,
+            )
+            continue
+
+        # Post dedup marker
+        gp.pr_add_comment(repo, pr_num, SLACK_DELIVERED_MARKER)
+        delivered.append(issue_n)
+
+    return delivered
 
 
 def main() -> int:

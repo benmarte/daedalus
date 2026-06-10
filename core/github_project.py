@@ -97,6 +97,35 @@ def pr_state_for_issue(repo: str, issue_number: int) -> Optional[str]:
     return "open" if open_found else None
 
 
+def pr_number_for_issue(repo: str, issue_number: int) -> Optional[int]:
+    """Return the PR number that resolves an issue (same matching as pr_state_for_issue).
+
+    Prefers merged over open. Returns None if no matching PR found.
+    """
+    data = _gh_json([
+        "pr", "list", "--repo", repo, "--state", "all", "--limit", "50",
+        "--json", "number,state,headRefName,body",
+    ])
+    if not data:
+        return None
+    n = str(issue_number)
+    closing = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#" + n + r"\b")
+    open_num = None
+    for pr in data:
+        head = pr.get("headRefName", "") or ""
+        body_text = pr.get("body", "") or ""
+        linked = (f"issue-{n}" in head or f"/{n}-" in head or head.endswith(f"-{n}")
+                  or bool(closing.search(body_text)))
+        if not linked:
+            continue
+        state = (pr.get("state") or "").lower()
+        if state == "merged":
+            return pr["number"]
+        if state == "open" and open_num is None:
+            open_num = pr["number"]
+    return open_num
+
+
 class GitHubProject:
     """Resolve and update a GitHub Projects v2 board's Status field for issues."""
 
@@ -219,6 +248,42 @@ def open_pr_for_branch(repo: str, branch: str) -> Optional[int]:
         return val if val > 0 else None
     except (ValueError, TypeError):
         return None
+
+
+# ── PR comment helpers ───────────────────────────────────────────────────────
+
+
+def pr_list_comments(repo: str, pr_number: int) -> List[Dict[str, Any]]:
+    """List all comments on a PR. Returns parsed JSON list, or [] on failure."""
+    data = _gh_json([
+        "pr", "view", str(pr_number), "--repo", repo,
+        "--json", "comments", "--jq", ".comments",
+    ])
+    return data if isinstance(data, list) else []
+
+
+def pr_find_comment(repo: str, pr_number: int, substring: str) -> Optional[Dict[str, Any]]:
+    """Find the first PR comment whose body contains ``substring``.
+
+    Returns the comment dict (keys: id, body, author, etc.), or None.
+    """
+    for c in pr_list_comments(repo, pr_number):
+        if substring in (c.get("body") or ""):
+            return c
+    return None
+
+
+def pr_add_comment(repo: str, pr_number: int, body: str) -> bool:
+    """Add a comment to a PR. Returns True on success, False (logged) otherwise."""
+    rc, _, err = _gh([
+        "pr", "comment", str(pr_number), "--repo", repo,
+        "--body", body,
+    ])
+    if rc != 0:
+        logger.warning("pr_add_comment: PR #%s failed: %s", pr_number, (err or "").strip())
+        return False
+    logger.info("pr_add_comment: commented on PR #%s", pr_number)
+    return True
 
 
 def reconcile_status(project: "GitHubProject", repo: str, issue_number: int) -> Optional[str]:

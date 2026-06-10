@@ -969,6 +969,283 @@ def test_open_pr_for_branch_empty_inputs():
     check("empty repo → None", gp.open_pr_for_branch("", "feat/x") is None)
 
 
+# ── PR comment helpers ───────────────────────────────────────────────────────
+
+
+def test_pr_list_comments_happy_path():
+    """pr_list_comments parses gh JSON output."""
+    sample = [{"id": 1, "body": "hello"}, {"id": 2, "body": "world"}]
+    with mock.patch.object(gp, "_gh_json", return_value=sample):
+        result = gp.pr_list_comments("O/R", 42)
+    check("pr_list_comments returns list", len(result) == 2)
+    check("first comment body", result[0]["body"] == "hello")
+
+
+def test_pr_list_comments_not_a_list():
+    """pr_list_comments returns [] when output is not a list."""
+    with mock.patch.object(gp, "_gh_json", return_value=None):
+        result = gp.pr_list_comments("O/R", 42)
+    check("pr_list_comments None → []", result == [])
+
+
+def test_pr_find_comment_finds():
+    """pr_find_comment finds a comment by substring."""
+    comments = [
+        {"id": 1, "body": "**Agent: developer**\n\ncode review"},
+        {"id": 2, "body": "**Agent: documentation**\n\nreport text"},
+    ]
+    with mock.patch.object(gp, "pr_list_comments", return_value=comments):
+        result = gp.pr_find_comment("O/R", 42, "**Agent: documentation**")
+    check("pr_find_comment finds doc comment", result is not None)
+    check("found correct comment", result["id"] == 2)
+
+
+def test_pr_find_comment_not_found():
+    """pr_find_comment returns None when no match."""
+    comments = [{"id": 1, "body": "regular comment"}]
+    with mock.patch.object(gp, "pr_list_comments", return_value=comments):
+        result = gp.pr_find_comment("O/R", 42, "missing")
+    check("pr_find_comment missing → None", result is None)
+
+
+def test_pr_add_comment_success():
+    """pr_add_comment calls gh and returns True on success."""
+    with mock.patch.object(gp, "_gh", return_value=(0, "", "")) as mk:
+        ok = gp.pr_add_comment("O/R", 42, "hello")
+    check("pr_add_comment returns True", ok is True)
+    mk.assert_called_once()
+
+
+def test_pr_add_comment_failure():
+    """pr_add_comment returns False on gh failure."""
+    with mock.patch.object(gp, "_gh", return_value=(1, "", "error")):
+        ok = gp.pr_add_comment("O/R", 42, "hello")
+    check("pr_add_comment failure → False", ok is False)
+
+
+def test_pr_number_for_issue():
+    """pr_number_for_issue returns the PR number from the same matching logic."""
+    prs = [
+        {"number": 1, "state": "OPEN", "headRefName": "fix/issue-99-foo", "body": ""},
+        {"number": 2, "state": "MERGED", "headRefName": "bar", "body": "Closes #99"},
+    ]
+    with mock.patch.object(gp, "_gh_json", return_value=prs):
+        result = gp.pr_number_for_issue("O/R", 99)
+    check("pr_number_for_issue prefers merged", result == 2)
+
+    prs_open = [
+        {"number": 5, "state": "OPEN", "headRefName": "fix/issue-88", "body": ""},
+    ]
+    with mock.patch.object(gp, "_gh_json", return_value=prs_open):
+        result2 = gp.pr_number_for_issue("O/R", 88)
+    check("pr_number_for_issue returns open if no merged", result2 == 5)
+
+    with mock.patch.object(gp, "_gh_json", return_value=None):
+        result3 = gp.pr_number_for_issue("O/R", 77)
+    check("pr_number_for_issue no data → None", result3 is None)
+
+
+# ── _deliver_doc_reports ─────────────────────────────────────────────────────
+
+
+def test_deliver_doc_reports_no_target():
+    """_deliver_doc_reports returns [] when notify_target is empty."""
+    disp = _load_dispatch()
+    result = disp._deliver_doc_reports("slug", "O/R", "")
+    check("no target → empty", result == [])
+
+
+def test_deliver_doc_reports_no_repo():
+    """_deliver_doc_reports returns [] when repo is empty."""
+    disp = _load_dispatch()
+    result = disp._deliver_doc_reports("slug", "", "slack:tasks")
+    check("no repo → empty", result == [])
+
+
+def test_deliver_doc_reports_dry_run():
+    """_deliver_doc_reports dry_run=True logs but doesn't call hermes send."""
+    disp = _load_dispatch()
+    cards = [
+        {"id": "t_doc", "status": "done", "assignee": "documentation",
+         "title": "#42 Some issue"},
+    ]
+    doc_comment = {"id": 1, "body": "**Agent: documentation**\n\nReport text."}
+    delivered_marker = None  # not yet delivered
+
+    def fake_pr_find_comment(repo, pr, substr):
+        if "slack-delivered" in substr:
+            return None
+        if "documentation" in substr:
+            return doc_comment
+        return None
+
+    with mock.patch.object(disp.gp, "pr_number_for_issue", return_value=99):
+        with mock.patch.object(disp.gp, "pr_find_comment", fake_pr_find_comment):
+            with mock.patch.object(disp, "_subprocess_run") as mk_run:
+                result = disp._deliver_doc_reports(
+                    "slug", "O/R", "slack:tasks",
+                    board_cards=cards,
+                    dry_run=True,
+                )
+    check("dry_run delivered issue #42", result == [42])
+    # _subprocess_run must NOT be called
+    mk_run.assert_not_called()
+
+
+def test_deliver_doc_reports_sends():
+    """_deliver_doc_reports calls hermes send and posts dedup marker."""
+    disp = _load_dispatch()
+    cards = [
+        {"id": "t_doc", "status": "done", "assignee": "documentation",
+         "title": "#55 Report issue"},
+    ]
+    doc_comment = {"id": 1, "body": "**Agent: documentation**\n\nFull report here."}
+
+    def fake_pr_find_comment(repo, pr, substr):
+        if "slack-delivered" in substr:
+            return None  # not delivered yet
+        if "documentation" in substr:
+            return doc_comment
+        return None
+
+    with mock.patch.object(disp.gp, "pr_number_for_issue", return_value=101):
+        with mock.patch.object(disp.gp, "pr_find_comment", fake_pr_find_comment):
+            with mock.patch.object(disp.gp, "pr_add_comment", return_value=True) as mk_add:
+                with mock.patch.object(disp, "_subprocess_run", return_value=(0, "", "")) as mk_run:
+                    result = disp._deliver_doc_reports(
+                        "slug", "O/R", "slack:tasks",
+                        board_cards=cards,
+                    )
+    check("sent report for #55", result == [55])
+    # _subprocess_run called once with hermes send
+    mk_run.assert_called_once()
+    call_args = mk_run.call_args[0][0]
+    check("subprocess is hermes send", "hermes" in call_args[0])
+    # dedup marker posted
+    mk_add.assert_called_once()
+    dedup_body = mk_add.call_args[0][2]
+    check("dedup marker posted", "<!-- daedalus:slack-delivered -->" in dedup_body)
+
+
+def test_deliver_doc_reports_dedup():
+    """_deliver_doc_reports skips send when dedup marker already present."""
+    disp = _load_dispatch()
+    cards = [
+        {"id": "t_doc", "status": "done", "assignee": "documentation",
+         "title": "#55 Already sent"},
+    ]
+
+    def fake_pr_find_comment(repo, pr, substr):
+        if "slack-delivered" in substr:
+            return {"id": 99, "body": "<!-- daedalus:slack-delivered -->"}
+        return None
+
+    with mock.patch.object(disp.gp, "pr_number_for_issue", return_value=101):
+        with mock.patch.object(disp.gp, "pr_find_comment", fake_pr_find_comment):
+            with mock.patch.object(disp, "_subprocess_run") as mk_run:
+                result = disp._deliver_doc_reports(
+                    "slug", "O/R", "slack:tasks",
+                    board_cards=cards,
+                )
+    # Still count as delivered (idempotent) but don't re-send
+    check("dedup counts as delivered", result == [55])
+    mk_run.assert_not_called()
+
+
+def test_deliver_doc_reports_send_failure():
+    """_deliver_doc_reports degrades gracefully on hermes send failure."""
+    disp = _load_dispatch()
+    cards = [
+        {"id": "t_doc", "status": "done", "assignee": "documentation",
+         "title": "#77 Fail test"},
+    ]
+    doc_comment = {"id": 1, "body": "**Agent: documentation**\n\nReport."}
+
+    def fake_pr_find_comment(repo, pr, substr):
+        if "slack-delivered" in substr:
+            return None
+        if "documentation" in substr:
+            return doc_comment
+        return None
+
+    with mock.patch.object(disp.gp, "pr_number_for_issue", return_value=202):
+        with mock.patch.object(disp.gp, "pr_find_comment", fake_pr_find_comment):
+            with mock.patch.object(disp.gp, "pr_add_comment", return_value=True) as mk_add:
+                with mock.patch.object(disp, "_subprocess_run", return_value=(1, "", "send error")) as mk_run:
+                    result = disp._deliver_doc_reports(
+                        "slug", "O/R", "slack:tasks",
+                        board_cards=cards,
+                    )
+    check("send failure → empty delivered list", result == [])
+    mk_run.assert_called_once()
+    # dedup marker NOT posted on failure
+    mk_add.assert_not_called()
+
+
+def test_deliver_doc_reports_skips_non_documentation():
+    """_deliver_doc_reports only processes documentation cards."""
+    disp = _load_dispatch()
+    cards = [
+        {"id": "t_dev", "status": "done", "assignee": "developer",
+         "title": "#1 Dev work"},
+        {"id": "t_doc", "status": "done", "assignee": "documentation",
+         "title": "#2 Doc work"},
+    ]
+    doc_comment = {"id": 1, "body": "**Agent: documentation**\n\nReport."}
+
+    def fake_pr_find_comment(repo, pr, substr):
+        if "slack-delivered" in substr:
+            return None
+        if "documentation" in substr:
+            return doc_comment
+        return None
+
+    with mock.patch.object(disp.gp, "pr_number_for_issue", return_value=42):
+        with mock.patch.object(disp.gp, "pr_find_comment", fake_pr_find_comment):
+            with mock.patch.object(disp, "_subprocess_run", return_value=(0, "", "")) as mk_run:
+                with mock.patch.object(disp.gp, "pr_add_comment", return_value=True):
+                    result = disp._deliver_doc_reports(
+                        "slug", "O/R", "slack:tasks",
+                        board_cards=cards,
+                    )
+    check("only doc card delivered", result == [2])
+    mk_run.assert_called_once()
+
+
+def test_deliver_doc_reports_skips_non_done():
+    """_deliver_doc_reports only processes done status cards."""
+    disp = _load_dispatch()
+    cards = [
+        {"id": "t_doc", "status": "running", "assignee": "documentation",
+         "title": "#42 Still running"},
+    ]
+    with mock.patch.object(disp.gp, "pr_number_for_issue") as mk_pr:
+        result = disp._deliver_doc_reports(
+            "slug", "O/R", "slack:tasks",
+            board_cards=cards,
+        )
+    check("non-done → empty", result == [])
+    mk_pr.assert_not_called()
+
+
+# ── _human_summary with delivered ────────────────────────────────────────────
+
+
+def test_human_summary_delivered():
+    """_human_summary renders delivered reports."""
+    disp = _load_dispatch()
+    summaries = {
+        "my-repo": {
+            "mode": "kanban",
+            "delivered": [42, 99],
+        },
+    }
+    msg = disp._human_summary(summaries)
+    check("summary mentions delivered", "📨" in msg)
+    check("summary has #42", "#42" in msg)
+    check("summary has #99", "#99" in msg)
+
+
 if __name__ == "__main__":
     print("Iterate (CI-aware auto-advance) tests")
     print("-" * 60)
@@ -1035,8 +1312,24 @@ if __name__ == "__main__":
         test_open_pr_for_branch_no_match,
         test_open_pr_for_branch_gh_error,
         test_open_pr_for_branch_empty_inputs,
-    ):
-        fn()
+        test_pr_list_comments_happy_path,
+        test_pr_list_comments_not_a_list,
+        test_pr_find_comment_finds,
+        test_pr_find_comment_not_found,
+        test_pr_add_comment_success,
+        test_pr_add_comment_failure,
+        test_pr_number_for_issue,
+        test_deliver_doc_reports_no_target,
+        test_deliver_doc_reports_no_repo,
+        test_deliver_doc_reports_dry_run,
+        test_deliver_doc_reports_sends,
+        test_deliver_doc_reports_dedup,
+        test_deliver_doc_reports_send_failure,
+        test_deliver_doc_reports_skips_non_documentation,
+        test_deliver_doc_reports_skips_non_done,
+        test_human_summary_delivered,
+        ):
+            fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)
