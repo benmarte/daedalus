@@ -12,7 +12,7 @@ const assert = require("assert");
 const { deriveMethodFromDeliver } = require("./src/deriveMethod");
 
 const NOTIF = {
-  Slack: ["slack:tasks", "slack:dycotomic"],
+  Slack: ["slack:tasks", "slack:projects"],
   Discord: ["discord:#general"],
 };
 

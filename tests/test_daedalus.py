@@ -489,6 +489,12 @@ def test_parse_pr_from_card():
     card3 = {"body": "No PR here.", "latest_summary": ""}
     check("_parse_pr_from_card returns None when no PR", disp._parse_pr_from_card(card3) is None)
 
+    card4 = {"body": "  \n  PR #7 is open.  \n  ", "latest_summary": None}
+    check("_parse_pr_from_card strips whitespace-padded body", disp._parse_pr_from_card(card4) == 7)
+
+    card5 = {"body": None, "latest_summary": "PR #13 merged."}
+    check("_parse_pr_from_card handles None body", disp._parse_pr_from_card(card5) == 13)
+
 
 def test_find_doc_comment():
     """_find_doc_comment returns the body of the first **Agent: documentation** comment."""

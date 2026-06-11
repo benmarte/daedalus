@@ -478,7 +478,7 @@ def _deliver_doc_reports(
 
 def _parse_pr_from_card(card: dict) -> Optional[int]:
     """Extract a PR number from a card's body + latest summary."""
-    body = (card.get("body") or "".strip())
+    body = (card.get("body") or "").strip()
     summary = (card.get("latest_summary") or "").strip()
     text = f"{body}\n{summary}"
     m = re.search(r"PR #(\d+)", text)

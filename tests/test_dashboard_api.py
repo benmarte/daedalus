@@ -498,7 +498,7 @@ def test_get_projects_registry_only_entries(client, temp_config_path):
 
     with mock.patch("dashboard.plugin_api.registry") as mock_registry:
         mock_registry.list_projects.return_value = [
-            "/Users/benmarte/Documents/github/terrasow",
+            "/repos/sampleproj",
         ]
         with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
             mock_list.return_value = []
@@ -510,11 +510,11 @@ def test_get_projects_registry_only_entries(client, temp_config_path):
     # Should have 2 entries: one from config, one from registry
     assert len(data) == 2
     registry_entry = next(
-        (p for p in data if p["repo"] == "/Users/benmarte/Documents/github/terrasow"),
+        (p for p in data if p["repo"] == "/repos/sampleproj"),
         None,
     )
     assert registry_entry is not None
-    assert registry_entry["name"] == "terrasow"
+    assert registry_entry["name"] == "sampleproj"
     assert registry_entry["tracking_mode"] == "kanban"
     assert registry_entry["cron"] is None
 
@@ -2040,13 +2040,13 @@ class TestRegistryNameResolution:
         """When folder basename ≠ config name, the list entry uses config name."""
         from dashboard.plugin_api import _build_registry_only_entry
 
-        # Simulate dycotomic case: folder is 'dycotomic', config name is 'dycotomic.app'
+        # Folder basename is 'webshop' but the config names the project 'webshop.app'
         entry = _build_registry_only_entry(
-            "/Users/benmarte/Documents/github/rizq/dycotomic",
-            "dycotomic.app",  # resolved from daedalus.yaml
+            "/repos/acme/webshop",
+            "webshop.app",  # resolved from daedalus.yaml
         )
-        assert entry["name"] == "dycotomic.app"
-        assert entry["repo"] == "/Users/benmarte/Documents/github/rizq/dycotomic"
+        assert entry["name"] == "webshop.app"
+        assert entry["repo"] == "/repos/acme/webshop"
 
     def test_get_projects_resolves_registry_name_from_config(self, client, temp_config_path):
         """GET /projects uses resolved config name for registry-only entries."""
@@ -2058,8 +2058,8 @@ class TestRegistryNameResolution:
             hermes_dir = repo / ".hermes"
             hermes_dir.mkdir()
             cfg = {
-                "name": "dycotomic.app",
-                "repo": "RIZQ-TECH/dycotomic.app",
+                "name": "webshop.app",
+                "repo": "ACME-ORG/webshop.app",
                 "workdir": str(repo),
             }
             (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
@@ -2080,8 +2080,8 @@ class TestRegistryNameResolution:
             assert registry_entry is not None, (
                 f"Registry entry not found in response. Projects: {[p['name'] for p in data]}"
             )
-            assert registry_entry["name"] == "dycotomic.app", (
-                f"Expected 'dycotomic.app', got '{registry_entry['name']}'"
+            assert registry_entry["name"] == "webshop.app", (
+                f"Expected 'webshop.app', got '{registry_entry['name']}'"
             )
 
     def test_resolve_project_path_matches_config_name(self):
@@ -2094,8 +2094,8 @@ class TestRegistryNameResolution:
             hermes_dir = repo / ".hermes"
             hermes_dir.mkdir()
             cfg = {
-                "name": "dycotomic.app",
-                "repo": "RIZQ-TECH/dycotomic.app",
+                "name": "webshop.app",
+                "repo": "ACME-ORG/webshop.app",
                 "workdir": str(repo),
             }
             (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
@@ -2104,7 +2104,7 @@ class TestRegistryNameResolution:
                 mock_registry.list_projects.return_value = [str(repo)]
 
                 # Look up by config name — should find it
-                resolved = _resolve_project_path("dycotomic.app")
+                resolved = _resolve_project_path("webshop.app")
                 # macOS /var is a symlink to /private/var — compare real paths
                 assert os.path.realpath(str(resolved)) == os.path.realpath(str(repo))
 

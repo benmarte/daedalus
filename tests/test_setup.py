@@ -204,7 +204,7 @@ def test_board_slug_derivation():
     """setup.sh board slug matches _board_slug for several repo patterns."""
     cases = [
         ("org/repo",              "org-repo"),
-        ("RIZQ-TECH/dycotomic.app", "rizq-tech-dycotomic-app"),
+        ("ACME-ORG/webshop.app",   "acme-org-webshop-app"),
         ("MyOrg/MyRepo",          "myorg-myrepo"),
         ("org/repo!@#test",       "org-repo---test"),
         ("benmarte/daedalus",     "benmarte-daedalus"),

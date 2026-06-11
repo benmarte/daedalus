@@ -302,6 +302,8 @@ def _execute_dev_fix_ci(
     if not pr:
         logger.warning("iterate: dev_fix_ci on %s but no PR found in handoff", tid)
         return False
+    # Read-then-increment is not atomic, but the dispatcher is a single-process
+    # cron (projects processed sequentially) — no lock needed unless that changes.
     fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
     if fix_attempts > MAX_FIX_ATTEMPTS:
         return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)

@@ -11,7 +11,7 @@ Single source of truth: daedalus.yaml
 Usage:
     loader = ConfigLoader(path="/path/to/daedalus.yaml")
     config = loader.load()
-    project = loader.resolve_project("dycotomic")
+    project = loader.resolve_project("my-project")
     all = loader.resolve_all()
     loader.add_project("new", "org/repo", "/path")
     loader.save()
