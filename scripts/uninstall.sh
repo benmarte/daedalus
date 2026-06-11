@@ -308,7 +308,7 @@ echo "Plugin package:"
 if $KEEP_PLUGIN; then
   echo "  (kept — --keep-plugin flag is set)"
 else
-  echo "  • will run: hermes plugins remove daedalus (deferred)"
+  echo "  • will run: hermes plugins remove daedalus"
   any_found=true
 fi
 
@@ -375,25 +375,41 @@ if [[ -d "$SHIP_GATE_D" ]]; then
   REMOVED+=("$SHIP_GATE_D/")
 fi
 
-# ── 2. Dashboard tab: disable plugin (unconditional — idempotent) ───────────
-if hermes plugins disable daedalus >/dev/null 2>&1; then
-  REMOVED+=("dashboard tab (hermes plugins disable daedalus)")
+# ── 2. Dashboard tab: disable then remove plugin ─────────────────────────────
+# Disable first (moves enabled→disabled in config), then immediately remove
+# while the config entry still exists — hermes plugins remove needs to find the
+# entry to locate and delete the plugin directory.
+if ! $KEEP_PLUGIN; then
+  hermes plugins disable daedalus >/dev/null 2>&1 || true
+  if hermes plugins remove daedalus >/dev/null 2>&1; then
+    REMOVED+=("plugin package (hermes plugins remove daedalus)")
+  else
+    # remove failed — fall through to belt-and-suspenders rm -rf below
+    SKIPPED+=("hermes plugins remove failed — will force-delete directory")
+  fi
+  # Belt-and-suspenders: nuke the directory regardless of whether remove succeeded
+  _PLUGIN_DIR="$HERMES/plugins/daedalus"
+  if [[ -d "$_PLUGIN_DIR" ]]; then
+    rm -rf "$_PLUGIN_DIR"
+    REMOVED+=("plugin directory: $_PLUGIN_DIR")
+  fi
   echo ""
-  echo "NOTE: The daedalus dashboard tab has been disabled."
+  echo "NOTE: The daedalus dashboard tab has been removed."
   echo "  Restart the dashboard for the change to take effect."
 else
-  # May fail if daedalus is already disabled or the command is unavailable;
-  # this is harmless — report as skipped rather than error.
-  SKIPPED+=("dashboard tab (hermes plugins disable daedalus failed — may already be disabled)")
+  if hermes plugins disable daedalus >/dev/null 2>&1; then
+    REMOVED+=("dashboard tab (hermes plugins disable daedalus)")
+    echo ""
+    echo "NOTE: The daedalus dashboard tab has been disabled."
+    echo "  Restart the dashboard for the change to take effect."
+  else
+    SKIPPED+=("dashboard tab (hermes plugins disable daedalus failed — may already be disabled)")
+  fi
 fi
 
 # ── 2b. Strip the lingering plugins.enabled/.disabled entry from config.yaml ──
-# `hermes plugins disable` only MOVES daedalus from plugins.enabled to
-# plugins.disabled, and `hermes plugins remove` (core) never touches either list
-# — so a `- daedalus` entry lingers in config.yaml after a full uninstall. Remove
-# it with a TARGETED line edit (never round-trip the YAML through a parser) so all
-# comments and unrelated structure are preserved. Only ever drops a line that is
-# exactly `  - daedalus` inside the plugins: block under enabled:/disabled:.
+# Safety net: hermes plugins remove should clean this up, but if it failed or
+# only partially ran, awk ensures no stale entry remains in config.yaml.
 _CFG="$HERMES/config.yaml"
 if [[ -f "$_CFG" ]] && grep -qE '^[[:space:]]+-[[:space:]]+daedalus[[:space:]]*$' "$_CFG"; then
   _cfg_tmp="$(mktemp)"
@@ -438,7 +454,7 @@ for board in "${FOUND_BOARDS[@]}"; do
     SKIPPED+=("kanban board: default (never removed)")
     continue
   fi
-  if hermes kanban boards rm "$board" >/dev/null 2>&1; then
+  if hermes kanban boards rm "$board" --delete >/dev/null 2>&1; then
     REMOVED+=("kanban board: $board")
   else
     SKIPPED+=("kanban board: $board (removal failed — may not exist)")
@@ -500,16 +516,5 @@ fi
 
 echo "Re-run this script any time — it's idempotent."
 echo ""
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DEFERRED PLUGIN REMOVAL (final action — runs AFTER script exits)
-# ══════════════════════════════════════════════════════════════════════════════
-if ! $KEEP_PLUGIN; then
-  echo "Removing the plugin package… (daedalus)"
-  # Spawn detached so the script's own directory survives until we exit.
-  # The subshell sleeps briefly to let this script finish, then runs the removal.
-  ( sleep 1; hermes plugins remove daedalus >/dev/null 2>&1 ) &
-  disown 2>/dev/null || true
-fi
 
 exit 0

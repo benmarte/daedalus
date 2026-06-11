@@ -195,9 +195,47 @@ own `.env` / `.git-credentials` / `terminal.env_passthrough`.
 
 | Provider | `vcs.provider` | Token env (default) | Minimal token scopes | Board model |
 |---|---|---|---|---|
-| GitHub | `github` | `GITHUB_TOKEN` / `GH_TOKEN` | fine-grained PAT: contents:read, issues:write, pull_requests:write, metadata:read, projects:write | Projects v2 (`tracking.github_project_number`) |
-| GitLab | `gitlab` | `GITLAB_TOKEN` | `api` | Issue-Board labels (`tracking.label_board: true`; lists keyed to `vcs.status_map` labels). Self-hosted via `vcs.base_url` |
-| Azure DevOps | `azuredevops` | `AZURE_DEVOPS_PAT` | Work Items R&W, Code Read, Pull Requests R&W, Build Read | Work-item states (`vcs.org` + `vcs.project` + `vcs.repo`; `vcs.work_item_type`, default `Issue`) |
+| GitHub | `github` | `GITHUB_TOKEN` / `GH_TOKEN` | see [Creating the tokens](#creating-the-tokens-pat-scopes) | Projects v2 (`tracking.github_project_number`) |
+| GitLab | `gitlab` | `GITLAB_TOKEN` | `api` + `write_repository` | Issue-Board labels (`tracking.label_board: true`; lists keyed to `vcs.status_map` labels). Self-hosted via `vcs.base_url` |
+| Azure DevOps | `azuredevops` | `AZURE_DEVOPS_PAT` | Work Items R&W, Code R&W, Build Read | Work-item states (`vcs.org` + `vcs.project` + `vcs.repo`; `vcs.work_item_type`, default `Issue`) |
+
+### Creating the tokens (PAT scopes)
+
+One token per provider covers everything daedalus does with it: dispatcher
+polling + board moves, dashboard pickers, worker `git push` (via the
+per-profile credential store), and PR create/comment API calls.
+
+**GitHub — fine-grained PAT** (github.com → Settings → Developer settings →
+Fine-grained tokens). Grant access to the repos daedalus drives, with:
+
+| Permission | Level | Used for |
+|---|---|---|
+| Contents | **Read and write** | workers push branches |
+| Pull requests | **Read and write** | open PRs, post the doc report |
+| Issues | **Read and write** | poll Ready issues, close on merge |
+| Commit statuses + Checks | Read | CI-green gating |
+| Metadata | Read | (mandatory baseline) |
+| Projects *(organization permission)* | **Read and write** | Projects v2 board sync |
+
+> Org-owned Projects v2 boards require your org to allow fine-grained PATs.
+> If that's not enabled, use a **classic PAT** with `repo` + `project` scopes
+> (+ `workflow` only if agents will edit `.github/workflows/`).
+
+**GitLab — personal access token** (GitLab → Preferences → Access tokens):
+`api` (covers issues, boards/labels, MRs, notes, pipelines) and
+`write_repository` (workers push over HTTPS). Same scopes on self-hosted.
+
+**Azure DevOps — PAT** (dev.azure.com → User settings → Personal access
+tokens), scoped to your organization:
+- **Work Items: Read & Write** — poll/close/move work items
+- **Code: Read & Write** — list PRs/branches, create PRs + threads, worker pushes
+- **Build: Read** — CI status on PRs
+
+**Security tips:** prefer a dedicated bot/machine account so PRs and comments
+are attributed to it (pass its token as `ROSTER_GH_TOKEN` when provisioning);
+set an expiry and rotate; if you want the dispatcher even more locked down,
+give it its own read-mostly token via `vcs.token_env` and keep the write
+token only in the worker profiles.
 
 The canonical pipeline statuses (`ready` / `in_progress` / `in_review` / `done`)
 map to your board's column/label/state names via `vcs.status_map` — defaults are

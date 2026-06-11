@@ -303,14 +303,16 @@ class TestKeepPlugin:
         assert "Removing the plugin package" not in r.stdout
 
     def test_no_keep_plugin_includes_deferred_removal(self, script_path, tmp_path):
-        """Without --keep-plugin, the deferred removal message appears."""
+        """Without --keep-plugin, the plugin removal runs (hermes remove or rm -rf fallback)."""
         d = tmp_path / "my-hermes"
         d.mkdir()
         (d / "config.yaml").write_text("model: fake\n")
         (d / "daedalus.yaml").write_text("projects: []\n")
         r = _run(script_path, hermes_home=str(d), extra_args=["-y"])
         assert r.returncode == 0
-        assert "Removing the plugin package" in r.stdout
+        # hermes is not present in CI so remove falls back; either way the plugin
+        # removal block runs and the tab-removed note is printed.
+        assert "daedalus dashboard tab has been removed" in r.stdout
 
     def test_keep_plugin_in_discovery_summary(self, script_path, tmp_path):
         """Discovery phase shows plugin kept when --keep-plugin is set."""

@@ -22,8 +22,10 @@ Roster: **project-manager · planner · developer · reviewer · security-analys
 3. A working **`default` profile** with their own LLM provider keys (any capable
    model works — the script clones config/keys from `default`).
 4. A **VCS API token** for each provider you use:
-   `GITHUB_TOKEN` (fine-grained PAT), `GITLAB_TOKEN` (`api` scope), or
-   `AZURE_DEVOPS_PAT` (Work Items R&W, Code Read, PR R&W, Build Read).
+   `GITHUB_TOKEN` (fine-grained PAT), `GITLAB_TOKEN` (`api` + `write_repository`),
+   or `AZURE_DEVOPS_PAT` (Work Items R&W, Code R&W, Build Read) — exact
+   permission lists in the README's
+   [Creating the tokens](README.md#creating-the-tokens-pat-scopes) section.
    That token covers everything — dispatcher polling, dashboard pickers, worker
    `git push` (per-profile credential store), and PR/comment API calls. No
    `gh`/`glab`/`az` CLI is needed or used.

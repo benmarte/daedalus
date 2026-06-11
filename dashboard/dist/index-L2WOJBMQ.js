@@ -491,8 +491,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         React.createElement(
           "div",
           { style: S.cardRow },
-          // Kanban counts
-          kanbanCounts ? Object.keys(kanbanCounts).sort().map(function(status) {
+          // Kanban counts — null means board unavailable, {} means board exists but empty
+          kanbanCounts !== null && kanbanCounts !== void 0 ? Object.keys(kanbanCounts).length > 0 ? Object.keys(kanbanCounts).sort().map(function(status) {
             var dotColor = {};
             if (status === "done") dotColor = S.dotGreen;
             else if (status === "in_progress") dotColor = S.dotYellow;
@@ -504,7 +504,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               React.createElement("span", { style: Object.assign({}, S.dot, dotColor) }),
               status + ": " + kanbanCounts[status]
             );
-          }) : React.createElement("span", { style: S.cardLabel }, "no kanban data"),
+          }) : React.createElement("span", { style: S.cardLabel }, "board ready") : React.createElement("span", { style: S.cardLabel }, "no kanban data"),
           // PRs
           openPrs ? React.createElement(
             "div",
@@ -886,19 +886,54 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
   function NotificationsEditor(props) {
     var targets = props.targets || [];
     var methods = props.methods || {};
+    var ts = useState({});
+    var testStatuses = ts[0], setTestStatuses = ts[1];
     function update(i, patch) {
       var next = targets.map(function(t, j) {
         return j === i ? Object.assign({}, t, patch) : t;
       });
+      setTestStatuses(function(prev) {
+        var n = Object.assign({}, prev);
+        delete n[i];
+        return n;
+      });
       props.onChange(next);
     }
     function remove(i) {
+      setTestStatuses(function(prev) {
+        var n = {};
+        Object.keys(prev).forEach(function(k) {
+          var ki = parseInt(k, 10);
+          if (ki < i) n[k] = prev[k];
+          else if (ki > i) n[String(ki - 1)] = prev[k];
+        });
+        return n;
+      });
       props.onChange(targets.filter(function(_, j) {
         return j !== i;
       }));
     }
     function add() {
       props.onChange(targets.concat([{ platform: "", target: "", events: [] }]));
+    }
+    function testRow(i, target) {
+      setTestStatuses(function(prev) {
+        return Object.assign({}, prev, { [i]: { ok: null, msg: "Sending\u2026" } });
+      });
+      fetchJSON("/api/plugins/daedalus/meta/test-deliver", {
+        method: "POST",
+        body: { deliver: target }
+      }).then(function(r) {
+        setTestStatuses(function(prev) {
+          return Object.assign({}, prev, {
+            [i]: r && r.ok ? { ok: true, msg: "\u2713 Sent" } : { ok: false, msg: "\u2717 " + (r && r.error || "send failed") }
+          });
+        });
+      }).catch(function(err) {
+        setTestStatuses(function(prev) {
+          return Object.assign({}, prev, { [i]: { ok: false, msg: "\u2717 " + String(err && err.message || err) } });
+        });
+      });
     }
     var eventOptions = NOTIFY_EVENTS.map(function(ev) {
       return { value: ev, label: ev };
@@ -909,9 +944,12 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       targets.length === 0 ? React.createElement(
         "div",
         { style: S.chipEmptyHint },
-        "No multi-target notifications \u2014 the single \u201CNotify Via\u201D target above is used."
+        'No multi-target notifications \u2014 the single "Notify Via" target above is used.'
       ) : null,
       targets.map(function(entry, i) {
+        var testStatus = testStatuses[String(i)] || null;
+        var isTesting = testStatus && testStatus.ok === null;
+        var hasTarget = !!entry.target;
         return React.createElement(
           "div",
           {
@@ -920,7 +958,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           },
           React.createElement(
             "div",
-            { style: { display: "flex", gap: "8px", alignItems: "center", marginBottom: "8px" } },
+            { style: { display: "flex", gap: "8px", alignItems: "center", marginBottom: "4px" } },
             React.createElement(MethodChannelPicker, {
               methods,
               method: entry.platform || "",
@@ -933,6 +971,14 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               }
             }),
             React.createElement("button", {
+              style: Object.assign({}, S.btnSmall, { opacity: hasTarget && !isTesting ? 1 : 0.4 }),
+              type: "button",
+              disabled: !hasTarget || !!isTesting,
+              onClick: function() {
+                testRow(i, entry.target);
+              }
+            }, isTesting ? "Sending\u2026" : "Test"),
+            React.createElement("button", {
               style: S.chipRemove,
               title: "Remove notification target",
               type: "button",
@@ -941,6 +987,13 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               }
             }, "\xD7")
           ),
+          testStatus ? React.createElement("div", {
+            style: {
+              fontSize: "11px",
+              marginBottom: "6px",
+              color: testStatus.ok === true ? "#4ade80" : testStatus.ok === null ? "#888" : "#f87171"
+            }
+          }, testStatus.msg) : null,
           React.createElement("span", { style: S.fieldLabel }, "Events (empty = all)"),
           React.createElement(TagMultiSelect, {
             selected: entry.events || [],
@@ -961,7 +1014,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       targets.length > 0 ? React.createElement(
         "div",
         { style: { fontSize: "11px", color: "#666", marginTop: "6px" } },
-        "Multi-target notifications override the single \u201CNotify Via\u201D target."
+        'Multi-target notifications override the single "Notify Via" target.'
       ) : null
     );
   }
@@ -1078,8 +1131,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var notifications = ns[0], setNotifications = ns[1];
     var sm = useState("");
     var selectedMethod = sm[0], setSelectedMethod = sm[1];
-    var td = useState(null);
-    var testDeliverStatus = td[0], setTestDeliverStatus = td[1];
     var br = useState([]);
     var branches = br[0], setBranches = br[1];
     var la = useState([]);
@@ -1226,27 +1277,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         }
       });
     }
-    function testDeliver() {
-      var deliver = getIn(config, ["cron", "deliver"], "");
-      if (!deliver) {
-        setTestDeliverStatus({ ok: false, msg: "no delivery target selected" });
-        return;
-      }
-      setTestDeliverStatus({ ok: null, msg: "Sending\u2026" });
-      fetchJSON("/api/plugins/daedalus/meta/test-deliver", {
-        method: "POST",
-        body: { deliver }
-      }).then(function(r2) {
-        if (r2 && r2.ok) {
-          setTestDeliverStatus({ ok: true, msg: "\u2713 Sent to " + r2.target });
-        } else {
-          var errMsg = r2 && r2.error || "send failed";
-          setTestDeliverStatus({ ok: false, msg: "\u2717 " + errMsg });
-        }
-      }).catch(function(err) {
-        setTestDeliverStatus({ ok: false, msg: "\u2717 " + String(err && err.message || err) });
-      });
-    }
     if (loading) return React.createElement(
       "div",
       { style: S.overlay, onClick: props.onClose },
@@ -1307,77 +1337,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           React.createElement("div", { style: S.fieldLabel }, FIELD_LABELS.workdir),
           React.createElement("span", { style: Object.assign({}, S.readOnlyText, { display: "block", width: "100%" }) }, config.workdir || "\u2014")
         ),
-        // Editable: tracking (GitHub mode shows board select + statuses)
-        React.createElement("div", { style: S.section }, "Tracking"),
-        (function() {
-          var isGitHub = !!(config.sources && config.sources.github_issues && config.sources.github_issues.enabled);
-          var boardNum = getIn(config, ["tracking", "github_project_number"], null);
-          var hasProjects = ghProjects && ghProjects.length > 0;
-          var hasStatuses = statuses && statuses.length > 0;
-          return [
-            // GitHub Project board select (only in GitHub mode) — always a <select>
-            isGitHub ? React.createElement(
-              "div",
-              { key: "track-board", style: S.fieldRow },
-              React.createElement(
-                "label",
-                { style: S.field },
-                React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.github_project_number),
-                React.createElement(
-                  "select",
-                  {
-                    style: S.select,
-                    value: boardNum != null ? String(boardNum) : "",
-                    onChange: function(e2) {
-                      var v = e2.target.value.trim();
-                      if (v === "") {
-                        updateField("tracking.github_project_number", void 0);
-                        setStatuses([]);
-                      } else {
-                        var n = parseInt(v, 10);
-                        if (!isNaN(n)) {
-                          updateField("tracking.github_project_number", n);
-                          fetchJSON(apiMetaUrl(name, "statuses") + "&github_project_number=" + n).then(function(data) {
-                            setStatuses(data && data.statuses ? data.statuses : []);
-                          }).catch(function() {
-                            setStatuses([]);
-                          });
-                        }
-                      }
-                    }
-                  },
-                  React.createElement("option", { value: "" }, "\u2014 none \u2014"),
-                  ghProjects.map(function(p) {
-                    return React.createElement("option", { key: p.number, value: String(p.number) }, "#" + p.number + " " + (p.title || ""));
-                  })
-                ),
-                !hasProjects ? React.createElement(
-                  "span",
-                  { style: { fontSize: "11px", color: "#666", display: "block", marginTop: "2px" } },
-                  "no open project boards found for this repo owner"
-                ) : null
-              )
-            ) : null,
-            // Statuses to process (TagMultiSelect, only in GitHub mode when statuses exist)
-            isGitHub && boardNum && hasStatuses ? React.createElement(
-              "div",
-              { key: "track-statuses", style: { marginBottom: "12px" } },
-              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.ready_statuses),
-              React.createElement(TagMultiSelect, {
-                selected: getIn(config, ["tracking", "ready_statuses"], ["Ready"]),
-                options: statuses.map(function(s2) {
-                  return { value: s2, label: s2 };
-                }),
-                onChange: function(arr) {
-                  updateField("tracking.ready_statuses", arr);
-                },
-                placeholder: "+ add status\u2026",
-                emptyHint: "no statuses found"
-              })
-            ) : null
-          ];
-        })(),
-        // Editable: vcs (provider-aware)
+        // ── VCS (provider-aware) — drives target_branch, board, and labels ───────────
         React.createElement("div", { style: S.section }, "VCS"),
         React.createElement(
           "div",
@@ -1420,7 +1380,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             "label",
             { style: S.field },
             React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.target_branch),
-            branches.length > 0 ? React.createElement(
+            React.createElement(
               "select",
               {
                 style: S.select,
@@ -1429,18 +1389,23 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                   updateField("vcs.target_branch", e2.target.value);
                 }
               },
-              React.createElement("option", { value: "" }, "\u2014 none \u2014"),
-              branches.map(function(b) {
-                return React.createElement("option", { key: b, value: b }, b);
-              })
-            ) : React.createElement("input", {
-              style: S.input,
-              value: getIn(config, ["vcs", "target_branch"], ""),
-              placeholder: "main",
-              onChange: function(e2) {
-                updateField("vcs.target_branch", e2.target.value);
-              }
-            })
+              React.createElement("option", { value: "" }, branches.length === 0 ? "\u2014 loading branches\u2026 \u2014" : "\u2014 none \u2014"),
+              (function() {
+                var saved = getIn(config, ["vcs", "target_branch"], "");
+                var opts = branches.map(function(b) {
+                  return React.createElement("option", { key: b, value: b }, b);
+                });
+                if (saved && branches.indexOf(saved) === -1) {
+                  opts.unshift(React.createElement("option", { key: saved, value: saved }, saved));
+                }
+                return opts;
+              })()
+            ),
+            branches.length === 0 ? React.createElement(
+              "span",
+              { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
+              "Requires 'repo' scope on your GITHUB_TOKEN to load branches."
+            ) : null
           ),
           React.createElement(
             "label",
@@ -1469,6 +1434,72 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             })
           )
         ),
+        // ── GitHub Project Board (GitHub only) ───────────────────────────
+        (getIn(config, ["vcs", "provider"], "github") || "github").toLowerCase() === "github" ? (function() {
+          var boardNum = getIn(config, ["tracking", "github_project_number"], null);
+          var hasStatuses = statuses && statuses.length > 0;
+          return [
+            React.createElement("div", { key: "tracking-hdr", style: S.section }, "GitHub Project Board"),
+            React.createElement(
+              "div",
+              { key: "track-board", style: S.fieldRow },
+              React.createElement(
+                "label",
+                { style: S.field },
+                React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.github_project_number),
+                React.createElement(
+                  "select",
+                  {
+                    style: S.select,
+                    value: boardNum != null ? String(boardNum) : "",
+                    onChange: function(e2) {
+                      var v = e2.target.value.trim();
+                      if (v === "") {
+                        updateField("tracking.github_project_number", void 0);
+                        setStatuses([]);
+                      } else {
+                        var n = parseInt(v, 10);
+                        if (!isNaN(n)) {
+                          updateField("tracking.github_project_number", n);
+                          fetchJSON(apiMetaUrl(name, "statuses") + "&github_project_number=" + n).then(function(data) {
+                            setStatuses(data && data.statuses ? data.statuses : []);
+                          }).catch(function() {
+                            setStatuses([]);
+                          });
+                        }
+                      }
+                    }
+                  },
+                  React.createElement("option", { value: "" }, ghProjects.length === 0 ? "\u2014 no boards found \u2014" : "\u2014 none \u2014"),
+                  ghProjects.map(function(p) {
+                    return React.createElement("option", { key: p.number, value: String(p.number) }, "#" + p.number + " " + (p.title || ""));
+                  })
+                ),
+                ghProjects.length === 0 ? React.createElement(
+                  "span",
+                  { style: { fontSize: "11px", color: "#888", display: "block", marginTop: "2px" } },
+                  "Requires 'project' scope on your GITHUB_TOKEN. Add it and reload."
+                ) : null
+              )
+            ),
+            boardNum && hasStatuses ? React.createElement(
+              "div",
+              { key: "track-statuses", style: { marginBottom: "12px" } },
+              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.ready_statuses),
+              React.createElement(TagMultiSelect, {
+                selected: getIn(config, ["tracking", "ready_statuses"], ["Ready"]),
+                options: statuses.map(function(s2) {
+                  return { value: s2, label: s2 };
+                }),
+                onChange: function(arr) {
+                  updateField("tracking.ready_statuses", arr);
+                },
+                placeholder: "+ add status\u2026",
+                emptyHint: "no statuses found"
+              })
+            ) : null
+          ];
+        })() : null,
         // Editable: Cron
         React.createElement("div", { style: S.section }, "Cron"),
         React.createElement(CronSchedule, {
@@ -1563,31 +1594,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                 })
               ) : null
             ];
-          })(),
-          // "Send test message" button — uses current in-modal deliver value
-          (function() {
-            var currentDeliver = getIn(config, ["cron", "deliver"], "");
-            var hasTarget = !!currentDeliver;
-            var isSending = testDeliverStatus && testDeliverStatus.ok === null;
-            var statusStyle = null;
-            if (testDeliverStatus && testDeliverStatus.ok === true) {
-              statusStyle = Object.assign({}, S.ok, { fontSize: "12px", marginLeft: "8px" });
-            } else if (testDeliverStatus && testDeliverStatus.ok === false) {
-              statusStyle = Object.assign({}, S.err, { fontSize: "12px", marginLeft: "8px" });
-            }
-            return [
-              React.createElement(
-                "label",
-                { key: "test-deliver-btn", style: Object.assign({}, S.field, { flex: "0 0 auto", justifyContent: "flex-end", minWidth: "auto" }) },
-                React.createElement("button", {
-                  style: Object.assign({}, S.btnSmall, { opacity: hasTarget && !isSending ? 1 : 0.5, marginTop: "20px" }),
-                  disabled: !hasTarget || isSending,
-                  onClick: testDeliver,
-                  type: "button"
-                }, isSending ? "Sending\u2026" : "Send test message")
-              ),
-              testDeliverStatus ? React.createElement("span", { key: "test-deliver-status", style: statusStyle }, testDeliverStatus.msg) : null
-            ];
           })()
         ),
         // Multi-target notifications (any Hermes messaging platform + channel + events)
@@ -1614,30 +1620,23 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             } });
           })
         ) : null,
-        // Editable: Labels (TagMultiSelect, GitHub mode only)
-        (function() {
-          var isGitHub = !!(config.sources && config.sources.github_issues && config.sources.github_issues.enabled);
-          if (!isGitHub) return null;
-          var labelOptions = (labels || []).map(function(l2) {
-            return { value: l2.name, label: l2.name, color: l2.color };
-          });
-          return [
-            React.createElement("div", { key: "labels-section", style: S.section }, "Issue Labels"),
-            React.createElement(
-              "div",
-              { key: "labels-container", style: { marginBottom: "12px" } },
-              React.createElement(TagMultiSelect, {
-                selected: getIn(config, ["issues", "filters", "labels"], []),
-                options: labelOptions,
-                onChange: function(arr) {
-                  updateField("issues.filters.labels", arr);
-                },
-                placeholder: "+ add label\u2026",
-                emptyHint: "no labels found"
-              })
-            )
-          ];
-        })(),
+        // ── Issue Labels ────────────────────────────────────────────────────────
+        React.createElement("div", { style: S.section }, "Issue Labels"),
+        React.createElement(
+          "div",
+          { style: { marginBottom: "12px" } },
+          React.createElement(TagMultiSelect, {
+            selected: getIn(config, ["issues", "filters", "labels"], []),
+            options: (labels || []).map(function(l2) {
+              return { value: l2.name, label: l2.name, color: l2.color };
+            }),
+            onChange: function(arr) {
+              updateField("issues.filters.labels", arr);
+            },
+            placeholder: labels.length === 0 ? "\u2014 loading labels\u2026 \u2014" : "\u2514 select a label to filter",
+            emptyHint: "Requires 'repo' scope on your GITHUB_TOKEN to load labels"
+          })
+        ),
         // Throughput caps
         React.createElement("div", { style: S.section }, "Throughput"),
         React.createElement(
@@ -1715,6 +1714,148 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       )
     );
   }
+  function DeliverMultiPicker(props) {
+    var targets = props.targets || [];
+    var methods = props.methods || {};
+    var methodNames = Object.keys(methods).sort();
+    var ts = useState({});
+    var testStatuses = ts[0], setTestStatuses = ts[1];
+    function updateRow(i, patch) {
+      var next = targets.map(function(t, j) {
+        return j === i ? Object.assign({}, t, patch) : t;
+      });
+      setTestStatuses(function(prev) {
+        var n = Object.assign({}, prev);
+        delete n[i];
+        return n;
+      });
+      props.onChange(next);
+    }
+    function removeRow(i) {
+      setTestStatuses(function(prev) {
+        var n = {};
+        Object.keys(prev).forEach(function(k) {
+          var ki = parseInt(k, 10);
+          if (ki < i) n[k] = prev[k];
+          else if (ki > i) n[String(ki - 1)] = prev[k];
+        });
+        return n;
+      });
+      props.onChange(targets.filter(function(_, j) {
+        return j !== i;
+      }));
+    }
+    function addRow() {
+      props.onChange(targets.concat([{ platform: "", target: "" }]));
+    }
+    function testRow(i, target) {
+      setTestStatuses(function(prev) {
+        return Object.assign({}, prev, { [i]: { ok: null, msg: "Sending\u2026" } });
+      });
+      fetchJSON("/api/plugins/daedalus/meta/test-deliver", {
+        method: "POST",
+        body: { deliver: target }
+      }).then(function(r) {
+        setTestStatuses(function(prev) {
+          return Object.assign({}, prev, {
+            [i]: r && r.ok ? { ok: true, msg: "\u2713 Sent" } : { ok: false, msg: "\u2717 " + (r && r.error || "send failed") }
+          });
+        });
+      }).catch(function(err) {
+        setTestStatuses(function(prev) {
+          return Object.assign({}, prev, { [i]: { ok: false, msg: "\u2717 " + String(err && err.message || err) } });
+        });
+      });
+    }
+    return React.createElement(
+      "div",
+      null,
+      targets.map(function(t, i) {
+        var rawChannelOpts = t.platform && methods[t.platform] ? methods[t.platform] : [];
+        var channelOpts = rawChannelOpts.map(function(e) {
+          return typeof e === "string" ? { value: e, label: e } : e;
+        });
+        var testStatus = testStatuses[String(i)] || null;
+        var isTesting = testStatus && testStatus.ok === null;
+        var hasTarget = !!t.target;
+        return React.createElement(
+          "div",
+          { key: i, style: { marginBottom: "8px" } },
+          React.createElement(
+            "div",
+            { style: { display: "flex", gap: "6px", alignItems: "center" } },
+            React.createElement(
+              "select",
+              {
+                style: Object.assign({}, S.select, { flex: "0 0 130px" }),
+                value: t.platform || "",
+                onChange: function(e) {
+                  updateRow(i, { platform: e.target.value, target: "" });
+                }
+              },
+              React.createElement("option", { value: "" }, "\u2014 service \u2014"),
+              methodNames.map(function(m) {
+                return React.createElement("option", { key: m, value: m }, m);
+              })
+            ),
+            t.platform ? channelOpts.length > 0 ? React.createElement(
+              "select",
+              {
+                style: Object.assign({}, S.select, { flex: "1 1 auto" }),
+                value: t.target || "",
+                onChange: function(e) {
+                  updateRow(i, { target: e.target.value });
+                }
+              },
+              React.createElement("option", { value: "" }, "\u2014 channel \u2014"),
+              channelOpts.map(function(ch) {
+                return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
+              })
+            ) : React.createElement("input", {
+              style: Object.assign({}, S.input, { flex: "1 1 auto" }),
+              value: t.target || "",
+              placeholder: t.platform + ":channel-id",
+              onChange: function(e) {
+                updateRow(i, { target: e.target.value });
+              }
+            }) : React.createElement("div", { style: { flex: "1 1 auto" } }),
+            React.createElement("button", {
+              style: Object.assign({}, S.btnSmall, { opacity: hasTarget && !isTesting ? 1 : 0.4 }),
+              type: "button",
+              disabled: !hasTarget || !!isTesting,
+              onClick: function() {
+                testRow(i, t.target);
+              }
+            }, isTesting ? "Sending\u2026" : "Test"),
+            React.createElement("button", {
+              style: S.btnSmall,
+              type: "button",
+              onClick: function() {
+                removeRow(i);
+              }
+            }, "\xD7")
+          ),
+          testStatus ? React.createElement("div", {
+            style: {
+              fontSize: "11px",
+              marginTop: "3px",
+              marginLeft: "2px",
+              color: testStatus.ok === true ? "#4ade80" : testStatus.ok === null ? "#888" : "#f87171"
+            }
+          }, testStatus.msg) : null
+        );
+      }),
+      methodNames.length > 0 ? React.createElement("button", {
+        style: S.btnSmall,
+        type: "button",
+        onClick: addRow
+      }, "+ Add notification service") : React.createElement(
+        "span",
+        { style: { fontSize: "12px", color: "#666" } },
+        "No notification services configured in Hermes yet."
+      )
+    );
+  }
   function AddProjectModal(props) {
     var nm = useState("");
     var name = nm[0], setName = nm[1];
@@ -1726,13 +1867,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var provider = pv[0], setProvider = pv[1];
     var sc = useState("every 60m");
     var schedule = sc[0], setSchedule = sc[1];
-    var dm = useState("");
-    var deliverMethod = dm[0], setDeliverMethod = dm[1];
-    var dt = useState("");
-    var deliver = dt[0], setDeliver = dt[1];
+    var nt = useState([]);
+    var notifications = nt[0], setNotifications = nt[1];
     var ex = useState({});
     var extra = ex[0], setExtra = ex[1];
-    var so = useState({ github_issues: true, local_specs: false, kanban_triage: false });
+    var so = useState({ github_issues: false, local_specs: true, kanban_triage: true });
     var srcToggles = so[0], setSrcToggles = so[1];
     var ns = useState({});
     var methods = ns[0], setMethods = ns[1];
@@ -1747,6 +1886,29 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setMethods({});
       });
     }, []);
+    useEffect(function() {
+      var trimmed = workdir.trim();
+      if (!trimmed) return;
+      var cancelled = false;
+      var timer = setTimeout(function() {
+        fetchJSON("/api/plugins/daedalus/meta/detect?workdir=" + encodeURIComponent(trimmed)).then(function(d) {
+          if (cancelled || !d || !d.detected) return;
+          if (d.name && !name) setName(d.name);
+          if (d.repo && !repo) setRepo(d.repo);
+          if (d.provider) {
+            setProvider(d.provider);
+            setSrcToggles(function(prev) {
+              return Object.assign({}, prev, { github_issues: true });
+            });
+          }
+        }).catch(function() {
+        });
+      }, 600);
+      return function() {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    }, [workdir]);
     function setExtraField(dotted, value) {
       var key = dotted.split(".").pop();
       setExtra(function(prev) {
@@ -1765,7 +1927,14 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         repo: repo.trim(),
         workdir: workdir.trim(),
         vcs,
-        cron: { schedule, deliver },
+        cron: {
+          schedule,
+          notifications: notifications.filter(function(t) {
+            return t.platform && t.target;
+          }).map(function(t) {
+            return { platform: t.platform, target: t.target, events: [] };
+          })
+        },
         sources: {
           github_issues: { enabled: !!srcToggles.github_issues },
           local_specs: { enabled: !!srcToggles.local_specs },
@@ -1874,14 +2043,41 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             "label",
             { style: S.field },
             React.createElement("span", { style: S.fieldLabel }, "Working Directory (absolute path)"),
-            React.createElement("input", {
-              style: S.input,
-              value: workdir,
-              placeholder: "/path/to/repo",
-              onChange: function(e) {
-                setWorkdir(e.target.value);
-              }
-            })
+            React.createElement(
+              "div",
+              { style: { display: "flex", gap: "6px" } },
+              React.createElement("input", {
+                style: Object.assign({}, S.input, { flex: "1 1 auto" }),
+                value: workdir,
+                placeholder: "/path/to/repo",
+                onChange: function(e) {
+                  setWorkdir(e.target.value);
+                }
+              }),
+              React.createElement("button", {
+                style: S.btnSmall,
+                type: "button",
+                onClick: function() {
+                  fetchJSON("/api/plugins/daedalus/meta/pick-directory").then(function(d) {
+                    if (!d || !d.path) return;
+                    setWorkdir(d.path);
+                    fetchJSON("/api/plugins/daedalus/meta/detect?workdir=" + encodeURIComponent(d.path)).then(function(det) {
+                      if (!det || !det.detected) return;
+                      if (det.name && !name) setName(det.name);
+                      if (det.repo && !repo) setRepo(det.repo);
+                      if (det.provider) {
+                        setProvider(det.provider);
+                        setSrcToggles(function(prev) {
+                          return Object.assign({}, prev, { github_issues: true });
+                        });
+                      }
+                    }).catch(function() {
+                    });
+                  }).catch(function() {
+                  });
+                }
+              }, "Browse\u2026")
+            )
           )
         ),
         React.createElement("div", { style: S.section }, "Cron"),
@@ -1891,27 +2087,14 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             setSchedule(v);
           }
         }),
-        React.createElement(
-          "div",
-          { style: S.fieldRow },
-          React.createElement(
-            "label",
-            { style: Object.assign({}, S.field, { flex: "1 1 100%" }) },
-            React.createElement("span", { style: S.fieldLabel }, "Notify Via"),
-            React.createElement(MethodChannelPicker, {
-              methods,
-              method: deliverMethod,
-              target: deliver,
-              onMethod: function(m) {
-                setDeliverMethod(m);
-                setDeliver("");
-              },
-              onTarget: function(t) {
-                setDeliver(t);
-              }
-            })
-          )
-        ),
+        React.createElement("div", { style: S.section }, "Notifications"),
+        React.createElement(DeliverMultiPicker, {
+          targets: notifications,
+          methods,
+          onChange: function(arr) {
+            setNotifications(arr);
+          }
+        }),
         React.createElement("div", { style: S.section }, "Sources"),
         [
           ["github_issues", "VCS Issues (GitHub/GitLab/Azure)"],
@@ -1964,6 +2147,12 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var modalProject = m[0], setModalProject = m[1];
     var ap = useState(false);
     var showAddProject = ap[0], setShowAddProject = ap[1];
+    var rs = useState(null);
+    var rosterStatus = rs[0], setRosterStatus = rs[1];
+    var rp = useState(false);
+    var provisioningRoster = rp[0], setProvisioningRoster = rp[1];
+    var rr = useState(null);
+    var rosterResult = rr[0], setRosterResult = rr[1];
     var load = useCallback(function() {
       setLoading(true);
       setLoadErr(null);
@@ -1978,6 +2167,30 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     useEffect(function() {
       load();
     }, [load]);
+    useEffect(function() {
+      fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function(d) {
+        setRosterStatus(d || null);
+      }).catch(function() {
+        setRosterStatus(null);
+      });
+    }, []);
+    function provisionRoster() {
+      setProvisioningRoster(true);
+      setRosterResult(null);
+      fetchJSON("/api/plugins/daedalus/meta/provision-roster", { method: "POST" }).then(function(r) {
+        setProvisioningRoster(false);
+        setRosterResult(r || { ok: false, error: "no response" });
+        if (r && r.ok) {
+          fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function(d) {
+            setRosterStatus(d || null);
+          }).catch(function() {
+          });
+        }
+      }).catch(function(err) {
+        setProvisioningRoster(false);
+        setRosterResult({ ok: false, error: String(err && err.message || err) });
+      });
+    }
     if (loading) return React.createElement(
       "div",
       { style: S.wrap },
@@ -2010,10 +2223,48 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           }
         })
       ),
+      // Roster provisioning banner — shown when any of the 6 profiles are missing
+      rosterStatus && !rosterStatus.all_provisioned ? React.createElement(
+        "div",
+        {
+          style: {
+            border: "1px solid #444",
+            borderRadius: "8px",
+            padding: "12px 16px",
+            marginBottom: "16px",
+            display: "flex",
+            gap: "12px",
+            alignItems: "flex-start",
+            background: "rgba(255,255,255,0.02)"
+          }
+        },
+        React.createElement(
+          "div",
+          { style: { flex: "1 1 auto" } },
+          React.createElement(
+            "div",
+            { style: { fontSize: "13px", fontWeight: 600, color: "#ccc", marginBottom: "2px" } },
+            "Worker Agents not provisioned"
+          ),
+          React.createElement(
+            "div",
+            { style: { fontSize: "12px", color: "#888" } },
+            "Install the 6 specialist profiles (project-manager, planner, developer, reviewer, security-analyst, documentation) to enable automated workflow dispatch."
+          ),
+          rosterResult ? React.createElement("div", {
+            style: { fontSize: "11px", marginTop: "4px", color: rosterResult.ok ? "#4ade80" : "#f87171" }
+          }, rosterResult.ok ? "Provisioned successfully." : "Error: " + (rosterResult.error || "failed")) : null
+        ),
+        React.createElement(Button, {
+          label: provisioningRoster ? "Installing\u2026" : "Install Agents",
+          disabled: !!provisioningRoster,
+          onClick: provisionRoster
+        })
+      ) : null,
       projects.length === 0 ? React.createElement(
         "div",
         { style: { textAlign: "center", padding: "40px", color: "#666" } },
-        "No projects configured. Click \u201C+ Add Project\u201D to get started."
+        'No projects configured. Click "+ Add Project" to get started.'
       ) : null,
       React.createElement(
         "div",
