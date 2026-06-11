@@ -75,7 +75,7 @@ class IssueSummary:
     url: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
-        """Shape used by the dispatcher's triage path (gh issue list parity)."""
+        """Dict shape the dispatcher's triage path consumes."""
         return {"number": self.number, "title": self.title, "body": self.body,
                 "labels": [{"name": n} for n in self.labels], "url": self.url}
 

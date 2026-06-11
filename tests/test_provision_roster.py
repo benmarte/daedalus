@@ -1,12 +1,14 @@
 """
-Tests for scripts/provision_roster.sh — keychain-free provisioning guarantees.
+Tests for scripts/provision_roster.sh — keychain-free, gh-free provisioning.
 
-Verifies the isolated-home git/gh operations never invoke osxkeychain, preventing
-the macOS "Keychain Not Found" dialog during provisioning or worker operation.
+Verifies the isolated-home git operations use a per-profile credential store
+(never osxkeychain — preventing the macOS "Keychain Not Found" dialog) and that
+the script never invokes the gh CLI.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -24,52 +26,36 @@ def provision_script() -> str:
 
 
 class TestKeychainFreeProvisioning:
-    """The script must set the isolated git credential.helper to empty and use
-    --insecure-storage so no worker git/gh operation ever reaches osxkeychain."""
+    """The script must authenticate git via a per-profile credential store —
+    keychain-free and entirely WITHOUT the gh CLI."""
 
-    def test_credential_helper_set_to_empty(self, provision_script: str):
-        """After mkdir, the isolated git config must set credential.helper to blank."""
-        assert 'credential.helper ""' in provision_script, \
-            "Missing: git config --global credential.helper \"\" — required for keychain-free git ops"
+    def test_credential_helper_is_store(self, provision_script: str):
+        """The isolated git config must use the file-based 'store' helper so no
+        worker git operation ever reaches osxkeychain."""
+        assert 'credential.helper "store"' in provision_script, \
+            "Missing: git config --global credential.helper \"store\""
 
-    def test_credential_helper_before_gh_auth(self, provision_script: str):
-        """credential.helper must be configured BEFORE gh auth login, so gh never
-        finds an osxkeychain-triggering git helper in its isolated HOME."""
-        cred_hlp_idx = provision_script.find('credential.helper ""')
-        gh_login_idx = provision_script.find("gh auth login --with-token")
-        assert cred_hlp_idx > 0, "credential.helper line not found"
-        assert gh_login_idx > 0, "gh auth login line not found"
-        assert cred_hlp_idx < gh_login_idx, (
-            "git config credential.helper must run BEFORE gh auth login — "
-            "otherwise gh may inherit osxkeychain from the git config"
-        )
+    def test_git_credentials_written_for_github(self, provision_script: str):
+        """git push auth comes from ~/.git-credentials with the token inline."""
+        assert "x-access-token:%s@github.com" in provision_script, \
+            "Missing: github.com entry in the per-profile .git-credentials"
 
-    def test_gh_uses_insecure_storage(self, provision_script: str):
-        """gh auth login must use --insecure-storage (gh 2.93+) so it writes
-        file-based creds only, never touching the macOS keychain."""
-        assert "--insecure-storage" in provision_script, \
-            "Missing: --insecure-storage flag on gh auth login — required for keychain-free auth"
+    def test_git_credentials_locked_down(self, provision_script: str):
+        assert 'chmod 600 "$home_dir/.git-credentials"' in provision_script
+        assert 'chmod 600 "$env_file"' in provision_script
+        assert 'chmod 700 "$PROFILES/$name"' in provision_script
 
-    def test_gh_prompt_disabled(self, provision_script: str):
-        """GH_PROMPT_DISABLED=1 must be set so gh never prompts interactively
-        (which could trigger credential helper cascades)."""
-        assert "GH_PROMPT_DISABLED=1" in provision_script, \
-            "Missing: GH_PROMPT_DISABLED=1 env var — required to suppress gh prompts"
+    def test_no_gh_cli_anywhere(self, provision_script: str):
+        """The roster must not invoke the gh CLI at all (fresh installs don't have it)."""
+        assert "gh auth" not in provision_script
+        assert "--insecure-storage" not in provision_script
+        assert "GH_PROMPT_DISABLED" not in provision_script
+        assert not re.search(r"(?<![\w./-])gh\s+(auth|pr|api|issue|project)", provision_script), \
+            "found a gh CLI invocation"
 
-    def test_env_vars_strip_gh_token(self, provision_script: str):
-        """The gh auth login call must explicitly unset GH_TOKEN and GITHUB_TOKEN
-        (env -u) so the pipe-based token injection is the only credential path."""
-        assert "-u GH_TOKEN" in provision_script, \
-            "Missing: env -u GH_TOKEN — required so gh auth login doesn't inherit host token"
-        assert "-u GITHUB_TOKEN" in provision_script, \
-            "Missing: env -u GITHUB_TOKEN — required so gh auth login doesn't inherit host token"
-
-    def test_secure_ordering_all_measures_present(self, provision_script: str):
-        """Meta-test: all three keychain-free measures appear in the correct order:
-        credential.helper → GH_PROMPT_DISABLED → --insecure-storage."""
-        cred_idx = provision_script.find('credential.helper ""')
-        prompt_idx = provision_script.find("GH_PROMPT_DISABLED=1")
-        insecure_idx = provision_script.find("--insecure-storage")
-        assert cred_idx < prompt_idx < insecure_idx, (
-            "Order must be: credential.helper → GH_PROMPT_DISABLED → --insecure-storage"
-        )
+    def test_gitlab_and_azure_passthrough(self, provision_script: str):
+        """GITLAB_TOKEN / AZURE_DEVOPS_PAT flow into git credentials + .env when set."""
+        assert "oauth2:%s@gitlab.com" in provision_script
+        assert "pat:%s@dev.azure.com" in provision_script
+        assert "GITLAB_TOKEN=" in provision_script
+        assert "AZURE_DEVOPS_PAT=" in provision_script

@@ -11,8 +11,8 @@ Roster: **project-manager · planner · developer · reviewer · security-analys
 ## Sharing model (important)
 - **Share = this git repo.** It is secret-free. Everyone reproduces the roster locally with their
   own keys via `scripts/provision_roster.sh`.
-- **Do NOT share `hermes profile export` tarballs** — they bundle `config.yaml`/`.env`/`gh` tokens
-  (LLM keys + VCS PATs). Those are per-person secrets.
+- **Do NOT share `hermes profile export` tarballs** — they bundle `config.yaml`/`.env`/
+  `.git-credentials` (LLM keys + VCS PATs). Those are per-person secrets.
 - Recommended: host this repo under your org so colleagues can clone it.
 
 ## Prerequisites (each colleague, once)
@@ -24,8 +24,9 @@ Roster: **project-manager · planner · developer · reviewer · security-analys
 4. A **VCS API token in the environment** for each provider you use:
    `GITHUB_TOKEN` (fine-grained PAT), `GITLAB_TOKEN` (`api` scope), or
    `AZURE_DEVOPS_PAT` (Work Items R&W, Code Read, PR R&W, Build Read).
-   For **GitHub** projects, also authenticate the **GitHub CLI** so worker agents
-   can push/open PRs: `gh auth login` (needs `repo`, `workflow`, `project` scopes).
+   That token covers everything — dispatcher polling, dashboard pickers, worker
+   `git push` (per-profile credential store), and PR/comment API calls. No
+   `gh`/`glab`/`az` CLI is needed or used.
 
 ## Provision the roster
 ```bash
@@ -34,9 +35,9 @@ bash scripts/provision_roster.sh        # idempotent — re-run any time to rese
 hermes profile list                     # expect the 6 roles
 ```
 What it does: creates the 6 profiles (cloning config/keys from `default`), seeds each with **only**
-its matrix agent-skills, and authenticates `gh` **into each profile's isolated HOME**
-(`gh auth login --with-token` — a profile `.env` is NOT enough; the kanban worker runs `gh` via the
-`terminal` tool whose shell ignores `.env`).
+its matrix agent-skills, writes a **per-profile git credential store** (`~/.git-credentials`,
+0600, keychain-free) so `git push` works inside each isolated HOME, and drops the provider
+tokens into each profile `.env` for API calls (open PR / comment via curl).
 
 ## Connect a project (per repo/board)
 The easiest path is the dashboard's **“+ Add Project”** button (scaffolds config,
@@ -66,7 +67,8 @@ registers the repo, creates its kanban board + cron). From the terminal:
   the dashboard); edits update the job in place.
 
 ## Known gotchas (captured the hard way)
-- `gh` auth must be **per-profile-HOME**, not `.env` (see above).
+- git credentials must live **per-profile-HOME** (`~/.git-credentials` via the `store`
+  helper), not only in `.env` — the worker's `terminal` shell does not inherit `.env` vars.
 - `hermes profile create --no-skills` is **mutually exclusive with `--clone`** — the script clones
   then nukes+reseeds skills.
 - A **broken symlink in `~/.hermes/skills/`** aborts every `profile create` (copytree fails) — remove it.

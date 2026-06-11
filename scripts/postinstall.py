@@ -2,9 +2,9 @@
 """
 postinstall.py — Prerequisite checker + roster provisioner for the daedalus plugin.
 
-Checks that the host environment is ready (default profile, agent-skills plugin;
-gh auth is advisory — only GitHub worker flows use it), then runs
-scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
+Checks that the host environment is ready (default profile, agent-skills plugin),
+then runs scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
+No gh CLI involved — VCS access is via provider APIs with tokens from env.
 
 Usage:
     python3 scripts/postinstall.py          # check + provision
@@ -56,38 +56,23 @@ def _check_agent_skills() -> tuple[bool, str]:
     )
 
 
-def _check_gh_auth() -> tuple[bool, str]:
-    """Advisory check: 'gh auth status' for GitHub worker flows.
+def _check_vcs_tokens() -> tuple[bool, str]:
+    """Advisory check: report which VCS provider tokens are present in the env.
 
-    The dispatcher and dashboard talk to GitHub/GitLab/Azure DevOps via their
-    HTTPS APIs (tokens from env: GITHUB_TOKEN / GITLAB_TOKEN / AZURE_DEVOPS_PAT),
-    so gh is NOT required for the plugin itself. Worker agents still use gh in
-    their terminals when a project targets GitHub (push branches, open PRs),
-    which is why this check exists — as a warning, never an install blocker.
+    The plugin (dispatcher, dashboard, and worker provisioning) talks to
+    GitHub/GitLab/Azure DevOps exclusively via their HTTPS APIs with tokens
+    from the environment. Never a blocker — kanban-only setups need no token.
     """
-    try:
-        result = subprocess.run(
-            ["gh", "auth", "status"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return True, f"OK: gh auth status passed\n{result.stderr.strip()}"
-        return True, (
-            f"WARN: gh auth status returned code {result.returncode} — fine unless "
-            f"worker agents target GitHub repos.\n"
-            f"  For GitHub projects: run 'gh auth login' (repo + workflow scopes).\n"
-            f"  For GitLab/Azure DevOps projects: set GITLAB_TOKEN / AZURE_DEVOPS_PAT instead."
-        )
-    except FileNotFoundError:
-        return True, (
-            "WARN: 'gh' CLI not found on PATH — fine unless worker agents target "
-            "GitHub repos.\n"
-            "  For GitHub projects: install gh (https://cli.github.com) and 'gh auth login'."
-        )
-    except subprocess.TimeoutExpired:
-        return True, (
-            "WARN: 'gh auth status' hung for 30s — check network / gh API reachability."
-        )
+    found = [name for name in ("GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN",
+                               "AZURE_DEVOPS_PAT")
+             if (os.environ.get(name) or "").strip()]
+    if found:
+        return True, f"OK: VCS token(s) in env: {', '.join(found)}"
+    return True, (
+        "WARN: no VCS tokens in env (GITHUB_TOKEN / GITLAB_TOKEN / AZURE_DEVOPS_PAT) "
+        "— fine for kanban-only/spec-file projects.\n"
+        "  Export the token for each provider your projects use before running the dispatcher."
+    )
 
 
 # ── cron wrapper ─────────────────────────────────────────────────────────────
@@ -163,7 +148,7 @@ def main(check_only: bool = False) -> int:
     checks = [
         ("default profile", _check_default_profile),
         ("agent-skills plugin", _check_agent_skills),
-        ("gh auth", _check_gh_auth),
+        ("vcs tokens", _check_vcs_tokens),
     ]
 
     all_ok = True

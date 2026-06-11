@@ -95,12 +95,26 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [i.as_dict() for i in provider.list_issues(state=state, labels=labels, limit=limit)]
 
 
+# API-based instructions only — no gh/glab/az CLIs are installed for workers.
 _PR_COMMENT_HOWTO = {
-    "github": "`gh pr comment <pr> --repo {repo} --body-file <report.md>`",
-    "gitlab": "`glab mr note <mr> --repo {repo} -m \"$(cat report.md)\"` "
-              "(or the GitLab MR notes API with GITLAB_TOKEN)",
-    "azuredevops": "the Azure DevOps PR threads API or "
-                   "`az repos pr ...` (authenticated via AZURE_DEVOPS_PAT)",
+    "github": "the GitHub API with your GITHUB_TOKEN env var: "
+              "POST https://api.github.com/repos/{repo}/issues/<pr>/comments "
+              "with JSON body {{\"body\": \"<report markdown>\"}} and header "
+              "'Authorization: Bearer $GITHUB_TOKEN' (curl works)",
+    "gitlab": "the GitLab API with your GITLAB_TOKEN env var: "
+              "POST /api/v4/projects/<project-id>/merge_requests/<mr>/notes "
+              "with header 'PRIVATE-TOKEN: $GITLAB_TOKEN'",
+    "azuredevops": "the Azure DevOps PR threads API with your AZURE_DEVOPS_PAT "
+                   "env var (Basic auth, base64 of ':' + PAT)",
+}
+
+_PR_CREATE_HOWTO = {
+    "github": "the GitHub API (POST https://api.github.com/repos/{repo}/pulls with "
+              "'Authorization: Bearer $GITHUB_TOKEN')",
+    "gitlab": "the GitLab API (POST /api/v4/projects/<project-id>/merge_requests with "
+              "'PRIVATE-TOKEN: $GITLAB_TOKEN')",
+    "azuredevops": "the Azure DevOps API (POST .../pullrequests, Basic auth with "
+                   "$AZURE_DEVOPS_PAT)",
 }
 
 
@@ -115,13 +129,17 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
     body = (issue.get("body") or "").strip()
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
+    pr_create_howto = _PR_CREATE_HOWTO.get(provider_name,
+                                           _PR_CREATE_HOWTO["github"]).format(repo=repo)
     return (
         f"Deliver issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
         f"Decompose this into the following role tasks and assign each to the right agent:\n\n"
         f"1. DEVELOPER — implement the fix/feature. Follow the agent-skills lifecycle "
         f"({_LIFECYCLE}). Branch fix/issue-{n}-<slug>, write code + tests, iterate up to {iterations}x "
-        f"if review fails. Open a PR into {base_branch}. The PR body MUST include `Closes #{n}` on its own line "
+        f"if review fails. Push the branch (git credentials are pre-configured) and open a PR "
+        f"into {base_branch} via {pr_create_howto} — no gh/glab/az CLI is installed. "
+        f"The PR body MUST include `Closes #{n}` on its own line "
         f"(REQUIRED — links the issue and tracks it to completion), plus Problem, Fix, How to test, "
         f"Manual testing.\n"
         f"2. REVIEWER — review the developer's PR for correctness, quality, and performance; request "

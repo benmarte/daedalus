@@ -571,7 +571,7 @@ def test_run_iterate_dry_run():
 
 
 def test_run_iterate_ci_cache():
-    """Two cards referencing the same PR → only one gh pr_ci_green call."""
+    """Two cards referencing the same PR → only one provider pr_ci_green call."""
     cards = [
         {
             "id": "t_a",

@@ -45,7 +45,7 @@ demo" into "a tool the team can depend on."
 | Without this | With this |
 |---|---|
 | One issue spawns 9 PRs | One issue → one tracked card → one PR |
-| Agent "forgets" to lint → red PR | **Ship-gate** blocks `gh pr create` until backend **and** frontend lint/typecheck pass |
+| Agent "forgets" to lint → red PR | **Ship-gate** blocks PR creation until backend **and** frontend lint/typecheck pass |
 | A single agent marks its own work done | **Decompose** into developer → reviewer → security → documentation |
 | You babysit every handoff | **Auto-advance**: each stage completes on green CI and flows to the next |
 | Issues merged to `dev` stay open forever | Dispatcher **closes the issue + moves card to Done** on merge |
@@ -75,7 +75,7 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    issue** (GitHub doesn't auto-close on a non-default-branch merge, so the dispatcher
    does it).
 
-The board and GitHub status are bookkept **in code on every tick**, so tracking is
+The kanban board and VCS board status are bookkept **in code on every tick**, so tracking is
 deterministic — never dependent on an agent remembering to update anything.
 
 ---
@@ -86,7 +86,7 @@ Each piece exists because the obvious approach failed:
 
 - **Ready-gating** — the dispatcher works *only* issues you put in `Ready`. You stay in
   control of what the fleet touches; it never surprises you by grabbing the backlog.
-- **Ship-gate** (a Hermes `pre_tool_call` hook) — blocks `gh pr create` until the repo's
+- **Ship-gate** (a Hermes `pre_tool_call` hook) — blocks PR creation until the repo's
   own checks pass. It's *language-agnostic* (runs the repo's `pre-commit`) plus a
   per-repo extra-checks script for things CI runs that pre-commit doesn't (e.g. a
   frontend `bun run lint && bun run typecheck`). A "remember to run pre-commit" note in
@@ -116,30 +116,35 @@ Each piece exists because the obvious approach failed:
 ## Multi-repo: one daedalus, many repos
 
 There is **one** daedalus and **one** agent roster. Every repo you want it to drive
-is an entry in `daedalus.yaml`'s `projects[]`, inheriting shared `defaults` and
-overriding what it needs (its own board, Slack channel, base branch, gate policy):
+carries its own checked-in `<repo>/.hermes/daedalus.yaml` (scaffolded by the
+dashboard's **+ Add Project** or `scripts/setup.sh`) and is listed in the
+registry at `~/.hermes/daedalus/projects`. Each project picks its own provider,
+board, base branch, schedule, and channels:
 
 ```yaml
-defaults:
-  vcs: { target_branch: dev }
-  lifecycle: { kanban: { enabled: true } }
-projects:
-- name: app-one
-  repo: ORG/app-one
-  workdir: /path/to/app-one
-  tracking: { github_project_number: 1 }
-  cron: { deliver: slack:C0CHANNEL1 }
-- name: api-two
-  repo: ORG/api-two
-  workdir: /path/to/api-two
-  tracking: { github_project_number: 4 }
-  cron: { deliver: slack:C0CHANNEL2 }
-  vcs: { target_branch: main }      # overrides the default
+# app-one/.hermes/daedalus.yaml
+name: app-one
+repo: ORG/app-one
+workdir: /path/to/app-one
+vcs: { provider: github, target_branch: dev }
+tracking: { github_project_number: 1 }
+cron:
+  schedule: "every 60m"
+  notifications:
+    - { platform: Slack, target: "slack:C0CHANNEL1", events: [doc-report, pipeline-failure] }
+
+# api-two/.hermes/daedalus.yaml
+name: api-two
+repo: group/api-two
+vcs: { provider: gitlab, target_branch: main }
+tracking: { label_board: true }
+cron: { schedule: "every 2h", deliver: "discord:#api-two" }
 ```
 
-One cron tick processes every project; each repo gets its **own kanban board**
-automatically and its **own ship-gate policy** (keyed by the repo's origin remote).
-Onboarding a repo = ~6 lines in `projects[]` + a `Ready` column on its board.
+Each repo gets its **own kanban board**, its **own cron job** (edits update it in
+place), and its **own ship-gate policy** (keyed by the repo's origin remote).
+Onboarding a repo = one dashboard click (or `setup.sh`) + a `Ready` column/label
+on its board.
 
 ---
 
@@ -165,10 +170,11 @@ and shared across a team.
 ## Prerequisites
 
 Hermes (installed + model auth), `bun`, `pre-commit`, `python3` + `pyyaml`.
-The dispatcher and dashboard talk to your VCS host via its **HTTPS API** with a
-token from the environment — no `gh`/`glab`/`az` CLI required for the plugin
-itself. (`gh` is still recommended for **GitHub** projects so worker agents can
-push branches and open PRs; the install check treats it as advisory.)
+**No VCS CLIs needed — ever.** Everything (dispatcher, dashboard, AND worker
+agents) talks to your VCS host via its **HTTPS API** with a token from the
+environment. Worker `git push` authenticates through a per-profile credential
+store written by the roster provisioner; PRs and comments go through the
+provider API with the token already in each worker's env.
 
 ## VCS providers
 
@@ -228,8 +234,8 @@ hermes gateway restart            # load the plugin
 > auto-start at login or auto-restart on crash.
 
 **2. Provision the agent roster** (the 6 specialist profiles — fails loudly if a
-prerequisite is missing, e.g. no `default` profile / `agent-skills`; missing `gh`
-auth is a warning, not a blocker):
+prerequisite is missing, e.g. no `default` profile / `agent-skills`; missing VCS
+tokens are a warning, not a blocker):
 ```bash
 python3 ~/.hermes/plugins/daedalus/scripts/postinstall.py
 hermes profile list               # expect: developer reviewer security-analyst documentation planner project-manager

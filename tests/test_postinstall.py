@@ -124,47 +124,31 @@ class TestCheckAgentSkills:
         assert "MISSING" in msg
 
 
-class TestCheckGhAuth:
-    """_check_gh_auth returns clear messages."""
+class TestCheckVcsTokens:
+    """_check_vcs_tokens is advisory — never blocks install."""
 
-    def test_gh_authenticated(self, postinstall):
-        with mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=0, stderr="Logged in to github.com as test-user\n",
-            )
-            ok, msg = postinstall._check_gh_auth()
+    def test_token_present(self, postinstall):
+        with mock.patch.dict("os.environ", {"GITHUB_TOKEN": "tok"}, clear=False):
+            ok, msg = postinstall._check_vcs_tokens()
         assert ok is True
-        assert "OK:" in msg
+        assert "OK:" in msg and "GITHUB_TOKEN" in msg
 
-    def test_gh_not_authenticated_is_advisory(self, postinstall):
-        """Missing gh auth must NOT block install — gh is only needed for
-        GitHub worker flows; the plugin itself talks to VCS APIs directly."""
-        with mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=1,
-                stderr="You are not logged into any GitHub hosts. Run gh auth login to authenticate.\n",
-            )
-            ok, msg = postinstall._check_gh_auth()
+    def test_no_tokens_is_advisory(self, postinstall):
+        """No tokens must NOT block install — kanban-only setups need none."""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            ok, msg = postinstall._check_vcs_tokens()
         assert ok is True
         assert "WARN" in msg
-        assert "gh auth login" in msg.lower()
-        assert "GITLAB_TOKEN" in msg
+        assert "GITLAB_TOKEN" in msg and "AZURE_DEVOPS_PAT" in msg
 
-    def test_gh_cli_missing_is_advisory(self, postinstall):
-        with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")):
-            ok, msg = postinstall._check_gh_auth()
+    def test_multiple_tokens_listed(self, postinstall):
+        with mock.patch.dict("os.environ",
+                             {"GITLAB_TOKEN": "a", "AZURE_DEVOPS_PAT": "b"},
+                             clear=True):
+            ok, msg = postinstall._check_vcs_tokens()
         assert ok is True
-        assert "WARN" in msg
-        assert "cli.github.com" in msg
+        assert "GITLAB_TOKEN" in msg and "AZURE_DEVOPS_PAT" in msg
 
-    def test_gh_timeout_is_advisory(self, postinstall):
-        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 30)):
-            ok, msg = postinstall._check_gh_auth()
-        assert ok is True
-        assert "WARN" in msg
-
-
-# ── provision tests ──────────────────────────────────────────────────────────
 
 class TestRunProvision:
     """_run_provision invokes the shell script and reports results."""
@@ -234,7 +218,7 @@ class TestMain:
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
             with mock.patch("subprocess.run") as mock_run:
                 mock_run.side_effect = [
-                    # gh auth status
+                    # vcs token check
                     mock.Mock(returncode=0, stderr="Logged in as test\n"),
                     # provision_roster.sh
                     mock.Mock(
@@ -251,7 +235,7 @@ class TestMain:
 
         # Easier approach: mock _run_provision and _check_* directly
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
-            with mock.patch.object(postinstall, "_check_gh_auth", return_value=(True, "OK")):
+            with mock.patch.object(postinstall, "_check_vcs_tokens", return_value=(True, "OK")):
                 with mock.patch.object(postinstall, "_run_provision", return_value=(True, "=== dev ===\ndone\n")):
                     rc = postinstall.main()
         assert rc == 0
@@ -273,7 +257,7 @@ class TestMain:
         (home / "plugins" / "agent-skills" / "skills" / "x").mkdir(parents=True)
 
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
-            with mock.patch.object(postinstall, "_check_gh_auth", return_value=(True, "OK")):
+            with mock.patch.object(postinstall, "_check_vcs_tokens", return_value=(True, "OK")):
                 with mock.patch.object(postinstall, "_run_provision") as mock_prov:
                     rc = postinstall.main(check_only=True)
         assert rc == 0
@@ -287,7 +271,7 @@ class TestMain:
         (home / "plugins" / "agent-skills" / "skills" / "x").mkdir(parents=True)
 
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
-            with mock.patch.object(postinstall, "_check_gh_auth", return_value=(True, "OK")):
+            with mock.patch.object(postinstall, "_check_vcs_tokens", return_value=(True, "OK")):
                 with mock.patch.object(postinstall, "_run_provision",
                                        return_value=(False, "Provision failed")):
                     rc = postinstall.main()
@@ -299,4 +283,4 @@ class TestMain:
         assert hasattr(postinstall, "main")
         assert hasattr(postinstall, "_check_default_profile")
         assert hasattr(postinstall, "_check_agent_skills")
-        assert hasattr(postinstall, "_check_gh_auth")
+        assert hasattr(postinstall, "_check_vcs_tokens")

@@ -660,8 +660,12 @@ def test_task_body_no_slack():
           "hermes send" not in body)
     check("_task_body mentions dispatcher handles Slack",
           "dispatcher" in body and "Slack" in body)
-    check("_task_body mentions gh pr comment",
-          "gh pr comment" in body)
+    check("_task_body instructs the API comment path (no CLI)",
+          "api.github.com/repos/O/R/issues" in body and "GITHUB_TOKEN" in body)
+    check("_task_body instructs the API PR-create path",
+          "api.github.com/repos/O/R/pulls" in body)
+    check("_task_body never mentions the gh CLI",
+          "gh pr" not in body and "gh issue" not in body and "gh auth" not in body)
     check("_task_body mentions Agent: documentation prefix",
           "**Agent: documentation**" in body)
 
