@@ -17,6 +17,9 @@ import json
 import os
 import re
 import subprocess
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any, Optional
 
@@ -129,7 +132,7 @@ def _list_slack_targets() -> list[str]:
         return []
 
 
-def _list_notification_methods() -> dict[str, list[str]]:
+def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
     """Return notification channels grouped by method from `hermes send --list`.
 
     The command output groups targets under method headers like::
@@ -137,12 +140,11 @@ def _list_notification_methods() -> dict[str, list[str]]:
         Slack:
           slack:tasks (private)
           slack:#engineering
-        Discord (Glados):
-          discord:#general
 
     Returns a dict mapping method name (e.g. 'Slack', 'Discord') to a list
-    of raw target strings with trailing annotations stripped
-    (e.g. 'slack:tasks', 'discord:#general').
+    of ``{value, label}`` objects. For Slack targets, labels are resolved
+    to human-readable names via the Slack Web API (cached). For non-Slack
+    methods, the label is the raw target string.
 
     Degrades gracefully to an empty dict if the command fails or the output
     is unparseable.
@@ -156,9 +158,31 @@ def _list_notification_methods() -> dict[str, list[str]]:
         )
         if result.returncode != 0:
             return {}
-        return _parse_send_list_output(result.stdout)
+        raw_methods = _parse_send_list_output(result.stdout)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return {}
+
+    # Resolve Slack labels
+    slack_ids: list[str] = []
+    for method, targets in raw_methods.items():
+        if method.lower() == "slack":
+            slack_ids = targets
+            break
+
+    slack_labels: dict[str, str] = {}
+    if slack_ids:
+        slack_labels = _resolve_slack_labels(slack_ids)
+
+    # Build the final shape: {value, label} per target
+    result_dict: dict[str, list[dict[str, str]]] = {}
+    for method, targets in raw_methods.items():
+        entries: list[dict[str, str]] = []
+        for t in targets:
+            label = slack_labels.get(t, t) if method.lower() == "slack" else t
+            entries.append({"value": t, "label": label})
+        result_dict[method] = entries
+
+    return result_dict
 
 
 def _parse_send_list_output(output: str) -> dict[str, list[str]]:
@@ -168,6 +192,10 @@ def _parse_send_list_output(output: str) -> dict[str, list[str]]:
     strips trailing parenthesized annotations from method keys (e.g.
     'Discord (Glados):' → 'Discord') and from target values (e.g.
     'slack:tasks (private)' → 'slack:tasks').
+
+    For Slack targets, also strips the per-thread ``/ topic <ts>`` suffix
+    and deduplicates to unique channel IDs (e.g. 33 thread rows → 6 unique
+    ``slack:<id>`` entries).
     """
     methods: dict[str, list[str]] = {}
     current_method: str | None = None
@@ -197,10 +225,171 @@ def _parse_send_list_output(output: str) -> dict[str, list[str]]:
             target = line.strip()
             # Remove parenthesized suffixes: 'slack:tasks (private)' -> 'slack:tasks'
             target = re.sub(r"\s*\([^)]*\)\s*$", "", target).strip()
+            # For Slack: strip per-thread suffix ' / topic <ts>' → unique channel id
+            if target.startswith("slack:"):
+                target = re.sub(r"\s*/\s*topic\s+\S+.*$", "", target).strip()
             if target:
                 methods[current_method].append(target)
 
+    # Deduplicate Slack targets to unique channel IDs
+    for method in methods:
+        if method.lower() == "slack":
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for t in methods[method]:
+                if t not in seen:
+                    seen.add(t)
+                    deduped.append(t)
+            methods[method] = deduped
+
     return methods
+
+
+# ── Slack channel name resolution ──────────────────────────────────────────
+
+_SLACK_CACHE_DIR = _real_home() / ".hermes" / "daedalus"
+_SLACK_CACHE_PATH = _SLACK_CACHE_DIR / "slack-channels.json"
+_SLACK_CACHE_TTL = 3600  # 1 hour
+
+
+def _load_slack_token() -> str | None:
+    """Read SLACK_BOT_TOKEN from ~/.hermes/.env. Never logs the token."""
+    env_path = _real_home() / ".hermes" / ".env"
+    if not env_path.exists():
+        return None
+    try:
+        for line in env_path.read_text().split("\n"):
+            line = line.strip()
+            if line.startswith("SLACK_BOT_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        return None
+    return None
+
+
+def _load_slack_cache() -> dict[str, dict[str, Any]]:
+    """Load the id→label cache from disk. Returns {} on any failure."""
+    if not _SLACK_CACHE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(_SLACK_CACHE_PATH.read_text())
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _save_slack_cache(cache: dict[str, dict[str, Any]]) -> None:
+    """Persist the id→label cache to disk. Never raises."""
+    try:
+        _SLACK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _SLACK_CACHE_PATH.write_text(json.dumps(cache, indent=2))
+    except OSError:
+        pass  # non-fatal — cache is best-effort
+
+
+def _resolve_slack_labels(channel_ids: list[str]) -> dict[str, str]:
+    """Resolve Slack channel IDs → human-readable labels via Slack Web API.
+
+    Uses SLACK_BOT_TOKEN from ~/.hermes/.env. Caches results in
+    ~/.hermes/daedalus/slack-channels.json with a 1-hour TTL.
+
+    Resolution rules:
+        - channel.name set → label ``#<name>``
+        - channel.is_im (DM) → resolve user → label ``DM: <real_name>``
+        - is_mpim / group with no name → label ``Group: <id>``
+        - Any failure (no token, non-200, ok:false, timeout, network error)
+          → graceful fallback to the raw ``slack:<id>`` label.
+
+    Never logs the token. Never raises.
+    """
+    token = _load_slack_token()
+    cache = _load_slack_cache()
+    now = time.time()
+    labels: dict[str, str] = {}
+
+    for cid in channel_ids:
+        # Strip "slack:" prefix to get bare channel ID for API calls
+        bare_id = cid
+        if cid.startswith("slack:"):
+            bare_id = cid.split(":", 1)[1]
+
+        # Check cache
+        cached = cache.get(bare_id)
+        if cached and isinstance(cached, dict) and (now - cached.get("ts", 0)) < _SLACK_CACHE_TTL:
+            labels[cid] = cached.get("label", f"slack:{bare_id}")
+            continue
+
+        if not token:
+            labels[cid] = f"slack:{bare_id}"
+            continue
+
+        # Resolve via Slack API
+        label = _resolve_one_slack_channel(bare_id, token)
+        labels[cid] = label
+
+        # Update cache
+        cache[bare_id] = {"label": label, "ts": now}
+
+    _save_slack_cache(cache)
+    return labels
+
+
+def _resolve_one_slack_channel(channel_id: str, token: str) -> str:
+    """Resolve a single Slack channel ID to a human-readable label.
+
+    Returns the label string. Never raises — falls back to ``slack:<id>``.
+    """
+    try:
+        # conversations.info
+        url = f"https://slack.com/api/conversations.info?channel={channel_id}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            json.JSONDecodeError, TimeoutError):
+        return f"slack:{channel_id}"
+
+    if not body.get("ok"):
+        return f"slack:{channel_id}"
+
+    channel = body.get("channel", {})
+
+    # Channel with a name → #<name>
+    if channel.get("name"):
+        return f"#{channel['name']}"
+
+    # DM → resolve user
+    if channel.get("is_im") and channel.get("user"):
+        user_label = _resolve_slack_user(channel["user"], token)
+        return f"DM: {user_label}"
+
+    # MPIM / group with no name
+    if channel.get("is_mpim") or channel.get("is_group"):
+        return f"Group: {channel_id}"
+
+    return f"slack:{channel_id}"
+
+
+def _resolve_slack_user(user_id: str, token: str) -> str:
+    """Resolve a Slack user ID to a display name. Never raises."""
+    try:
+        url = f"https://slack.com/api/users.info?user={user_id}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            json.JSONDecodeError, TimeoutError):
+        return f"@{user_id}"
+
+    if not body.get("ok"):
+        return f"@{user_id}"
+
+    user = body.get("user", {})
+    return user.get("real_name") or user.get("display_name") or f"@{user_id}"
 
 
 # ── Board slug derivation (mirrors _board_slug in daedalus_dispatch.py) ─
@@ -475,11 +664,20 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
         projects.append(_build_project_entry(proj, resolved.get("defaults", {})))
 
     # Add registry-only repos as lightweight entries
+    loader = ConfigLoader()
     for repo_path in registry_repos:
         if repo_path in seen_repos:
             continue
         seen_repos.add(repo_path)
-        name = Path(repo_path).name
+        # Resolve the per-repo config name (same source _resolve_project_path matches on)
+        name = Path(repo_path).name  # fallback
+        try:
+            resolved = loader.resolve_repo_config(repo_path)
+            cfg_name = resolved.get("name", "").strip()
+            if cfg_name:
+                name = cfg_name
+        except Exception:
+            pass  # graceful fallback to folder basename
         projects.append(_build_registry_only_entry(repo_path, name))
 
     return projects
@@ -762,12 +960,13 @@ async def post_project_config(request: Request, name: str) -> dict[str, Any]:
 
 
 @meta_router.get("/notifications")
-async def get_notifications(request: Request) -> dict[str, list[str]]:
+async def get_notifications(request: Request) -> dict[str, list[dict[str, str]]]:
     """Return notification methods and their deliverable targets.
 
     Calls ``hermes send --list`` and parses the output into a dict mapping
-    method names (e.g. 'Slack', 'Discord') to lists of raw target strings
-    (e.g. 'slack:tasks', 'discord:#general').
+    method names (e.g. 'Slack', 'Discord') to lists of ``{value, label}``
+    objects. Slack labels are resolved to human-readable names via the
+    Slack Web API (cached); non-Slack methods use the raw target as label.
 
     Degrades gracefully to an empty dict if the command is unavailable.
     """
