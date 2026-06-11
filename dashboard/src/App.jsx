@@ -1714,44 +1714,44 @@ function UninstallModal(props) {
   }
 
   if (result) {
-    return createElement("div", { style: S.overlay },
-      createElement("div", { style: Object.assign({}, S.modal, { maxWidth: 480 }) },
-        createElement("h2", { style: { marginTop: 0, color: result.ok ? "var(--color-success, #4ade80)" : "var(--color-danger, #f87171)" } },
+    return React.createElement("div", { style: S.overlay },
+      React.createElement("div", { style: Object.assign({}, S.modal, { maxWidth: 480 }) },
+        React.createElement("h2", { style: { marginTop: 0, color: result.ok ? "var(--color-success, #4ade80)" : "var(--color-danger, #f87171)" } },
           result.ok ? "✓ Uninstall complete" : "✗ Uninstall failed"),
-        result.error && createElement("p", { style: { color: "var(--color-danger, #f87171)", fontSize: 13 } }, result.error),
-        result.removed && result.removed.length > 0 && createElement("div", null,
-          createElement("p", { style: { fontWeight: 600, margin: "8px 0 4px" } }, "Removed:"),
-          createElement("ul", { style: { margin: 0, paddingLeft: 20, fontSize: 13 } },
-            result.removed.map(function (item, i) { return createElement("li", { key: i }, item); }))),
-        result.skipped && result.skipped.length > 0 && createElement("div", null,
-          createElement("p", { style: { fontWeight: 600, margin: "8px 0 4px" } }, "Skipped:"),
-          createElement("ul", { style: { margin: 0, paddingLeft: 20, fontSize: 13, opacity: 0.7 } },
-            result.skipped.map(function (item, i) { return createElement("li", { key: i }, item); }))),
-        createElement("p", { style: { fontSize: 13, marginTop: 12, opacity: 0.8 } },
+        result.error ? React.createElement("p", { style: { color: "var(--color-danger, #f87171)", fontSize: 13 } }, result.error) : null,
+        result.removed && result.removed.length > 0 ? React.createElement("div", null,
+          React.createElement("p", { style: { fontWeight: 600, margin: "8px 0 4px" } }, "Removed:"),
+          React.createElement("ul", { style: { margin: 0, paddingLeft: 20, fontSize: 13 } },
+            result.removed.map(function (item, i) { return React.createElement("li", { key: i }, item); }))) : null,
+        result.skipped && result.skipped.length > 0 ? React.createElement("div", null,
+          React.createElement("p", { style: { fontWeight: 600, margin: "8px 0 4px" } }, "Skipped:"),
+          React.createElement("ul", { style: { margin: 0, paddingLeft: 20, fontSize: 13, opacity: 0.7 } },
+            result.skipped.map(function (item, i) { return React.createElement("li", { key: i }, item); }))) : null,
+        React.createElement("p", { style: { fontSize: 13, marginTop: 12, opacity: 0.8 } },
           "Restart the Hermes gateway to complete removal of the dashboard tab."),
-        createElement("div", { style: { display: "flex", gap: 8, marginTop: 16 } },
-          createElement("button", { onClick: props.onClose, style: S.btn }, "Close"))));
+        React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 16 } },
+          React.createElement("button", { onClick: props.onClose, style: S.btn }, "Close"))));
   }
 
-  return createElement("div", { style: S.overlay },
-    createElement("div", { style: Object.assign({}, S.modal, { maxWidth: 420 }) },
-      createElement("h2", { style: { marginTop: 0 } }, "Uninstall Daedalus"),
-      createElement("p", { style: { fontSize: 14, lineHeight: 1.5 } },
+  return React.createElement("div", { style: S.overlay },
+    React.createElement("div", { style: Object.assign({}, S.modal, { maxWidth: 420 }) },
+      React.createElement("h2", { style: { marginTop: 0 } }, "Uninstall Daedalus"),
+      React.createElement("p", { style: { fontSize: 14, lineHeight: 1.5 } },
         "This will permanently remove:"),
-      createElement("ul", { style: { fontSize: 13, lineHeight: 1.8, paddingLeft: 20 } },
-        createElement("li", null, "All Daedalus cron jobs"),
-        createElement("li", null, "All 6 specialist agent profiles"),
-        createElement("li", null, "All non-default kanban boards"),
-        createElement("li", null, "The registry and plugin package")),
-      createElement("p", { style: { fontSize: 13, color: "var(--color-danger, #f87171)", fontWeight: 600 } },
+      React.createElement("ul", { style: { fontSize: 13, lineHeight: 1.8, paddingLeft: 20 } },
+        React.createElement("li", null, "All Daedalus cron jobs"),
+        React.createElement("li", null, "All 6 specialist agent profiles"),
+        React.createElement("li", null, "All non-default kanban boards"),
+        React.createElement("li", null, "The registry and plugin package")),
+      React.createElement("p", { style: { fontSize: 13, color: "var(--color-danger, #f87171)", fontWeight: 600 } },
         "⚠️ This cannot be undone."),
-      createElement("div", { style: { display: "flex", gap: 8, marginTop: 20 } },
-        createElement("button", {
+      React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 20 } },
+        React.createElement("button", {
           onClick: doUninstall,
           disabled: running,
           style: Object.assign({}, S.btnDanger, running ? { opacity: 0.6, cursor: "not-allowed" } : {})
         }, running ? "Uninstalling…" : "Uninstall"),
-        createElement("button", { onClick: props.onClose, disabled: running, style: S.btn }, "Cancel"))));
+        React.createElement("button", { onClick: props.onClose, disabled: running, style: S.btn }, "Cancel"))));
 }
 
 // ── main App ────────────────────────────────────────────────────────────────
