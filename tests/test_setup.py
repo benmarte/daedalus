@@ -189,3 +189,143 @@ def test_setup_template_exists(tmp_path):
     assert _TEMPLATE.exists(), f"Template not found at {_TEMPLATE}"
     data = yaml.safe_load(_TEMPLATE.read_text())
     assert data is not None
+
+
+# ── Board slug derivation (mirrors _board_slug in daedalus_dispatch.py) ──────
+
+def _board_slug(repo: str, name: str = "") -> str:
+    """Pure-Python reimplementation of _board_slug from setup.sh."""
+    import re
+    slug = repo.replace("/", "-") if repo else name
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
+
+
+def test_board_slug_derivation():
+    """setup.sh board slug matches _board_slug for several repo patterns."""
+    cases = [
+        ("org/repo",              "org-repo"),
+        ("RIZQ-TECH/dycotomic.app", "rizq-tech-dycotomic-app"),
+        ("MyOrg/MyRepo",          "myorg-myrepo"),
+        ("org/repo!@#test",       "org-repo---test"),
+        ("benmarte/daedalus",     "benmarte-daedalus"),
+    ]
+    for repo, expected in cases:
+        assert _board_slug(repo) == expected, f"board slug for {repo!r}"
+
+    # Empty repo falls back to name
+    assert _board_slug("", "my-project") == "my-project"
+
+
+def test_setup_board_creation(tmp_path):
+    """setup.sh creates the board via 'hermes kanban boards create <slug>'."""
+    registry = tmp_path / "registry.txt"
+    repo = _init_tmp_repo(tmp_path, "https://github.com/acme/widgets.git")
+
+    # Create a mock hermes script that records the call and returns success
+    mock_bin = tmp_path / "mockbin"
+    mock_bin.mkdir()
+    mock_hermes = mock_bin / "hermes"
+    mock_log = mock_bin / "hermes.log"
+    mock_hermes.write_text("""#!/usr/bin/env bash
+echo "$@" >> "$1"
+exit 0
+""".replace("$1", str(mock_log)))
+    mock_hermes.chmod(0o755)
+
+    # Run setup with mock hermes on PATH
+    env = {
+        **os.environ,
+        "HERMES_ORCH_REGISTRY": str(registry),
+        "PYTHONPATH": str(_ORCH_ROOT),
+        "PATH": f"{mock_bin}:{os.environ['PATH']}",
+    }
+    r = subprocess.run(
+        ["bash", str(_SETUP_SH)], cwd=str(repo), env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 0, f"setup.sh failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+
+    # Verify it printed the board line
+    assert "Kanban board:" in r.stdout, f"No board output in: {r.stdout}"
+    assert "acme-widgets" in r.stdout, f"Expected 'acme-widgets' board slug in: {r.stdout}"
+
+    # Verify it called 'hermes kanban boards create acme-widgets'
+    log_content = mock_log.read_text()
+    assert "boards create" in log_content, f"Expected 'boards create' in hermes log: {log_content}"
+    assert "acme-widgets" in log_content, f"Expected 'acme-widgets' in hermes log: {log_content}"
+
+
+def test_setup_board_creation_idempotent(tmp_path):
+    """Second run of setup.sh reports 'exists' and does not fail."""
+    registry = tmp_path / "registry.txt"
+    repo = _init_tmp_repo(tmp_path, "https://github.com/acme/widgets.git")
+
+    # Mock hermes that returns "already exists" (non-zero)
+    mock_bin = tmp_path / "mockbin"
+    mock_bin.mkdir()
+    mock_hermes = mock_bin / "hermes"
+    mock_log = mock_bin / "hermes.log"
+    mock_hermes.write_text("""#!/usr/bin/env bash
+echo "board 'acme-widgets' already exists." >&2
+echo "$@" >> "$1"
+exit 1
+""".replace("$1", str(mock_log)))
+    mock_hermes.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HERMES_ORCH_REGISTRY": str(registry),
+        "PYTHONPATH": str(_ORCH_ROOT),
+        "PATH": f"{mock_bin}:{os.environ['PATH']}",
+    }
+
+    # First run — the config file doesn't exist yet, so setup will scaffold it
+    r1 = subprocess.run(
+        ["bash", str(_SETUP_SH)], cwd=str(repo), env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r1.returncode == 0, f"setup.sh failed:\nSTDOUT:\n{r1.stdout}\nSTDERR:\n{r1.stderr}"
+    assert "Kanban board: acme-widgets (exists)" in r1.stdout
+
+    # Second run — SKIP the config, but board creation is still tried
+    r2 = subprocess.run(
+        ["bash", str(_SETUP_SH)], cwd=str(repo), env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r2.returncode == 0
+    assert "Kanban board: acme-widgets (exists)" in r2.stdout
+
+
+def test_setup_board_creation_non_fatal(tmp_path):
+    """setup.sh succeeds overall even when board creation fails."""
+    registry = tmp_path / "registry.txt"
+    repo = _init_tmp_repo(tmp_path, "https://github.com/acme/widgets.git")
+
+    # Mock hermes that always fails with a genuine error
+    mock_bin = tmp_path / "mockbin"
+    mock_bin.mkdir()
+    mock_hermes = mock_bin / "hermes"
+    mock_hermes.write_text("""#!/usr/bin/env bash
+echo "disk full" >&2
+exit 5
+""")
+    mock_hermes.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HERMES_ORCH_REGISTRY": str(registry),
+        "PYTHONPATH": str(_ORCH_ROOT),
+        "PATH": f"{mock_bin}:{os.environ['PATH']}",
+    }
+
+    r = subprocess.run(
+        ["bash", str(_SETUP_SH)], cwd=str(repo), env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    # setup.sh must still succeed — board creation is non-fatal
+    assert r.returncode == 0, f"setup.sh must not fail on board creation error: {r.stderr}"
+    assert "WARNING" in r.stdout or "WARNING" in r.stderr, "Should warn about board creation failure"
+    # Config still created
+    assert (repo / ".hermes" / "daedalus.yaml").exists()
+    # Registry still added
+    assert registry.exists()

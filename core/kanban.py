@@ -30,12 +30,23 @@ def _hk(args: List[str], timeout: int = 60):
 
 
 def ensure_board(slug: str) -> bool:
-    """Create the board if missing (idempotent). True if usable."""
-    rc, _, err = _hk(["--board", slug, "init"])
-    if rc != 0:
-        logger.warning("kanban: could not ensure board '%s': %s", slug, (err or "").strip())
-        return False
-    return True
+    """Create the board if missing (idempotent). True if usable.
+
+    In Hermes v0.16.0+ ``hermes kanban --board <slug> init`` REQUIRES the
+    board to already exist, so it NEVER creates one.  The correct command is
+    ``hermes kanban boards create <slug>``, which creates the board if absent
+    and succeeds (exit 0) when it already exists.
+    """
+    rc, out, err = _hk(["boards", "create", slug])
+    if rc == 0:
+        return True
+    # Some versions may return non-zero with an "already exists" message
+    # (e.g. stderr).  Treat that as success — the board is usable.
+    combined = ((out or "") + (err or "")).lower()
+    if "already exists" in combined or "already exist" in combined:
+        return True
+    logger.warning("kanban: could not ensure board '%s': %s", slug, (err or "").strip())
+    return False
 
 
 def list_issue_numbers(slug: str) -> Set[int]:
