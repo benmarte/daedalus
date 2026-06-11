@@ -88,7 +88,9 @@ class GitHubProvider(VCSProvider):
         try:
             data = self._http.get_json(f"/repos/{self.repo}/issues/{issue_number}")
             return (data.get("state") or "open").lower()
-        except ProviderError:
+        except ProviderError as e:
+            if e.status_code == 404:
+                return "closed"  # deleted or transferred issue — treat as closed
             return None
 
     # ── pull requests ────────────────────────────────────────────────────────

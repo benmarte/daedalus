@@ -97,7 +97,9 @@ class GitLabProvider(VCSProvider):
             data = self._http.get_json(f"{self._proj}/issues/{issue_number}")
             state = (data.get("state") or "opened").lower()
             return "closed" if state == "closed" else "open"
-        except ProviderError:
+        except ProviderError as e:
+            if e.status_code == 404:
+                return "closed"
             return None
 
     # ── merge requests ───────────────────────────────────────────────────────
