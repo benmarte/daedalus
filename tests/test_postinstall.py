@@ -157,7 +157,7 @@ class TestRunProvision:
         script_dir = tmp_path / "scripts"
         script_dir.mkdir()
         (script_dir / "provision_roster.sh").write_text(
-            "#!/bin/bash\necho '=== project-manager ==='\necho '=== developer ==='\necho 'roster done'\n"
+            "#!/bin/bash\necho '=== project-manager-daedalus ==='\necho '=== developer-daedalus ==='\necho 'roster done'\n"
         )
         (script_dir / "provision_roster.sh").chmod(0o755)
 
@@ -186,14 +186,14 @@ class TestRunProvision:
 
     def test_extract_profiles(self, postinstall):
         output = """
-=== project-manager ===
+=== project-manager-daedalus ===
   skills: spec-driven-development ...
-=== developer ===
+=== developer-daedalus ===
   skills: context-engineering ...
 === roster provisioned ===
 """
         profiles = postinstall._extract_profiles_from_output(output)
-        assert profiles == ["project-manager", "developer"]
+        assert profiles == ["project-manager-daedalus", "developer-daedalus"]
 
 
 # ── main() integration tests ─────────────────────────────────────────────────
@@ -211,7 +211,7 @@ class TestMain:
         script_dir = tmp_path / "scripts"
         script_dir.mkdir()
         (script_dir / "provision_roster.sh").write_text(
-            "#!/bin/bash\necho '=== developer ==='\necho 'done'\n"
+            "#!/bin/bash\necho '=== developer-daedalus ==='\necho 'done'\n"
         )
         (script_dir / "provision_roster.sh").chmod(0o755)
 
@@ -223,7 +223,7 @@ class TestMain:
                     # provision_roster.sh
                     mock.Mock(
                         returncode=0,
-                        stdout="=== developer ===\ndone\n",
+                        stdout="=== developer-daedalus ===\ndone\n",
                         stderr="",
                     ),
                 ]

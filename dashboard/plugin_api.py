@@ -1510,8 +1510,8 @@ async def get_meta_pick_directory(request: Request) -> dict[str, Any]:
 # ── Roster provisioning ──────────────────────────────────────────────────────
 
 _ROSTER_PROFILES = [
-    "project-manager", "planner", "developer",
-    "reviewer", "security-analyst", "documentation",
+    "project-manager-daedalus", "planner-daedalus", "developer-daedalus",
+    "reviewer-daedalus", "security-analyst-daedalus", "documentation-daedalus",
 ]
 _PROVISION_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "provision_roster.sh"
 
@@ -1586,8 +1586,8 @@ async def post_provision_roster(request: Request) -> dict[str, Any]:
 
 
 _DAEDALUS_PROFILES = [
-    "developer", "reviewer", "security-analyst",
-    "documentation", "planner", "project-manager",
+    "developer-daedalus", "reviewer-daedalus", "security-analyst-daedalus",
+    "documentation-daedalus", "planner-daedalus", "project-manager-daedalus",
 ]
 
 def _hermes_cmd(*args: str, timeout: int = 30) -> tuple[bool, str]:

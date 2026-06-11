@@ -105,7 +105,7 @@ def classify_blocked(
     effective_pr = handoff["pr_number"] or pr_number
 
     # ── developer card ───────────────────────────────────────────────────
-    if assignee == "developer":
+    if assignee == "developer-daedalus":
         # Exceeded max fix attempts → escalate
         if fix_attempts >= MAX_FIX_ATTEMPTS:
             return ESCALATE
@@ -119,7 +119,7 @@ def classify_blocked(
         return ""
 
     # ── reviewer / security-analyst card ─────────────────────────────────
-    if assignee in ("reviewer", "security-analyst"):
+    if assignee in ("reviewer-daedalus", "security-analyst-daedalus"):
         # Exceeded max fix attempts → escalate
         if fix_attempts >= MAX_FIX_ATTEMPTS:
             return ESCALATE
@@ -326,7 +326,7 @@ def _execute_dev_fix_ci(
         slug,
         title,
         body=body,
-        assignee="developer",
+        assignee="developer-daedalus",
         workspace=ws,
         idempotency_key=idem_key,
     )
@@ -348,7 +348,7 @@ def _execute_pm_route(
     handoff_text: str,
     *,
     workdir: str = "",
-    router_profile: str = "project-manager",
+    router_profile: str = "project-manager-daedalus",
     dry_run: bool = False,
     pr_number: Optional[int] = None,
     **_kwargs: Any,
@@ -470,7 +470,7 @@ def _execute_legacy_dev_fix_review(
         slug,
         title,
         body=body,
-        assignee="developer",
+        assignee="developer-daedalus",
         workspace=ws,
         idempotency_key=idem_key,
     )
@@ -585,7 +585,7 @@ def run_iterate(
 
     workdir = (resolved or {}).get("workdir", "")
     notify_target = (resolved or {}).get("cron", {}).get("deliver", "")
-    router_profile = (resolved or {}).get("router_profile", "project-manager")
+    router_profile = (resolved or {}).get("router_profile", "project-manager-daedalus")
 
     blocked_cards = kanban.list_blocked(slug)
     if not blocked_cards:

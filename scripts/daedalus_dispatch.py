@@ -472,7 +472,7 @@ def _deliver_doc_reports(
 
     for card in doc_cards:
         assignee = (card.get("assignee") or "").strip()
-        if assignee != "documentation":
+        if assignee != "documentation-daedalus":
             continue
 
         # Resolve the PR number: try the card's body/events for a PR reference,

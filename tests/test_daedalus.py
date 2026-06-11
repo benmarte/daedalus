@@ -469,7 +469,7 @@ def test_deliver_doc_reports_idempotent():
     disp = _load_dispatch()
 
     doc_card = {
-        "id": "t_doc_1", "assignee": "documentation",
+        "id": "t_doc_1", "assignee": "documentation-daedalus",
         "body": "Write report. PR #42 is ready.",
         "latest_summary": "Report posted.", "parents": [],
     }
@@ -511,7 +511,7 @@ def test_deliver_doc_reports_send_failure():
     disp = _load_dispatch()
 
     doc_card = {
-        "id": "t_doc_1", "assignee": "documentation",
+        "id": "t_doc_1", "assignee": "documentation-daedalus",
         "body": "PR #42.", "latest_summary": "", "parents": [],
     }
 
@@ -540,7 +540,7 @@ def test_deliver_doc_reports_send_failure():
 def test_deliver_doc_reports_non_doc_assignee():
     """_deliver_doc_reports skips cards not assigned to documentation."""
     disp = _load_dispatch()
-    dev_card = {"id": "t_dev", "assignee": "developer", "body": "PR #42.",
+    dev_card = {"id": "t_dev", "assignee": "developer-daedalus", "body": "PR #42.",
                 "latest_summary": "", "parents": []}
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[dev_card]):
         result = disp._deliver_doc_reports("slug", gp, "slack:tasks")
@@ -550,7 +550,7 @@ def test_deliver_doc_reports_non_doc_assignee():
 def test_deliver_doc_reports_no_pr():
     """_deliver_doc_reports skips doc cards with no resolvable PR."""
     disp = _load_dispatch()
-    doc_card = {"id": "t_doc", "assignee": "documentation", "body": "No PR ref.",
+    doc_card = {"id": "t_doc", "assignee": "documentation-daedalus", "body": "No PR ref.",
                 "latest_summary": "", "parents": []}
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
         with mock.patch.object(disp, "_parse_pr_from_card", return_value=None):
@@ -562,7 +562,7 @@ def test_deliver_doc_reports_no_pr():
 def test_deliver_doc_reports_no_doc_comment():
     """_deliver_doc_reports skips when no **Agent: documentation** comment exists."""
     disp = _load_dispatch()
-    doc_card = {"id": "t_doc", "assignee": "documentation", "body": "PR #42.",
+    doc_card = {"id": "t_doc", "assignee": "documentation-daedalus", "body": "PR #42.",
                 "latest_summary": "", "parents": []}
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
         with mock.patch.object(gp, "pr_has_delivery_marker", return_value=False):
@@ -574,7 +574,7 @@ def test_deliver_doc_reports_no_doc_comment():
 def test_deliver_doc_reports_dry_run():
     """_deliver_doc_reports in dry_run mode logs but does NOT send."""
     disp = _load_dispatch()
-    doc_card = {"id": "t_doc", "assignee": "documentation", "body": "PR #42.",
+    doc_card = {"id": "t_doc", "assignee": "documentation-daedalus", "body": "PR #42.",
                 "latest_summary": "", "parents": []}
     send_calls = []
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
@@ -746,7 +746,7 @@ def test_notify_project_summary_fans_out():
 def test_deliver_doc_reports_multi_target():
     """_deliver_doc_reports fans a report out to every configured target."""
     disp = _load_dispatch()
-    doc_card = {"id": "t_doc", "assignee": "documentation", "body": "PR #42.",
+    doc_card = {"id": "t_doc", "assignee": "documentation-daedalus", "body": "PR #42.",
                 "latest_summary": "", "parents": []}
     sent = []
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):

@@ -44,7 +44,7 @@ def registry_repo(tmp_path):
         "workdir": str(repo),
         "vcs": {"target_branch": "dev"},
         "tracking": {"github_project_number": 1},
-        "execution": {"worker_profile": "developer"},
+        "execution": {"worker_profile": "developer-daedalus"},
         "cron": {"schedule": "60m", "deliver": "slack:#engineering"},
         "sources": {"github": {"enabled": True}, "local_specs": {"enabled": False}},
     }
@@ -371,7 +371,7 @@ def project_repo_dir():
             "repo": "org/test-project",
             "workdir": str(repo),
             "vcs": {"target_branch": "main"},
-            "execution": {"worker_profile": "developer"},
+            "execution": {"worker_profile": "developer-daedalus"},
             "cron": {"schedule": "30m"},
         }
         (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
@@ -404,7 +404,7 @@ def test_get_project_config_returns_resolved_config(project_client, project_repo
     # Should have resolved config fields
     assert data["workdir"] == str(project_repo_dir.resolve())
     assert data["vcs"]["target_branch"] == "main"
-    assert data["execution"]["worker_profile"] == "developer"
+    assert data["execution"]["worker_profile"] == "developer-daedalus"
 
 
 def test_get_project_config_strips_secrets(project_client, project_repo_dir):
@@ -451,7 +451,7 @@ def test_post_project_config_persists_editable_fields(project_client, project_re
         payload = {
             "vcs": {"target_branch": "dev"},
             "cron": {"schedule": "15m"},
-            "execution": {"worker_profile": "developer"},
+            "execution": {"worker_profile": "developer-daedalus"},
         }
 
         resp = project_client.post(

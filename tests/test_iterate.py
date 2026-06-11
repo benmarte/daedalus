@@ -60,7 +60,7 @@ def _load_dispatch():
 def test_classify_blocked_dev_green():
     """Developer + review-required with PR + CI green → advance."""
     result = iterate.classify_blocked(
-        "developer",
+        "developer-daedalus",
         "review-required: PR #42 shipped, all tests pass",
         ci_green=True,
     )
@@ -70,7 +70,7 @@ def test_classify_blocked_dev_green():
 def test_classify_blocked_dev_red():
     """Developer + review-required with PR + CI red → dev_fix_ci."""
     result = iterate.classify_blocked(
-        "developer",
+        "developer-daedalus",
         "review-required: PR #42 — CI failing",
         ci_green=False,
     )
@@ -80,7 +80,7 @@ def test_classify_blocked_dev_red():
 def test_classify_blocked_dev_escalate():
     """Developer + CI red + fix_attempts >= max → escalate."""
     result = iterate.classify_blocked(
-        "developer",
+        "developer-daedalus",
         "review-required: PR #42 — CI failing",
         ci_green=False,
         fix_attempts=3,
@@ -88,7 +88,7 @@ def test_classify_blocked_dev_escalate():
     check("dev over max → escalate", result == iterate.ESCALATE)
 
     result2 = iterate.classify_blocked(
-        "developer",
+        "developer-daedalus",
         "review-required: PR #42",
         ci_green=True,
         fix_attempts=5,
@@ -99,7 +99,7 @@ def test_classify_blocked_dev_escalate():
 def test_classify_blocked_dev_no_pr():
     """Developer + no PR in handoff → empty string (no action)."""
     result = iterate.classify_blocked(
-        "developer",
+        "developer-daedalus",
         "some other block reason",
         ci_green=True,
     )
@@ -109,7 +109,7 @@ def test_classify_blocked_dev_no_pr():
 def test_classify_blocked_reviewer_changes():
     """Reviewer + changes requested → pm_route."""
     result = iterate.classify_blocked(
-        "reviewer",
+        "reviewer-daedalus",
         "review-required: CHANGES REQUESTED — SQL injection in api/search.py",
         ci_green=True,
     )
@@ -119,7 +119,7 @@ def test_classify_blocked_reviewer_changes():
 def test_classify_blocked_reviewer_approved():
     """Reviewer + approved → approve_advance."""
     result = iterate.classify_blocked(
-        "reviewer",
+        "reviewer-daedalus",
         "review-required: APPROVED. PR #42 looks good.",
         ci_green=True,
     )
@@ -129,7 +129,7 @@ def test_classify_blocked_reviewer_approved():
 def test_classify_blocked_reviewer_escalate():
     """Reviewer + changes requested + fix_attempts >= max → escalate."""
     result = iterate.classify_blocked(
-        "reviewer",
+        "reviewer-daedalus",
         "review-required: CHANGES REQUESTED",
         ci_green=True,
         fix_attempts=3,
@@ -140,7 +140,7 @@ def test_classify_blocked_reviewer_escalate():
 def test_classify_blocked_security_approved():
     """Security-analyst + approved → approve_advance."""
     result = iterate.classify_blocked(
-        "security-analyst",
+        "security-analyst-daedalus",
         "review-required: No findings. Approved for merge.",
         ci_green=True,
     )
@@ -150,7 +150,7 @@ def test_classify_blocked_security_approved():
 def test_classify_blocked_security_findings():
     """Security-analyst + blocking findings → pm_route."""
     result = iterate.classify_blocked(
-        "security-analyst",
+        "security-analyst-daedalus",
         "review-required: BLOCKING FINDINGS — hardcoded secret in config.py",
         ci_green=True,
     )
@@ -160,7 +160,7 @@ def test_classify_blocked_security_findings():
 def test_classify_blocked_unknown_assignee():
     """Unknown assignee → no action."""
     result = iterate.classify_blocked(
-        "documentation",
+        "documentation-daedalus",
         "review-required: APPROVED",
         ci_green=True,
     )
@@ -169,7 +169,7 @@ def test_classify_blocked_unknown_assignee():
 
 def test_classify_blocked_empty_handoff():
     """Empty handoff → no action."""
-    result = iterate.classify_blocked("developer", "", ci_green=True)
+    result = iterate.classify_blocked("developer-daedalus", "", ci_green=True)
     check("empty handoff → no action", result == "")
 
 
@@ -182,7 +182,7 @@ def test_classify_blocked_variant_approval():
         "no findings, :+1:",
         "approved. merge when ready.",
     ):
-        result = iterate.classify_blocked("reviewer", text, ci_green=True)
+        result = iterate.classify_blocked("reviewer-daedalus", text, ci_green=True)
         check(f"approval phrase '{text[:40]}' → approve_advance", result == iterate.APPROVE_ADVANCE)
 
 
@@ -194,7 +194,7 @@ def test_classify_blocked_variant_changes():
         "request changes: missing error handling.",
         "changes required before approval.",
     ):
-        result = iterate.classify_blocked("reviewer", text, ci_green=True)
+        result = iterate.classify_blocked("reviewer-daedalus", text, ci_green=True)
         check(f"changes phrase '{text[:40]}' → pm_route", result == iterate.PM_ROUTE)
 
 
@@ -340,7 +340,7 @@ def test_execute_dev_fix_ci():
     call_args = mk_create.call_args[1]
     check("idempotency key has attempt 1",
           "attempt-1" in call_args["idempotency_key"])
-    check("assignee is developer", call_args["assignee"] == "developer")
+    check("assignee is developer", call_args["assignee"] == "developer-daedalus")
 
 
 def test_execute_pm_route():
@@ -356,13 +356,13 @@ def test_execute_pm_route():
                 ok = iterate._execute_pm_route(
                     "slug", card, "O/R",
                     "review-required: CHANGES REQUESTED — fix X",
-                    router_profile="project-manager",
+                    router_profile="project-manager-daedalus",
                 )
     check("pm_route returns True", ok is True)
     mk_create.assert_called_once()
     # Verify PM card is created with goal=True
     pos_args, call_kwargs = mk_create.call_args
-    check("pm card assignee is project-manager", call_kwargs["assignee"] == "project-manager")
+    check("pm card assignee is project-manager", call_kwargs["assignee"] == "project-manager-daedalus")
     check("pm card has goal=True", call_kwargs["goal"] is True)
     check("pm body has findings", "fix X" in call_kwargs["body"])
     check("pm title mentions PM-ROUTE", "PM-ROUTE" in pos_args[1])  # title is positional arg 1
@@ -389,7 +389,7 @@ def test_execute_pm_route_empty_profile_fallback():
                 )
     check("pm_route empty profile → fallback returns True", ok is True)
     call_kwargs = mk_create.call_args[1]
-    check("fallback assignee is developer", call_kwargs["assignee"] == "developer")
+    check("fallback assignee is developer", call_kwargs["assignee"] == "developer-daedalus")
     check("fallback does NOT use goal", call_kwargs.get("goal") != True)
 
 
@@ -446,7 +446,7 @@ def test_run_iterate_dev_advance():
     """Blocked dev card with green CI → advance."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "runs": [{"reason": "review-required: PR #42 shipped"}],
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
@@ -462,7 +462,7 @@ def test_run_iterate_dev_fix_ci():
     """Blocked dev card with red CI → dev_fix_ci."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "runs": [{"reason": "review-required: PR #42 CI red"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
@@ -478,7 +478,7 @@ def test_run_iterate_reviewer_changes():
     """Blocked reviewer card with changes requested → pm_route."""
     cards = [{
         "id": "t_rev",
-        "assignee": "reviewer",
+        "assignee": "reviewer-daedalus",
         "runs": [{"reason": "review-required: CHANGES REQUESTED — fix auth"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
@@ -495,7 +495,7 @@ def test_run_iterate_reviewer_approved():
     """Blocked reviewer card with approved → approve_advance."""
     cards = [{
         "id": "t_rev",
-        "assignee": "reviewer",
+        "assignee": "reviewer-daedalus",
         "runs": [{"reason": "review-required: APPROVED"}],
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
@@ -509,7 +509,7 @@ def test_run_iterate_escalate():
     """Blocked card with fix_attempts >= MAX → escalate."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "runs": [
             {"reason": "review-required: PR #42 CI red",
              "metadata": {"fix_attempts": 3}},  # at cap
@@ -527,17 +527,17 @@ def test_run_iterate_mixed():
     cards = [
         {
             "id": "t_dev_green",
-            "assignee": "developer",
+            "assignee": "developer-daedalus",
             "runs": [{"reason": "review-required: PR #1"}],
         },
         {
             "id": "t_rev_approved",
-            "assignee": "reviewer",
+            "assignee": "reviewer-daedalus",
             "runs": [{"reason": "review-required: APPROVED PR #1"}],
         },
         {
             "id": "t_unknown",
-            "assignee": "documentation",
+            "assignee": "documentation-daedalus",
             "runs": [{"reason": "some block"}],
         },
     ]
@@ -556,7 +556,7 @@ def test_run_iterate_dry_run():
     """dry_run=True does not call mutating kanban methods."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "runs": [{"reason": "review-required: PR #1"}],
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
@@ -575,12 +575,12 @@ def test_run_iterate_ci_cache():
     cards = [
         {
             "id": "t_a",
-            "assignee": "developer",
+            "assignee": "developer-daedalus",
             "runs": [{"reason": "review-required: PR #42"}],
         },
         {
             "id": "t_b",
-            "assignee": "reviewer",
+            "assignee": "reviewer-daedalus",
             "runs": [{"reason": "APPROVED PR #42"}],
         },
     ]
@@ -738,7 +738,7 @@ def test_diagnostics_non_json_returns_empty():
 def test_create_task_passes_goal():
     """kanban.create_task passes --goal when goal=True."""
     with mock.patch("core.kanban._hk", return_value=(0, "t_test", "")) as mk:
-        kanban.create_task("slug", "title", assignee="developer", goal=True)
+        kanban.create_task("slug", "title", assignee="developer-daedalus", goal=True)
     args = mk.call_args[0][0]
     check("--goal in create_task args", "--goal" in args)
 
@@ -746,7 +746,7 @@ def test_create_task_passes_goal():
 def test_create_task_passes_goal_max_turns():
     """kanban.create_task passes --goal-max-turns when goal_max_turns is set."""
     with mock.patch("core.kanban._hk", return_value=(0, "t_test", "")) as mk:
-        kanban.create_task("slug", "title", assignee="developer", goal=True, goal_max_turns=10)
+        kanban.create_task("slug", "title", assignee="developer-daedalus", goal=True, goal_max_turns=10)
     args = mk.call_args[0][0]
     check("--goal in args", "--goal" in args)
     check("--goal-max-turns 10 in args", "--goal-max-turns" in args and "10" in args)
@@ -755,7 +755,7 @@ def test_create_task_passes_goal_max_turns():
 def test_create_task_no_goal_by_default():
     """kanban.create_task NOT passes --goal when goal=False (default)."""
     with mock.patch("core.kanban._hk", return_value=(0, "t_test", "")) as mk:
-        kanban.create_task("slug", "title", assignee="developer")
+        kanban.create_task("slug", "title", assignee="developer-daedalus")
     args = mk.call_args[0][0]
     check("--goal NOT in create_task args", "--goal" not in args)
 
@@ -773,7 +773,7 @@ def test_run_iterate_falls_back_to_show_card_for_handoff():
     # Minimal list_blocked result (no runs, no reason)
     minimal_cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
     }]
     # show_card returns full detail with latest_summary
     full_card = {
@@ -794,7 +794,7 @@ def test_run_iterate_show_card_fallback_skip_on_failure():
     """show_card returning None → card skipped (graceful degradation)."""
     minimal_cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=minimal_cards):
         with mock.patch.object(kanban, "show_card", return_value=None):
@@ -807,7 +807,7 @@ def test_run_iterate_show_card_no_latest_summary():
     """show_card returns dict without latest_summary → card skipped."""
     minimal_cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=minimal_cards):
         with mock.patch.object(kanban, "show_card", return_value={"id": "t_dev"}):
@@ -823,7 +823,7 @@ def test_run_iterate_respects_router_profile_config():
     """run_iterate passes router_profile from resolved config to executor."""
     cards = [{
         "id": "t_rev",
-        "assignee": "reviewer",
+        "assignee": "reviewer-daedalus",
         "runs": [{"reason": "review-required: CHANGES REQUESTED — fix X"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
@@ -844,7 +844,7 @@ def test_run_iterate_default_router_profile():
     """run_iterate defaults router_profile to 'project-manager' when not in config."""
     cards = [{
         "id": "t_rev",
-        "assignee": "reviewer",
+        "assignee": "reviewer-daedalus",
         "runs": [{"reason": "review-required: CHANGES REQUESTED — fix X"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
@@ -855,7 +855,7 @@ def test_run_iterate_default_router_profile():
                     with mock.patch.object(gp, "pr_ci_green", return_value=True):
                         iterate.run_iterate("slug", "O/R", provider=gp, resolved={})
     call_kwargs = mk_create.call_args[1]
-    check("default router_profile → assignee is project-manager", call_kwargs["assignee"] == "project-manager")
+    check("default router_profile → assignee is project-manager", call_kwargs["assignee"] == "project-manager-daedalus")
 
 
 # ── branch→PR fallback ────────────────────────────────────────────────────────
@@ -865,7 +865,7 @@ def test_classify_blocked_pr_number_fallback():
     """classify_blocked uses pr_number kwarg when handoff has no PR."""
     # handoff has no PR, but pr_number=42 provided
     result = iterate.classify_blocked(
-        "developer",
+        "developer-daedalus",
         "review-required: all tests pass, CI green",
         ci_green=True,
         pr_number=42,
@@ -874,7 +874,7 @@ def test_classify_blocked_pr_number_fallback():
 
     # handoff WITH PR still wins (handoff takes priority)
     result2 = iterate.classify_blocked(
-        "developer",
+        "developer-daedalus",
         "review-required: PR #99 shipped",
         ci_green=True,
         pr_number=42,  # should be ignored; handoff's #99 wins
@@ -886,7 +886,7 @@ def test_run_iterate_branch_pr_fallback():
     """run_iterate advances a dev card whose handoff has no PR but branch resolves to one."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "branch_name": "feat/my-feature",
         "runs": [{"reason": "review-required: CI green, shipped"}],
     }]
@@ -904,7 +904,7 @@ def test_run_iterate_branch_pr_fallback_no_match():
     """branch→PR lookup returns None → card skipped (graceful)."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "branch_name": "feat/nonexistent",
         "runs": [{"reason": "review-required: CI green"}],
     }]
@@ -920,7 +920,7 @@ def test_run_iterate_handoff_pr_still_works():
     """Existing handoff-PR path still works alongside the new branch fallback."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "branch_name": "feat/other",
         "runs": [{"reason": "review-required: PR #55 shipped"}],
     }]
@@ -940,7 +940,7 @@ def test_run_iterate_branch_pr_fallback_ci_red():
     """branch PR + CI red → dev_fix_ci still created."""
     cards = [{
         "id": "t_dev",
-        "assignee": "developer",
+        "assignee": "developer-daedalus",
         "branch_name": "feat/broken",
         "runs": [{"reason": "review-required: CI failing"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",

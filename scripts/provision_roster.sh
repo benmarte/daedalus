@@ -153,27 +153,27 @@ PY
 
 # ── Role -> agent-skills matrix (lifecycle-aligned, 6-agent lean team) ──────────────────
 
-setup_role project-manager \
+setup_role project-manager-daedalus \
   "Refines an issue into clear scope and acceptance criteria, breaks it into work, tracks acceptance, and runs the pre-ship checklist. Coordinates the team; writes no code." \
   idea-refine spec-driven-development planning-and-task-breakdown shipping-and-launch using-agent-skills
 
-setup_role planner \
+setup_role planner-daedalus \
   "Turns a spec into an ordered, verifiable task graph and stable interface contracts. Owns architecture and decomposition; writes no code." \
   spec-driven-development planning-and-task-breakdown context-engineering source-driven-development api-and-interface-design using-agent-skills
 
-setup_role developer \
+setup_role developer-daedalus \
   "Implements features and bug fixes: writes code plus tests in a git worktree, drives CI to green with no conflicts, and opens a PR." \
   context-engineering source-driven-development incremental-implementation test-driven-development frontend-ui-engineering api-and-interface-design debugging-and-error-recovery git-workflow-and-versioning using-agent-skills
 
-setup_role reviewer \
+setup_role reviewer-daedalus \
   "Reviews diffs for correctness, quality, and performance; approves or blocks with specific, actionable findings." \
   code-review-and-quality code-simplification performance-optimization test-driven-development debugging-and-error-recovery git-workflow-and-versioning using-agent-skills
 
-setup_role security-analyst \
+setup_role security-analyst-daedalus \
   "Audits diffs for vulnerabilities (OWASP, authn/z, secrets, injection, SSRF); blocks on risk with severity-rated findings." \
   security-and-hardening code-review-and-quality source-driven-development debugging-and-error-recovery using-agent-skills
 
-setup_role documentation \
+setup_role documentation-daedalus \
   "Writes and updates READMEs, ADRs, and changelogs from merged work; verifies documentation against the actual code." \
   documentation-and-adrs source-driven-development context-engineering using-agent-skills
 
