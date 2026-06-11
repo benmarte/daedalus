@@ -84,6 +84,7 @@ fetchJSON = function (url, opts) {
 
 var API_PROJECTS = "/api/plugins/daedalus/projects";
 var API_PROJECT_CREATE = "/api/plugins/daedalus/project/create";
+var API_UNINSTALL = "/api/plugins/daedalus/meta/uninstall";
 var apiProjectConfig = function (name) { return "/api/plugins/daedalus/project/" + encodeURIComponent(name) + "/config"; };
 var apiMetaUrl = function (name, endpoint) { return "/api/plugins/daedalus/meta/" + endpoint + "?project=" + encodeURIComponent(name); };
 
@@ -1700,6 +1701,59 @@ function AddProjectModal(props) {
   );
 }
 
+// ── UninstallModal ───────────────────────────────────────────────────────────
+function UninstallModal(props) {
+  var busy = useState(false); var running = busy[0], setRunning = busy[1];
+  var res = useState(null); var result = res[0], setResult = res[1];
+
+  function doUninstall() {
+    setRunning(true);
+    fetchJSON(API_UNINSTALL, { method: "POST" })
+      .then(function (d) { setResult(d); setRunning(false); })
+      .catch(function (err) { setResult({ ok: false, removed: [], skipped: [], error: String(err) }); setRunning(false); });
+  }
+
+  if (result) {
+    return createElement("div", { style: S.overlay },
+      createElement("div", { style: Object.assign({}, S.modal, { maxWidth: 480 }) },
+        createElement("h2", { style: { marginTop: 0, color: result.ok ? "var(--color-success, #4ade80)" : "var(--color-danger, #f87171)" } },
+          result.ok ? "✓ Uninstall complete" : "✗ Uninstall failed"),
+        result.error && createElement("p", { style: { color: "var(--color-danger, #f87171)", fontSize: 13 } }, result.error),
+        result.removed && result.removed.length > 0 && createElement("div", null,
+          createElement("p", { style: { fontWeight: 600, margin: "8px 0 4px" } }, "Removed:"),
+          createElement("ul", { style: { margin: 0, paddingLeft: 20, fontSize: 13 } },
+            result.removed.map(function (item, i) { return createElement("li", { key: i }, item); }))),
+        result.skipped && result.skipped.length > 0 && createElement("div", null,
+          createElement("p", { style: { fontWeight: 600, margin: "8px 0 4px" } }, "Skipped:"),
+          createElement("ul", { style: { margin: 0, paddingLeft: 20, fontSize: 13, opacity: 0.7 } },
+            result.skipped.map(function (item, i) { return createElement("li", { key: i }, item); }))),
+        createElement("p", { style: { fontSize: 13, marginTop: 12, opacity: 0.8 } },
+          "Restart the Hermes gateway to complete removal of the dashboard tab."),
+        createElement("div", { style: { display: "flex", gap: 8, marginTop: 16 } },
+          createElement("button", { onClick: props.onClose, style: S.btn }, "Close"))));
+  }
+
+  return createElement("div", { style: S.overlay },
+    createElement("div", { style: Object.assign({}, S.modal, { maxWidth: 420 }) },
+      createElement("h2", { style: { marginTop: 0 } }, "Uninstall Daedalus"),
+      createElement("p", { style: { fontSize: 14, lineHeight: 1.5 } },
+        "This will permanently remove:"),
+      createElement("ul", { style: { fontSize: 13, lineHeight: 1.8, paddingLeft: 20 } },
+        createElement("li", null, "All Daedalus cron jobs"),
+        createElement("li", null, "All 6 specialist agent profiles"),
+        createElement("li", null, "All non-default kanban boards"),
+        createElement("li", null, "The registry and plugin package")),
+      createElement("p", { style: { fontSize: 13, color: "var(--color-danger, #f87171)", fontWeight: 600 } },
+        "⚠️ This cannot be undone."),
+      createElement("div", { style: { display: "flex", gap: 8, marginTop: 20 } },
+        createElement("button", {
+          onClick: doUninstall,
+          disabled: running,
+          style: Object.assign({}, S.btnDanger, running ? { opacity: 0.6, cursor: "not-allowed" } : {})
+        }, running ? "Uninstalling…" : "Uninstall"),
+        createElement("button", { onClick: props.onClose, disabled: running, style: S.btn }, "Cancel"))));
+}
+
 // ── main App ────────────────────────────────────────────────────────────────
 function App() {
   var s = useState(null); var data = s[0], setData = s[1];
@@ -1710,6 +1764,7 @@ function App() {
   var rs = useState(null); var rosterStatus = rs[0], setRosterStatus = rs[1];
   var rp = useState(false); var provisioningRoster = rp[0], setProvisioningRoster = rp[1];
   var rr = useState(null); var rosterResult = rr[0], setRosterResult = rr[1];
+  var ui = useState(false); var showUninstall = ui[0], setShowUninstall = ui[1];
 
   var load = useCallback(function () {
     setLoading(true); setLoadErr(null);
@@ -1812,6 +1867,14 @@ function App() {
       React.createElement(Button, { label: "Refresh", onClick: load })
     ),
 
+    // Uninstall footer
+    React.createElement("div", { style: { textAlign: "center", marginTop: "40px", paddingTop: "20px", borderTop: "1px solid #2a2a2a" } },
+      React.createElement("button", {
+        onClick: function () { setShowUninstall(true); },
+        style: Object.assign({}, S.btn, { color: "#f87171", borderColor: "#7f1d1d", fontSize: "12px" })
+      }, "Uninstall Daedalus")
+    ),
+
     // Modals
     modalProject ? React.createElement(ConfigModal, {
       name: modalProject,
@@ -1820,6 +1883,9 @@ function App() {
     showAddProject ? React.createElement(AddProjectModal, {
       onClose: function () { setShowAddProject(false); },
       onCreated: function () { setShowAddProject(false); load(); }
+    }) : null,
+    showUninstall ? React.createElement(UninstallModal, {
+      onClose: function () { setShowUninstall(false); }
     }) : null
   );
 }

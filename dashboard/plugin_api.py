@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -1535,6 +1536,147 @@ async def post_provision_roster(request: Request) -> dict[str, Any]:
         return {"ok": False, "output": "", "error": "provision_roster.sh timed out after 180s"}
     except Exception as exc:
         return {"ok": False, "output": "", "error": str(exc)[:500]}
+
+
+_DAEDALUS_PROFILES = [
+    "developer", "reviewer", "security-analyst",
+    "documentation", "planner", "project-manager",
+]
+
+def _hermes_cmd(*args: str, timeout: int = 30) -> tuple[bool, str]:
+    """Run a hermes CLI command. Returns (success, combined_output)."""
+    try:
+        r = subprocess.run(
+            ["hermes", *args], capture_output=True, text=True, timeout=timeout
+        )
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except Exception as exc:
+        return False, str(exc)
+
+
+@meta_router.post("/uninstall")
+async def post_uninstall() -> dict[str, Any]:
+    """Clean up all Daedalus host-side state and remove the plugin.
+
+    Removes in order: cron jobs → profiles → kanban boards → registry dir →
+    config.yaml plugin entry → plugin package (hermes plugins remove + rm -rf
+    fallback). Returns a summary of what was removed and what was skipped.
+
+    Safe to call even if some items are already gone (idempotent).
+    """
+    removed: list[str] = []
+    skipped: list[str] = []
+    hermes_home = _real_home() / ".hermes"
+
+    # ── 1. Cron jobs ────────────────────────────────────────────────────────
+    ok, cron_out = _hermes_cmd("cron", "list", "--all")
+    if ok and cron_out:
+        # Extract job names: lines like "  abc123 [active]\n  Name: foo-daedalus"
+        job_names: list[str] = []
+        current_name = ""
+        current_script = ""
+        in_block = False
+        for line in cron_out.splitlines():
+            if re.match(r"^\s*[0-9a-fA-F]{6,}\s+\[", line):
+                if in_block and current_name:
+                    if current_name.endswith("-daedalus") or re.search(r"daedalus-[^/]*\.sh$", current_script):
+                        job_names.append(current_name)
+                in_block = True
+                current_name = current_script = ""
+            elif in_block:
+                m = re.match(r"^\s*Name:\s+(\S+)", line)
+                if m:
+                    current_name = m.group(1)
+                m2 = re.match(r"^\s*Script:\s+(\S+)", line)
+                if m2:
+                    current_script = m2.group(1)
+        if in_block and current_name:
+            if current_name.endswith("-daedalus") or re.search(r"daedalus-[^/]*\.sh$", current_script):
+                job_names.append(current_name)
+        for job in sorted(set(job_names)):
+            ok2, _ = _hermes_cmd("cron", "remove", job)
+            if ok2:
+                removed.append(f"cron job: {job}")
+            else:
+                skipped.append(f"cron job: {job} (removal failed)")
+
+    # ── 2. Profiles ─────────────────────────────────────────────────────────
+    ok, prof_out = _hermes_cmd("profile", "list")
+    existing_profiles = prof_out if ok else ""
+    for role in _DAEDALUS_PROFILES:
+        if role in existing_profiles:
+            ok2, _ = _hermes_cmd("profile", "delete", role, "-y")
+            if ok2:
+                removed.append(f"profile: {role}")
+            else:
+                skipped.append(f"profile: {role} (deletion failed)")
+
+    # ── 3. Kanban boards ─────────────────────────────────────────────────────
+    # Scan live boards list to catch orphaned boards too
+    ok, boards_out = _hermes_cmd("kanban", "boards", "list")
+    if ok and boards_out:
+        for line in boards_out.splitlines():
+            if not line.strip() or line.startswith(("SLUG", "Switch", "Current")):
+                continue
+            slug = re.sub(r"^[\s●]+", "", line).split()[0]
+            if slug and slug != "default":
+                ok2, _ = _hermes_cmd("kanban", "boards", "rm", slug, "--delete")
+                if ok2:
+                    removed.append(f"kanban board: {slug}")
+                else:
+                    skipped.append(f"kanban board: {slug} (removal failed)")
+
+    # ── 4. Registry directory ─────────────────────────────────────────────────
+    registry_dir = hermes_home / "daedalus"
+    if registry_dir.is_dir():
+        try:
+            shutil.rmtree(registry_dir)
+            removed.append(f"registry dir: {registry_dir}")
+        except OSError as exc:
+            skipped.append(f"registry dir: {exc}")
+
+    # ── 5. Strip plugins.enabled/.disabled entry from config.yaml ─────────────
+    cfg_path = hermes_home / "config.yaml"
+    if cfg_path.exists():
+        try:
+            lines = cfg_path.read_text().splitlines(keepends=True)
+            in_plugins = in_list = False
+            new_lines = []
+            for ln in lines:
+                stripped = ln.rstrip()
+                if re.match(r"^[^\s#]", stripped):
+                    in_plugins = stripped.startswith("plugins:")
+                    in_list = False
+                if in_plugins and re.match(r"^\s+(enabled|disabled):", stripped):
+                    in_list = True
+                if in_plugins and in_list and re.match(r"^\s+-\s+daedalus\s*$", stripped):
+                    continue  # drop this line
+                new_lines.append(ln)
+            new_text = "".join(new_lines)
+            if new_text != cfg_path.read_text():
+                cfg_path.write_text(new_text)
+                removed.append("config.yaml daedalus plugin entry")
+        except OSError:
+            skipped.append("config.yaml (could not edit)")
+
+    # ── 6. Plugin package ─────────────────────────────────────────────────────
+    _hermes_cmd("plugins", "disable", "daedalus")
+    ok2, _ = _hermes_cmd("plugins", "remove", "daedalus", timeout=15)
+    if ok2:
+        removed.append("plugin package (hermes plugins remove)")
+    else:
+        # Belt-and-suspenders: nuke the directory directly
+        plugin_dir = hermes_home / "plugins" / "daedalus"
+        if plugin_dir.is_dir():
+            try:
+                shutil.rmtree(plugin_dir)
+                removed.append(f"plugin directory: {plugin_dir}")
+            except OSError as exc:
+                skipped.append(f"plugin directory rm failed: {exc}")
+        else:
+            skipped.append("plugin package (hermes plugins remove failed — may already be gone)")
+
+    return {"ok": True, "removed": removed, "skipped": skipped}
 
 
 # ── Top-level router (defined at end so sub-routers are already populated) ───
