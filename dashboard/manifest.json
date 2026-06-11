@@ -1,7 +1,7 @@
 {
   "name": "daedalus",
   "label": "Daedalus",
-  "entry": "dist/index-W5DNLTEY.js",
+  "entry": "dist/index-2HNZPKE4.js",
   "api": "plugin_api.py",
   "tab": "/daedalus"
 }

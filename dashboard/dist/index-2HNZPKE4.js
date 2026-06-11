@@ -1799,148 +1799,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       }) : null
     );
   }
-  function DeliverMultiPicker(props) {
-    var targets = props.targets || [];
-    var methods = props.methods || {};
-    var methodNames = Object.keys(methods).sort();
-    var ts = useState({});
-    var testStatuses = ts[0], setTestStatuses = ts[1];
-    function updateRow(i, patch) {
-      var next = targets.map(function(t, j) {
-        return j === i ? Object.assign({}, t, patch) : t;
-      });
-      setTestStatuses(function(prev) {
-        var n = Object.assign({}, prev);
-        delete n[i];
-        return n;
-      });
-      props.onChange(next);
-    }
-    function removeRow(i) {
-      setTestStatuses(function(prev) {
-        var n = {};
-        Object.keys(prev).forEach(function(k) {
-          var ki = parseInt(k, 10);
-          if (ki < i) n[k] = prev[k];
-          else if (ki > i) n[String(ki - 1)] = prev[k];
-        });
-        return n;
-      });
-      props.onChange(targets.filter(function(_, j) {
-        return j !== i;
-      }));
-    }
-    function addRow() {
-      props.onChange(targets.concat([{ platform: "", target: "" }]));
-    }
-    function testRow(i, target) {
-      setTestStatuses(function(prev) {
-        return Object.assign({}, prev, { [i]: { ok: null, msg: "Sending\u2026" } });
-      });
-      fetchJSON("/api/plugins/daedalus/meta/test-deliver", {
-        method: "POST",
-        body: { deliver: target }
-      }).then(function(r) {
-        setTestStatuses(function(prev) {
-          return Object.assign({}, prev, {
-            [i]: r && r.ok ? { ok: true, msg: "\u2713 Sent" } : { ok: false, msg: "\u2717 " + (r && r.error || "send failed") }
-          });
-        });
-      }).catch(function(err) {
-        setTestStatuses(function(prev) {
-          return Object.assign({}, prev, { [i]: { ok: false, msg: "\u2717 " + String(err && err.message || err) } });
-        });
-      });
-    }
-    return React.createElement(
-      "div",
-      null,
-      targets.map(function(t, i) {
-        var rawChannelOpts = t.platform && methods[t.platform] ? methods[t.platform] : [];
-        var channelOpts = rawChannelOpts.map(function(e) {
-          return typeof e === "string" ? { value: e, label: e } : e;
-        });
-        var testStatus = testStatuses[String(i)] || null;
-        var isTesting = testStatus && testStatus.ok === null;
-        var hasTarget = !!t.target;
-        return React.createElement(
-          "div",
-          { key: i, style: { marginBottom: "8px" } },
-          React.createElement(
-            "div",
-            { style: { display: "flex", gap: "6px", alignItems: "center" } },
-            React.createElement(
-              "select",
-              {
-                style: Object.assign({}, S.select, { flex: "0 0 130px" }),
-                value: t.platform || "",
-                onChange: function(e) {
-                  updateRow(i, { platform: e.target.value, target: "" });
-                }
-              },
-              React.createElement("option", { value: "" }, "\u2014 service \u2014"),
-              methodNames.map(function(m) {
-                return React.createElement("option", { key: m, value: m }, m);
-              })
-            ),
-            t.platform ? channelOpts.length > 0 ? React.createElement(
-              "select",
-              {
-                style: Object.assign({}, S.select, { flex: "1 1 auto" }),
-                value: t.target || "",
-                onChange: function(e) {
-                  updateRow(i, { target: e.target.value });
-                }
-              },
-              React.createElement("option", { value: "" }, "\u2014 channel \u2014"),
-              channelOpts.map(function(ch) {
-                return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
-              })
-            ) : React.createElement("input", {
-              style: Object.assign({}, S.input, { flex: "1 1 auto" }),
-              value: t.target || "",
-              placeholder: t.platform + ":channel-id",
-              onChange: function(e) {
-                updateRow(i, { target: e.target.value });
-              }
-            }) : React.createElement("div", { style: { flex: "1 1 auto" } }),
-            React.createElement("button", {
-              style: Object.assign({}, S.btnSmall, { opacity: hasTarget && !isTesting ? 1 : 0.4 }),
-              type: "button",
-              disabled: !hasTarget || !!isTesting,
-              onClick: function() {
-                testRow(i, t.target);
-              }
-            }, isTesting ? "Sending\u2026" : "Test"),
-            React.createElement("button", {
-              style: S.btnSmall,
-              type: "button",
-              onClick: function() {
-                removeRow(i);
-              }
-            }, "\xD7")
-          ),
-          testStatus ? React.createElement("div", {
-            style: {
-              fontSize: "11px",
-              marginTop: "3px",
-              marginLeft: "2px",
-              color: testStatus.ok === true ? "#4ade80" : testStatus.ok === null ? "#888" : "#f87171"
-            }
-          }, testStatus.msg) : null
-        );
-      }),
-      methodNames.length > 0 ? React.createElement("button", {
-        style: S.btnSmall,
-        type: "button",
-        onClick: addRow
-      }, "+ Add notification service") : React.createElement(
-        "span",
-        { style: { fontSize: "12px", color: "#666" } },
-        "No notification services configured in Hermes yet."
-      )
-    );
-  }
   function AddProjectModal(props) {
     var nm = useState("");
     var name = nm[0], setName = nm[1];
@@ -1950,14 +1808,30 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var workdir = wd[0], setWorkdir = wd[1];
     var pv = useState("");
     var provider = pv[0], setProvider = pv[1];
+    var tb = useState("main");
+    var targetBranch = tb[0], setTargetBranch = tb[1];
+    var bp = useState("fix");
+    var branchPrefix = bp[0], setBranchPrefix = bp[1];
+    var pp = useState("fix:");
+    var prTitlePrefix = pp[0], setPrTitlePrefix = pp[1];
+    var gp = useState("");
+    var ghProjectNumber = gp[0], setGhProjectNumber = gp[1];
     var sc = useState("every 60m");
     var schedule = sc[0], setSchedule = sc[1];
+    var dv = useState("");
+    var deliver = dv[0], setDeliver = dv[1];
+    var sm = useState("");
+    var selectedMethod = sm[0], setSelectedMethod = sm[1];
     var nt = useState([]);
     var notifications = nt[0], setNotifications = nt[1];
     var ex = useState({});
     var extra = ex[0], setExtra = ex[1];
     var so = useState({ github_issues: false, local_specs: true, kanban_triage: true });
     var srcToggles = so[0], setSrcToggles = so[1];
+    var mi = useState(20);
+    var maxIssues = mi[0], setMaxIssues = mi[1];
+    var mp = useState(5);
+    var maxPRs = mp[0], setMaxPRs = mp[1];
     var ns = useState({});
     var methods = ns[0], setMethods = ns[1];
     var sv = useState(false);
@@ -2007,23 +1881,32 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       setErrors(null);
       var vcs = Object.assign({}, extra);
       if (provider) vcs.provider = provider;
+      if (targetBranch) vcs.target_branch = targetBranch;
+      if (branchPrefix) vcs.branch_prefix = branchPrefix;
+      if (prTitlePrefix) vcs.pr_title_prefix = prTitlePrefix;
+      var tracking = {};
+      var gpn = parseInt(ghProjectNumber, 10);
+      if (!isNaN(gpn) && gpn > 0) tracking.github_project_number = gpn;
       var body = {
         name: name.trim(),
         repo: repo.trim(),
         workdir: workdir.trim(),
         vcs,
+        tracking: Object.keys(tracking).length > 0 ? tracking : void 0,
         cron: {
           schedule,
+          deliver: deliver || void 0,
           notifications: notifications.filter(function(t) {
             return t.platform && t.target;
-          }).map(function(t) {
-            return { platform: t.platform, target: t.target, events: [] };
           })
         },
         sources: {
           github_issues: { enabled: !!srcToggles.github_issues },
           local_specs: { enabled: !!srcToggles.local_specs },
           kanban_triage: { enabled: !!srcToggles.kanban_triage }
+        },
+        issues: {
+          processing: { max_issues_per_run: maxIssues, max_open_prs: maxPRs }
         }
       };
       fetchJSON(API_PROJECT_CREATE, { method: "POST", body }).then(function(res) {
@@ -2165,6 +2048,78 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             )
           )
         ),
+        React.createElement("div", { style: S.section }, "VCS"),
+        React.createElement(
+          "div",
+          { style: S.fieldRow },
+          React.createElement(
+            "label",
+            { style: S.field },
+            React.createElement("span", { style: S.fieldLabel }, "Target Branch"),
+            React.createElement("input", {
+              style: S.input,
+              value: targetBranch,
+              placeholder: "main",
+              onChange: function(e) {
+                setTargetBranch(e.target.value);
+              }
+            })
+          ),
+          React.createElement(
+            "label",
+            { style: S.field },
+            React.createElement("span", { style: S.fieldLabel }, "Branch Prefix"),
+            React.createElement("input", {
+              style: S.input,
+              value: branchPrefix,
+              placeholder: "fix",
+              onChange: function(e) {
+                setBranchPrefix(e.target.value);
+              }
+            })
+          ),
+          React.createElement(
+            "label",
+            { style: S.field },
+            React.createElement("span", { style: S.fieldLabel }, "PR Title Prefix"),
+            React.createElement("input", {
+              style: S.input,
+              value: prTitlePrefix,
+              placeholder: "fix:",
+              onChange: function(e) {
+                setPrTitlePrefix(e.target.value);
+              }
+            })
+          )
+        ),
+        provider === "" || provider === "github" ? React.createElement(
+          "div",
+          null,
+          React.createElement("div", { style: S.section }, "GitHub Project Board"),
+          React.createElement(
+            "div",
+            { style: S.fieldRow },
+            React.createElement(
+              "label",
+              { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, "Project Board Number"),
+              React.createElement("input", {
+                style: S.input,
+                type: "number",
+                value: ghProjectNumber,
+                placeholder: "e.g. 1",
+                onChange: function(e) {
+                  setGhProjectNumber(e.target.value);
+                }
+              }),
+              React.createElement(
+                "span",
+                { style: { fontSize: "11px", color: "#666", marginTop: "2px" } },
+                "Leave empty if not using GitHub Projects v2"
+              )
+            )
+          )
+        ) : null,
         React.createElement("div", { style: S.section }, "Cron"),
         React.createElement(CronSchedule, {
           value: schedule,
@@ -2172,8 +2127,82 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             setSchedule(v);
           }
         }),
+        React.createElement(
+          "div",
+          { style: S.fieldRow },
+          (function() {
+            var methodNames = Object.keys(methods).sort();
+            var rawChannelOpts = selectedMethod && methods[selectedMethod] ? methods[selectedMethod] : [];
+            var channelOpts = rawChannelOpts.map(function(e) {
+              return typeof e === "string" ? { value: e, label: e } : e;
+            });
+            if (methodNames.length === 0) {
+              return React.createElement(
+                "label",
+                { key: "deliver", style: S.field },
+                React.createElement("span", { style: S.fieldLabel }, "Notify Via"),
+                React.createElement("input", {
+                  style: S.input,
+                  value: deliver,
+                  placeholder: "e.g. slack:tasks",
+                  onChange: function(e) {
+                    setDeliver(e.target.value);
+                  }
+                })
+              );
+            }
+            return [
+              React.createElement(
+                "label",
+                { key: "deliver-method", style: S.field },
+                React.createElement("span", { style: S.fieldLabel }, "Notify Via"),
+                React.createElement(
+                  "select",
+                  {
+                    style: S.select,
+                    value: selectedMethod,
+                    onChange: function(e) {
+                      setSelectedMethod(e.target.value);
+                      setDeliver("");
+                    }
+                  },
+                  React.createElement("option", { value: "" }, "\u2014 default \u2014"),
+                  methodNames.map(function(m) {
+                    return React.createElement("option", { key: m, value: m }, m);
+                  })
+                )
+              ),
+              selectedMethod ? React.createElement(
+                "label",
+                { key: "deliver-channel", style: S.field },
+                React.createElement("span", { style: S.fieldLabel }, "Channel"),
+                channelOpts.length > 0 ? React.createElement(
+                  "select",
+                  {
+                    style: S.select,
+                    value: deliver,
+                    onChange: function(e) {
+                      setDeliver(e.target.value);
+                    }
+                  },
+                  React.createElement("option", { value: "" }, "\u2014 none \u2014"),
+                  channelOpts.map(function(ch) {
+                    return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
+                  })
+                ) : React.createElement("input", {
+                  style: S.input,
+                  value: deliver,
+                  placeholder: "channel id",
+                  onChange: function(e) {
+                    setDeliver(e.target.value);
+                  }
+                })
+              ) : null
+            ];
+          })()
+        ),
         React.createElement("div", { style: S.section }, "Notifications"),
-        React.createElement(DeliverMultiPicker, {
+        React.createElement(NotificationsEditor, {
           targets: notifications,
           methods,
           onChange: function(arr) {
@@ -2200,6 +2229,39 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             }
           });
         }),
+        React.createElement("div", { style: S.section }, "Throughput"),
+        React.createElement(
+          "div",
+          { style: S.fieldRow },
+          React.createElement(
+            "label",
+            { style: S.field },
+            React.createElement("span", { style: S.fieldLabel }, "Max Issues per Run"),
+            React.createElement("input", {
+              style: S.input,
+              type: "number",
+              value: maxIssues,
+              onChange: function(e) {
+                var v = parseInt(e.target.value, 10);
+                if (!isNaN(v)) setMaxIssues(v);
+              }
+            })
+          ),
+          React.createElement(
+            "label",
+            { style: S.field },
+            React.createElement("span", { style: S.fieldLabel }, "Max Open PRs"),
+            React.createElement("input", {
+              style: S.input,
+              type: "number",
+              value: maxPRs,
+              onChange: function(e) {
+                var v = parseInt(e.target.value, 10);
+                if (!isNaN(v)) setMaxPRs(v);
+              }
+            })
+          )
+        ),
         errors && errors.length > 0 ? React.createElement(
           "div",
           { style: { margin: "10px 0" } },
