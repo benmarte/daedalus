@@ -5,24 +5,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
   };
 
-  // src/deriveMethod.js
-  var require_deriveMethod = __commonJS({
-    "src/deriveMethod.js"(exports, module) {
-      function deriveMethodFromDeliver2(deliver, notifications) {
-        if (!deliver || !notifications || !Object.keys(notifications).length) return "";
-        var prefix = String(deliver).split(":")[0].toLowerCase();
-        var methods = Object.keys(notifications);
-        for (var i = 0; i < methods.length; i++) {
-          var m = methods[i].toLowerCase();
-          if (m === prefix || m.indexOf(prefix) === 0) return methods[i];
-        }
-        if (notifications[deliver]) return deliver;
-        return "";
-      }
-      module.exports = { deriveMethodFromDeliver: deriveMethodFromDeliver2 };
-    }
-  });
-
   // src/cronSchedule.js
   var require_cronSchedule = __commonJS({
     "src/cronSchedule.js"(exports, module) {
@@ -179,7 +161,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
   var SdkComponents = SDK.components || {};
   var SdkButton = SdkComponents.Button || null;
   var SdkCheckbox = SdkComponents.Checkbox || null;
-  var deriveMethodFromDeliver = require_deriveMethod().deriveMethodFromDeliver;
   var cronSchedule = require_cronSchedule();
   var parseSchedule = cronSchedule.parseSchedule;
   var buildSchedule = cronSchedule.buildSchedule;
@@ -1194,8 +1175,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var fieldErrors = fe[0], setFieldErrors = fe[1];
     var ns = useState({});
     var notifications = ns[0], setNotifications = ns[1];
-    var sm = useState("");
-    var selectedMethod = sm[0], setSelectedMethod = sm[1];
     var sr = useState(false);
     var showRemoveModal = sr[0], setShowRemoveModal = sr[1];
     var br = useState([]);
@@ -1259,12 +1238,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setGhProjects([]);
       });
     }, [name]);
-    useEffect(function() {
-      if (!config) return;
-      var deliver = getIn(config, ["cron", "deliver"], "");
-      var derived = deriveMethodFromDeliver(deliver, notifications);
-      if (derived) setSelectedMethod(derived);
-    }, [config, notifications]);
     function updateField(path, value) {
       setConfig(function(prev) {
         var parts = path.split(".");
@@ -1301,7 +1274,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         body.tracking = config.tracking;
       }
       if (config.vcs) body.vcs = config.vcs;
-      if (config.cron) body.cron = config.cron;
+      if (config.cron) {
+        var cronBody = Object.assign({}, config.cron);
+        delete cronBody.deliver;
+        body.cron = cronBody;
+      }
       if (config.sources) body.sources = config.sources;
       if (config.issues) body.issues = config.issues;
       fetchJSON(apiProjectConfig(name), { method: "POST", body }).then(function(res) {
@@ -1582,94 +1559,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               updateField("cron.schedule", v);
             }
           }),
-          React.createElement(
-            "div",
-            { style: S.fieldRow },
-            // Cascade deliver: method → channel. Built from /meta/notifications endpoint.
-            (function() {
-              var methodNames = Object.keys(notifications).sort();
-              var rawChannelOpts = selectedMethod && notifications[selectedMethod] ? notifications[selectedMethod] : [];
-              var channelOpts = rawChannelOpts.map(function(entry) {
-                if (typeof entry === "string") return { value: entry, label: entry };
-                return entry;
-              });
-              var savedDeliver = getIn(config, ["cron", "deliver"], "");
-              var selectedChannel = savedDeliver;
-              if (selectedChannel && selectedMethod) {
-                var found = false;
-                for (var ci = 0; ci < channelOpts.length; ci++) {
-                  if (channelOpts[ci].value === selectedChannel) {
-                    found = true;
-                    break;
-                  }
-                }
-                if (!found) selectedChannel = "";
-              }
-              if (methodNames.length === 0) {
-                return React.createElement(
-                  "label",
-                  { key: "deliver", style: S.field },
-                  React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
-                  React.createElement("input", {
-                    style: S.input,
-                    value: savedDeliver,
-                    placeholder: "e.g. slack:tasks",
-                    onChange: function(e2) {
-                      updateField("cron.deliver", e2.target.value);
-                    }
-                  })
-                );
-              }
-              return [
-                React.createElement(
-                  "label",
-                  { key: "deliver-method", style: S.field },
-                  React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
-                  React.createElement(
-                    "select",
-                    {
-                      style: S.select,
-                      value: selectedMethod,
-                      onChange: function(e2) {
-                        setSelectedMethod(e2.target.value);
-                        updateField("cron.deliver", "");
-                      }
-                    },
-                    React.createElement("option", { value: "" }, "\u2014 default \u2014"),
-                    methodNames.map(function(m) {
-                      return React.createElement("option", { key: m, value: m }, m);
-                    })
-                  )
-                ),
-                selectedMethod ? React.createElement(
-                  "label",
-                  { key: "deliver-channel", style: S.field },
-                  React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.channel),
-                  channelOpts.length > 0 ? React.createElement(
-                    "select",
-                    {
-                      style: S.select,
-                      value: selectedChannel,
-                      onChange: function(e2) {
-                        updateField("cron.deliver", e2.target.value);
-                      }
-                    },
-                    React.createElement("option", { value: "" }, "\u2014 none \u2014"),
-                    channelOpts.map(function(ch) {
-                      return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
-                    })
-                  ) : React.createElement("input", {
-                    style: S.input,
-                    value: selectedChannel,
-                    placeholder: "e.g. slack:tasks",
-                    onChange: function(e2) {
-                      updateField("cron.deliver", e2.target.value);
-                    }
-                  })
-                ) : null
-              ];
-            })()
-          ),
           // Multi-target notifications (any Hermes messaging platform + channel + events)
           React.createElement("div", { style: S.section }, "Notifications"),
           React.createElement(NotificationsEditor, {

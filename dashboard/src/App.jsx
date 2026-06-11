@@ -33,9 +33,6 @@ var SdkCheckbox = SdkComponents.Checkbox || null;
 // Input, Select, SelectOption are known to break React 19 — always use raw HTML.
 // Separator works visually; use if available, else plain <hr/>.
 
-// Pure cascade helper (own module so it can be unit-tested in plain node).
-var deriveMethodFromDeliver = require("./deriveMethod").deriveMethodFromDeliver;
-
 // Cron schedule parse/build helpers (own module for unit-testing).
 var cronSchedule = require("./cronSchedule");
 var parseSchedule = cronSchedule.parseSchedule;
@@ -916,7 +913,6 @@ function ConfigModal(props) {
   var r = useState(null); var result = r[0], setResult = r[1];
   var fe = useState(null); var fieldErrors = fe[0], setFieldErrors = fe[1];
   var ns = useState({}); var notifications = ns[0], setNotifications = ns[1];
-  var sm = useState(""); var selectedMethod = sm[0], setSelectedMethod = sm[1];
   var sr = useState(false); var showRemoveModal = sr[0], setShowRemoveModal = sr[1];
 
   // Meta data for data-driven fields (branches, labels, statuses, projects)
@@ -982,16 +978,6 @@ function ConfigModal(props) {
     }).catch(function () { setGhProjects([]); });
   }, [name]);
 
-  // Derive selected method from saved cron.deliver value (e.g. "slack:tasks" → method "slack").
-  useEffect(function () {
-    if (!config) return;
-    var deliver = getIn(config, ["cron", "deliver"], "");
-    // When deliver is empty (e.g. user just picked a method but hasn't picked a channel yet),
-    // do NOT reset selectedMethod — that causes a cascade that wipes the user's selection.
-    var derived = deriveMethodFromDeliver(deliver, notifications);
-    if (derived) setSelectedMethod(derived);
-  }, [config, notifications]);
-
   function updateField(path, value) {
     setConfig(function (prev) {
       var parts = path.split(".");
@@ -1028,7 +1014,11 @@ function ConfigModal(props) {
       body.tracking = config.tracking;
     }
     if (config.vcs) body.vcs = config.vcs;
-    if (config.cron) body.cron = config.cron;
+    if (config.cron) {
+      var cronBody = Object.assign({}, config.cron);
+      delete cronBody.deliver; // removed in favour of multi-target notifications
+      body.cron = cronBody;
+    }
     if (config.sources) body.sources = config.sources;
     if (config.issues) body.issues = config.issues;
 
@@ -1241,79 +1231,6 @@ function ConfigModal(props) {
         value: getIn(config, ["cron", "schedule"], ""),
         onChange: function (v) { updateField("cron.schedule", v); }
       }),
-      React.createElement("div", { style: S.fieldRow },
-        // Cascade deliver: method → channel. Built from /meta/notifications endpoint.
-        (function () {
-          var methodNames = Object.keys(notifications).sort();
-          // Normalize channel entries: new shape is [{value, label}], old shape was [string].
-          // Support both for backward compatibility.
-          var rawChannelOpts = selectedMethod && notifications[selectedMethod] ? notifications[selectedMethod] : [];
-          var channelOpts = rawChannelOpts.map(function (entry) {
-            if (typeof entry === "string") return { value: entry, label: entry };
-            return entry;
-          });
-          var savedDeliver = getIn(config, ["cron", "deliver"], "");
-          // Determine preselected channel: the saved deliver value if it's in the channel list
-          var selectedChannel = savedDeliver;
-          // Only trust it if it matches a channel value in the current method's list
-          if (selectedChannel && selectedMethod) {
-            var found = false;
-            for (var ci = 0; ci < channelOpts.length; ci++) {
-              if (channelOpts[ci].value === selectedChannel) { found = true; break; }
-            }
-            if (!found) selectedChannel = ""; // saved value is stale, clear it
-          }
-          if (methodNames.length === 0) {
-            // Fallback: no notifications data — show a plain text input
-            return React.createElement("label", { key: "deliver", style: S.field },
-              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
-              React.createElement("input", {
-                style: S.input,
-                value: savedDeliver,
-                placeholder: "e.g. slack:tasks",
-                onChange: function (e) { updateField("cron.deliver", e.target.value); }
-              })
-            );
-          }
-          return [
-            React.createElement("label", { key: "deliver-method", style: S.field },
-              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
-              React.createElement("select", {
-                style: S.select,
-                value: selectedMethod,
-                onChange: function (e) {
-                  setSelectedMethod(e.target.value);
-                  updateField("cron.deliver", ""); // clear channel when method changes
-                }
-              },
-                React.createElement("option", { value: "" }, "— default —"),
-                methodNames.map(function (m) {
-                  return React.createElement("option", { key: m, value: m }, m);
-                })
-              )
-            ),
-            selectedMethod ? React.createElement("label", { key: "deliver-channel", style: S.field },
-              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.channel),
-              channelOpts.length > 0 ? React.createElement("select", {
-                style: S.select,
-                value: selectedChannel,
-                onChange: function (e) { updateField("cron.deliver", e.target.value); }
-              },
-                React.createElement("option", { value: "" }, "— none —"),
-                channelOpts.map(function (ch) {
-                  return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
-                })
-              ) : React.createElement("input", {
-                style: S.input,
-                value: selectedChannel,
-                placeholder: "e.g. slack:tasks",
-                onChange: function (e) { updateField("cron.deliver", e.target.value); }
-              })
-            ) : null
-          ];
-        })(),
-      ),
-
       // Multi-target notifications (any Hermes messaging platform + channel + events)
       React.createElement("div", { style: S.section }, "Notifications"),
       React.createElement(NotificationsEditor, {
