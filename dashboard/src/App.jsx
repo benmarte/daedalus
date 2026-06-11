@@ -845,6 +845,50 @@ function providerExtraFields(provider, getVal, setVal) {
   return null;
 }
 
+// ── RemoveProjectModal ──────────────────────────────────────────────────────
+function RemoveProjectModal(props) {
+  var rm = useState(false); var removing = rm[0], setRemoving = rm[1];
+  var er = useState(null); var error = er[0], setError = er[1];
+
+  function doRemove() {
+    setRemoving(true); setError(null);
+    fetchJSON(apiProject(props.name), { method: "DELETE" })
+      .then(function () { props.onRemoved(); })
+      .catch(function (err) {
+        setRemoving(false);
+        setError(String(err && err.message || err));
+      });
+  }
+
+  return React.createElement("div", { style: Object.assign({}, S.overlay, { zIndex: 1100 }) },
+    React.createElement("div", { style: Object.assign({}, S.modal, { maxWidth: "400px" }) },
+      React.createElement("div", { style: S.modalHeader },
+        React.createElement("span", { style: S.modalTitle }, "Remove Project"),
+        React.createElement("button", { style: S.btnSmall, onClick: props.onClose }, "×")
+      ),
+      React.createElement("p", { style: { fontSize: "14px", lineHeight: "1.5", color: "#ccc", margin: "0 0 8px" } },
+        "Remove ", React.createElement("strong", null, props.name), " from the dashboard?"
+      ),
+      React.createElement("p", { style: { fontSize: "13px", color: "#888", margin: "0 0 4px" } },
+        "This will:"
+      ),
+      React.createElement("ul", { style: { fontSize: "13px", color: "#aaa", margin: "0 0 12px", paddingLeft: "20px", lineHeight: "1.8" } },
+        React.createElement("li", null, "Delete the cron job"),
+        React.createElement("li", null, "Archive the kanban board"),
+        React.createElement("li", null, "Remove from the project registry")
+      ),
+      React.createElement("p", { style: { fontSize: "13px", color: "#4ade80", margin: "0 0 16px" } },
+        "✓ .hermes/daedalus.yaml is not touched — you can re-add this project at any time."
+      ),
+      error ? React.createElement("div", { style: Object.assign({}, S.err, { marginBottom: "12px" }) }, error) : null,
+      React.createElement("div", { style: S.modalBar },
+        React.createElement(Button, { label: removing ? "Removing…" : "Remove Project", variant: "danger", disabled: removing, onClick: doRemove }),
+        React.createElement(Button, { label: "Cancel", disabled: removing, onClick: props.onClose })
+      )
+    )
+  );
+}
+
 // ── config modal ────────────────────────────────────────────────────────────
 // Human-friendly field label map: raw key → display title
 var FIELD_LABELS = {
@@ -873,8 +917,7 @@ function ConfigModal(props) {
   var fe = useState(null); var fieldErrors = fe[0], setFieldErrors = fe[1];
   var ns = useState({}); var notifications = ns[0], setNotifications = ns[1];
   var sm = useState(""); var selectedMethod = sm[0], setSelectedMethod = sm[1];
-  var rc = useState(false); var confirmRemove = rc[0], setConfirmRemove = rc[1];
-  var rm = useState(false); var removing = rm[0], setRemoving = rm[1];
+  var sr = useState(false); var showRemoveModal = sr[0], setShowRemoveModal = sr[1];
 
   // Meta data for data-driven fields (branches, labels, statuses, projects)
   var br = useState([]); var branches = br[0], setBranches = br[1];
@@ -1050,7 +1093,8 @@ function ConfigModal(props) {
 
   var sources = config && config.sources ? Object.keys(config.sources).filter(function (k) { return k !== "secret"; }) : [];
 
-  return React.createElement("div", { style: S.overlay, onClick: props.onClose },
+  return React.createElement(React.Fragment, null,
+  React.createElement("div", { style: S.overlay, onClick: props.onClose },
     React.createElement("div", { style: S.modal, onClick: function (e) { e.stopPropagation(); } },
       // Header
       React.createElement("div", { style: S.modalHeader },
@@ -1362,34 +1406,20 @@ function ConfigModal(props) {
 
       // Actions
       React.createElement("div", { style: S.modalBar },
-        React.createElement(Button, { label: saving ? "Saving…" : "Save", variant: "primary", disabled: saving || removing, onClick: save }),
-        React.createElement(Button, { label: "Cancel", disabled: removing, onClick: props.onClose }),
+        React.createElement(Button, { label: saving ? "Saving…" : "Save", variant: "primary", disabled: saving, onClick: save }),
+        React.createElement(Button, { label: "Cancel", onClick: props.onClose }),
         React.createElement("div", { style: { marginLeft: "auto" } },
-          confirmRemove
-            ? React.createElement("span", { style: { display: "flex", gap: "8px", alignItems: "center" } },
-                React.createElement("span", { style: { fontSize: "12px", color: "#f87171" } }, "Remove from dashboard?"),
-                React.createElement(Button, { label: removing ? "Removing…" : "Yes, remove", variant: "danger", disabled: removing, onClick: removeProject }),
-                React.createElement(Button, { label: "No", disabled: removing, onClick: function () { setConfirmRemove(false); } })
-              )
-            : React.createElement(Button, { label: "Remove Project", variant: "danger", onClick: function () { setConfirmRemove(true); } })
+          React.createElement(Button, { label: "Remove Project", variant: "danger", onClick: function () { setShowRemoveModal(true); } })
         )
       )
     )
+  ),
+  showRemoveModal ? React.createElement(RemoveProjectModal, {
+    name: name,
+    onClose: function () { setShowRemoveModal(false); },
+    onRemoved: props.onRemoved,
+  }) : null
   );
-
-  function removeProject() {
-    setRemoving(true);
-    fetchJSON(apiProject(name), { method: "DELETE" })
-      .then(function () {
-        setRemoving(false);
-        props.onRemoved();
-      })
-      .catch(function (err) {
-        setRemoving(false);
-        setResult({ ok: false, errors: ["Remove failed: " + String(err && err.message || err)] });
-        setConfirmRemove(false);
-      });
-  }
 }
 
 // ── DeliverMultiPicker ──────────────────────────────────────────────────────

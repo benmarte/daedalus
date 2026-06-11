@@ -1102,6 +1102,67 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     }
     return null;
   }
+  function RemoveProjectModal(props) {
+    var rm = useState(false);
+    var removing = rm[0], setRemoving = rm[1];
+    var er = useState(null);
+    var error = er[0], setError = er[1];
+    function doRemove() {
+      setRemoving(true);
+      setError(null);
+      fetchJSON(apiProject(props.name), { method: "DELETE" }).then(function() {
+        props.onRemoved();
+      }).catch(function(err) {
+        setRemoving(false);
+        setError(String(err && err.message || err));
+      });
+    }
+    return React.createElement(
+      "div",
+      { style: Object.assign({}, S.overlay, { zIndex: 1100 }) },
+      React.createElement(
+        "div",
+        { style: Object.assign({}, S.modal, { maxWidth: "400px" }) },
+        React.createElement(
+          "div",
+          { style: S.modalHeader },
+          React.createElement("span", { style: S.modalTitle }, "Remove Project"),
+          React.createElement("button", { style: S.btnSmall, onClick: props.onClose }, "\xD7")
+        ),
+        React.createElement(
+          "p",
+          { style: { fontSize: "14px", lineHeight: "1.5", color: "#ccc", margin: "0 0 8px" } },
+          "Remove ",
+          React.createElement("strong", null, props.name),
+          " from the dashboard?"
+        ),
+        React.createElement(
+          "p",
+          { style: { fontSize: "13px", color: "#888", margin: "0 0 4px" } },
+          "This will:"
+        ),
+        React.createElement(
+          "ul",
+          { style: { fontSize: "13px", color: "#aaa", margin: "0 0 12px", paddingLeft: "20px", lineHeight: "1.8" } },
+          React.createElement("li", null, "Delete the cron job"),
+          React.createElement("li", null, "Archive the kanban board"),
+          React.createElement("li", null, "Remove from the project registry")
+        ),
+        React.createElement(
+          "p",
+          { style: { fontSize: "13px", color: "#4ade80", margin: "0 0 16px" } },
+          "\u2713 .hermes/daedalus.yaml is not touched \u2014 you can re-add this project at any time."
+        ),
+        error ? React.createElement("div", { style: Object.assign({}, S.err, { marginBottom: "12px" }) }, error) : null,
+        React.createElement(
+          "div",
+          { style: S.modalBar },
+          React.createElement(Button, { label: removing ? "Removing\u2026" : "Remove Project", variant: "danger", disabled: removing, onClick: doRemove }),
+          React.createElement(Button, { label: "Cancel", disabled: removing, onClick: props.onClose })
+        )
+      )
+    );
+  }
   var FIELD_LABELS = {
     repo: "Repository",
     workdir: "Working Directory",
@@ -1135,10 +1196,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var notifications = ns[0], setNotifications = ns[1];
     var sm = useState("");
     var selectedMethod = sm[0], setSelectedMethod = sm[1];
-    var rc = useState(false);
-    var confirmRemove = rc[0], setConfirmRemove = rc[1];
-    var rm = useState(false);
-    var removing = rm[0], setRemoving = rm[1];
+    var sr = useState(false);
+    var showRemoveModal = sr[0], setShowRemoveModal = sr[1];
     var br = useState([]);
     var branches = br[0], setBranches = br[1];
     var la = useState([]);
@@ -1318,435 +1377,427 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       return k !== "secret";
     }) : [];
     return React.createElement(
-      "div",
-      { style: S.overlay, onClick: props.onClose },
+      React.Fragment,
+      null,
       React.createElement(
         "div",
-        { style: S.modal, onClick: function(e2) {
-          e2.stopPropagation();
-        } },
-        // Header
+        { style: S.overlay, onClick: props.onClose },
         React.createElement(
           "div",
-          { style: S.modalHeader },
-          React.createElement("span", { style: S.modalTitle }, "Edit: ", name),
-          React.createElement("button", { style: S.btnSmall, onClick: props.onClose }, "\xD7")
-        ),
-        // Read-only identity (full-width, stacked, label + bare value)
-        React.createElement(
-          "div",
-          { style: { marginBottom: "12px" } },
-          React.createElement("div", { style: S.fieldLabel }, FIELD_LABELS.repo),
-          React.createElement("span", { style: Object.assign({}, S.readOnlyText, { display: "block", width: "100%" }) }, config.repo || "\u2014")
-        ),
-        React.createElement(
-          "div",
-          { style: { marginBottom: "12px" } },
-          React.createElement("div", { style: S.fieldLabel }, FIELD_LABELS.workdir),
-          React.createElement("span", { style: Object.assign({}, S.readOnlyText, { display: "block", width: "100%" }) }, config.workdir || "\u2014")
-        ),
-        // ── VCS (provider-aware) — drives target_branch, board, and labels ───────────
-        React.createElement("div", { style: S.section }, "VCS"),
-        React.createElement(
-          "div",
-          { style: S.fieldRow },
+          { style: S.modal, onClick: function(e2) {
+            e2.stopPropagation();
+          } },
+          // Header
           React.createElement(
-            "label",
-            { style: S.field },
-            React.createElement("span", { style: S.fieldLabel }, "Provider"),
+            "div",
+            { style: S.modalHeader },
+            React.createElement("span", { style: S.modalTitle }, "Edit: ", name),
+            React.createElement("button", { style: S.btnSmall, onClick: props.onClose }, "\xD7")
+          ),
+          // Read-only identity (full-width, stacked, label + bare value)
+          React.createElement(
+            "div",
+            { style: { marginBottom: "12px" } },
+            React.createElement("div", { style: S.fieldLabel }, FIELD_LABELS.repo),
+            React.createElement("span", { style: Object.assign({}, S.readOnlyText, { display: "block", width: "100%" }) }, config.repo || "\u2014")
+          ),
+          React.createElement(
+            "div",
+            { style: { marginBottom: "12px" } },
+            React.createElement("div", { style: S.fieldLabel }, FIELD_LABELS.workdir),
+            React.createElement("span", { style: Object.assign({}, S.readOnlyText, { display: "block", width: "100%" }) }, config.workdir || "\u2014")
+          ),
+          // ── VCS (provider-aware) — drives target_branch, board, and labels ───────────
+          React.createElement("div", { style: S.section }, "VCS"),
+          React.createElement(
+            "div",
+            { style: S.fieldRow },
             React.createElement(
-              "select",
-              {
-                style: S.select,
-                value: getIn(config, ["vcs", "provider"], "github"),
+              "label",
+              { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, "Provider"),
+              React.createElement(
+                "select",
+                {
+                  style: S.select,
+                  value: getIn(config, ["vcs", "provider"], "github"),
+                  onChange: function(e2) {
+                    updateField("vcs.provider", e2.target.value);
+                  }
+                },
+                PROVIDERS.map(function(p) {
+                  return React.createElement("option", { key: p, value: p }, PROVIDER_LABELS[p] || p);
+                })
+              ),
+              React.createElement(
+                "span",
+                { style: { fontSize: "11px", color: "#666", marginTop: "2px" } },
+                repoLabelForProvider(getIn(config, ["vcs", "provider"], "github"))
+              )
+            )
+          ),
+          providerExtraFields(
+            getIn(config, ["vcs", "provider"], "github"),
+            function(path, fb) {
+              return getIn(config, path, fb);
+            },
+            updateField
+          ),
+          React.createElement(
+            "div",
+            { style: S.fieldRow },
+            React.createElement(
+              "label",
+              { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.target_branch),
+              React.createElement(
+                "select",
+                {
+                  style: S.select,
+                  value: getIn(config, ["vcs", "target_branch"], ""),
+                  onChange: function(e2) {
+                    updateField("vcs.target_branch", e2.target.value);
+                  }
+                },
+                React.createElement("option", { value: "" }, branches.length === 0 ? "\u2014 loading branches\u2026 \u2014" : "\u2014 none \u2014"),
+                (function() {
+                  var saved = getIn(config, ["vcs", "target_branch"], "");
+                  var opts = branches.map(function(b) {
+                    return React.createElement("option", { key: b, value: b }, b);
+                  });
+                  if (saved && branches.indexOf(saved) === -1) {
+                    opts.unshift(React.createElement("option", { key: saved, value: saved }, saved));
+                  }
+                  return opts;
+                })()
+              ),
+              branches.length === 0 ? React.createElement(
+                "span",
+                { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
+                "Requires 'repo' scope on your GITHUB_TOKEN to load branches."
+              ) : null
+            ),
+            React.createElement(
+              "label",
+              { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.branch_prefix),
+              React.createElement("input", {
+                style: S.input,
+                value: getIn(config, ["vcs", "branch_prefix"], ""),
+                placeholder: "fix",
                 onChange: function(e2) {
-                  updateField("vcs.provider", e2.target.value);
+                  updateField("vcs.branch_prefix", e2.target.value);
                 }
-              },
-              PROVIDERS.map(function(p) {
-                return React.createElement("option", { key: p, value: p }, PROVIDER_LABELS[p] || p);
               })
             ),
             React.createElement(
-              "span",
-              { style: { fontSize: "11px", color: "#666", marginTop: "2px" } },
-              repoLabelForProvider(getIn(config, ["vcs", "provider"], "github"))
-            )
-          )
-        ),
-        providerExtraFields(
-          getIn(config, ["vcs", "provider"], "github"),
-          function(path, fb) {
-            return getIn(config, path, fb);
-          },
-          updateField
-        ),
-        React.createElement(
-          "div",
-          { style: S.fieldRow },
-          React.createElement(
-            "label",
-            { style: S.field },
-            React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.target_branch),
-            React.createElement(
-              "select",
-              {
-                style: S.select,
-                value: getIn(config, ["vcs", "target_branch"], ""),
+              "label",
+              { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.pr_title_prefix),
+              React.createElement("input", {
+                style: S.input,
+                value: getIn(config, ["vcs", "pr_title_prefix"], ""),
+                placeholder: "fix:",
                 onChange: function(e2) {
-                  updateField("vcs.target_branch", e2.target.value);
+                  updateField("vcs.pr_title_prefix", e2.target.value);
                 }
-              },
-              React.createElement("option", { value: "" }, branches.length === 0 ? "\u2014 loading branches\u2026 \u2014" : "\u2014 none \u2014"),
-              (function() {
-                var saved = getIn(config, ["vcs", "target_branch"], "");
-                var opts = branches.map(function(b) {
-                  return React.createElement("option", { key: b, value: b }, b);
-                });
-                if (saved && branches.indexOf(saved) === -1) {
-                  opts.unshift(React.createElement("option", { key: saved, value: saved }, saved));
-                }
-                return opts;
-              })()
-            ),
-            branches.length === 0 ? React.createElement(
-              "span",
-              { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
-              "Requires 'repo' scope on your GITHUB_TOKEN to load branches."
-            ) : null
+              })
+            )
           ),
-          React.createElement(
-            "label",
-            { style: S.field },
-            React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.branch_prefix),
-            React.createElement("input", {
-              style: S.input,
-              value: getIn(config, ["vcs", "branch_prefix"], ""),
-              placeholder: "fix",
-              onChange: function(e2) {
-                updateField("vcs.branch_prefix", e2.target.value);
-              }
-            })
-          ),
-          React.createElement(
-            "label",
-            { style: S.field },
-            React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.pr_title_prefix),
-            React.createElement("input", {
-              style: S.input,
-              value: getIn(config, ["vcs", "pr_title_prefix"], ""),
-              placeholder: "fix:",
-              onChange: function(e2) {
-                updateField("vcs.pr_title_prefix", e2.target.value);
-              }
-            })
-          )
-        ),
-        // ── GitHub Project Board (GitHub only) ───────────────────────────
-        (getIn(config, ["vcs", "provider"], "github") || "github").toLowerCase() === "github" ? (function() {
-          var boardNum = getIn(config, ["tracking", "github_project_number"], null);
-          var hasStatuses = statuses && statuses.length > 0;
-          return [
-            React.createElement("div", { key: "tracking-hdr", style: S.section }, "GitHub Project Board"),
-            React.createElement(
-              "div",
-              { key: "track-board", style: S.fieldRow },
+          // ── GitHub Project Board (GitHub only) ───────────────────────────
+          (getIn(config, ["vcs", "provider"], "github") || "github").toLowerCase() === "github" ? (function() {
+            var boardNum = getIn(config, ["tracking", "github_project_number"], null);
+            var hasStatuses = statuses && statuses.length > 0;
+            return [
+              React.createElement("div", { key: "tracking-hdr", style: S.section }, "GitHub Project Board"),
               React.createElement(
-                "label",
-                { style: S.field },
-                React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.github_project_number),
+                "div",
+                { key: "track-board", style: S.fieldRow },
                 React.createElement(
-                  "select",
-                  {
-                    style: S.select,
-                    value: boardNum != null ? String(boardNum) : "",
-                    onChange: function(e2) {
-                      var v = e2.target.value.trim();
-                      if (v === "") {
-                        updateField("tracking.github_project_number", void 0);
-                        setStatuses([]);
-                      } else {
-                        var n = parseInt(v, 10);
-                        if (!isNaN(n)) {
-                          updateField("tracking.github_project_number", n);
-                          fetchJSON(apiMetaUrl(name, "statuses") + "&github_project_number=" + n).then(function(data) {
-                            setStatuses(data && data.statuses ? data.statuses : []);
-                          }).catch(function() {
-                            setStatuses([]);
-                          });
+                  "label",
+                  { style: S.field },
+                  React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.github_project_number),
+                  React.createElement(
+                    "select",
+                    {
+                      style: S.select,
+                      value: boardNum != null ? String(boardNum) : "",
+                      onChange: function(e2) {
+                        var v = e2.target.value.trim();
+                        if (v === "") {
+                          updateField("tracking.github_project_number", void 0);
+                          setStatuses([]);
+                        } else {
+                          var n = parseInt(v, 10);
+                          if (!isNaN(n)) {
+                            updateField("tracking.github_project_number", n);
+                            fetchJSON(apiMetaUrl(name, "statuses") + "&github_project_number=" + n).then(function(data) {
+                              setStatuses(data && data.statuses ? data.statuses : []);
+                            }).catch(function() {
+                              setStatuses([]);
+                            });
+                          }
                         }
                       }
-                    }
-                  },
-                  React.createElement("option", { value: "" }, ghProjects.length === 0 ? "\u2014 no boards found \u2014" : "\u2014 none \u2014"),
-                  ghProjects.map(function(p) {
-                    return React.createElement("option", { key: p.number, value: String(p.number) }, "#" + p.number + " " + (p.title || ""));
-                  })
-                ),
-                ghProjects.length === 0 ? React.createElement(
-                  "span",
-                  { style: { fontSize: "11px", color: "#888", display: "block", marginTop: "2px" } },
-                  "Requires 'project' scope on your GITHUB_TOKEN. Add it and reload."
-                ) : null
-              )
-            ),
-            boardNum && hasStatuses ? React.createElement(
-              "div",
-              { key: "track-statuses", style: { marginBottom: "12px" } },
-              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.ready_statuses),
-              React.createElement(TagMultiSelect, {
-                selected: getIn(config, ["tracking", "ready_statuses"], ["Ready"]),
-                options: statuses.map(function(s2) {
-                  return { value: s2, label: s2 };
-                }),
-                onChange: function(arr) {
-                  updateField("tracking.ready_statuses", arr);
-                },
-                placeholder: "+ add status\u2026",
-                emptyHint: "no statuses found"
-              })
-            ) : null
-          ];
-        })() : null,
-        // Editable: Cron
-        React.createElement("div", { style: S.section }, "Cron"),
-        React.createElement(CronSchedule, {
-          value: getIn(config, ["cron", "schedule"], ""),
-          onChange: function(v) {
-            updateField("cron.schedule", v);
-          }
-        }),
-        React.createElement(
-          "div",
-          { style: S.fieldRow },
-          // Cascade deliver: method → channel. Built from /meta/notifications endpoint.
-          (function() {
-            var methodNames = Object.keys(notifications).sort();
-            var rawChannelOpts = selectedMethod && notifications[selectedMethod] ? notifications[selectedMethod] : [];
-            var channelOpts = rawChannelOpts.map(function(entry) {
-              if (typeof entry === "string") return { value: entry, label: entry };
-              return entry;
-            });
-            var savedDeliver = getIn(config, ["cron", "deliver"], "");
-            var selectedChannel = savedDeliver;
-            if (selectedChannel && selectedMethod) {
-              var found = false;
-              for (var ci = 0; ci < channelOpts.length; ci++) {
-                if (channelOpts[ci].value === selectedChannel) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found) selectedChannel = "";
-            }
-            if (methodNames.length === 0) {
-              return React.createElement(
-                "label",
-                { key: "deliver", style: S.field },
-                React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
-                React.createElement("input", {
-                  style: S.input,
-                  value: savedDeliver,
-                  placeholder: "e.g. slack:tasks",
-                  onChange: function(e2) {
-                    updateField("cron.deliver", e2.target.value);
-                  }
-                })
-              );
-            }
-            return [
-              React.createElement(
-                "label",
-                { key: "deliver-method", style: S.field },
-                React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
-                React.createElement(
-                  "select",
-                  {
-                    style: S.select,
-                    value: selectedMethod,
-                    onChange: function(e2) {
-                      setSelectedMethod(e2.target.value);
-                      updateField("cron.deliver", "");
-                    }
-                  },
-                  React.createElement("option", { value: "" }, "\u2014 default \u2014"),
-                  methodNames.map(function(m) {
-                    return React.createElement("option", { key: m, value: m }, m);
-                  })
+                    },
+                    React.createElement("option", { value: "" }, ghProjects.length === 0 ? "\u2014 no boards found \u2014" : "\u2014 none \u2014"),
+                    ghProjects.map(function(p) {
+                      return React.createElement("option", { key: p.number, value: String(p.number) }, "#" + p.number + " " + (p.title || ""));
+                    })
+                  ),
+                  ghProjects.length === 0 ? React.createElement(
+                    "span",
+                    { style: { fontSize: "11px", color: "#888", display: "block", marginTop: "2px" } },
+                    "Requires 'project' scope on your GITHUB_TOKEN. Add it and reload."
+                  ) : null
                 )
               ),
-              selectedMethod ? React.createElement(
-                "label",
-                { key: "deliver-channel", style: S.field },
-                React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.channel),
-                channelOpts.length > 0 ? React.createElement(
-                  "select",
-                  {
-                    style: S.select,
-                    value: selectedChannel,
-                    onChange: function(e2) {
-                      updateField("cron.deliver", e2.target.value);
-                    }
+              boardNum && hasStatuses ? React.createElement(
+                "div",
+                { key: "track-statuses", style: { marginBottom: "12px" } },
+                React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.ready_statuses),
+                React.createElement(TagMultiSelect, {
+                  selected: getIn(config, ["tracking", "ready_statuses"], ["Ready"]),
+                  options: statuses.map(function(s2) {
+                    return { value: s2, label: s2 };
+                  }),
+                  onChange: function(arr) {
+                    updateField("tracking.ready_statuses", arr);
                   },
-                  React.createElement("option", { value: "" }, "\u2014 none \u2014"),
-                  channelOpts.map(function(ch) {
-                    return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
-                  })
-                ) : React.createElement("input", {
-                  style: S.input,
-                  value: selectedChannel,
-                  placeholder: "e.g. slack:tasks",
-                  onChange: function(e2) {
-                    updateField("cron.deliver", e2.target.value);
-                  }
+                  placeholder: "+ add status\u2026",
+                  emptyHint: "no statuses found"
                 })
               ) : null
             ];
-          })()
-        ),
-        // Multi-target notifications (any Hermes messaging platform + channel + events)
-        React.createElement("div", { style: S.section }, "Notifications"),
-        React.createElement(NotificationsEditor, {
-          targets: getIn(config, ["cron", "notifications"], []),
-          methods: notifications,
-          onChange: function(arr) {
-            updateField("cron.notifications", arr);
-          }
-        }),
-        // Editable: Source toggles with human-readable labels and enabled/disabled status
-        sources.length > 0 ? React.createElement("div", { style: S.section }, "Sources") : null,
-        sources.length > 0 ? React.createElement(
-          "div",
-          { style: { marginBottom: "12px" } },
-          sources.map(function(key) {
-            var enabled = !!(config.sources[key] && config.sources[key].enabled);
-            var labelMap = { github_issues: "VCS Issues (GitHub/GitLab/Azure)", local_specs: "Local Specs", kanban_triage: "Kanban Triage" };
-            var humanLabel = labelMap[key] || key;
-            var statusSuffix = enabled ? " (enabled)" : " (disabled)";
-            return React.createElement(Checkbox, { key, label: humanLabel + statusSuffix, checked: enabled, onChange: function() {
-              toggleSource(key);
-            } });
-          })
-        ) : null,
-        // ── Issue Labels ────────────────────────────────────────────────────────
-        React.createElement("div", { style: S.section }, "Issue Labels"),
-        React.createElement(
-          "div",
-          { style: { marginBottom: "12px" } },
-          React.createElement(TagMultiSelect, {
-            selected: getIn(config, ["issues", "filters", "labels"], []),
-            options: (labels || []).map(function(l2) {
-              return { value: l2.name, label: l2.name, color: l2.color };
-            }),
-            onChange: function(arr) {
-              updateField("issues.filters.labels", arr);
-            },
-            placeholder: labels.length === 0 ? "\u2014 loading labels\u2026 \u2014" : "\u2514 select a label to filter",
-            emptyHint: "Requires 'repo' scope on your GITHUB_TOKEN to load labels"
-          })
-        ),
-        // Throughput caps
-        React.createElement("div", { style: S.section }, "Throughput"),
-        React.createElement(
-          "div",
-          { style: S.fieldRow },
-          React.createElement(
-            "label",
-            { style: S.field },
-            React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.max_issues_per_run),
-            React.createElement("input", {
-              style: S.input,
-              type: "number",
-              value: getIn(config, ["issues", "processing", "max_issues_per_run"], ""),
-              placeholder: "20",
-              onChange: function(e2) {
-                var v = e2.target.value.trim();
-                if (v === "") {
-                  updateField("issues.processing.max_issues_per_run", void 0);
-                } else {
-                  var n = parseInt(v, 10);
-                  if (!isNaN(n)) updateField("issues.processing.max_issues_per_run", n);
-                }
-              }
-            })
-          ),
-          React.createElement(
-            "label",
-            { style: S.field },
-            React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.max_open_prs),
-            React.createElement("input", {
-              style: S.input,
-              type: "number",
-              value: getIn(config, ["issues", "processing", "max_open_prs"], ""),
-              placeholder: "5",
-              onChange: function(e2) {
-                var v = e2.target.value.trim();
-                if (v === "") {
-                  setConfig(function(prev) {
-                    var next = JSON.parse(JSON.stringify(prev));
-                    var proc = (next.issues || {}).processing;
-                    if (proc) delete proc.max_open_prs;
-                    return next;
-                  });
-                } else {
-                  var n = parseInt(v, 10);
-                  if (!isNaN(n)) updateField("issues.processing.max_open_prs", n);
-                }
-              }
-            })
-          )
-        ),
-        // Errors
-        fieldErrors && fieldErrors.length > 0 ? React.createElement(
-          "div",
-          { style: { marginBottom: "8px" } },
-          fieldErrors.map(function(errMsg, i) {
-            return React.createElement("div", { key: i, style: { color: "#f87171", fontSize: "12px", margin: "2px 0", padding: "4px 8px", background: "rgba(248,113,113,0.08)", borderRadius: "4px" } }, errMsg);
-          })
-        ) : null,
-        result && !result.ok ? React.createElement(
-          "div",
-          { style: { marginBottom: "8px" } },
-          (result.errors || []).map(function(errMsg, i) {
-            return React.createElement("div", { key: i, style: S.err }, errMsg);
-          })
-        ) : null,
-        result && result.ok ? React.createElement("div", { style: S.ok }, result.msg) : null,
-        // Actions
-        React.createElement(
-          "div",
-          { style: S.modalBar },
-          React.createElement(Button, { label: saving ? "Saving\u2026" : "Save", variant: "primary", disabled: saving || removing, onClick: save }),
-          React.createElement(Button, { label: "Cancel", disabled: removing, onClick: props.onClose }),
+          })() : null,
+          // Editable: Cron
+          React.createElement("div", { style: S.section }, "Cron"),
+          React.createElement(CronSchedule, {
+            value: getIn(config, ["cron", "schedule"], ""),
+            onChange: function(v) {
+              updateField("cron.schedule", v);
+            }
+          }),
           React.createElement(
             "div",
-            { style: { marginLeft: "auto" } },
-            confirmRemove ? React.createElement(
-              "span",
-              { style: { display: "flex", gap: "8px", alignItems: "center" } },
-              React.createElement("span", { style: { fontSize: "12px", color: "#f87171" } }, "Remove from dashboard?"),
-              React.createElement(Button, { label: removing ? "Removing\u2026" : "Yes, remove", variant: "danger", disabled: removing, onClick: removeProject }),
-              React.createElement(Button, { label: "No", disabled: removing, onClick: function() {
-                setConfirmRemove(false);
+            { style: S.fieldRow },
+            // Cascade deliver: method → channel. Built from /meta/notifications endpoint.
+            (function() {
+              var methodNames = Object.keys(notifications).sort();
+              var rawChannelOpts = selectedMethod && notifications[selectedMethod] ? notifications[selectedMethod] : [];
+              var channelOpts = rawChannelOpts.map(function(entry) {
+                if (typeof entry === "string") return { value: entry, label: entry };
+                return entry;
+              });
+              var savedDeliver = getIn(config, ["cron", "deliver"], "");
+              var selectedChannel = savedDeliver;
+              if (selectedChannel && selectedMethod) {
+                var found = false;
+                for (var ci = 0; ci < channelOpts.length; ci++) {
+                  if (channelOpts[ci].value === selectedChannel) {
+                    found = true;
+                    break;
+                  }
+                }
+                if (!found) selectedChannel = "";
+              }
+              if (methodNames.length === 0) {
+                return React.createElement(
+                  "label",
+                  { key: "deliver", style: S.field },
+                  React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
+                  React.createElement("input", {
+                    style: S.input,
+                    value: savedDeliver,
+                    placeholder: "e.g. slack:tasks",
+                    onChange: function(e2) {
+                      updateField("cron.deliver", e2.target.value);
+                    }
+                  })
+                );
+              }
+              return [
+                React.createElement(
+                  "label",
+                  { key: "deliver-method", style: S.field },
+                  React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.deliver),
+                  React.createElement(
+                    "select",
+                    {
+                      style: S.select,
+                      value: selectedMethod,
+                      onChange: function(e2) {
+                        setSelectedMethod(e2.target.value);
+                        updateField("cron.deliver", "");
+                      }
+                    },
+                    React.createElement("option", { value: "" }, "\u2014 default \u2014"),
+                    methodNames.map(function(m) {
+                      return React.createElement("option", { key: m, value: m }, m);
+                    })
+                  )
+                ),
+                selectedMethod ? React.createElement(
+                  "label",
+                  { key: "deliver-channel", style: S.field },
+                  React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.channel),
+                  channelOpts.length > 0 ? React.createElement(
+                    "select",
+                    {
+                      style: S.select,
+                      value: selectedChannel,
+                      onChange: function(e2) {
+                        updateField("cron.deliver", e2.target.value);
+                      }
+                    },
+                    React.createElement("option", { value: "" }, "\u2014 none \u2014"),
+                    channelOpts.map(function(ch) {
+                      return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
+                    })
+                  ) : React.createElement("input", {
+                    style: S.input,
+                    value: selectedChannel,
+                    placeholder: "e.g. slack:tasks",
+                    onChange: function(e2) {
+                      updateField("cron.deliver", e2.target.value);
+                    }
+                  })
+                ) : null
+              ];
+            })()
+          ),
+          // Multi-target notifications (any Hermes messaging platform + channel + events)
+          React.createElement("div", { style: S.section }, "Notifications"),
+          React.createElement(NotificationsEditor, {
+            targets: getIn(config, ["cron", "notifications"], []),
+            methods: notifications,
+            onChange: function(arr) {
+              updateField("cron.notifications", arr);
+            }
+          }),
+          // Editable: Source toggles with human-readable labels and enabled/disabled status
+          sources.length > 0 ? React.createElement("div", { style: S.section }, "Sources") : null,
+          sources.length > 0 ? React.createElement(
+            "div",
+            { style: { marginBottom: "12px" } },
+            sources.map(function(key) {
+              var enabled = !!(config.sources[key] && config.sources[key].enabled);
+              var labelMap = { github_issues: "VCS Issues (GitHub/GitLab/Azure)", local_specs: "Local Specs", kanban_triage: "Kanban Triage" };
+              var humanLabel = labelMap[key] || key;
+              var statusSuffix = enabled ? " (enabled)" : " (disabled)";
+              return React.createElement(Checkbox, { key, label: humanLabel + statusSuffix, checked: enabled, onChange: function() {
+                toggleSource(key);
+              } });
+            })
+          ) : null,
+          // ── Issue Labels ────────────────────────────────────────────────────────
+          React.createElement("div", { style: S.section }, "Issue Labels"),
+          React.createElement(
+            "div",
+            { style: { marginBottom: "12px" } },
+            React.createElement(TagMultiSelect, {
+              selected: getIn(config, ["issues", "filters", "labels"], []),
+              options: (labels || []).map(function(l2) {
+                return { value: l2.name, label: l2.name, color: l2.color };
+              }),
+              onChange: function(arr) {
+                updateField("issues.filters.labels", arr);
+              },
+              placeholder: labels.length === 0 ? "\u2014 loading labels\u2026 \u2014" : "\u2514 select a label to filter",
+              emptyHint: "Requires 'repo' scope on your GITHUB_TOKEN to load labels"
+            })
+          ),
+          // Throughput caps
+          React.createElement("div", { style: S.section }, "Throughput"),
+          React.createElement(
+            "div",
+            { style: S.fieldRow },
+            React.createElement(
+              "label",
+              { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.max_issues_per_run),
+              React.createElement("input", {
+                style: S.input,
+                type: "number",
+                value: getIn(config, ["issues", "processing", "max_issues_per_run"], ""),
+                placeholder: "20",
+                onChange: function(e2) {
+                  var v = e2.target.value.trim();
+                  if (v === "") {
+                    updateField("issues.processing.max_issues_per_run", void 0);
+                  } else {
+                    var n = parseInt(v, 10);
+                    if (!isNaN(n)) updateField("issues.processing.max_issues_per_run", n);
+                  }
+                }
+              })
+            ),
+            React.createElement(
+              "label",
+              { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, FIELD_LABELS.max_open_prs),
+              React.createElement("input", {
+                style: S.input,
+                type: "number",
+                value: getIn(config, ["issues", "processing", "max_open_prs"], ""),
+                placeholder: "5",
+                onChange: function(e2) {
+                  var v = e2.target.value.trim();
+                  if (v === "") {
+                    setConfig(function(prev) {
+                      var next = JSON.parse(JSON.stringify(prev));
+                      var proc = (next.issues || {}).processing;
+                      if (proc) delete proc.max_open_prs;
+                      return next;
+                    });
+                  } else {
+                    var n = parseInt(v, 10);
+                    if (!isNaN(n)) updateField("issues.processing.max_open_prs", n);
+                  }
+                }
+              })
+            )
+          ),
+          // Errors
+          fieldErrors && fieldErrors.length > 0 ? React.createElement(
+            "div",
+            { style: { marginBottom: "8px" } },
+            fieldErrors.map(function(errMsg, i) {
+              return React.createElement("div", { key: i, style: { color: "#f87171", fontSize: "12px", margin: "2px 0", padding: "4px 8px", background: "rgba(248,113,113,0.08)", borderRadius: "4px" } }, errMsg);
+            })
+          ) : null,
+          result && !result.ok ? React.createElement(
+            "div",
+            { style: { marginBottom: "8px" } },
+            (result.errors || []).map(function(errMsg, i) {
+              return React.createElement("div", { key: i, style: S.err }, errMsg);
+            })
+          ) : null,
+          result && result.ok ? React.createElement("div", { style: S.ok }, result.msg) : null,
+          // Actions
+          React.createElement(
+            "div",
+            { style: S.modalBar },
+            React.createElement(Button, { label: saving ? "Saving\u2026" : "Save", variant: "primary", disabled: saving, onClick: save }),
+            React.createElement(Button, { label: "Cancel", onClick: props.onClose }),
+            React.createElement(
+              "div",
+              { style: { marginLeft: "auto" } },
+              React.createElement(Button, { label: "Remove Project", variant: "danger", onClick: function() {
+                setShowRemoveModal(true);
               } })
-            ) : React.createElement(Button, { label: "Remove Project", variant: "danger", onClick: function() {
-              setConfirmRemove(true);
-            } })
+            )
           )
         )
-      )
+      ),
+      showRemoveModal ? React.createElement(RemoveProjectModal, {
+        name,
+        onClose: function() {
+          setShowRemoveModal(false);
+        },
+        onRemoved: props.onRemoved
+      }) : null
     );
-    function removeProject() {
-      setRemoving(true);
-      fetchJSON(apiProject(name), { method: "DELETE" }).then(function() {
-        setRemoving(false);
-        props.onRemoved();
-      }).catch(function(err) {
-        setRemoving(false);
-        setResult({ ok: false, errors: ["Remove failed: " + String(err && err.message || err)] });
-        setConfirmRemove(false);
-      });
-    }
   }
   function DeliverMultiPicker(props) {
     var targets = props.targets || [];
