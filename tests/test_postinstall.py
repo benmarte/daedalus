@@ -136,30 +136,32 @@ class TestCheckGhAuth:
         assert ok is True
         assert "OK:" in msg
 
-    def test_gh_not_authenticated(self, postinstall):
+    def test_gh_not_authenticated_is_advisory(self, postinstall):
+        """Missing gh auth must NOT block install — gh is only needed for
+        GitHub worker flows; the plugin itself talks to VCS APIs directly."""
         with mock.patch("subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=1,
                 stderr="You are not logged into any GitHub hosts. Run gh auth login to authenticate.\n",
             )
             ok, msg = postinstall._check_gh_auth()
-        assert ok is False
-        assert "FAIL" in msg
+        assert ok is True
+        assert "WARN" in msg
         assert "gh auth login" in msg.lower()
+        assert "GITLAB_TOKEN" in msg
 
-    def test_gh_cli_missing(self, postinstall):
+    def test_gh_cli_missing_is_advisory(self, postinstall):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")):
             ok, msg = postinstall._check_gh_auth()
-        assert ok is False
-        assert "MISSING" in msg
-        assert "gh" in msg.lower()
+        assert ok is True
+        assert "WARN" in msg
         assert "cli.github.com" in msg
 
-    def test_gh_timeout(self, postinstall):
+    def test_gh_timeout_is_advisory(self, postinstall):
         with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 30)):
             ok, msg = postinstall._check_gh_auth()
-        assert ok is False
-        assert "TIMEOUT" in msg
+        assert ok is True
+        assert "WARN" in msg
 
 
 # ── provision tests ──────────────────────────────────────────────────────────

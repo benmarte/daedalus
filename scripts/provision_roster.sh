@@ -85,11 +85,14 @@ setup_role() {
     mkdir -p "$home_dir"
     # Keychain-free: the isolated HOME must never invoke osxkeychain. Workers
     # authenticate via the gh token / hosts.yml, not the macOS login keychain.
+    # gh's plaintext-storage flag is required BECAUSE the HOME is isolated —
+    # there is no keychain to use; the profile dir is locked to 0700 below.
     env HOME="$home_dir" git config --global credential.helper ""
     printf '%s' "$GH_TOKEN" | env -u GH_TOKEN -u GITHUB_TOKEN GH_PROMPT_DISABLED=1 HOME="$home_dir" gh auth login --with-token --insecure-storage 2>/dev/null || echo "  WARN: gh auth login failed for $name" >&2
     # Belt-and-suspenders: also drop it in .env for any tool that reads the env directly.
     local env_file="$PROFILES/$name/.env"
     touch "$env_file"
+    chmod 600 "$env_file"
     grep -q '^GITHUB_TOKEN=' "$env_file" 2>/dev/null || printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$env_file"
     # Attribute git commits to the bot (workers run with HOME=<profile>/home → this gitconfig).
     if [ -n "${ROSTER_BOT_NAME:-}" ] && [ -n "${ROSTER_BOT_EMAIL:-}" ]; then
@@ -97,6 +100,9 @@ setup_role() {
       env HOME="$home_dir" git config --global user.email "$ROSTER_BOT_EMAIL"
     fi
   fi
+
+  # Lock the profile down: it holds credentials (hosts.yml, .env).
+  chmod 700 "$PROFILES/$name" 2>/dev/null || true
 
   # NOTE: project-specific conventions (base branch, pre-commit policy, …) are NOT
   # seeded here — the provisioner stays project-agnostic. They live in each repo's

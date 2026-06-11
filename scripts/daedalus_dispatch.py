@@ -65,16 +65,28 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [i.as_dict() for i in provider.list_issues(state=state, labels=labels, limit=limit)]
 
 
+_PR_COMMENT_HOWTO = {
+    "github": "`gh pr comment <pr> --repo {repo} --body-file <report.md>`",
+    "gitlab": "`glab mr note <mr> --repo {repo} -m \"$(cat report.md)\"` "
+              "(or the GitLab MR notes API with GITLAB_TOKEN)",
+    "azuredevops": "the Azure DevOps PR threads API or "
+                   "`az repos pr ...` (authenticated via AZURE_DEVOPS_PAT)",
+}
+
+
 def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
-               notify_target: str = "", base_branch: str = "dev") -> str:
+               notify_target: str = "", base_branch: str = "dev",
+               provider_name: str = "github") -> str:
     """Triage body for decompose(): describes the FULL lifecycle so the decomposer
     fans it out across the roster (developer → reviewer → security-analyst →
     documentation). Each role's instructions are spelled out so routing is clean."""
     n = issue.get("number")
     title = issue.get("title", "")
     body = (issue.get("body") or "").strip()
+    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
+                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     return (
-        f"Deliver GitHub issue {repo}#{n}: {title}\n"
+        f"Deliver issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
         f"Decompose this into the following role tasks and assign each to the right agent:\n\n"
         f"1. DEVELOPER — implement the fix/feature. Follow the agent-skills lifecycle "
@@ -87,7 +99,7 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"3. SECURITY-ANALYST — audit the PR diff for vulnerabilities (authz, secrets, injection, "
         f"input validation); flag findings or sign off.\n"
         f"4. DOCUMENTATION — after the PR is open and reviewed, write a detailed completion report and "
-        f"post it as a comment on the GitHub PR (`gh pr comment <pr> --repo {repo} --body-file <report.md>`). "
+        f"post it as a comment on the PR ({comment_howto}). "
         f"Use the PR number from the chain above (developer/reviewer cards carry it). "
         f"The report MUST cover: the issue (#{n} + summary), what was fixed, the files edited (with a "
         f"one-line note per file), how it was resolved, the PR link, and step-by-step instructions to "
@@ -274,7 +286,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # Pin the triage to the project checkout; Hermes propagates the workspace to
         # every decomposed child, so no worker can wander into the wrong repo.
         tid = kanban.create_triage(slug, n, issue.get("title", ""),
-                                   _task_body(repo, issue, iterations, workdir, notify_target, base_branch),
+                                   _task_body(repo, issue, iterations, workdir, notify_target,
+                                              base_branch, provider_name=provider.name),
                                    idempotency_key=f"issue-{n}",
                                    workspace=f"dir:{workdir}" if workdir else None)
         if tid:

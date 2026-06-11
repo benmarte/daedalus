@@ -2,8 +2,9 @@
 """
 postinstall.py — Prerequisite checker + roster provisioner for the daedalus plugin.
 
-Checks that the host environment is ready (default profile, agent-skills plugin, gh auth),
-then runs scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
+Checks that the host environment is ready (default profile, agent-skills plugin;
+gh auth is advisory — only GitHub worker flows use it), then runs
+scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
 
 Usage:
     python3 scripts/postinstall.py          # check + provision
@@ -56,7 +57,14 @@ def _check_agent_skills() -> tuple[bool, str]:
 
 
 def _check_gh_auth() -> tuple[bool, str]:
-    """Verify 'gh auth status' reports authenticated."""
+    """Advisory check: 'gh auth status' for GitHub worker flows.
+
+    The dispatcher and dashboard talk to GitHub/GitLab/Azure DevOps via their
+    HTTPS APIs (tokens from env: GITHUB_TOKEN / GITLAB_TOKEN / AZURE_DEVOPS_PAT),
+    so gh is NOT required for the plugin itself. Worker agents still use gh in
+    their terminals when a project targets GitHub (push branches, open PRs),
+    which is why this check exists — as a warning, never an install blocker.
+    """
     try:
         result = subprocess.run(
             ["gh", "auth", "status"],
@@ -64,20 +72,21 @@ def _check_gh_auth() -> tuple[bool, str]:
         )
         if result.returncode == 0:
             return True, f"OK: gh auth status passed\n{result.stderr.strip()}"
-        return False, (
-            f"FAIL: gh auth status returned code {result.returncode}\n"
-            f"{result.stderr.strip()}\n"
-            f"  Fix: run 'gh auth login' with a token that has repo + workflow scopes."
+        return True, (
+            f"WARN: gh auth status returned code {result.returncode} — fine unless "
+            f"worker agents target GitHub repos.\n"
+            f"  For GitHub projects: run 'gh auth login' (repo + workflow scopes).\n"
+            f"  For GitLab/Azure DevOps projects: set GITLAB_TOKEN / AZURE_DEVOPS_PAT instead."
         )
     except FileNotFoundError:
-        return False, (
-            "MISSING: 'gh' CLI not found on PATH.\n"
-            "  Fix: install gh (https://cli.github.com) and run 'gh auth login'."
+        return True, (
+            "WARN: 'gh' CLI not found on PATH — fine unless worker agents target "
+            "GitHub repos.\n"
+            "  For GitHub projects: install gh (https://cli.github.com) and 'gh auth login'."
         )
     except subprocess.TimeoutExpired:
-        return False, (
-            "TIMEOUT: 'gh auth status' hung for 30s.\n"
-            "  Fix: check network / gh API reachability."
+        return True, (
+            "WARN: 'gh auth status' hung for 30s — check network / gh API reachability."
         )
 
 
