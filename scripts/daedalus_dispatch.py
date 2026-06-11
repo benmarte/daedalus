@@ -346,6 +346,27 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     if created and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)  # nudge (gateway also auto-dispatches)
 
+    # ── cleanup: archive kanban tasks for issues closed directly on VCS ───────
+    # Issues closed without a merged PR (won't-fix, duplicate, manual close)
+    # never appear in the open-issue fetch, so the reconciliation loop above
+    # never sees them. Find managed issue numbers absent from this tick's open
+    # fetch, check their VCS state, and complete their kanban tasks.
+    seen_open = {i["number"] for i in issues}
+    orphaned = existing - seen_open
+    for n in sorted(orphaned):
+        state = provider.get_issue_state(n)
+        if state != "closed":
+            continue  # still open (filtered by label/limit) or unknown — leave it
+        if dry_run:
+            logger.info("[dry-run] #%s closed externally → would archive kanban tasks + Done", n)
+            completed.append(n)
+            continue
+        provider.board_set_status(n, provider.status_name("done"))
+        closed_tasks = kanban.close_issue_tasks(slug, n)
+        logger.info("dispatch: #%s closed externally → Done (%d task(s) completed: %s)",
+                    n, len(closed_tasks), closed_tasks)
+        completed.append(n)
+
     summary = {"board": slug, "mode": provider.name, "created": created, "reconciled": reconciled,
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),

@@ -305,3 +305,25 @@ def list_tasks(slug: str, status: str = "") -> List[dict]:
         return json.loads(out or "[]")
     except Exception:
         return []
+
+
+def close_issue_tasks(slug: str, issue_number: int) -> List[str]:
+    """Complete all non-done kanban tasks that reference #issue_number in their title.
+
+    Used when a GitHub/GitLab/Azure issue is closed externally (no merged PR),
+    so the decomposed sub-tasks (developer, reviewer, etc.) don't linger on the board.
+    Returns the list of task IDs that were completed.
+    """
+    tasks = list_tasks(slug)
+    pattern = f"#{issue_number}"
+    completed_ids: List[str] = []
+    for t in tasks:
+        if pattern not in (t.get("title") or ""):
+            continue
+        status = (t.get("status") or "").lower()
+        if status in ("done", "complete", "completed"):
+            continue
+        tid = t.get("id") or t.get("task_id")
+        if tid and complete(slug, str(tid)):
+            completed_ids.append(str(tid))
+    return completed_ids

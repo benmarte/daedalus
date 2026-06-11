@@ -124,6 +124,17 @@ class AzureDevOpsProvider(VCSProvider):
             self._log.info("close_issue: closed #%s (state %s)", issue_number, closed_state)
         return ok
 
+    def get_issue_state(self, issue_number: int) -> Optional[str]:
+        try:
+            data = self._http.get_json(
+                f"{self._pproj}/_apis/wit/workitems/{issue_number}",
+                params={"fields": "System.State", **_API})
+            state = (data.get("fields") or {}).get("System.State", "")
+            closed_state = (self._cfg.get("vcs") or {}).get("closed_state") or "Done"
+            return "closed" if state == closed_state else "open"
+        except ProviderError:
+            return None
+
     # ── pull requests ────────────────────────────────────────────────────────
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
         status = {"open": "active", "merged": "completed", "closed": "abandoned"}.get(state, "all")

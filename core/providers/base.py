@@ -169,6 +169,10 @@ class VCSProvider(abc.ABC):
     @abc.abstractmethod
     def close_issue(self, issue_number: int) -> bool: ...
 
+    def get_issue_state(self, issue_number: int) -> Optional[str]:
+        """Return 'open', 'closed', or None if unknown/error. Providers override for efficiency."""
+        return None
+
     # ── pull/merge requests ──────────────────────────────────────────────────
     @abc.abstractmethod
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]: ...

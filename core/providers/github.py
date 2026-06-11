@@ -84,6 +84,13 @@ class GitHubProvider(VCSProvider):
         self._log.info("close_issue: closed #%s", issue_number)
         return True
 
+    def get_issue_state(self, issue_number: int) -> Optional[str]:
+        try:
+            data = self._http.get_json(f"/repos/{self.repo}/issues/{issue_number}")
+            return (data.get("state") or "open").lower()
+        except ProviderError:
+            return None
+
     # ── pull requests ────────────────────────────────────────────────────────
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
         rest_state = "all" if state == "merged" else state
