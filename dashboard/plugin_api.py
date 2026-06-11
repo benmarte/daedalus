@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 # When the dashboard host runs, it adds the plugin dir to sys.path so
 # relative imports work. Fall back to absolute import for testing.
 try:
-    from config import ConfigLoader, deep_merge
+    from config import ConfigLoader, deep_merge, validate_vcs
 except ImportError:
     import sys
 
@@ -40,6 +40,7 @@ except ImportError:
         sys.path.insert(0, str(_repo_root))
     from config import ConfigLoader  # type: ignore[no-redef]
     from config import deep_merge  # type: ignore[no-redef]
+    from config import validate_vcs  # type: ignore[no-redef]
 
 # Core helpers (degrade gracefully — never raise on missing data).
 try:
@@ -47,9 +48,11 @@ try:
 except ImportError:
     registry = None  # type: ignore[assignment]
 try:
-    from core.kanban import list_tasks, diagnostics as kanban_diagnostics
+    from core.kanban import (list_tasks, ensure_board,
+                             diagnostics as kanban_diagnostics)
 except ImportError:
     list_tasks = None  # type: ignore[assignment]
+    ensure_board = None  # type: ignore[assignment]
     kanban_diagnostics = None  # type: ignore[assignment]
 try:
     from core.providers import get_provider
@@ -987,6 +990,120 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     else:
         result["cron"] = "created" if "created" in out.lower() else "updated"
     return result
+
+
+_PLUGIN_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "daedalus.yaml"
+
+
+@project_config_router.post("/create")
+async def create_project(request: Request) -> dict[str, Any]:
+    """Create a new project — the API equivalent of scripts/setup.sh.
+
+    Scaffolds ``<workdir>/.hermes/daedalus.yaml`` from the packaged template,
+    deep-merges any config sections from the request body, registers the repo
+    in the daedalus registry, creates the project's own kanban board
+    (idempotent), and creates its own cron job.
+
+    Returns 409 when the repo already has a config (edit it instead),
+    422 for missing/invalid input. Never stores secrets in the config file.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Body must be a JSON object")
+
+    name = (body.get("name") or "").strip() if isinstance(body.get("name"), str) else ""
+    repo = (body.get("repo") or "").strip() if isinstance(body.get("repo"), str) else ""
+    workdir = (body.get("workdir") or "").strip() if isinstance(body.get("workdir"), str) else ""
+    if not name:
+        raise HTTPException(status_code=422, detail="'name' is required")
+    if not repo:
+        raise HTTPException(status_code=422, detail="'repo' is required")
+    if not workdir:
+        raise HTTPException(status_code=422, detail="'workdir' is required")
+
+    workdir_path = Path(workdir).expanduser()
+    if not workdir_path.is_absolute():
+        raise HTTPException(status_code=422, detail="'workdir' must be an absolute path")
+    workdir_path = workdir_path.resolve()
+    if not workdir_path.is_dir():
+        raise HTTPException(status_code=422,
+                            detail=f"'workdir' does not exist: {workdir_path}")
+
+    cfg_path = workdir_path / ".hermes" / "daedalus.yaml"
+    if cfg_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Project already has a config at {cfg_path} — edit it instead",
+        )
+
+    # Scaffold from the packaged template (same one setup.sh uses).
+    try:
+        template = _PLUGIN_TEMPLATE_PATH.read_text()
+    except OSError:
+        raise HTTPException(status_code=500,
+                            detail=f"Plugin template missing at {_PLUGIN_TEMPLATE_PATH}")
+    rendered = (template.replace("{{NAME}}", name)
+                        .replace("{{REPO}}", repo)
+                        .replace("{{WORKDIR}}", str(workdir_path)))
+    try:
+        cfg = yaml.safe_load(rendered) or {}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to render config template")
+
+    # Deep-merge optional config sections from the request body.
+    for key in sorted(_CONFIG_SECTION_KEYS):
+        if key in body:
+            if body[key] is not None and not isinstance(body[key], dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"'{key}' must be a mapping, got {type(body[key]).__name__}",
+                )
+            cfg[key] = deep_merge(cfg.get(key) or {}, body[key] or {})
+
+    # Validate notifications + provider config before anything touches disk.
+    errors: list[str] = []
+    cron_cfg = cfg.get("cron") or {}
+    if cron_cfg.get("notifications") is not None:
+        errors += _validate_notifications(cron_cfg["notifications"])
+    errors += validate_vcs(cfg)
+    if errors:
+        raise HTTPException(status_code=422, detail={"errors": errors})
+
+    safe = _strip_secrets(cfg)
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(yaml.dump(safe, default_flow_style=False,
+                                      sort_keys=False, allow_unicode=True))
+    except OSError:
+        raise HTTPException(status_code=500, detail="Failed to write config file")
+
+    # Register in the daedalus registry (idempotent).
+    registered = False
+    if registry is not None:
+        try:
+            registry.add_project(str(workdir_path))
+            registered = True
+        except Exception:
+            registered = False
+
+    # Each project gets its OWN kanban board (idempotent create).
+    board_slug = _board_slug(repo, name)
+    board_ok = bool(ensure_board(board_slug)) if ensure_board is not None else False
+
+    # …and its OWN cron job.
+    cron_result = _reconcile_cron(name, cron_cfg)
+
+    return {
+        "status": "created",
+        "config_path": str(cfg_path),
+        "registered": registered,
+        "board": board_slug,
+        "board_created": board_ok,
+        "cron": cron_result,
+    }
 
 
 @project_config_router.get("/{name}/config")

@@ -725,6 +725,101 @@ def test_post_project_config_rejects_invalid_yaml_values(project_client, project
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# POST /project/create — dashboard add-project flow
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCreateProject:
+    """POST /project/create scaffolds config + registry + board + cron."""
+
+    def _post(self, client, payload):
+        return client.post("/api/plugins/daedalus/project/create", json=payload)
+
+    def _payload(self, workdir):
+        return {"name": "new-proj", "repo": "org/new-proj", "workdir": str(workdir)}
+
+    def test_create_success(self, project_client, tmp_path):
+        with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True) as mock_board, \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "new-proj-daedalus",
+                                      "error": None}) as mock_cron:
+            resp = self._post(project_client, {**self._payload(tmp_path),
+                                               "cron": {"schedule": "45m"}})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["status"] == "created"
+        assert data["board"] == "org-new-proj"
+        assert data["registered"] is True
+        assert data["cron"]["cron"] == "created"
+
+        # Config scaffolded on disk with identity + overrides applied
+        cfg_path = tmp_path / ".hermes" / "daedalus.yaml"
+        assert cfg_path.exists()
+        cfg = yaml.safe_load(cfg_path.read_text())
+        assert cfg["name"] == "new-proj"
+        assert cfg["repo"] == "org/new-proj"
+        assert cfg["cron"]["schedule"] == "45m"
+        assert cfg["vcs"]["provider"] == "github"  # template default
+
+        mock_registry.add_project.assert_called_once_with(str(tmp_path.resolve()))
+        mock_board.assert_called_once_with("org-new-proj")
+        mock_cron.assert_called_once()
+
+    def test_create_409_when_config_exists(self, project_client, project_repo_dir):
+        resp = self._post(project_client, {"name": "x", "repo": "o/r",
+                                           "workdir": str(project_repo_dir)})
+        assert resp.status_code == 409
+
+    def test_create_422_missing_fields(self, project_client, tmp_path):
+        for missing in ("name", "repo", "workdir"):
+            payload = self._payload(tmp_path)
+            payload.pop(missing)
+            resp = self._post(project_client, payload)
+            assert resp.status_code == 422, missing
+            assert missing in resp.json()["detail"]
+
+    def test_create_422_relative_or_missing_workdir(self, project_client, tmp_path):
+        resp = self._post(project_client, {"name": "x", "repo": "o/r",
+                                           "workdir": "relative/path"})
+        assert resp.status_code == 422
+        resp2 = self._post(project_client, {"name": "x", "repo": "o/r",
+                                            "workdir": str(tmp_path / "nope")})
+        assert resp2.status_code == 422
+
+    def test_create_validates_provider_config(self, project_client, tmp_path):
+        """A gitlab project without project_path/id is rejected before any write."""
+        resp = self._post(project_client, {
+            "name": "x", "repo": "not-a-path", "workdir": str(tmp_path),
+            "vcs": {"provider": "gitlab"},
+        })
+        assert resp.status_code == 422
+        assert not (tmp_path / ".hermes" / "daedalus.yaml").exists()
+
+    def test_create_validates_notifications(self, project_client, tmp_path):
+        resp = self._post(project_client, {
+            **self._payload(tmp_path),
+            "cron": {"schedule": "30m",
+                     "notifications": [{"platform": "Slack", "target": ""}]},
+        })
+        assert resp.status_code == 422
+        assert not (tmp_path / ".hermes" / "daedalus.yaml").exists()
+
+    def test_create_gitlab_project(self, project_client, tmp_path):
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client, {
+                "name": "gl-proj", "repo": "group/gl-proj", "workdir": str(tmp_path),
+                "vcs": {"provider": "gitlab"},
+            })
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["vcs"]["provider"] == "gitlab"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # _reconcile_cron unit tests — mocked subprocess
 # ═══════════════════════════════════════════════════════════════════════════════
 
