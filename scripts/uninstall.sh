@@ -308,7 +308,7 @@ echo "Plugin package:"
 if $KEEP_PLUGIN; then
   echo "  (kept — --keep-plugin flag is set)"
 else
-  echo "  • will run: hermes plugins remove daedalus (deferred)"
+  echo "  • will run: hermes plugins remove daedalus"
   any_found=true
 fi
 
@@ -438,7 +438,7 @@ for board in "${FOUND_BOARDS[@]}"; do
     SKIPPED+=("kanban board: default (never removed)")
     continue
   fi
-  if hermes kanban boards rm "$board" >/dev/null 2>&1; then
+  if hermes kanban boards rm "$board" --delete >/dev/null 2>&1; then
     REMOVED+=("kanban board: $board")
   else
     SKIPPED+=("kanban board: $board (removal failed — may not exist)")
@@ -502,14 +502,17 @@ echo "Re-run this script any time — it's idempotent."
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DEFERRED PLUGIN REMOVAL (final action — runs AFTER script exits)
+# PLUGIN REMOVAL (synchronous — must run before exit so restart sees a clean state)
 # ══════════════════════════════════════════════════════════════════════════════
+# Running synchronously is safe even when this script lives inside the plugin
+# directory: bash has already read and parsed the script before we delete it.
 if ! $KEEP_PLUGIN; then
   echo "Removing the plugin package… (daedalus)"
-  # Spawn detached so the script's own directory survives until we exit.
-  # The subshell sleeps briefly to let this script finish, then runs the removal.
-  ( sleep 1; hermes plugins remove daedalus >/dev/null 2>&1 ) &
-  disown 2>/dev/null || true
+  if hermes plugins remove daedalus >/dev/null 2>&1; then
+    echo "  ✓ plugin removed"
+  else
+    echo "  - plugin removal failed (may already be removed)"
+  fi
 fi
 
 exit 0
