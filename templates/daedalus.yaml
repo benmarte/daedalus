@@ -32,6 +32,8 @@ tracking:
 # environment variables — never put a token in this file.
 vcs:
   provider: "github"                    # github | gitlab | azuredevops
+  #                                     # setup.sh and the dashboard auto-detect
+  #                                     # this from the repo's origin remote
   target_branch: "main"                 # Base branch for PRs (dev, main, master…)
 
   # token_env: "GITHUB_TOKEN"           # Override the env var holding the API token.
@@ -58,14 +60,16 @@ vcs:
     done: "Done"
 
 # ── Sources ──────────────────────────────────────────────────────────────────
-# Toggle which issue/spec sources the daedalus watches for this repo.
+# Which triggers the daedalus watches for this repo. ALL are on by default —
+# VCS issues, spec/plan .md drops, and manual kanban triage cards all work
+# out of the box; disable whichever you don't want.
 sources:
   github_issues:
     enabled: true                       # Poll the VCS provider's issues/work items
   local_specs:
-    enabled: false                      # Watch .hermes/pending/ for spec/plan files
+    enabled: true                       # Watch .hermes/pending/ for spec/plan files
   kanban_triage:
-    enabled: false                      # Allow Kanban-only triage cards (no VCS source)
+    enabled: true                       # Kanban-only triage cards (no VCS source)
 
 # ── Cron + Notifications ──────────────────────────────────────────────────────
 cron:

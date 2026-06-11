@@ -178,8 +178,11 @@ provider API with the token already in each worker's env.
 
 ## VCS providers
 
-Each project picks its provider in `.hermes/daedalus.yaml` (`vcs.provider`) or
-the dashboard's provider dropdown. Tokens are read **only from environment
+The provider is **auto-detected from the repo's `origin` remote** (github.com,
+gitlab hosts — incl. self-hosted `base_url`, dev.azure.com / *.visualstudio.com
+— incl. org/project/repo) by both `setup.sh` and the dashboard's Add Project
+(leave the provider on "Auto-detect" and the repo field empty). You can always
+pin it manually in `.hermes/daedalus.yaml` (`vcs.provider`) or the dropdown. Tokens are read **only from environment
 variables** — never from config files — and are redacted from all errors/logs.
 Override the env var name per project with `vcs.token_env`.
 
@@ -266,7 +269,8 @@ Export the provider token for the dispatcher's environment (see
 [VCS providers](#vcs-providers)), e.g. `GITHUB_TOKEN`, `GITLAB_TOKEN`, or
 `AZURE_DEVOPS_PAT`.
 
-**4. Trigger work** — any of:
+**4. Trigger work** — all three sources are **enabled by default** (toggle any
+off in the config):
 - **Prompt / spec file:** `hermes kanban create --triage --workspace dir:$PWD --body "$(cat spec.md)"`
 - **Spec drop:** put a `*.md` in `<repo>/.hermes/pending/` (when `sources.local_specs.enabled`)
 - **VCS issue:** move an issue/work item to **Ready** — GitHub Project column,

@@ -56,8 +56,10 @@ except ImportError:
     kanban_diagnostics = None  # type: ignore[assignment]
 try:
     from core.providers import get_provider
+    from core.providers.detect import detect_repo_vcs
 except ImportError:
     get_provider = None  # type: ignore[assignment]
+    detect_repo_vcs = None  # type: ignore[assignment]
 
 projects_router = APIRouter(prefix="/projects", tags=["daedalus-projects"])
 project_config_router = APIRouter(prefix="/project", tags=["daedalus-project-config"])
@@ -846,8 +848,6 @@ async def create_project(request: Request) -> dict[str, Any]:
     workdir = (body.get("workdir") or "").strip() if isinstance(body.get("workdir"), str) else ""
     if not name:
         raise HTTPException(status_code=422, detail="'name' is required")
-    if not repo:
-        raise HTTPException(status_code=422, detail="'repo' is required")
     if not workdir:
         raise HTTPException(status_code=422, detail="'workdir' is required")
 
@@ -858,6 +858,23 @@ async def create_project(request: Request) -> dict[str, Any]:
     if not workdir_path.is_dir():
         raise HTTPException(status_code=422,
                             detail=f"'workdir' does not exist: {workdir_path}")
+
+    # Auto-detect the provider + repo identity from the repo's origin remote
+    # when the request doesn't pin a provider explicitly.
+    body_vcs = body.get("vcs") if isinstance(body.get("vcs"), dict) else {}
+    detected = None
+    if detect_repo_vcs is not None and not (body_vcs or {}).get("provider"):
+        try:
+            detected = detect_repo_vcs(str(workdir_path))
+        except Exception:
+            detected = None
+    if not repo and detected:
+        repo = detected["repo"]
+    if not repo:
+        raise HTTPException(
+            status_code=422,
+            detail="'repo' is required (no origin remote found to auto-detect it from)",
+        )
 
     cfg_path = workdir_path / ".hermes" / "daedalus.yaml"
     if cfg_path.exists():
@@ -889,6 +906,15 @@ async def create_project(request: Request) -> dict[str, Any]:
                     detail=f"'{key}' must be a mapping, got {type(body[key]).__name__}",
                 )
             cfg[key] = deep_merge(cfg.get(key) or {}, body[key] or {})
+
+    # Apply the auto-detected provider. Detection only runs when the request
+    # didn't pin one, so it overrides the template's github default — but any
+    # request-supplied extra keys (base_url, org, …) still win via setdefault.
+    if detected:
+        vcs_cfg = cfg.setdefault("vcs", {})
+        vcs_cfg["provider"] = detected["provider"]
+        for k, v in (detected.get("vcs_extra") or {}).items():
+            vcs_cfg.setdefault(k, v)
 
     # Validate notifications + provider config before anything touches disk.
     errors: list[str] = []

@@ -635,6 +635,61 @@ class TestCreateProject:
         assert resp.status_code == 422
         assert not (tmp_path / ".hermes" / "daedalus.yaml").exists()
 
+    def test_create_auto_detects_provider_and_repo(self, project_client, tmp_path):
+        """No repo/provider in the request → both detected from the origin remote."""
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
+                        "https://gitlab.corp.io/team/app.git"], check=True)
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client,
+                              {"name": "auto-proj", "workdir": str(tmp_path)})
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["repo"] == "team/app"
+        assert cfg["vcs"]["provider"] == "gitlab"
+        assert cfg["vcs"]["base_url"] == "https://gitlab.corp.io"
+
+    def test_create_explicit_provider_wins_over_detection(self, project_client, tmp_path):
+        """A pinned vcs.provider in the request suppresses auto-detection."""
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
+                        "https://gitlab.com/group/proj.git"], check=True)
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client, {
+                "name": "pinned", "repo": "org/pinned", "workdir": str(tmp_path),
+                "vcs": {"provider": "github"},
+            })
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["vcs"]["provider"] == "github"
+        assert cfg["repo"] == "org/pinned"
+
+    def test_create_no_repo_and_no_remote_is_422(self, project_client, tmp_path):
+        resp = self._post(project_client, {"name": "x", "workdir": str(tmp_path)})
+        assert resp.status_code == 422
+        assert "auto-detect" in resp.json()["detail"]
+
+    def test_create_scaffolds_all_sources_enabled(self, project_client, tmp_path):
+        """Template defaults: VCS issues + spec/plan drops + kanban triage all on."""
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client, self._payload(tmp_path))
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["sources"]["github_issues"]["enabled"] is True
+        assert cfg["sources"]["local_specs"]["enabled"] is True
+        assert cfg["sources"]["kanban_triage"]["enabled"] is True
+
     def test_create_gitlab_project(self, project_client, tmp_path):
         with mock.patch("dashboard.plugin_api.registry"), \
              mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \

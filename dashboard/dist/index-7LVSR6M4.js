@@ -1722,7 +1722,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var repo = rp[0], setRepo = rp[1];
     var wd = useState("");
     var workdir = wd[0], setWorkdir = wd[1];
-    var pv = useState("github");
+    var pv = useState("");
     var provider = pv[0], setProvider = pv[1];
     var sc = useState("every 60m");
     var schedule = sc[0], setSchedule = sc[1];
@@ -1758,7 +1758,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     function create() {
       setSaving(true);
       setErrors(null);
-      var vcs = Object.assign({ provider }, extra);
+      var vcs = Object.assign({}, extra);
+      if (provider) vcs.provider = provider;
       var body = {
         name: name.trim(),
         repo: repo.trim(),
@@ -1786,7 +1787,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setErrors([String(err && err.message || err)]);
       });
     }
-    var canSubmit = name.trim() && repo.trim() && workdir.trim() && !saving;
+    var canSubmit = name.trim() && workdir.trim() && !saving;
     return React.createElement(
       "div",
       { style: S.overlay, onClick: props.onClose },
@@ -1831,6 +1832,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                   setExtra({});
                 }
               },
+              React.createElement("option", { value: "" }, "Auto-detect from git remote"),
               PROVIDERS.map(function(p) {
                 return React.createElement("option", { key: p, value: p }, PROVIDER_LABELS[p] || p);
               })
@@ -1843,11 +1845,15 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           React.createElement(
             "label",
             { style: S.field },
-            React.createElement("span", { style: S.fieldLabel }, repoLabelForProvider(provider)),
+            React.createElement(
+              "span",
+              { style: S.fieldLabel },
+              provider ? repoLabelForProvider(provider) : "Repository (optional \u2014 auto-detected from origin remote)"
+            ),
             React.createElement("input", {
               style: S.input,
               value: repo,
-              placeholder: repoPlaceholderForProvider(provider),
+              placeholder: provider ? repoPlaceholderForProvider(provider) : "leave empty to auto-detect",
               onChange: function(e) {
                 setRepo(e.target.value);
               }

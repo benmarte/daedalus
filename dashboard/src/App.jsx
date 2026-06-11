@@ -1371,7 +1371,7 @@ function AddProjectModal(props) {
   var nm = useState(""); var name = nm[0], setName = nm[1];
   var rp = useState(""); var repo = rp[0], setRepo = rp[1];
   var wd = useState(""); var workdir = wd[0], setWorkdir = wd[1];
-  var pv = useState("github"); var provider = pv[0], setProvider = pv[1];
+  var pv = useState(""); var provider = pv[0], setProvider = pv[1];  // "" = auto-detect
   var sc = useState("every 60m"); var schedule = sc[0], setSchedule = sc[1];
   var dm = useState(""); var deliverMethod = dm[0], setDeliverMethod = dm[1];
   var dt = useState(""); var deliver = dt[0], setDeliver = dt[1];
@@ -1400,7 +1400,8 @@ function AddProjectModal(props) {
 
   function create() {
     setSaving(true); setErrors(null);
-    var vcs = Object.assign({ provider: provider }, extra);
+    var vcs = Object.assign({}, extra);
+    if (provider) vcs.provider = provider;  // empty = server auto-detects
     var body = {
       name: name.trim(),
       repo: repo.trim(),
@@ -1430,7 +1431,8 @@ function AddProjectModal(props) {
     });
   }
 
-  var canSubmit = name.trim() && repo.trim() && workdir.trim() && !saving;
+  // repo may be empty — the server auto-detects it from the origin remote
+  var canSubmit = name.trim() && workdir.trim() && !saving;
 
   return React.createElement("div", { style: S.overlay, onClick: props.onClose },
     React.createElement("div", { style: S.modal, onClick: function (e) { e.stopPropagation(); } },
@@ -1453,6 +1455,7 @@ function AddProjectModal(props) {
             style: S.select, value: provider,
             onChange: function (e) { setProvider(e.target.value); setExtra({}); },
           },
+            React.createElement("option", { value: "" }, "Auto-detect from git remote"),
             PROVIDERS.map(function (p) {
               return React.createElement("option", { key: p, value: p }, PROVIDER_LABELS[p] || p);
             })
@@ -1461,10 +1464,12 @@ function AddProjectModal(props) {
       ),
       React.createElement("div", { style: S.fieldRow },
         React.createElement("label", { style: S.field },
-          React.createElement("span", { style: S.fieldLabel }, repoLabelForProvider(provider)),
+          React.createElement("span", { style: S.fieldLabel },
+            provider ? repoLabelForProvider(provider)
+                     : "Repository (optional — auto-detected from origin remote)"),
           React.createElement("input", {
             style: S.input, value: repo,
-            placeholder: repoPlaceholderForProvider(provider),
+            placeholder: provider ? repoPlaceholderForProvider(provider) : "leave empty to auto-detect",
             onChange: function (e) { setRepo(e.target.value); },
           })
         )

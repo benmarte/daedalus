@@ -66,29 +66,41 @@ if [[ -z "$REMOTE_URL" ]]; then
   exit 1
 fi
 
-# Normalise to owner/repo.  Handles:
-#   https://github.com/owner/repo.git
-#   git@github.com:owner/repo.git
-#   ssh://git@github.com/owner/repo.git
-#
-# Strategy: strip the optional .git suffix first (bash regex is POSIX ERE
-# and does not support non-greedy quantifiers), then match.
-CLEAN_URL="$(echo "$REMOTE_URL" | sed 's/\.git$//')"
+# Auto-detect the VCS provider + repo identity from the remote URL
+# (github.com → github, gitlab hosts → gitlab incl. self-hosted base_url,
+# dev.azure.com / *.visualstudio.com → azuredevops with org/project/repo).
+PROVIDER="github"
+DETECTED="$(PYTHONPATH="$ORCH_ROOT" python3 - "$REMOTE_URL" <<'PY' 2>/dev/null || true
+import sys
+from core.providers.detect import detect_from_url
+d = detect_from_url(sys.argv[1])
+if d:
+    print(d["provider"] + "\t" + d["repo"])
+PY
+)"
 REPO=""
-if [[ "$CLEAN_URL" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
-  REPO="${BASH_REMATCH[1]}"
-elif [[ "$CLEAN_URL" =~ ^https?://.*/([^/]+/[^/]+)$ ]]; then
-  REPO="${BASH_REMATCH[1]}"
-elif [[ "$CLEAN_URL" =~ ^git@([^:]+):([^/]+/[^/]+)$ ]]; then
-  REPO="${BASH_REMATCH[2]}"
-elif [[ "$CLEAN_URL" =~ ^ssh://.*/([^/]+/[^/]+)$ ]]; then
-  REPO="${BASH_REMATCH[1]}"
+if [[ -n "$DETECTED" ]]; then
+  PROVIDER="${DETECTED%%$'\t'*}"
+  REPO="${DETECTED#*$'\t'}"
+fi
+
+# Fallback for unknown hosts: parse a generic owner/repo and keep github.
+if [[ -z "$REPO" ]]; then
+  CLEAN_URL="$(echo "$REMOTE_URL" | sed 's/\.git$//')"
+  if [[ "$CLEAN_URL" =~ ^https?://.*/([^/]+/[^/]+)$ ]]; then
+    REPO="${BASH_REMATCH[1]}"
+  elif [[ "$CLEAN_URL" =~ ^git@([^:]+):([^/]+/[^/]+)$ ]]; then
+    REPO="${BASH_REMATCH[2]}"
+  elif [[ "$CLEAN_URL" =~ ^ssh://.*/([^/]+/[^/]+)$ ]]; then
+    REPO="${BASH_REMATCH[1]}"
+  fi
 fi
 
 if [[ -z "$REPO" ]]; then
-  echo "FATAL: could not parse owner/repo from remote URL: $REMOTE_URL" >&2
+  echo "FATAL: could not parse repo identity from remote URL: $REMOTE_URL" >&2
   exit 1
 fi
+echo "VCS provider: $PROVIDER (auto-detected from origin remote)"
 
 # name: repo short name (the part after the '/', e.g. 'daedalus' from 'benmarte/daedalus'),
 # overridable with --name
@@ -117,6 +129,30 @@ else
     -e "s|{{REPO}}|$REPO|g" \
     -e "s|{{WORKDIR}}|$WORKDIR|g" \
     "$TEMPLATE" > "$CONFIG_FILE"
+
+  # Apply the auto-detected provider (+ provider-specific keys: gitlab
+  # base_url for self-hosted, azure org/project/repo). The template default
+  # is github, so only non-github detections need the rewrite.
+  if [[ "$PROVIDER" != "github" ]]; then
+    PYTHONPATH="$ORCH_ROOT" python3 - "$CONFIG_FILE" "$REMOTE_URL" <<'PY'
+import sys
+import yaml
+from core.providers.detect import detect_from_url
+
+path, url = sys.argv[1], sys.argv[2]
+d = detect_from_url(url)
+if d:
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    vcs = cfg.setdefault("vcs", {})
+    vcs["provider"] = d["provider"]
+    for k, v in (d.get("vcs_extra") or {}).items():
+        vcs.setdefault(k, v)
+    with open(path, "w") as f:
+        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False,
+                       allow_unicode=True)
+PY
+  fi
 
   echo "Created $CONFIG_FILE"
 fi
