@@ -1143,7 +1143,7 @@ async def delete_project(name: str) -> dict[str, Any]:
     else:
         skipped.append(f"cron job: {cron_name} (not found or already removed)")
 
-    # 2. Remove kanban board.
+    # 2. Archive kanban board (no --delete so it's recoverable via hermes kanban boards restore).
     loader = ConfigLoader()
     try:
         cfg = loader.resolve_repo_config(str(workdir))
@@ -1151,9 +1151,9 @@ async def delete_project(name: str) -> dict[str, Any]:
     except Exception:
         repo = ""
     slug = _board_slug(repo, name)
-    ok2, _ = _hermes_cmd("kanban", "boards", "rm", slug, "--delete")
+    ok2, _ = _hermes_cmd("kanban", "boards", "rm", slug)
     if ok2:
-        removed.append(f"kanban board: {slug}")
+        removed.append(f"kanban board archived: {slug}")
     else:
         skipped.append(f"kanban board: {slug} (not found or already removed)")
 
