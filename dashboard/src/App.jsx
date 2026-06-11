@@ -882,7 +882,7 @@ function RemoveProjectModal(props) {
       ),
       error ? React.createElement("div", { style: Object.assign({}, S.err, { marginBottom: "12px" }) }, error) : null,
       React.createElement("div", { style: S.modalBar },
-        React.createElement(Button, { label: removing ? "Removing…" : "Remove Project", variant: "danger", disabled: removing, onClick: doRemove }),
+        React.createElement(Button, { label: removing ? "Removing…" : "Remove", variant: "danger", disabled: removing, onClick: doRemove }),
         React.createElement(Button, { label: "Cancel", disabled: removing, onClick: props.onClose })
       )
     )

@@ -1157,7 +1157,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         React.createElement(
           "div",
           { style: S.modalBar },
-          React.createElement(Button, { label: removing ? "Removing\u2026" : "Remove Project", variant: "danger", disabled: removing, onClick: doRemove }),
+          React.createElement(Button, { label: removing ? "Removing\u2026" : "Remove", variant: "danger", disabled: removing, onClick: doRemove }),
           React.createElement(Button, { label: "Cancel", disabled: removing, onClick: props.onClose })
         )
       )
