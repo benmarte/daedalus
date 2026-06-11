@@ -198,20 +198,18 @@ _build_board_slug() {
 
 FOUND_BOARDS=()
 REGISTRY_FILE="$HERMES/daedalus/projects"
+
+# Pass 1: derive slugs from registered project configs (covers active projects)
 if [[ -f "$REGISTRY_FILE" ]]; then
-  # Read registered workdir paths, derive repo + board slug for each
   while IFS= read -r workdir_line || [[ -n "$workdir_line" ]]; do
     workdir_line="$(echo "$workdir_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     [[ -z "$workdir_line" || "$workdir_line" == \#* ]] && continue
-
-    # Try to read the daedalus.yaml in the workdir to get the repo
     repo=""
     name=""
     if [[ -f "$workdir_line/.hermes/daedalus.yaml" ]]; then
       repo="$(grep -E '^[[:space:]]*repo:' "$workdir_line/.hermes/daedalus.yaml" 2>/dev/null | head -1 | sed 's/.*repo:[[:space:]]*//;s/[[:space:]]*$//')"
       name="$(grep -E '^[[:space:]]*name:' "$workdir_line/.hermes/daedalus.yaml" 2>/dev/null | head -1 | sed 's/.*name:[[:space:]]*//;s/[[:space:]]*$//')"
     fi
-
     if [[ -n "$repo" ]]; then
       board_slug="$(_build_board_slug "$repo" "$name")"
       if [[ -n "$board_slug" && "$board_slug" != "default" ]]; then
@@ -219,11 +217,22 @@ if [[ -f "$REGISTRY_FILE" ]]; then
       fi
     fi
   done < "$REGISTRY_FILE"
+fi
 
-  # Dedup
-  if [[ ${#FOUND_BOARDS[@]} -gt 0 ]]; then
-    FOUND_BOARDS=( $(printf '%s\n' "${FOUND_BOARDS[@]}" | sort -u) )
-  fi
+# Pass 2: also scrape `hermes kanban boards list` for orphaned boards — projects
+# that were deregistered without their board being cleaned up won't appear in
+# the registry any more but their board still exists.
+if command -v hermes >/dev/null 2>&1; then
+  while IFS= read -r _slug; do
+    [[ -z "$_slug" || "$_slug" == "default" ]] && continue
+    FOUND_BOARDS+=("$_slug")
+  done < <(hermes kanban boards list 2>/dev/null \
+    | awk 'NR>1 && $0 !~ /^(SLUG|Switch|Current)/ { gsub(/^[[:space:]●]+/,"",$1); if ($1 != "" && $1 != "default") print $1 }')
+fi
+
+# Dedup
+if [[ ${#FOUND_BOARDS[@]} -gt 0 ]]; then
+  FOUND_BOARDS=( $(printf '%s\n' "${FOUND_BOARDS[@]}" | sort -u) )
 fi
 
 # ── 5. Dashboard tab ─────────────────────────────────────────────────────────
