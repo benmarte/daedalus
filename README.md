@@ -1,19 +1,21 @@
 # Daedalus — autonomous issue → PR pipeline on native Hermes
 
-Flag a GitHub issue **Ready**, and a roster of AI agents implements it, reviews it,
-security-audits it, documents it, and opens a **green, mergeable PR** — with quality
-gates that *cannot* be skipped, full board/issue tracking, and zero babysitting.
-A single Daedalus deployment drives **many repos**.
+Flag an issue **Ready** — on **GitHub**, **GitLab**, or **Azure DevOps** — and a
+roster of AI agents implements it, reviews it, security-audits it, documents it,
+and opens a **green, mergeable PR** — with quality gates that *cannot* be skipped,
+full board/issue tracking, and zero babysitting. A single Daedalus deployment
+drives **many repos**, each with its own provider, kanban board, cron job, and
+notification channels (Slack, Discord, Telegram, Signal, WhatsApp, …).
 
 ```
-GitHub issue → "Ready"
+issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
       │  (cron tick — deterministic, code)
       ▼
    triage card ──decompose──► developer ─► reviewer ─► security ─► documentation
       │                          │            │           │            │
    board: In progress       opens PR     approves     audits     posts report
-                            (ship-gate                            to issue + Slack
-                             enforced)
+                            (ship-gate                            to PR + your
+                             enforced)                            chat channels
       ▼
    PR green → you merge → issue auto-closed, card → Done
 ```
@@ -56,8 +58,9 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
 
 ## How it works
 
-1. **You** drag a GitHub issue to the **`Ready`** column on its Project board. That's
-   the only manual step — nothing else moves without it.
+1. **You** move an issue to **`Ready`** — a GitHub Project column, a GitLab `Ready`
+   board label, or an Azure DevOps work-item state. That's the only manual step —
+   nothing else moves without it.
 2. A **cron tick** runs `daedalus_dispatch.py` (`--no-agent`, pure code). It:
    - selects **only `Ready`** issues (and skips any that already have a PR),
    - flips the board to **In progress**, creates a **triage card**, and **decomposes**
@@ -65,7 +68,7 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
 3. **Agents** (Hermes kanban workers) execute their tasks:
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR,
    - **reviewer** reviews, **security-analyst** audits, **documentation** writes a
-     completion report and posts it to the **GitHub issue and Slack**.
+     completion report and posts it to the **PR and your chat channels**.
 4. Each tick **auto-advances** any stage that's blocked on review once its PR's CI is
    green — the chain flows hands-off.
 5. When you **merge** the PR, the next tick sets the card **Done** and **closes the
@@ -147,11 +150,11 @@ Onboarding a repo = ~6 lines in `projects[]` + a `Ready` column on its board.
 | `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `scripts/provision_roster.sh` | Provisions the 6-agent Hermes roster. |
-| `core/github_project.py` | GitHub Projects v2 status tracking + PR/CI state, all via `gh`. |
+| `core/providers/` | VCS provider layer: GitHub (REST + GraphQL Projects v2), GitLab (REST), Azure DevOps (REST/WIQL) — token-authenticated HTTPS APIs, extensible via `register_provider()`. |
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
-| `config/` | `ConfigLoader` (defaults + `projects[]` merge) and the config template. |
-| `tests/` | Unit tests for the config loader. |
-| `tasks/RUNBOOK-native-pipeline.md` | Deeper operational reference. |
+| `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |
+| `dashboard/` | Dashboard tab: project grid, add/edit project modals, notifications editor (`plugin_api.py` + React `src/App.jsx`). |
+| `tests/` | Unit tests — config, providers (mocked HTTP), dispatcher, dashboard API, installers. |
 
 The **ship-gate hook**, **cron wrapper**, and **roster profiles** live in the Hermes
 home (`$HERMES_HOME`), not here — see [`SETUP.md`](SETUP.md) for how they're deployed
@@ -161,10 +164,47 @@ and shared across a team.
 
 ## Prerequisites
 
-Hermes (installed + model auth), `gh` (authed, with **Projects v2** scope — ideally a
-shared bot token so PRs are authored consistently), `bun`, `pre-commit`,
-`python3` + `pyyaml`. Each target repo needs a GitHub Project board with a `Ready`
-column and its own `.pre-commit-config.yaml` / CI.
+Hermes (installed + model auth), `bun`, `pre-commit`, `python3` + `pyyaml`.
+The dispatcher and dashboard talk to your VCS host via its **HTTPS API** with a
+token from the environment — no `gh`/`glab`/`az` CLI required for the plugin
+itself. (`gh` is still recommended for **GitHub** projects so worker agents can
+push branches and open PRs; the install check treats it as advisory.)
+
+## VCS providers
+
+Each project picks its provider in `.hermes/daedalus.yaml` (`vcs.provider`) or
+the dashboard's provider dropdown. Tokens are read **only from environment
+variables** — never from config files — and are redacted from all errors/logs.
+Override the env var name per project with `vcs.token_env`.
+
+| Provider | `vcs.provider` | Token env (default) | Minimal token scopes | Board model |
+|---|---|---|---|---|
+| GitHub | `github` | `GITHUB_TOKEN` / `GH_TOKEN` | fine-grained PAT: contents:read, issues:write, pull_requests:write, metadata:read, projects:write | Projects v2 (`tracking.github_project_number`) |
+| GitLab | `gitlab` | `GITLAB_TOKEN` | `api` | Issue-Board labels (`tracking.label_board: true`; lists keyed to `vcs.status_map` labels). Self-hosted via `vcs.base_url` |
+| Azure DevOps | `azuredevops` | `AZURE_DEVOPS_PAT` | Work Items R&W, Code Read, Pull Requests R&W, Build Read | Work-item states (`vcs.org` + `vcs.project` + `vcs.repo`; `vcs.work_item_type`, default `Issue`) |
+
+The canonical pipeline statuses (`ready` / `in_progress` / `in_review` / `done`)
+map to your board's column/label/state names via `vcs.status_map` — defaults are
+`Ready` / `In progress` / `In review` / `Done`.
+
+Other trackers (Jira, Linear, Gitea, Bitbucket, …) plug in by implementing the
+`core/providers/base.py` interface and calling `register_provider()` — the
+dispatcher and dashboard never need to change.
+
+## Notifications
+
+Reports and tick summaries go to **any configured Hermes messaging platform**
+via `hermes send` — Slack, Discord, Telegram, Signal, WhatsApp, SMS, etc. Two
+modes per project:
+
+- **Single target** (`cron.deliver: "slack:C123"`) — the cron delivers the
+  dispatcher's summary; doc reports go to the same target.
+- **Multi-target** (`cron.notifications`) — a list of `{platform, target,
+  events}` entries; each channel picks which events it receives
+  (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`; omit
+  `events` to receive everything). Configure it in the dashboard's
+  **Notifications** editor — channels are discovered from `hermes send --list`,
+  with manual entry as fallback.
 
 ## Troubleshooting
 
@@ -188,28 +228,34 @@ hermes gateway restart            # load the plugin
 > auto-start at login or auto-restart on crash.
 
 **2. Provision the agent roster** (the 6 specialist profiles — fails loudly if a
-prerequisite is missing, e.g. no `default` profile / `agent-skills` / `gh` auth):
+prerequisite is missing, e.g. no `default` profile / `agent-skills`; missing `gh`
+auth is a warning, not a blocker):
 ```bash
 python3 ~/.hermes/plugins/daedalus/scripts/postinstall.py
 hermes profile list               # expect: developer reviewer security-analyst documentation planner project-manager
 ```
 
-**3. Onboard a target repo** — scaffolds `<repo>/.hermes/daedalus.yaml` and
-registers the repo so the dispatcher sweeps it:
+**3. Onboard a target repo** — either click **“+ Add Project”** in the dashboard
+(scaffolds the config, registers the repo, creates its kanban board + cron), or
+from the terminal:
 ```bash
 cd /path/to/your/repo
 bash ~/.hermes/plugins/daedalus/scripts/setup.sh
-# then edit .hermes/daedalus.yaml (tracking, sources, cron) — repo/workdir are fixed
+# then edit .hermes/daedalus.yaml (vcs provider, tracking, sources, cron) — repo/workdir are fixed
 ```
+Export the provider token for the dispatcher's environment (see
+[VCS providers](#vcs-providers)), e.g. `GITHUB_TOKEN`, `GITLAB_TOKEN`, or
+`AZURE_DEVOPS_PAT`.
 
 **4. Trigger work** — any of:
 - **Prompt / spec file:** `hermes kanban create --triage --workspace dir:$PWD --body "$(cat spec.md)"`
 - **Spec drop:** put a `*.md` in `<repo>/.hermes/pending/` (when `sources.local_specs.enabled`)
-- **GitHub issue:** move an issue to **Ready** on the repo's GitHub Project (GitHub-Projects mode)
+- **VCS issue:** move an issue/work item to **Ready** — GitHub Project column,
+  GitLab `Ready` board label, or Azure DevOps work-item state
 
 The triage card decomposes across the roster → developer opens a PR → reviewer + security
-gate it → CI-aware auto-advance → documentation posts the resolution **on the PR** + Slack.
-You merge (agents never merge `main`).
+gate it → CI-aware auto-advance → documentation posts the resolution **on the PR** and your
+configured chat channels. You merge (agents never merge `main`).
 
 **5. Visual config + status** — `hermes dashboard` → the **Daedalus** tab: a card per
 project with live status (kanban counts, open PRs + CI, needs-attention, cron), and an
@@ -279,10 +325,16 @@ without error.
   launchd on some macOS versions and falls back to a background process. It works, but
   won't auto-restart on crash or auto-start at login.
 
-- **Agents can't send to Slack directly.** Notifications and reports are delivered by
-  the deterministic dispatcher (root cron context), not by individual agents. Set the
-  channel via the config modal's deliver dropdown and use the **Send test message**
-  button to verify connectivity.
+- **Agents can't message chat platforms directly.** Notifications and reports are
+  delivered by the deterministic dispatcher (root cron context), not by individual
+  agents. Set channels via the config modal's Notify Via dropdown or the multi-target
+  Notifications editor, and use the **Send test message** button to verify connectivity.
+
+- **GitLab/Azure worker flows are less battle-tested than GitHub.** The dispatcher
+  and dashboard are fully provider-backed (mocked-API test suites for all three),
+  but worker agents pushing branches/opening MRs on GitLab/Azure need their own
+  credentials in the profile environment (`GITLAB_TOKEN` / `AZURE_DEVOPS_PAT`) and
+  have not been dogfooded end-to-end yet — beta feedback welcome.
 
 - **Single-machine validation.** This beta has been dogfooded on one machine.
   Cross-machine and multi-user behavior is exactly what beta feedback should surface —
