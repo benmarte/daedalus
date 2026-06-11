@@ -123,8 +123,8 @@ def test_get_projects_kanban_summary_counts_by_status(client):
     assert summary == {"todo": 2, "in_progress": 1, "done": 3}
 
 
-def test_get_projects_kanban_summary_none_on_empty(client):
-    """kanban_summary is None when list_tasks returns empty."""
+def test_get_projects_kanban_summary_empty_on_empty(client):
+    """kanban_summary is {} (not None) when list_tasks returns [] — board exists, 0 tasks."""
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
 
@@ -132,7 +132,7 @@ def test_get_projects_kanban_summary_none_on_empty(client):
         assert resp.status_code == 200, resp.text
         data = resp.json()
 
-    assert data[0]["kanban_summary"] is None
+    assert data[0]["kanban_summary"] == {}
 
 
 def test_get_projects_needs_attention_blocked_and_gave_up(client):
