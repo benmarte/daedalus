@@ -1188,11 +1188,22 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           // Cascade deliver: method → channel. Built from /meta/notifications endpoint.
           (function() {
             var methodNames = Object.keys(notifications).sort();
-            var channelOpts = selectedMethod && notifications[selectedMethod] ? notifications[selectedMethod] : [];
+            var rawChannelOpts = selectedMethod && notifications[selectedMethod] ? notifications[selectedMethod] : [];
+            var channelOpts = rawChannelOpts.map(function(entry) {
+              if (typeof entry === "string") return { value: entry, label: entry };
+              return entry;
+            });
             var savedDeliver = getIn(config, ["cron", "deliver"], "");
             var selectedChannel = savedDeliver;
-            if (selectedChannel && channelOpts.indexOf(selectedChannel) === -1 && selectedMethod) {
-              selectedChannel = "";
+            if (selectedChannel && selectedMethod) {
+              var found = false;
+              for (var ci = 0; ci < channelOpts.length; ci++) {
+                if (channelOpts[ci].value === selectedChannel) {
+                  found = true;
+                  break;
+                }
+              }
+              if (!found) selectedChannel = "";
             }
             if (methodNames.length === 0) {
               return React.createElement(
@@ -1245,7 +1256,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                   },
                   React.createElement("option", { value: "" }, "\u2014 none \u2014"),
                   channelOpts.map(function(ch) {
-                    return React.createElement("option", { key: ch, value: ch }, ch);
+                    return React.createElement("option", { key: ch.value, value: ch.value }, ch.label);
                   })
                 ) : React.createElement("input", {
                   style: S.input,

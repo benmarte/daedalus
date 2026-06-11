@@ -125,4 +125,34 @@ fi
 
 PYTHONPATH="$ORCH_ROOT" python3 -c 'import sys; from core.registry import add_project; print("Registry: " + ("added" if add_project(sys.argv[1]) else "already present"))' "$WORKDIR"
 
+# ── Create the kanban board (idempotent, non-fatal) ──────────────────────
+# Derive board slug the same way the dispatcher does (_board_slug):
+#   org/repo → org-repo, lowercased, non-alnum → '-', trim.
+_board_slug() {
+  local slug="${1:-$2}"
+  slug="${slug//\//-}"
+  slug="$(echo "$slug" | tr '[:upper:]' '[:lower:]')"
+  slug="$(echo "$slug" | sed 's/[^a-z0-9_-]/-/g' | sed 's/^-//;s/-$//')"
+  echo "${slug:-$2}"
+}
+BOARD_SLUG="$(_board_slug "$REPO" "$NAME")"
+if command -v hermes >/dev/null 2>&1; then
+  # boards create exits 0 on success OR already-exists.  Treat nonzero
+  # with "already exists" stderr as success too (idempotent).
+  set +e
+  CREATE_OUT="$(hermes kanban boards create "$BOARD_SLUG" 2>&1)"
+  CREATE_RC=$?
+  set -e
+  if [[ $CREATE_RC -eq 0 ]]; then
+    echo "Kanban board: $BOARD_SLUG (created)"
+  elif echo "$CREATE_OUT" | grep -qi 'already.exists'; then
+    echo "Kanban board: $BOARD_SLUG (exists)"
+  else
+    echo "WARNING: could not create kanban board '$BOARD_SLUG': $CREATE_OUT" >&2
+    # Non-fatal — registry and config are already written.
+  fi
+else
+  echo "WARNING: 'hermes' not on PATH — kanban board '$BOARD_SLUG' not created" >&2
+fi
+
 echo "Done.  Edit $CONFIG_FILE to configure tracking, sources, and cron for this project."

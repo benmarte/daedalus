@@ -106,6 +106,46 @@ def test_kanban_review_handoff_pr():
     check("review_handoff_pr returns None when not a review-required handoff", none is None)
 
 
+# ── kanban: ensure_board ──────────────────────────────────────────────────────
+
+def test_ensure_board_creates():
+    """ensure_board runs 'hermes kanban boards create <slug>' and succeeds on rc=0."""
+    captured = {}
+
+    def fake_hk(args, timeout=60):
+        captured["args"] = args
+        return (0, "Board my-board created.", "")
+
+    with mock.patch.object(kanban, "_hk", fake_hk):
+        ok = kanban.ensure_board("my-board")
+    check("ensure_board returns True on rc=0", ok is True)
+    check("runs 'boards create' not '--board <slug> init'",
+          captured["args"][:3] == ["boards", "create", "my-board"])
+
+
+def test_ensure_board_already_exists():
+    """ensure_board treats 'already exists' stderr as success (idempotent)."""
+    captured = {}
+
+    def fake_hk(args, timeout=60):
+        captured["args"] = args
+        return (1, "", "board 'my-board' already exists.")
+
+    with mock.patch.object(kanban, "_hk", fake_hk):
+        ok = kanban.ensure_board("my-board")
+    check("ensure_board returns True when board already exists", ok is True)
+
+
+def test_ensure_board_failure():
+    """ensure_board returns False + warns on genuine failure."""
+    with mock.patch.object(kanban, "_hk", return_value=(1, "", "permission denied")):
+        with mock.patch.object(kanban.logger, "warning") as mw:
+            ok = kanban.ensure_board("my-board")
+    check("ensure_board returns False on genuine failure", ok is False)
+    mw.assert_called_once()
+    assert "permission denied" in mw.call_args[0][2]
+
+
 # ── github_project: PR + CI state ────────────────────────────────────────────
 def test_pr_state_for_issue():
     prs = [
