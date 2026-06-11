@@ -1632,6 +1632,38 @@ function AddProjectModal(props) {
 
       React.createElement("div", { style: S.fieldRow },
         React.createElement("label", { style: S.field },
+          React.createElement("span", { style: S.fieldLabel }, "Working Directory (absolute path)"),
+          React.createElement("div", { style: { display: "flex", gap: "6px" } },
+            React.createElement("input", {
+              style: Object.assign({}, S.input, { flex: "1 1 auto" }),
+              value: workdir, placeholder: "/path/to/repo",
+              onChange: function (e) { setWorkdir(e.target.value); },
+            }),
+            React.createElement("button", {
+              style: S.btnSmall, type: "button",
+              onClick: function () {
+                fetchJSON("/api/plugins/daedalus/meta/pick-directory")
+                  .then(function (d) {
+                    if (!d || !d.path) return;
+                    setWorkdir(d.path);
+                    fetchJSON("/api/plugins/daedalus/meta/detect?workdir=" + encodeURIComponent(d.path))
+                      .then(function (det) {
+                        if (!det || !det.detected) return;
+                        if (det.name && !name) setName(det.name);
+                        if (det.repo && !repo) setRepo(det.repo);
+                        if (det.provider) {
+                          setProvider(det.provider);
+                          setSrcToggles(function (prev) { return Object.assign({}, prev, { github_issues: true }); });
+                        }
+                      }).catch(function () {});
+                  }).catch(function () {});
+              },
+            }, "Browse…")
+          )
+        )
+      ),
+      React.createElement("div", { style: S.fieldRow },
+        React.createElement("label", { style: S.field },
           React.createElement("span", { style: S.fieldLabel }, "Project Name"),
           React.createElement("input", {
             style: S.input, value: name, placeholder: "my-project",
@@ -1665,38 +1697,6 @@ function AddProjectModal(props) {
       providerExtraFields(provider,
         function (path) { return extra[path[path.length - 1]] || ""; },
         setExtraField),
-      React.createElement("div", { style: S.fieldRow },
-        React.createElement("label", { style: S.field },
-          React.createElement("span", { style: S.fieldLabel }, "Working Directory (absolute path)"),
-          React.createElement("div", { style: { display: "flex", gap: "6px" } },
-            React.createElement("input", {
-              style: Object.assign({}, S.input, { flex: "1 1 auto" }),
-              value: workdir, placeholder: "/path/to/repo",
-              onChange: function (e) { setWorkdir(e.target.value); },
-            }),
-            React.createElement("button", {
-              style: S.btnSmall, type: "button",
-              onClick: function () {
-                fetchJSON("/api/plugins/daedalus/meta/pick-directory")
-                  .then(function (d) {
-                    if (!d || !d.path) return;
-                    setWorkdir(d.path);
-                    fetchJSON("/api/plugins/daedalus/meta/detect?workdir=" + encodeURIComponent(d.path))
-                      .then(function (det) {
-                        if (!det || !det.detected) return;
-                        if (det.name && !name) setName(det.name);
-                        if (det.repo && !repo) setRepo(det.repo);
-                        if (det.provider) {
-                          setProvider(det.provider);
-                          setSrcToggles(function (prev) { return Object.assign({}, prev, { github_issues: true }); });
-                        }
-                      }).catch(function () {});
-                  }).catch(function () {});
-              },
-            }, "Browse…")
-          )
-        )
-      ),
 
       React.createElement("div", { style: S.section }, "Sources"),
       [["github_issues", "VCS Issues (GitHub/GitLab/Azure)"],
