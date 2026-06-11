@@ -117,6 +117,30 @@ setup_role() {
     env HOME="$home_dir" git config --global user.email "$ROSTER_BOT_EMAIL"
   fi
 
+  # CRITICAL: the worker's `terminal` tool only inherits env vars listed in
+  # terminal.env_passthrough (default []). Without this, the provider tokens
+  # in the profile .env are invisible to the shell the agent runs curl in —
+  # API calls (open PR / comment) would silently see an empty token.
+  python3 - "$PROFILES/$name/config.yaml" <<'PY'
+import sys
+import yaml
+
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    cfg = {}
+term = cfg.setdefault("terminal", {})
+passthrough = term.get("env_passthrough") or []
+for var in ("GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_PAT"):
+    if var not in passthrough:
+        passthrough.append(var)
+term["env_passthrough"] = passthrough
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PY
+
   # Lock the profile down: it holds credentials (.git-credentials, .env).
   chmod 700 "$PROFILES/$name" 2>/dev/null || true
 

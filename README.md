@@ -183,6 +183,13 @@ the dashboard's provider dropdown. Tokens are read **only from environment
 variables** — never from config files — and are redacted from all errors/logs.
 Override the env var name per project with `vcs.token_env`.
 
+**Where to put the tokens:** add them to **`~/.hermes/.env`**
+(e.g. `GITHUB_TOKEN=ghp_...`) — Hermes loads that file at startup, which covers
+the dispatcher cron and the dashboard (restart the gateway + dashboard after
+editing). Also export them in your shell before running
+`scripts/provision_roster.sh` so each worker profile gets them seeded into its
+own `.env` / `.git-credentials` / `terminal.env_passthrough`.
+
 | Provider | `vcs.provider` | Token env (default) | Minimal token scopes | Board model |
 |---|---|---|---|---|
 | GitHub | `github` | `GITHUB_TOKEN` / `GH_TOKEN` | fine-grained PAT: contents:read, issues:write, pull_requests:write, metadata:read, projects:write | Projects v2 (`tracking.github_project_number`) |

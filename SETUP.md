@@ -21,12 +21,21 @@ Roster: **project-manager · planner · developer · reviewer · security-analys
    `~/.hermes/plugins/agent-skills/skills/`).
 3. A working **`default` profile** with their own LLM provider keys (any capable
    model works — the script clones config/keys from `default`).
-4. A **VCS API token in the environment** for each provider you use:
+4. A **VCS API token** for each provider you use:
    `GITHUB_TOKEN` (fine-grained PAT), `GITLAB_TOKEN` (`api` scope), or
    `AZURE_DEVOPS_PAT` (Work Items R&W, Code Read, PR R&W, Build Read).
    That token covers everything — dispatcher polling, dashboard pickers, worker
    `git push` (per-profile credential store), and PR/comment API calls. No
    `gh`/`glab`/`az` CLI is needed or used.
+
+   **Where tokens go:**
+   - Add them to **`~/.hermes/.env`** (e.g. `GITHUB_TOKEN=ghp_...`) — Hermes loads
+     this file at startup, which covers the dispatcher cron and the dashboard.
+     Restart the gateway + dashboard after editing it.
+   - **Export them in your shell before running `provision_roster.sh`** — the
+     provisioner copies them into each worker profile's `.env` +
+     `.git-credentials`, and adds them to `terminal.env_passthrough` so the
+     workers' terminal shells can actually see them.
 
 ## Provision the roster
 ```bash

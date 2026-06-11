@@ -59,3 +59,11 @@ class TestKeychainFreeProvisioning:
         assert "pat:%s@dev.azure.com" in provision_script
         assert "GITLAB_TOKEN=" in provision_script
         assert "AZURE_DEVOPS_PAT=" in provision_script
+
+    def test_terminal_env_passthrough_configured(self, provision_script: str):
+        """The worker terminal only inherits vars in terminal.env_passthrough
+        (default []) — the provisioner must add the provider tokens there or
+        agents' API calls would silently see empty tokens."""
+        assert "env_passthrough" in provision_script
+        for var in ("GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_PAT"):
+            assert f'"{var}"' in provision_script, f"{var} missing from passthrough setup"
