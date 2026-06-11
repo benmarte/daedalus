@@ -1,9 +1,10 @@
 """
 Pytest for the Daedalus dashboard plugin API.
 
-Round-trips GET → POST → GET /config against a temporary daedalus.yaml.
-Tests validation edge cases (missing fields, invalid types, unknown profiles).
-Tests GET /projects endpoint with mocked kanban, gh, and registry.
+Projects come exclusively from the registry; each repo carries its own
+.hermes/daedalus.yaml. Tests GET /projects, the per-project config API,
+project creation, cron reconcile, and the meta endpoints — with mocked
+kanban, providers, and registry.
 """
 
 from __future__ import annotations
@@ -29,235 +30,36 @@ _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-# Import the router (it will import ConfigLoader from config/)
-from dashboard.plugin_api import router, DEFAULT_CONFIG_PATH, HERMES_PROFILES_DIR
+from dashboard.plugin_api import router
 
 
 @pytest.fixture
-def temp_config_path():
-    """Create a temporary daedalus.yaml and patch DEFAULT_CONFIG_PATH."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False
-    ) as f:
-        f.write(
-            yaml.dump(
-                {
-                    "defaults": {
-                        "vcs": {"target_branch": "dev"},
-                        "lifecycle": {"kanban": {"enabled": True}},
-                        "cron": {"schedule": "60m", "deliver": "slack:#engineering"},
-                    },
-                    "projects": [
-                        {
-                            "name": "test-project",
-                            "repo": "org/test-repo",
-                            "workdir": "/tmp/test-workdir",
-                            "tracking": {"github_project_number": 1},
-                            "execution": {"worker_profile": "developer"},
-                            "sources": {"github": {"enabled": True}, "local_specs": {"enabled": False}},
-                        }
-                    ],
-                }
-            )
-        )
-        tmp_path = f.name
-
-    with mock.patch(
-        "dashboard.plugin_api.DEFAULT_CONFIG_PATH", Path(tmp_path)
-    ):
-        yield tmp_path
-
-    Path(tmp_path).unlink(missing_ok=True)
+def registry_repo(tmp_path):
+    """Temp repo with .hermes/daedalus.yaml, registered via a mocked registry."""
+    repo = tmp_path / "test-repo"
+    (repo / ".hermes").mkdir(parents=True)
+    cfg = {
+        "name": "test-project",
+        "repo": "org/test-repo",
+        "workdir": str(repo),
+        "vcs": {"target_branch": "dev"},
+        "tracking": {"github_project_number": 1},
+        "execution": {"worker_profile": "developer"},
+        "cron": {"schedule": "60m", "deliver": "slack:#engineering"},
+        "sources": {"github": {"enabled": True}, "local_specs": {"enabled": False}},
+    }
+    (repo / ".hermes" / "daedalus.yaml").write_text(yaml.dump(cfg))
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        mock_registry.list_projects.return_value = [str(repo)]
+        yield repo
 
 
 @pytest.fixture
-def client(temp_config_path):
-    """Create a FastAPI TestClient with the daedalus routers mounted."""
+def client(registry_repo):
+    """FastAPI TestClient with the full daedalus router mounted."""
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/daedalus")
     return TestClient(app)
-
-
-@pytest.fixture
-def populated_profiles_dir():
-    """Create a temporary profiles directory with a known profile name."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        profiles_dir = Path(tmpdir)
-        # Create a known profile so the directory is non-empty
-        (profiles_dir / "developer").mkdir()
-        with mock.patch(
-            "dashboard.plugin_api.HERMES_PROFILES_DIR", profiles_dir
-        ):
-            yield profiles_dir
-
-
-# ── Round-trip tests ────────────────────────────────────────────────────────
-
-
-def test_get_config_returns_resolved_config(client):
-    """GET /config returns defaults, projects, and meta."""
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-
-    assert "defaults" in data
-    assert "projects" in data
-    assert "meta" in data
-    assert "profiles" in data["meta"]
-    assert "slack_targets" in data["meta"]
-    assert "path" in data["meta"]
-
-    # Projects should be resolved (merged with defaults)
-    projects = data["projects"]
-    assert len(projects) == 1
-    assert projects[0]["name"] == "test-project"
-    assert projects[0]["repo"] == "org/test-repo"
-    assert projects[0]["workdir"] == "/tmp/test-workdir"
-    # Inherited from defaults
-    assert projects[0]["vcs"]["target_branch"] == "dev"
-
-
-def test_get_config_strips_secrets(client, temp_config_path):
-    """GET /config never returns secret keys."""
-    # Write a config with a secret field
-    raw = yaml.safe_load(Path(temp_config_path).read_text())
-    raw["defaults"]["webhook"] = {"enabled": True, "secret": "shhh-dont-leak"}
-    Path(temp_config_path).write_text(yaml.dump(raw))
-
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200
-    data = resp.json()
-
-    # The 'secret' key should be stripped from defaults
-    defaults = data["defaults"]
-    if "webhook" in defaults:
-        assert "secret" not in defaults["webhook"]
-
-
-def test_round_trip_get_post_get(client, temp_config_path):
-    """GET → POST (modified) → GET: changes persist."""
-    # 1. GET initial config
-    resp1 = client.get("/api/plugins/daedalus/config")
-    assert resp1.status_code == 200
-    initial = resp1.json()
-
-    # 2. Modify and POST back
-    payload = {
-        "defaults": initial["defaults"],
-        "projects": initial["projects"],
-    }
-    # Add a second project
-    payload["projects"].append(
-        {
-            "name": "second-project",
-            "repo": "org/second",
-            "workdir": "/tmp/second",
-            "execution": {"worker_profile": "developer"},
-        }
-    )
-
-    resp2 = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp2.status_code == 200, resp2.text
-    assert resp2.json()["status"] == "saved"
-
-    # 3. GET again — should have two projects
-    resp3 = client.get("/api/plugins/daedalus/config")
-    assert resp3.status_code == 200
-    updated = resp3.json()
-    assert len(updated["projects"]) == 2
-    names = {p["name"] for p in updated["projects"]}
-    assert names == {"test-project", "second-project"}
-
-
-# ── Validation tests ────────────────────────────────────────────────────────
-
-
-def _valid_payload():
-    """Return a minimal valid POST payload."""
-    return {
-        "defaults": {},
-        "projects": [
-            {
-                "name": "valid",
-                "repo": "org/valid",
-                "workdir": "/tmp/valid",
-                "execution": {"worker_profile": "developer"},
-            }
-        ],
-    }
-
-
-def test_post_rejects_missing_name(client):
-    """POST rejects a project with no name."""
-    payload = _valid_payload()
-    payload["projects"][0]["name"] = ""
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "name" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_missing_repo(client):
-    """POST rejects a project with no repo."""
-    payload = _valid_payload()
-    payload["projects"][0]["repo"] = ""
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "repo" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_missing_workdir(client):
-    """POST rejects a project with no workdir."""
-    payload = _valid_payload()
-    payload["projects"][0]["workdir"] = ""
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "workdir" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_non_numeric_github_project_number(client):
-    """POST rejects a non-numeric github_project_number."""
-    payload = _valid_payload()
-    payload["projects"][0]["tracking"] = {"github_project_number": "not-a-number"}
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "github_project_number" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_unknown_worker_profile(client, populated_profiles_dir):
-    """POST rejects a worker_profile that doesn't exist (when profiles dir is populated)."""
-    payload = _valid_payload()
-    payload["projects"][0]["execution"] = {
-        "worker_profile": "nonexistent-profile-xyz"
-    }
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    errors_str = str(resp.json()["detail"]["errors"]).lower()
-    assert "worker_profile" in errors_str
-    assert "nonexistent-profile-xyz" in errors_str
-
-
-def test_post_accepts_valid_config(client):
-    """POST accepts a valid config and saves it."""
-    payload = _valid_payload()
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "saved"
-
-
-def test_post_accepts_optional_github_project_number(client):
-    """POST accepts a project without github_project_number (kanban-only mode)."""
-    payload = _valid_payload()
-    # No tracking key at all
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 200, resp.text
-
-
-def test_post_accepts_numeric_github_project_number(client):
-    """POST accepts a numeric github_project_number."""
-    payload = _valid_payload()
-    payload["projects"][0]["tracking"] = {"github_project_number": 42}
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 200, resp.text
 
 
 # ── GET /projects tests ──────────────────────────────────────────────────────
@@ -272,22 +74,20 @@ def _make_kanban_tasks(statuses: list[str]) -> list[dict]:
     ]
 
 
-def test_get_projects_returns_one_entry_per_config_project(client):
-    """GET /projects returns one entry for each project in the config."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
-        mock_registry.list_projects.return_value = []
-        with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
-            mock_list.return_value = _make_kanban_tasks(["todo", "todo", "in_progress"])
+def test_get_projects_returns_one_entry_per_registered_repo(client, registry_repo):
+    """GET /projects returns one entry for each repo in the registry."""
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = _make_kanban_tasks(["todo", "todo", "in_progress"])
 
-            resp = client.get("/api/plugins/daedalus/projects")
-            assert resp.status_code == 200, resp.text
-            data = resp.json()
+        resp = client.get("/api/plugins/daedalus/projects")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
 
     assert len(data) == 1
     proj = data[0]
     assert proj["name"] == "test-project"
     assert proj["repo"] == "org/test-repo"
-    assert proj["workdir"] == "/tmp/test-workdir"
+    assert proj["workdir"] == str(registry_repo)
 
 
 def test_get_projects_has_all_required_fields(client):
@@ -381,12 +181,12 @@ def test_get_projects_tracking_mode_github(client):
     assert data[0]["tracking_mode"] == "github"
 
 
-def test_get_projects_tracking_mode_kanban_without_board(client, temp_config_path):
-    """tracking_mode is 'kanban' when github_project_number is absent."""
-    raw = yaml.safe_load(Path(temp_config_path).read_text())
-    # Remove github_project_number
-    raw["projects"][0]["tracking"] = {}
-    Path(temp_config_path).write_text(yaml.dump(raw))
+def test_get_projects_tracking_mode_kanban_without_board(client, registry_repo):
+    """tracking_mode is 'kanban' when no board is configured."""
+    cfg_path = registry_repo / ".hermes" / "daedalus.yaml"
+    raw = yaml.safe_load(cfg_path.read_text())
+    raw["tracking"] = {}
+    cfg_path.write_text(yaml.dump(raw))
 
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
@@ -396,6 +196,30 @@ def test_get_projects_tracking_mode_kanban_without_board(client, temp_config_pat
         data = resp.json()
 
     assert data[0]["tracking_mode"] == "kanban"
+
+
+def test_get_projects_tracking_mode_per_provider(client, registry_repo):
+    """tracking_mode reflects the provider when its board model is on."""
+    cfg_path = registry_repo / ".hermes" / "daedalus.yaml"
+    raw = yaml.safe_load(cfg_path.read_text())
+    raw["vcs"]["provider"] = "gitlab"
+    raw["tracking"] = {"label_board": True}
+    cfg_path.write_text(yaml.dump(raw))
+
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        resp = client.get("/api/plugins/daedalus/projects")
+        data = resp.json()
+    assert data[0]["tracking_mode"] == "gitlab"
+
+    raw["vcs"] = {"provider": "azuredevops", "org": "a", "project": "p", "repo": "r"}
+    raw["tracking"] = {}
+    cfg_path.write_text(yaml.dump(raw))
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        resp = client.get("/api/plugins/daedalus/projects")
+        data = resp.json()
+    assert data[0]["tracking_mode"] == "azuredevops"
 
 
 def test_get_projects_cron_info(client):
@@ -475,14 +299,13 @@ def test_get_projects_open_prs_mocked(client):
     assert prs["prs"][1]["ci_green"] is False
 
 
-def test_get_projects_graceful_degration_when_sources_return_nothing(client):
-    """When all data sources return nothing/None, the endpoint still returns 200."""
+def test_get_projects_graceful_degradation_when_sources_return_nothing(client):
+    """When kanban/provider sources return nothing, the endpoint still returns 200."""
     with mock.patch("dashboard.plugin_api.list_tasks", None):
         with mock.patch("dashboard.plugin_api.get_provider", None):
-            with mock.patch("dashboard.plugin_api.registry", None):
-                resp = client.get("/api/plugins/daedalus/projects")
-                assert resp.status_code == 200, resp.text
-                data = resp.json()
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
 
     assert len(data) >= 1
     proj = data[0]
@@ -493,16 +316,23 @@ def test_get_projects_graceful_degration_when_sources_return_nothing(client):
     assert proj["tracking_mode"] in ("github", "kanban")
 
 
-def test_get_projects_registry_only_entries(client, temp_config_path):
-    """Registry-only repos appear as lightweight entries alongside config projects."""
-    # Write a config with one project
-    raw = yaml.safe_load(Path(temp_config_path).read_text())
-    # Keep one project
-    raw["projects"] = [raw["projects"][0]]
-    Path(temp_config_path).write_text(yaml.dump(raw))
+def test_get_projects_empty_registry(registry_repo):
+    """An empty registry returns an empty list (no global config fallback)."""
+    app = FastAPI()
+    app.include_router(router, prefix="/api/plugins/daedalus")
+    c = TestClient(app)
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        mock_registry.list_projects.return_value = []
+        resp = c.get("/api/plugins/daedalus/projects")
+    assert resp.status_code == 200
+    assert resp.json() == []
 
+
+def test_get_projects_registry_only_entries(client, registry_repo):
+    """Registered repos without a config appear as lightweight entries."""
     with mock.patch("dashboard.plugin_api.registry") as mock_registry:
         mock_registry.list_projects.return_value = [
+            str(registry_repo),
             "/repos/sampleproj",
         ]
         with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
@@ -512,7 +342,7 @@ def test_get_projects_registry_only_entries(client, temp_config_path):
             assert resp.status_code == 200, resp.text
             data = resp.json()
 
-    # Should have 2 entries: one from config, one from registry
+    # Two entries: one full (config), one lightweight (no config)
     assert len(data) == 2
     registry_entry = next(
         (p for p in data if p["repo"] == "/repos/sampleproj"),
@@ -1701,27 +1531,18 @@ class TestMetaTestDeliverEndpoint:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_router_mount_exposes_all_endpoints(temp_config_path, project_repo_dir):
+def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
     """Build a FastAPI app, mount the unified router, and assert every endpoint
-    group (/config, /projects, /project/{name}/config, /meta/notifications)
-    is reachable.
+    group (/projects, /project/{name}/config, /meta/notifications) is reachable.
 
-    This is the regression test for the bug where only the /config router was
-    mounted and /projects + /project/{name}/config were silently missing.
+    This is the regression test for the bug where some sub-routers were
+    silently missing from the unified router.
     """
     from dashboard.plugin_api import router as unified_router
 
     app = FastAPI()
     app.include_router(unified_router, prefix="/api/plugins/daedalus")
     client = TestClient(app)
-
-    # ── /config (GET) ────────────────────────────────────────────────────
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200, f"GET /config: {resp.status_code} {resp.text}"
-    data = resp.json()
-    assert "defaults" in data
-    assert "projects" in data
-    assert "meta" in data
 
     # ── /projects (GET) ──────────────────────────────────────────────────
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
@@ -1772,7 +1593,7 @@ def test_router_mount_exposes_all_endpoints(temp_config_path, project_repo_dir):
             ]
 
 
-def test_all_sub_routers_mounted_and_resolve(temp_config_path, project_repo_dir):
+def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
     """Build a FastAPI app, mount only plugin_api.router, introspect the module
     for all APIRouter instances (config, projects, project_config, meta),
     and assert each one's routes resolve to non-404 responses.
@@ -1786,7 +1607,7 @@ def test_all_sub_routers_mounted_and_resolve(temp_config_path, project_repo_dir)
 
     # ── Discover all APIRouter instances in the module ──────────────────
     sub_routers: dict[str, APIRouter] = {}
-    expected = {"config_router", "projects_router", "project_config_router", "meta_router"}
+    expected = {"projects_router", "project_config_router", "meta_router"}
     for name in expected:
         obj = getattr(papi, name, None)
         assert isinstance(obj, APIRouter), (
@@ -1827,10 +1648,6 @@ def test_all_sub_routers_mounted_and_resolve(temp_config_path, project_repo_dir)
     app = FastAPI()
     app.include_router(top_router, prefix="/api/plugins/daedalus")
     client = TestClient(app)
-
-    # ── /config (GET) ────────────────────────────────────────────────────
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200, f"/config: {resp.status_code}"
 
     # ── /projects (GET) ──────────────────────────────────────────────────
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
@@ -2193,8 +2010,8 @@ class TestRegistryNameResolution:
         assert entry["name"] == "webshop.app"
         assert entry["repo"] == "/repos/acme/webshop"
 
-    def test_get_projects_resolves_registry_name_from_config(self, client, temp_config_path):
-        """GET /projects uses resolved config name for registry-only entries."""
+    def test_get_projects_resolves_registry_name_from_config(self, client):
+        """GET /projects uses the resolved config name, not the folder basename."""
         import tempfile
 
         # Create a temp repo dir with .hermes/daedalus.yaml where name ≠ folder basename
@@ -2218,16 +2035,13 @@ class TestRegistryNameResolution:
                     assert resp.status_code == 200, resp.text
                     data = resp.json()
 
-            # Find the registry-only entry
-            registry_entry = next(
-                (p for p in data if p["repo"] == str(repo)), None
+            entry = next(
+                (p for p in data if p["name"] == "webshop.app"), None
             )
-            assert registry_entry is not None, (
-                f"Registry entry not found in response. Projects: {[p['name'] for p in data]}"
+            assert entry is not None, (
+                f"Entry not found in response. Projects: {[p['name'] for p in data]}"
             )
-            assert registry_entry["name"] == "webshop.app", (
-                f"Expected 'webshop.app', got '{registry_entry['name']}'"
-            )
+            assert entry["repo"] == "ACME-ORG/webshop.app"
 
     def test_resolve_project_path_matches_config_name(self):
         """_resolve_project_path finds project by config name, not folder name."""
@@ -2258,7 +2072,7 @@ class TestRegistryNameResolution:
                     _resolve_project_path(Path(tmpdir).name)
                 assert exc_info.value.status_code == 404
 
-    def test_fallback_to_folder_basename_when_no_config(self, client, temp_config_path):
+    def test_fallback_to_folder_basename_when_no_config(self, client):
         """When .hermes/daedalus.yaml doesn't exist, fall back to folder basename."""
         import tempfile
 
@@ -2282,7 +2096,7 @@ class TestRegistryNameResolution:
             # Falls back to folder basename
             assert registry_entry["name"] == Path(tmpdir).name
 
-    def test_existing_happy_path_still_green(self, client, temp_config_path):
+    def test_existing_happy_path_still_green(self, client):
         """When folder name == config name, everything still works."""
         import tempfile
 
@@ -2306,8 +2120,8 @@ class TestRegistryNameResolution:
                     assert resp.status_code == 200, resp.text
                     data = resp.json()
 
-            registry_entry = next(
-                (p for p in data if p["repo"] == str(repo)), None
+            entry = next(
+                (p for p in data if p["name"] == repo.name), None
             )
-            assert registry_entry is not None
-            assert registry_entry["name"] == repo.name
+            assert entry is not None
+            assert entry["repo"] == "org/test-repo"

@@ -249,6 +249,12 @@ cd /path/to/your/repo
 bash ~/.hermes/plugins/daedalus/scripts/setup.sh
 # then edit .hermes/daedalus.yaml (vcs provider, tracking, sources, cron) — repo/workdir are fixed
 ```
+Prefer hand-writing the config? That works too: copy
+[`templates/daedalus.yaml`](templates/daedalus.yaml) to `<repo>/.hermes/daedalus.yaml`,
+edit it, then run `setup.sh` once to register the repo (it never overwrites an
+existing config without `--force`) — or skip the registry entirely and run a
+single repo with `daedalus_dispatch.py --repo /path/to/repo`.
+
 Export the provider token for the dispatcher's environment (see
 [VCS providers](#vcs-providers)), e.g. `GITHUB_TOKEN`, `GITLAB_TOKEN`, or
 `AZURE_DEVOPS_PAT`.

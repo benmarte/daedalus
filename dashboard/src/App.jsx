@@ -324,8 +324,8 @@ function ProjectCard(props) {
           "⚠ " + attentionCount + " needing attention") : null,
         hasRedCI ? React.createElement("span", { style: Object.assign({}, S.badge, S.badgeRed) },
           "● CI failing") : null,
-        trackingMode === "github" ? React.createElement("span", { style: Object.assign({}, S.badge, S.badgeNeutral) },
-          "github") : React.createElement("span", { style: Object.assign({}, S.badge, S.badgeNeutral) }, "kanban")
+        React.createElement("span", { style: Object.assign({}, S.badge, S.badgeNeutral) },
+          trackingMode || "kanban")
       )
     ),
 

@@ -477,11 +477,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             { style: Object.assign({}, S.badge, S.badgeRed) },
             "\u25CF CI failing"
           ) : null,
-          trackingMode === "github" ? React.createElement(
+          React.createElement(
             "span",
             { style: Object.assign({}, S.badge, S.badgeNeutral) },
-            "github"
-          ) : React.createElement("span", { style: Object.assign({}, S.badge, S.badgeNeutral) }, "kanban")
+            trackingMode || "kanban"
+          )
         )
       ),
       // Stats row

@@ -6,9 +6,10 @@ Provides config read/write with validation, and per-project status aggregation.
 Never reads or returns secrets.
 
 Endpoints:
-    GET  /config    — full resolved config + meta (profiles, slack targets, path)
-    POST /config    — validate and persist the full daedalus.yaml document
-    GET  /projects  — aggregated status for all registered projects
+    GET  /projects                 — aggregated status for every registered project
+    POST /project/create           — scaffold + register a new project (board + cron)
+    GET/POST /project/{name}/config — read/edit a project's .hermes/daedalus.yaml
+    /meta/*                        — branches/labels/boards/statuses/notifications pickers
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from typing import Any, Optional
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
 
 # ConfigLoader + deep_merge live in the daedalus package root (config/__init__.py).
 # When the dashboard host runs, it adds the plugin dir to sys.path so
@@ -59,7 +59,6 @@ try:
 except ImportError:
     get_provider = None  # type: ignore[assignment]
 
-config_router = APIRouter(prefix="/config", tags=["daedalus-config"])
 projects_router = APIRouter(prefix="/projects", tags=["daedalus-projects"])
 project_config_router = APIRouter(prefix="/project", tags=["daedalus-project-config"])
 meta_router = APIRouter(prefix="/meta", tags=["daedalus-meta"])
@@ -82,9 +81,6 @@ def _real_home() -> Path:
     return home
 
 
-HERMES_PROFILES_DIR = _real_home() / ".hermes" / "profiles"
-DEFAULT_CONFIG_PATH = _real_home() / ".hermes" / "daedalus.yaml"
-
 # ── secret keys to strip before returning ──────────────────────────────────
 _SECRET_KEYS = {"secret", "api_key", "password", "token"}
 
@@ -102,36 +98,6 @@ def _strip_secrets(obj: Any) -> Any:
     return obj
 
 
-def _list_profiles() -> list[str]:
-    """Return directory names under ~/.hermes/profiles/."""
-    if not HERMES_PROFILES_DIR.exists():
-        return []
-    return sorted(
-        p.name
-        for p in HERMES_PROFILES_DIR.iterdir()
-        if p.is_dir() and not p.name.startswith(".")
-    )
-
-
-def _list_slack_targets() -> list[str]:
-    """Return slack target strings from `hermes send --list`."""
-    try:
-        result = subprocess.run(
-            ["hermes", "send", "--list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return []
-        targets: list[str] = []
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("slack:"):
-                targets.append(line)
-        return targets
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return []
 
 
 def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
@@ -494,137 +460,21 @@ def _open_prs(provider) -> Optional[dict[str, Any]]:
 # ── Tracking mode ───────────────────────────────────────────────────────────
 
 def _tracking_mode(project_cfg: dict[str, Any]) -> str:
-    """Determine tracking mode: 'github' if a project board is configured, else 'kanban'."""
+    """Provider name when a VCS board is configured, else 'kanban'."""
+    vcs = project_cfg.get("vcs") or {}
+    provider = (vcs.get("provider") or "github").lower().replace("-", "").replace("_", "")
+    provider = {"azure": "azuredevops", "ado": "azuredevops"}.get(provider, provider)
     tracking = project_cfg.get("tracking") or {}
-    if tracking.get("github_project_number"):
+    if provider == "github" and tracking.get("github_project_number"):
         return "github"
+    if provider == "gitlab" and tracking.get("label_board"):
+        return "gitlab"
+    if provider == "azuredevops":
+        return "azuredevops"  # board columns map to work-item states — always on
     return "kanban"
 
 
-# ── Pydantic models for POST validation ────────────────────────────────────
-
-
-class ProjectConfig(BaseModel):
-    """A single project entry in daedalus.yaml."""
-
-    name: str = Field(...)
-    repo: str = Field(...)
-    workdir: str = Field(...)
-    tracking: dict[str, Any] = Field(default_factory=dict)
-    execution: dict[str, Any] = Field(default_factory=dict)
-    cron: dict[str, Any] = Field(default_factory=dict)
-    delivery: dict[str, Any] = Field(default_factory=dict)
-    vcs: dict[str, Any] = Field(default_factory=dict)
-    issues: dict[str, Any] = Field(default_factory=dict)
-    lifecycle: dict[str, Any] = Field(default_factory=dict)
-    model: dict[str, Any] = Field(default_factory=dict)
-    sources: dict[str, Any] = Field(default_factory=dict)
-    notification: dict[str, Any] = Field(default_factory=dict)
-    platform: dict[str, Any] = Field(default_factory=dict)
-    stats: dict[str, Any] = Field(default_factory=dict)
-    tech_stack: str = "auto"
-
-
-class FullConfig(BaseModel):
-    """The full daedalus.yaml document."""
-
-    defaults: dict[str, Any] = Field(default_factory=dict)
-    projects: list[ProjectConfig] = Field(default_factory=list)
-
-
 # ── Endpoints ──────────────────────────────────────────────────────────────
-
-
-@config_router.get("")
-async def get_config(request: Request) -> dict[str, Any]:
-    """Return the full resolved config + meta.
-
-    Response shape:
-        {
-            "defaults": {...},
-            "projects": [{...}, ...],
-            "meta": {
-                "profiles": ["developer", "planner", ...],
-                "slack_targets": ["slack:...", ...],
-                "path": "/Users/.../.hermes/daedalus.yaml"
-            }
-        }
-    """
-    loader = ConfigLoader(DEFAULT_CONFIG_PATH)
-    resolved = loader.resolve_all()
-
-    # Strip secrets from the resolved config
-    safe = _strip_secrets(resolved)
-
-    safe["meta"] = {
-        "profiles": _list_profiles(),
-        "slack_targets": _list_slack_targets(),
-        "path": str(DEFAULT_CONFIG_PATH),
-    }
-    return safe
-
-
-@config_router.post("")
-async def post_config(request: Request, body: FullConfig) -> dict[str, Any]:
-    """Validate and persist the full daedalus.yaml document.
-
-    Validation rules (per project):
-        - name, repo, workdir are required
-        - tracking.github_project_number must be numeric if present
-        - execution.worker_profile must exist in ~/.hermes/profiles/
-    """
-    errors: list[str] = []
-
-    # Validate each project
-    profiles = _list_profiles()
-    for i, proj in enumerate(body.projects):
-        prefix = f"projects[{i}] ({proj.name or 'unnamed'})"
-
-        if not proj.name or not proj.name.strip():
-            errors.append(f"{prefix}: 'name' is required")
-        if not proj.repo or not proj.repo.strip():
-            errors.append(f"{prefix}: 'repo' is required")
-        if not proj.workdir or not proj.workdir.strip():
-            errors.append(f"{prefix}: 'workdir' is required")
-
-        # github_project_number: optional but must be numeric
-        gh_num = proj.tracking.get("github_project_number")
-        if gh_num is not None:
-            if not isinstance(gh_num, int):
-                try:
-                    int(gh_num)
-                except (ValueError, TypeError):
-                    errors.append(
-                        f"{prefix}: tracking.github_project_number must be numeric, got {gh_num!r}"
-                    )
-
-        # worker_profile: validate only when profiles directory has content.
-        # An empty or absent profiles dir means the local machine isn't
-        # populated; a valid profile name should never 422 in that case.
-        worker = proj.execution.get("worker_profile")
-        if worker is not None and profiles:
-            if worker not in profiles:
-                errors.append(
-                    f"{prefix}: execution.worker_profile '{worker}' not found in "
-                    f"~/.hermes/profiles/. Available: {profiles}"
-                )
-
-    if errors:
-        raise HTTPException(
-            status_code=422,
-            detail={"errors": errors},
-        )
-
-    # Persist: convert Pydantic models to plain dicts, save via ConfigLoader
-    raw: dict[str, Any] = {
-        "defaults": body.defaults,
-        "projects": [p.model_dump(exclude_unset=False) for p in body.projects],
-    }
-
-    loader = ConfigLoader(DEFAULT_CONFIG_PATH)
-    loader.save(raw)
-
-    return {"status": "saved", "path": str(DEFAULT_CONFIG_PATH)}
 
 
 # ── Projects endpoint ───────────────────────────────────────────────────────
@@ -632,30 +482,23 @@ async def post_config(request: Request, body: FullConfig) -> dict[str, Any]:
 
 @projects_router.get("")
 async def get_projects(request: Request) -> list[dict[str, Any]]:
-    """Return aggregated status for all registered projects.
+    """Return aggregated status for every project in the registry.
+
+    The registry (~/.hermes/daedalus/projects) is the single source of truth;
+    each repo path resolves its own ``.hermes/daedalus.yaml`` for settings.
+    Repos registered without a config yet appear as lightweight entries.
 
     Each entry includes:
         - name, repo, workdir (read-only identity fields)
-        - kanban_summary: counts by status (kanban mode only)
+        - kanban_summary: counts by status
         - open_prs: open/in-review PRs with counts and CI state
         - cron: schedule and delivery target
         - needs_attention: blocked/gave_up cards with ids and reasons
-        - tracking_mode: 'github' or 'kanban'
+        - tracking_mode: provider name when a board is configured, else 'kanban'
         - sources: enabled sources dict (stripped of secrets)
 
     All fields degrade gracefully — nulls for missing data, never 500.
     """
-    loader = ConfigLoader(DEFAULT_CONFIG_PATH)
-    resolved = loader.resolve_all()
-
-    # Collect projects from config
-    config_projects: dict[str, dict[str, Any]] = {}
-    for proj in resolved.get("projects", []):
-        repo = proj.get("repo", "")
-        if repo:
-            config_projects[repo] = proj
-
-    # Also collect from registry (repo paths registered but not yet in config)
     registry_repos: list[str] = []
     if registry is not None:
         try:
@@ -663,42 +506,26 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
         except Exception:
             registry_repos = []
 
-    # Build unique list; prefer config entries (which have name/workdir/settings)
-    seen_repos: set[str] = set()
-    projects: list[dict[str, Any]] = []
-
-    for proj in resolved.get("projects", []):
-        repo = proj.get("repo", "")
-        if not repo or repo in seen_repos:
-            continue
-        seen_repos.add(repo)
-        projects.append(_build_project_entry(proj, resolved.get("defaults", {})))
-
-    # Add registry-only repos as lightweight entries
     loader = ConfigLoader()
+    seen: set[str] = set()
+    projects: list[dict[str, Any]] = []
     for repo_path in registry_repos:
-        if repo_path in seen_repos:
+        if repo_path in seen:
             continue
-        seen_repos.add(repo_path)
-        # Resolve the per-repo config name (same source _resolve_project_path matches on)
-        name = Path(repo_path).name  # fallback
+        seen.add(repo_path)
         try:
             resolved = loader.resolve_repo_config(repo_path)
-            cfg_name = resolved.get("name", "").strip()
-            if cfg_name:
-                name = cfg_name
         except Exception:
-            pass  # graceful fallback to folder basename
-        projects.append(_build_registry_only_entry(repo_path, name))
+            # Registered but no per-repo config yet — lightweight entry.
+            projects.append(_build_registry_only_entry(repo_path, Path(repo_path).name))
+            continue
+        projects.append(_build_project_entry(resolved))
 
     return projects
 
 
-def _build_project_entry(
-    proj: dict[str, Any],
-    defaults: dict[str, Any],
-) -> dict[str, Any]:
-    """Build a single project status entry from a resolved config project."""
+def _build_project_entry(proj: dict[str, Any]) -> dict[str, Any]:
+    """Build a single project status entry from a resolved per-repo config."""
     name = proj.get("name", "")
     repo = proj.get("repo", "")
     workdir = proj.get("workdir", "")
@@ -711,7 +538,7 @@ def _build_project_entry(
     open_prs = _open_prs(_project_provider(proj))
 
     # Cron info
-    cron_cfg = proj.get("cron") or defaults.get("cron") or {}
+    cron_cfg = proj.get("cron") or {}
     cron: Optional[dict[str, Any]] = None
     if cron_cfg:
         cron_name = f"{name}-daedalus"
@@ -731,7 +558,7 @@ def _build_project_entry(
     needs_attention = _needs_attention(slug)
 
     # Sources (strip secrets)
-    sources = _strip_secrets(proj.get("sources") or defaults.get("sources") or {})
+    sources = _strip_secrets(proj.get("sources") or {})
 
     return {
         "name": name,
@@ -1487,7 +1314,6 @@ def _cron_health(cron_name: str) -> dict[str, Any]:
 # ── Top-level router (defined at end so sub-routers are already populated) ───
 
 router = APIRouter(tags=["daedalus"])
-router.include_router(config_router)
 router.include_router(projects_router)
 router.include_router(project_config_router)
 router.include_router(meta_router)

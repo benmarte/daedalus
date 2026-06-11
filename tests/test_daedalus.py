@@ -12,7 +12,7 @@ from unittest import mock
 # Make the package root importable (config/, core/).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import ConfigLoader, deep_merge, strip_project_key  # noqa: E402
+from config import ConfigLoader, deep_merge  # noqa: E402
 from core import kanban  # noqa: E402
 
 
@@ -93,31 +93,26 @@ def test_deep_merge():
     check("deep_merge does not mutate the base", base == {"a": {"x": 1}})
 
 
-def test_strip_project_key():
-    check("strip_project_key removes the projects list",
-          "projects" not in strip_project_key({"projects": [], "vcs": {}}))
-
 
 def test_config_loader_resolve():
+    """resolve_repo_config merges the per-repo file over template defaults."""
+    import tempfile
     import yaml
-    tmp = "/tmp/_orch_test_config.yaml"
-    cfg = {
-        "defaults": {"vcs": {"target_branch": "dev"}, "lifecycle": {"kanban": {"enabled": True}}},
-        "projects": [
-            {"name": "p1", "repo": "O/p1", "workdir": "/w/p1", "tracking": {"github_project_number": 1}},
-            {"name": "p2", "repo": "O/p2", "workdir": "/w/p2", "vcs": {"target_branch": "main"}},
-        ],
-    }
-    Path(tmp).write_text(yaml.safe_dump(cfg))
-    loader = ConfigLoader(tmp)
-    r1 = loader.resolve_project("p1")
-    check("resolve_project keeps identity fields", r1["repo"] == "O/p1" and r1["workdir"] == "/w/p1")
-    check("resolve_project inherits defaults", r1["vcs"]["target_branch"] == "dev")
-    check("resolve_project carries project tracking", r1["tracking"]["github_project_number"] == 1)
-    r2 = loader.resolve_project("p2")
-    check("resolve_project lets a project override a default", r2["vcs"]["target_branch"] == "main")
-    check("list_projects returns every project", {p["name"] for p in loader.list_projects()} == {"p1", "p2"})
-    Path(tmp).unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = Path(tmpdir)
+        (repo / ".hermes").mkdir()
+        (repo / ".hermes" / "daedalus.yaml").write_text(yaml.safe_dump({
+            "name": "p1", "repo": "O/p1",
+            "vcs": {"target_branch": "release"},
+        }))
+        r1 = ConfigLoader().resolve_repo_config(str(repo))
+    check("resolve_repo_config keeps identity fields", r1["repo"] == "O/p1")
+    check("resolve_repo_config pins workdir to the repo path",
+          r1["workdir"] == str(repo.resolve()))
+    check("resolve_repo_config lets the repo override template defaults",
+          r1["vcs"]["target_branch"] == "release")
+    check("resolve_repo_config inherits template defaults",
+          r1["vcs"]["provider"] == "github" and r1["cron"]["schedule"] == "every 60m")
 
 
 # ── kanban: ls parsing ───────────────────────────────────────────────────────
@@ -280,27 +275,6 @@ def test_resolve_repo_config_missing_file():
         except FileNotFoundError as e:
             check("resolve_repo_config error message includes path",
                   tmp in str(e))
-
-
-def test_resolve_repo_config_does_not_break_resolve_project():
-    """Adding resolve_repo_config must not affect existing resolve_project/resolve_all."""
-    import yaml
-    tmp = "/tmp/_orch_test_config.yaml"
-    cfg = {
-        "defaults": {"vcs": {"target_branch": "dev"}},
-        "projects": [
-            {"name": "p1", "repo": "O/p1", "workdir": "/w/p1"},
-        ],
-    }
-    Path(tmp).write_text(yaml.safe_dump(cfg))
-    loader = ConfigLoader(tmp)
-    r1 = loader.resolve_project("p1")
-    check("resolve_project still works after resolve_repo_config added",
-          r1["repo"] == "O/p1" and r1["workdir"] == "/w/p1")
-    ra = loader.resolve_all()
-    check("resolve_all still works after resolve_repo_config added",
-          len(ra["projects"]) == 1)
-    Path(tmp).unlink(missing_ok=True)
 
 
 def test_dispatch_dual_mode():
@@ -809,13 +783,12 @@ def test_deliver_doc_reports_multi_target():
 if __name__ == "__main__":
     print("Daedalus tests")
     print("-" * 60)
-    for fn in (test_deep_merge, test_strip_project_key, test_config_loader_resolve,
+    for fn in (test_deep_merge, test_config_loader_resolve,
                test_kanban_list_issue_numbers, test_create_triage_pins_workspace,
                test_kanban_review_handoff_pr,
                test_dispatch_dual_mode,
                test_resolve_repo_config_valid, test_resolve_repo_config_sources_toggles,
                test_resolve_repo_config_missing_file,
-               test_resolve_repo_config_does_not_break_resolve_project,
                test_main_registry_sweep, test_main_single_repo,
                test_parse_pr_from_card, test_find_doc_comment,
                test_send_via_hermes, test_deliver_doc_reports_idempotent,
