@@ -169,12 +169,25 @@ and shared across a team.
 
 ## Prerequisites
 
-Hermes (installed + model auth), `bun`, `pre-commit`, `python3` + `pyyaml`.
+| Requirement | Why |
+|---|---|
+| [Hermes](https://herm.es) installed + model auth | The runtime everything runs on |
+| [agent-skills](https://github.com/addyosmani/agent-skills) Hermes plugin | The 6 specialist profiles (developer, reviewer, security-analyst, documentation, planner, project-manager) extend agent-skills profiles — **must be installed before provisioning the roster** |
+| `python3` + `pyyaml` | Dispatcher and postinstall script |
+| `bun` | Dashboard build (only needed if you modify `dashboard/src/`) |
+| `pre-commit` | Ship-gate enforces the repo's pre-commit checks before a PR can open |
+
 **No VCS CLIs needed — ever.** Everything (dispatcher, dashboard, AND worker
 agents) talks to your VCS host via its **HTTPS API** with a token from the
 environment. Worker `git push` authenticates through a per-profile credential
 store written by the roster provisioner; PRs and comments go through the
 provider API with the token already in each worker's env.
+
+Install agent-skills before anything else:
+```bash
+hermes plugins install addyosmani/agent-skills --enable
+hermes gateway restart
+```
 
 ## VCS providers
 
@@ -271,6 +284,12 @@ login keychain or set a non-keychain helper:
 
 ## Quickstart
 
+**0. Install agent-skills** (required before the roster can be provisioned):
+```bash
+hermes plugins install addyosmani/agent-skills --enable
+hermes gateway restart
+```
+
 **1. Install the plugin** (official Hermes plugin):
 ```bash
 hermes plugins install benmarte/daedalus --enable
@@ -333,8 +352,12 @@ hermes cron add daedalus --schedule "every 3m" \
 
 ## Uninstall / reset
 
-To completely remove Daedalus and all its host-side state:
+**Option A — dashboard button (easiest):** open `hermes dashboard` → Daedalus tab →
+scroll to the footer → click **Uninstall Daedalus**. It removes profiles, cron jobs,
+kanban boards, config, and the plugin package in one go, with a confirmation dialog
+before anything is deleted.
 
+**Option B — terminal:**
 ```bash
 # HERMES_HOME defaults to ~/.hermes — set it if yours is elsewhere
 bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh"
@@ -347,7 +370,7 @@ what will be removed before confirming (or use `-y` for scripting).
 > **Do NOT use `hermes plugins uninstall daedalus` alone** — that only deletes
 > the plugin directory and leaves profiles, cron jobs, boards, config, and
 > hook artifacts behind. Hermes has no uninstall hook for plugins to clean up
-> after themselves. Use `uninstall.sh` for a complete uninstall.
+> after themselves. Use the dashboard button or `uninstall.sh` for a complete uninstall.
 
 ```bash
 # Skip the plugin removal (keep daedalus installed, reset host state only):
