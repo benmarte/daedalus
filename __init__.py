@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def register(ctx) -> None:
-    """Heremes plugin entry point — import-safe, never raises.
+    """Hermes plugin entry point — import-safe, never raises.
 
     Registers the daedalus dispatcher as an auxiliary LLM task so users
     can configure its provider/model independently of the main chat model.

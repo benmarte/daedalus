@@ -21,6 +21,15 @@ def _run_setup(workdir: Path, registry: Path, *, force: bool = False) -> subproc
     env = {**os.environ, "HERMES_ORCH_REGISTRY": str(registry)}
     # Add ORCH_ROOT to PYTHONPATH so setup.sh can import core.registry
     env["PYTHONPATH"] = str(_ORCH_ROOT)
+    # Stub the hermes CLI so tests NEVER touch a real Hermes install — without
+    # this, `hermes kanban boards create` in setup.sh leaves stray boards on
+    # the developer's machine every test run.
+    stub_dir = workdir / ".hermes-stub-bin"
+    stub_dir.mkdir(exist_ok=True)
+    stub = stub_dir / "hermes"
+    stub.write_text("#!/bin/sh\necho \"stub-hermes: $*\"\nexit 0\n")
+    stub.chmod(0o755)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
     cmd = ["bash", str(_SETUP_SH)]
     if force:
         cmd.append("--force")
@@ -204,7 +213,7 @@ def test_board_slug_derivation():
     """setup.sh board slug matches _board_slug for several repo patterns."""
     cases = [
         ("org/repo",              "org-repo"),
-        ("RIZQ-TECH/dycotomic.app", "rizq-tech-dycotomic-app"),
+        ("ACME-ORG/webshop.app",   "acme-org-webshop-app"),
         ("MyOrg/MyRepo",          "myorg-myrepo"),
         ("org/repo!@#test",       "org-repo---test"),
         ("benmarte/daedalus",     "benmarte-daedalus"),
@@ -329,3 +338,45 @@ exit 5
     assert (repo / ".hermes" / "daedalus.yaml").exists()
     # Registry still added
     assert registry.exists()
+
+
+# ── Provider auto-detection through the real script ──────────────────────────
+
+def test_setup_detects_gitlab_self_hosted(tmp_path):
+    """setup.sh writes provider gitlab + base_url for a self-hosted remote."""
+    import yaml
+    repo = _init_tmp_repo(tmp_path, "https://gitlab.corp.io/team/app.git")
+    registry = tmp_path / "registry"
+    result = _run_setup(repo, registry)
+    assert result.returncode == 0, result.stderr
+    assert "gitlab (auto-detected" in result.stdout
+    cfg = yaml.safe_load((repo / ".hermes" / "daedalus.yaml").read_text())
+    assert cfg["repo"] == "team/app"
+    assert cfg["vcs"]["provider"] == "gitlab"
+    assert cfg["vcs"]["base_url"] == "https://gitlab.corp.io"
+
+
+def test_setup_detects_azure_devops(tmp_path):
+    """setup.sh writes provider azuredevops + org/project/repo for an Azure remote."""
+    import yaml
+    repo = _init_tmp_repo(tmp_path, "git@ssh.dev.azure.com:v3/acme/WebApp/web-repo")
+    registry = tmp_path / "registry"
+    result = _run_setup(repo, registry)
+    assert result.returncode == 0, result.stderr
+    cfg = yaml.safe_load((repo / ".hermes" / "daedalus.yaml").read_text())
+    assert cfg["vcs"]["provider"] == "azuredevops"
+    assert cfg["vcs"]["org"] == "acme"
+    assert cfg["vcs"]["project"] == "WebApp"
+    assert cfg["vcs"]["repo"] == "web-repo"
+
+
+def test_setup_scaffolds_all_sources_enabled(tmp_path):
+    """Template defaults: every trigger source is on out of the box."""
+    import yaml
+    repo = _init_tmp_repo(tmp_path, "git@github.com:org/proj.git")
+    registry = tmp_path / "registry"
+    result = _run_setup(repo, registry)
+    assert result.returncode == 0, result.stderr
+    cfg = yaml.safe_load((repo / ".hermes" / "daedalus.yaml").read_text())
+    for source in ("github_issues", "local_specs", "kanban_triage"):
+        assert cfg["sources"][source]["enabled"] is True, source

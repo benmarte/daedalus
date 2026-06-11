@@ -2,8 +2,9 @@
 """
 postinstall.py — Prerequisite checker + roster provisioner for the daedalus plugin.
 
-Checks that the host environment is ready (default profile, agent-skills plugin, gh auth),
+Checks that the host environment is ready (default profile, agent-skills plugin),
 then runs scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
+No gh CLI involved — VCS access is via provider APIs with tokens from env.
 
 Usage:
     python3 scripts/postinstall.py          # check + provision
@@ -55,30 +56,23 @@ def _check_agent_skills() -> tuple[bool, str]:
     )
 
 
-def _check_gh_auth() -> tuple[bool, str]:
-    """Verify 'gh auth status' reports authenticated."""
-    try:
-        result = subprocess.run(
-            ["gh", "auth", "status"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return True, f"OK: gh auth status passed\n{result.stderr.strip()}"
-        return False, (
-            f"FAIL: gh auth status returned code {result.returncode}\n"
-            f"{result.stderr.strip()}\n"
-            f"  Fix: run 'gh auth login' with a token that has repo + workflow scopes."
-        )
-    except FileNotFoundError:
-        return False, (
-            "MISSING: 'gh' CLI not found on PATH.\n"
-            "  Fix: install gh (https://cli.github.com) and run 'gh auth login'."
-        )
-    except subprocess.TimeoutExpired:
-        return False, (
-            "TIMEOUT: 'gh auth status' hung for 30s.\n"
-            "  Fix: check network / gh API reachability."
-        )
+def _check_vcs_tokens() -> tuple[bool, str]:
+    """Advisory check: report which VCS provider tokens are present in the env.
+
+    The plugin (dispatcher, dashboard, and worker provisioning) talks to
+    GitHub/GitLab/Azure DevOps exclusively via their HTTPS APIs with tokens
+    from the environment. Never a blocker — kanban-only setups need no token.
+    """
+    found = [name for name in ("GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN",
+                               "AZURE_DEVOPS_PAT")
+             if (os.environ.get(name) or "").strip()]
+    if found:
+        return True, f"OK: VCS token(s) in env: {', '.join(found)}"
+    return True, (
+        "WARN: no VCS tokens in env (GITHUB_TOKEN / GITLAB_TOKEN / AZURE_DEVOPS_PAT) "
+        "— fine for kanban-only/spec-file projects.\n"
+        "  Export the token for each provider your projects use before running the dispatcher."
+    )
 
 
 # ── cron wrapper ─────────────────────────────────────────────────────────────
@@ -154,7 +148,7 @@ def main(check_only: bool = False) -> int:
     checks = [
         ("default profile", _check_default_profile),
         ("agent-skills plugin", _check_agent_skills),
-        ("gh auth", _check_gh_auth),
+        ("vcs tokens", _check_vcs_tokens),
     ]
 
     all_ok = True

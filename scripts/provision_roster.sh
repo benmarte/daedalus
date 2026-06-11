@@ -10,8 +10,8 @@
 # Strategy: delete + recreate each role so the end state is identical every run (this script
 # is the source of truth). Profiles are cloned from `default` for model + provider keys,
 # created with --no-skills (no bundled skill packs -> genuinely specialized + opts out of
-# `hermes update` skill re-sync), then seeded with exactly their matrix skills and a
-# GITHUB_TOKEN in .env (so `gh` works inside the isolated profile HOME — Phase-0 blocker #2).
+# `hermes update` skill re-sync), then seeded with exactly their matrix skills, a git
+# credential store for pushes, and provider tokens in .env for API calls (no gh CLI).
 #
 # Re-run any time to reset the roster to spec. Safe: only touches the six role names below.
 
@@ -26,14 +26,19 @@ if [ ! -d "$SRC" ]; then
   exit 1
 fi
 
-# Token + git identity the workers use for gh/git. By DEFAULT this falls back to the host's own
-# `gh` login with no commit-author override. To run the roster under a dedicated BOT identity — so
-# PRs, commits, comments and reviews are attributed to the bot instead of your personal account —
+# Token + git identity the workers use for git push + provider API calls.
+# NO gh CLI involved anywhere — git authenticates via a per-profile credential
+# store, and API calls (open PR, comment) use the token from the profile env.
+# To run the roster under a dedicated BOT identity — so PRs, commits, comments
+# and reviews are attributed to the bot instead of your personal account —
 # export these before running (or drop the token in ~/.hermes/.roster_bot_token, one line, chmod 600):
 #   ROSTER_GH_TOKEN   the bot's GitHub token (machine-user fine-grained PAT, or App installation token)
-#   ROSTER_BOT_NAME   git commit author name,  e.g. "RIZQ AI Agent"
+#   ROSTER_BOT_NAME   git commit author name,  e.g. "ACME AI Agent"
 #   ROSTER_BOT_EMAIL  git commit author email — the bot's GitHub no-reply address
 #                     (machine user: <id>+<login>@users.noreply.github.com ; App: <appid>+<slug>[bot]@users.noreply.github.com)
+# Fallback when neither is set: GITHUB_TOKEN from the current environment.
+# GitLab / Azure DevOps projects: export GITLAB_TOKEN / AZURE_DEVOPS_PAT before
+# running and they are passed into each profile's .env the same way.
 GH_TOKEN="${ROSTER_GH_TOKEN:-}"
 if [ -z "$GH_TOKEN" ] && [ -f "$HOME/.hermes/.roster_bot_token" ]; then
   GH_TOKEN="$(tr -d '\n' < "$HOME/.hermes/.roster_bot_token")"
@@ -41,9 +46,12 @@ fi
 if [ -n "$GH_TOKEN" ]; then
   echo "Roster GitHub identity: BOT${ROSTER_BOT_NAME:+ ($ROSTER_BOT_NAME)}"
 else
-  GH_TOKEN="$(gh auth token 2>/dev/null || true)"
-  echo "Roster GitHub identity: host gh user (set ROSTER_GH_TOKEN to use a bot)"
-  [ -z "$GH_TOKEN" ] && echo "WARN: no bot token and 'gh auth token' is empty — profiles will lack gh auth" >&2
+  GH_TOKEN="${GITHUB_TOKEN:-}"
+  if [ -n "$GH_TOKEN" ]; then
+    echo "Roster GitHub identity: GITHUB_TOKEN from env (set ROSTER_GH_TOKEN to use a bot)"
+  else
+    echo "WARN: no ROSTER_GH_TOKEN / ~/.hermes/.roster_bot_token / GITHUB_TOKEN — profiles will lack GitHub push auth" >&2
+  fi
 fi
 
 # Remove legacy / stray profiles from earlier spikes so the roster is exactly the six below.
@@ -75,44 +83,70 @@ setup_role() {
     fi
   done
 
-  # Make `gh` work inside the worker. NOTE: putting GITHUB_TOKEN in the profile .env is NOT
-  # enough — the kanban worker runs `gh` via the `terminal` tool, whose shell only inherits vars
-  # listed in `terminal.env_passthrough` (default []), and each worker has an isolated HOME so the
-  # host gh keychain isn't visible. The reliable fix is to authenticate gh INTO the profile's HOME
-  # (writes ~/.config/gh/hosts.yml there), independent of any env plumbing.
+  # Make `git push` + provider API calls work inside the worker — WITHOUT the
+  # gh CLI. Each worker has an isolated HOME, so we write a per-profile git
+  # credential store there (keychain-free: the isolated HOME must never invoke
+  # osxkeychain) and drop the tokens into the profile .env for API calls
+  # (open PR / comment via curl with the token env var).
+  local home_dir="$PROFILES/$name/home"
+  mkdir -p "$home_dir"
+  env HOME="$home_dir" git config --global credential.helper "store"
+  local env_file="$PROFILES/$name/.env"
+  touch "$env_file"
+  chmod 600 "$env_file"
   if [ -n "$GH_TOKEN" ]; then
-    local home_dir="$PROFILES/$name/home"
-    mkdir -p "$home_dir"
-    # Keychain-free: the isolated HOME must never invoke osxkeychain. Workers
-    # authenticate via the gh token / hosts.yml, not the macOS login keychain.
-    env HOME="$home_dir" git config --global credential.helper ""
-    printf '%s' "$GH_TOKEN" | env -u GH_TOKEN -u GITHUB_TOKEN GH_PROMPT_DISABLED=1 HOME="$home_dir" gh auth login --with-token --insecure-storage 2>/dev/null || echo "  WARN: gh auth login failed for $name" >&2
-    # Belt-and-suspenders: also drop it in .env for any tool that reads the env directly.
-    local env_file="$PROFILES/$name/.env"
-    touch "$env_file"
+    # git push auth for github.com via the credential store (0600, profile-local).
+    printf 'https://x-access-token:%s@github.com\n' "$GH_TOKEN" > "$home_dir/.git-credentials"
+    chmod 600 "$home_dir/.git-credentials"
     grep -q '^GITHUB_TOKEN=' "$env_file" 2>/dev/null || printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$env_file"
-    # Attribute git commits to the bot (workers run with HOME=<profile>/home → this gitconfig).
-    if [ -n "${ROSTER_BOT_NAME:-}" ] && [ -n "${ROSTER_BOT_EMAIL:-}" ]; then
-      env HOME="$home_dir" git config --global user.name  "$ROSTER_BOT_NAME"
-      env HOME="$home_dir" git config --global user.email "$ROSTER_BOT_EMAIL"
-    fi
+  fi
+  # GitLab / Azure DevOps: pass through tokens for API + push auth when set.
+  if [ -n "${GITLAB_TOKEN:-}" ]; then
+    printf 'https://oauth2:%s@gitlab.com\n' "$GITLAB_TOKEN" >> "$home_dir/.git-credentials"
+    chmod 600 "$home_dir/.git-credentials"
+    grep -q '^GITLAB_TOKEN=' "$env_file" 2>/dev/null || printf '\nGITLAB_TOKEN=%s\n' "$GITLAB_TOKEN" >> "$env_file"
+  fi
+  if [ -n "${AZURE_DEVOPS_PAT:-}" ]; then
+    printf 'https://pat:%s@dev.azure.com\n' "$AZURE_DEVOPS_PAT" >> "$home_dir/.git-credentials"
+    chmod 600 "$home_dir/.git-credentials"
+    grep -q '^AZURE_DEVOPS_PAT=' "$env_file" 2>/dev/null || printf '\nAZURE_DEVOPS_PAT=%s\n' "$AZURE_DEVOPS_PAT" >> "$env_file"
+  fi
+  # Attribute git commits to the bot (workers run with HOME=<profile>/home → this gitconfig).
+  if [ -n "${ROSTER_BOT_NAME:-}" ] && [ -n "${ROSTER_BOT_EMAIL:-}" ]; then
+    env HOME="$home_dir" git config --global user.name  "$ROSTER_BOT_NAME"
+    env HOME="$home_dir" git config --global user.email "$ROSTER_BOT_EMAIL"
   fi
 
-  # Seed project conventions into the profile memory so they survive every re-provision
-  # (the worker reads memories/MEMORY.md each run; the decomposer may not carry them in the body).
-  local mem="$PROFILES/$name/memories/MEMORY.md"
-  mkdir -p "$(dirname "$mem")"; touch "$mem"
-  if ! grep -q "dycotomic project conventions" "$mem" 2>/dev/null; then
-    cat >> "$mem" <<'CONV'
+  # CRITICAL: the worker's `terminal` tool only inherits env vars listed in
+  # terminal.env_passthrough (default []). Without this, the provider tokens
+  # in the profile .env are invisible to the shell the agent runs curl in —
+  # API calls (open PR / comment) would silently see an empty token.
+  python3 - "$PROFILES/$name/config.yaml" <<'PY'
+import sys
+import yaml
 
-## dycotomic project conventions (RIZQ-TECH/dycotomic.app) — MUST follow
-- Base ALL work on `dev`. Branch from `origin/dev`; open PRs INTO `dev`. NEVER PR into `main`
-  (CI/ci.yml only runs on PRs to `dev`; `main` is promote-only and can be far behind `dev`).
-- Before committing, run `pre-commit run --all-files` and fix every failure (black, isort, flake8,
-  biome lint+format, pytest, typecheck). Fresh git worktrees have no hooks installed — run it explicitly.
-- A PR is acceptable only when it targets `dev`, CI is green, there are no conflicts, and tests pass.
-CONV
-  fi
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    cfg = {}
+term = cfg.setdefault("terminal", {})
+passthrough = term.get("env_passthrough") or []
+for var in ("GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_PAT"):
+    if var not in passthrough:
+        passthrough.append(var)
+term["env_passthrough"] = passthrough
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PY
+
+  # Lock the profile down: it holds credentials (.git-credentials, .env).
+  chmod 700 "$PROFILES/$name" 2>/dev/null || true
+
+  # NOTE: project-specific conventions (base branch, pre-commit policy, …) are NOT
+  # seeded here — the provisioner stays project-agnostic. They live in each repo's
+  # .hermes/daedalus.yaml and the triage card body generated by the dispatcher.
 
   echo "  skills: $(ls "$dst" 2>/dev/null | tr '\n' ' ')"
 }

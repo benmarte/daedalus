@@ -1,26 +1,41 @@
 # Native Hermes autonomous issue→PR pipeline — team setup
 
-This repo provisions a **lean roster of specialist Hermes agents** that take a GitHub Project
-"Ready" issue and drive it to a reviewed, ready-to-merge PR — using **native Hermes Kanban**
-(decompose → role profiles → dispatch → review), no custom plugin.
+This repo provisions a **lean roster of specialist Hermes agents** that take a
+"Ready" issue — from **GitHub, GitLab, or Azure DevOps** — and drive it to a reviewed,
+ready-to-merge PR — using **native Hermes Kanban**
+(decompose → role profiles → dispatch → review).
 
 Roster: **project-manager · planner · developer · reviewer · security-analyst · documentation**
-(each loads only its lifecycle agent-skills). See `tasks/RUNBOOK-native-pipeline.md` for the run flow.
+(each loads only its lifecycle agent-skills).
 
 ## Sharing model (important)
 - **Share = this git repo.** It is secret-free. Everyone reproduces the roster locally with their
   own keys via `scripts/provision_roster.sh`.
-- **Do NOT share `hermes profile export` tarballs** — they bundle `config.yaml`/`.env`/`gh` tokens
-  (LLM keys + GitHub PAT). Those are per-person secrets.
-- Recommended: host this repo under the **`RIZQ-TECH` org** so colleagues can clone it.
+- **Do NOT share `hermes profile export` tarballs** — they bundle `config.yaml`/`.env`/
+  `.git-credentials` (LLM keys + VCS PATs). Those are per-person secrets.
+- Recommended: host this repo under your org so colleagues can clone it.
 
 ## Prerequisites (each colleague, once)
 1. **Hermes Agent** installed + gateway running (`hermes gateway` / `hermes gateway install`).
 2. The **`agent-skills` plugin** installed (provides the lifecycle skills at
    `~/.hermes/plugins/agent-skills/skills/`).
-3. A working **`default` profile** with their own LLM provider keys (model used here:
-   `deepseek-v4-pro`; any capable model works — the script clones config/keys from `default`).
-4. **GitHub CLI** authenticated: `gh auth login` (needs `repo`, `workflow`, `project` scopes).
+3. A working **`default` profile** with their own LLM provider keys (any capable
+   model works — the script clones config/keys from `default`).
+4. A **VCS API token** for each provider you use:
+   `GITHUB_TOKEN` (fine-grained PAT), `GITLAB_TOKEN` (`api` scope), or
+   `AZURE_DEVOPS_PAT` (Work Items R&W, Code Read, PR R&W, Build Read).
+   That token covers everything — dispatcher polling, dashboard pickers, worker
+   `git push` (per-profile credential store), and PR/comment API calls. No
+   `gh`/`glab`/`az` CLI is needed or used.
+
+   **Where tokens go:**
+   - Add them to **`~/.hermes/.env`** (e.g. `GITHUB_TOKEN=ghp_...`) — Hermes loads
+     this file at startup, which covers the dispatcher cron and the dashboard.
+     Restart the gateway + dashboard after editing it.
+   - **Export them in your shell before running `provision_roster.sh`** — the
+     provisioner copies them into each worker profile's `.env` +
+     `.git-credentials`, and adds them to `terminal.env_passthrough` so the
+     workers' terminal shells can actually see them.
 
 ## Provision the roster
 ```bash
@@ -29,33 +44,40 @@ bash scripts/provision_roster.sh        # idempotent — re-run any time to rese
 hermes profile list                     # expect the 6 roles
 ```
 What it does: creates the 6 profiles (cloning config/keys from `default`), seeds each with **only**
-its matrix agent-skills, and authenticates `gh` **into each profile's isolated HOME**
-(`gh auth login --with-token` — a profile `.env` is NOT enough; the kanban worker runs `gh` via the
-`terminal` tool whose shell ignores `.env`).
+its matrix agent-skills, writes a **per-profile git credential store** (`~/.git-credentials`,
+0600, keychain-free) so `git push` works inside each isolated HOME, and drops the provider
+tokens into each profile `.env` for API calls (open PR / comment via curl).
 
 ## Connect a project (per repo/board)
-The pipeline reads a **GitHub Project** board and writes to a **Hermes Kanban board**.
-1. Find your Project's IDs: `gh project list --owner <ORG>`, then `gh project field-list <N> --owner <ORG> --format json` for the Status field + option IDs.
-2. Hermes board: `hermes kanban boards` (a board slug per project).
-3. Record them like `tasks/RUNBOOK-native-pipeline.md` does (board node id, Status field id, option ids).
+The easiest path is the dashboard's **“+ Add Project”** button (scaffolds config,
+registers the repo, creates its kanban board + cron). From the terminal:
+`cd <repo> && bash ~/.hermes/plugins/daedalus/scripts/setup.sh`, then set
+`vcs.provider` and board tracking in `<repo>/.hermes/daedalus.yaml`:
+- **GitHub:** `tracking.github_project_number: <N>` (Projects v2 board number).
+- **GitLab:** `tracking.label_board: true` — board lists keyed to the
+  `vcs.status_map` labels; self-hosted via `vcs.base_url`.
+- **Azure DevOps:** `vcs.org` / `vcs.project` / `vcs.repo` — board columns map to
+  work-item states.
 
-## Project conventions the agents MUST follow (dycotomic example)
-> These are repo-specific. Encode them in the triage-card body and the B4 ingestion template.
-- **Branch off `dev`, open PRs into `dev`** — CI (`ci.yml`) only runs on PRs to `dev`.
-  `main` is promote-only (release-please). **Never PR into `main`** (no CI runs there).
-- **Create the worktree from `origin/dev`** (not `main` — `main` can be hundreds of commits stale).
-- **Run the quality gates before committing**: `pre-commit run --all-files`
-  (black, isort, flake8, biome lint+format, pytest, typecheck). A fresh git worktree has **no hooks
-  installed**, so `git commit` skips them unless you run `pre-commit install` / `pre-commit run`.
+## Project conventions the agents MUST follow (example)
+> These are repo-specific. Encode them in the triage-card body (the dispatcher's
+> `vcs.target_branch` drives the base branch) — the roster provisioner stays
+> project-agnostic and seeds no per-project conventions.
+- **Branch off your integration branch** (e.g. `dev`) and open PRs into it when
+  `main` is promote-only — set `vcs.target_branch` accordingly.
+- **Run the quality gates before committing**: `pre-commit run --all-files`.
+  A fresh git worktree has **no hooks installed**, so `git commit` skips them
+  unless you run `pre-commit install` / `pre-commit run`.
 
 ## Run it
-- **Manual / spike:** follow `tasks/RUNBOOK-native-pipeline.md` (promote an issue to Ready →
-  create worktree-pinned triage card → dispatcher decomposes → roster works it → PR).
-- **Automated (cron):** the B4 section of the runbook — poll Project "Ready" items, ingest, mirror
-  status (one-way Hermes→GitHub). Build after the manual flow is proven on `dev`.
+- **Manual / spike:** promote an issue to Ready → the next cron tick creates a
+  worktree-pinned triage card → dispatcher decomposes → roster works it → PR.
+- **Automated (cron):** each project gets its own cron job (created by setup.sh /
+  the dashboard); edits update the job in place.
 
 ## Known gotchas (captured the hard way)
-- `gh` auth must be **per-profile-HOME**, not `.env` (see above).
+- git credentials must live **per-profile-HOME** (`~/.git-credentials` via the `store`
+  helper), not only in `.env` — the worker's `terminal` shell does not inherit `.env` vars.
 - `hermes profile create --no-skills` is **mutually exclusive with `--clone`** — the script clones
   then nukes+reseeds skills.
 - A **broken symlink in `~/.hermes/skills/`** aborts every `profile create` (copytree fails) — remove it.

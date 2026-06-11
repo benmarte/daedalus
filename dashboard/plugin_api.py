@@ -6,9 +6,10 @@ Provides config read/write with validation, and per-project status aggregation.
 Never reads or returns secrets.
 
 Endpoints:
-    GET  /config    — full resolved config + meta (profiles, slack targets, path)
-    POST /config    — validate and persist the full daedalus.yaml document
-    GET  /projects  — aggregated status for all registered projects
+    GET  /projects                 — aggregated status for every registered project
+    POST /project/create           — scaffold + register a new project (board + cron)
+    GET/POST /project/{name}/config — read/edit a project's .hermes/daedalus.yaml
+    /meta/*                        — branches/labels/boards/statuses/notifications pickers
 """
 
 from __future__ import annotations
@@ -25,13 +26,12 @@ from typing import Any, Optional
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
 
 # ConfigLoader + deep_merge live in the daedalus package root (config/__init__.py).
 # When the dashboard host runs, it adds the plugin dir to sys.path so
 # relative imports work. Fall back to absolute import for testing.
 try:
-    from config import ConfigLoader, deep_merge
+    from config import ConfigLoader, deep_merge, validate_vcs
 except ImportError:
     import sys
 
@@ -40,6 +40,7 @@ except ImportError:
         sys.path.insert(0, str(_repo_root))
     from config import ConfigLoader  # type: ignore[no-redef]
     from config import deep_merge  # type: ignore[no-redef]
+    from config import validate_vcs  # type: ignore[no-redef]
 
 # Core helpers (degrade gracefully — never raise on missing data).
 try:
@@ -47,17 +48,19 @@ try:
 except ImportError:
     registry = None  # type: ignore[assignment]
 try:
-    from core.kanban import list_tasks, diagnostics as kanban_diagnostics
+    from core.kanban import (list_tasks, ensure_board,
+                             diagnostics as kanban_diagnostics)
 except ImportError:
     list_tasks = None  # type: ignore[assignment]
+    ensure_board = None  # type: ignore[assignment]
     kanban_diagnostics = None  # type: ignore[assignment]
 try:
-    from core.github_project import _gh_json, pr_ci_green
+    from core.providers import get_provider
+    from core.providers.detect import detect_repo_vcs
 except ImportError:
-    _gh_json = None  # type: ignore[assignment]
-    pr_ci_green = None  # type: ignore[assignment]
+    get_provider = None  # type: ignore[assignment]
+    detect_repo_vcs = None  # type: ignore[assignment]
 
-config_router = APIRouter(prefix="/config", tags=["daedalus-config"])
 projects_router = APIRouter(prefix="/projects", tags=["daedalus-projects"])
 project_config_router = APIRouter(prefix="/project", tags=["daedalus-project-config"])
 meta_router = APIRouter(prefix="/meta", tags=["daedalus-meta"])
@@ -80,9 +83,6 @@ def _real_home() -> Path:
     return home
 
 
-HERMES_PROFILES_DIR = _real_home() / ".hermes" / "profiles"
-DEFAULT_CONFIG_PATH = _real_home() / ".hermes" / "daedalus.yaml"
-
 # ── secret keys to strip before returning ──────────────────────────────────
 _SECRET_KEYS = {"secret", "api_key", "password", "token"}
 
@@ -100,36 +100,6 @@ def _strip_secrets(obj: Any) -> Any:
     return obj
 
 
-def _list_profiles() -> list[str]:
-    """Return directory names under ~/.hermes/profiles/."""
-    if not HERMES_PROFILES_DIR.exists():
-        return []
-    return sorted(
-        p.name
-        for p in HERMES_PROFILES_DIR.iterdir()
-        if p.is_dir() and not p.name.startswith(".")
-    )
-
-
-def _list_slack_targets() -> list[str]:
-    """Return slack target strings from `hermes send --list`."""
-    try:
-        result = subprocess.run(
-            ["hermes", "send", "--list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return []
-        targets: list[str] = []
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("slack:"):
-                targets.append(line)
-        return targets
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return []
 
 
 def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
@@ -444,34 +414,43 @@ def _needs_attention(slug: str) -> Optional[list[dict[str, str]]]:
     return items if items else None
 
 
-# ── GitHub PR helpers (degrade gracefully) ──────────────────────────────────
+# ── VCS PR helpers (degrade gracefully) ─────────────────────────────────────
 
-def _open_prs(repo: str) -> Optional[dict[str, Any]]:
+def _project_provider(resolved: dict[str, Any]):
+    """Build the VCS provider for a resolved project config, or None."""
+    if get_provider is None or not resolved:
+        return None
+    try:
+        return get_provider(resolved)
+    except Exception:
+        return None
+
+
+def _open_prs(provider) -> Optional[dict[str, Any]]:
     """Return open/in-review PRs with counts, numbers, and CI state.
 
-    Returns None when gh is unavailable or the repo has no open PRs.
+    Returns None when no provider is available or the repo has no open PRs.
     """
-    if _gh_json is None:
+    if provider is None:
         return None
-    data = _gh_json([
-        "pr", "list", "--repo", repo, "--state", "open", "--limit", "20",
-        "--json", "number,title,headRefName,state",
-    ])
-    if not data:
+    try:
+        prs = provider.list_prs(state="open", limit=20)
+    except Exception:
+        return None
+    if not prs:
         return None
     pr_list: list[dict[str, Any]] = []
-    for pr in data:
-        num = pr.get("number")
+    for pr in prs:
         ci = None
-        if num is not None and pr_ci_green is not None:
+        if pr.number is not None and provider.supports_ci_status:
             try:
-                ci = pr_ci_green(repo, int(num))
+                ci = provider.pr_ci_green(int(pr.number))
             except Exception:
                 ci = None
         pr_list.append({
-            "number": num,
-            "title": pr.get("title", ""),
-            "branch": pr.get("headRefName", ""),
+            "number": pr.number,
+            "title": pr.title,
+            "branch": pr.head_branch,
             "ci_green": ci,
         })
     return {
@@ -483,137 +462,21 @@ def _open_prs(repo: str) -> Optional[dict[str, Any]]:
 # ── Tracking mode ───────────────────────────────────────────────────────────
 
 def _tracking_mode(project_cfg: dict[str, Any]) -> str:
-    """Determine tracking mode: 'github' if a project board is configured, else 'kanban'."""
+    """Provider name when a VCS board is configured, else 'kanban'."""
+    vcs = project_cfg.get("vcs") or {}
+    provider = (vcs.get("provider") or "github").lower().replace("-", "").replace("_", "")
+    provider = {"azure": "azuredevops", "ado": "azuredevops"}.get(provider, provider)
     tracking = project_cfg.get("tracking") or {}
-    if tracking.get("github_project_number"):
+    if provider == "github" and tracking.get("github_project_number"):
         return "github"
+    if provider == "gitlab" and tracking.get("label_board"):
+        return "gitlab"
+    if provider == "azuredevops":
+        return "azuredevops"  # board columns map to work-item states — always on
     return "kanban"
 
 
-# ── Pydantic models for POST validation ────────────────────────────────────
-
-
-class ProjectConfig(BaseModel):
-    """A single project entry in daedalus.yaml."""
-
-    name: str = Field(...)
-    repo: str = Field(...)
-    workdir: str = Field(...)
-    tracking: dict[str, Any] = Field(default_factory=dict)
-    execution: dict[str, Any] = Field(default_factory=dict)
-    cron: dict[str, Any] = Field(default_factory=dict)
-    delivery: dict[str, Any] = Field(default_factory=dict)
-    vcs: dict[str, Any] = Field(default_factory=dict)
-    issues: dict[str, Any] = Field(default_factory=dict)
-    lifecycle: dict[str, Any] = Field(default_factory=dict)
-    model: dict[str, Any] = Field(default_factory=dict)
-    sources: dict[str, Any] = Field(default_factory=dict)
-    notification: dict[str, Any] = Field(default_factory=dict)
-    platform: dict[str, Any] = Field(default_factory=dict)
-    stats: dict[str, Any] = Field(default_factory=dict)
-    tech_stack: str = "auto"
-
-
-class FullConfig(BaseModel):
-    """The full daedalus.yaml document."""
-
-    defaults: dict[str, Any] = Field(default_factory=dict)
-    projects: list[ProjectConfig] = Field(default_factory=list)
-
-
 # ── Endpoints ──────────────────────────────────────────────────────────────
-
-
-@config_router.get("")
-async def get_config(request: Request) -> dict[str, Any]:
-    """Return the full resolved config + meta.
-
-    Response shape:
-        {
-            "defaults": {...},
-            "projects": [{...}, ...],
-            "meta": {
-                "profiles": ["developer", "planner", ...],
-                "slack_targets": ["slack:...", ...],
-                "path": "/Users/.../.hermes/daedalus.yaml"
-            }
-        }
-    """
-    loader = ConfigLoader(DEFAULT_CONFIG_PATH)
-    resolved = loader.resolve_all()
-
-    # Strip secrets from the resolved config
-    safe = _strip_secrets(resolved)
-
-    safe["meta"] = {
-        "profiles": _list_profiles(),
-        "slack_targets": _list_slack_targets(),
-        "path": str(DEFAULT_CONFIG_PATH),
-    }
-    return safe
-
-
-@config_router.post("")
-async def post_config(request: Request, body: FullConfig) -> dict[str, Any]:
-    """Validate and persist the full daedalus.yaml document.
-
-    Validation rules (per project):
-        - name, repo, workdir are required
-        - tracking.github_project_number must be numeric if present
-        - execution.worker_profile must exist in ~/.hermes/profiles/
-    """
-    errors: list[str] = []
-
-    # Validate each project
-    profiles = _list_profiles()
-    for i, proj in enumerate(body.projects):
-        prefix = f"projects[{i}] ({proj.name or 'unnamed'})"
-
-        if not proj.name or not proj.name.strip():
-            errors.append(f"{prefix}: 'name' is required")
-        if not proj.repo or not proj.repo.strip():
-            errors.append(f"{prefix}: 'repo' is required")
-        if not proj.workdir or not proj.workdir.strip():
-            errors.append(f"{prefix}: 'workdir' is required")
-
-        # github_project_number: optional but must be numeric
-        gh_num = proj.tracking.get("github_project_number")
-        if gh_num is not None:
-            if not isinstance(gh_num, int):
-                try:
-                    int(gh_num)
-                except (ValueError, TypeError):
-                    errors.append(
-                        f"{prefix}: tracking.github_project_number must be numeric, got {gh_num!r}"
-                    )
-
-        # worker_profile: validate only when profiles directory has content.
-        # An empty or absent profiles dir means the local machine isn't
-        # populated; a valid profile name should never 422 in that case.
-        worker = proj.execution.get("worker_profile")
-        if worker is not None and profiles:
-            if worker not in profiles:
-                errors.append(
-                    f"{prefix}: execution.worker_profile '{worker}' not found in "
-                    f"~/.hermes/profiles/. Available: {profiles}"
-                )
-
-    if errors:
-        raise HTTPException(
-            status_code=422,
-            detail={"errors": errors},
-        )
-
-    # Persist: convert Pydantic models to plain dicts, save via ConfigLoader
-    raw: dict[str, Any] = {
-        "defaults": body.defaults,
-        "projects": [p.model_dump(exclude_unset=False) for p in body.projects],
-    }
-
-    loader = ConfigLoader(DEFAULT_CONFIG_PATH)
-    loader.save(raw)
-
-    return {"status": "saved", "path": str(DEFAULT_CONFIG_PATH)}
 
 
 # ── Projects endpoint ───────────────────────────────────────────────────────
@@ -621,30 +484,23 @@ async def post_config(request: Request, body: FullConfig) -> dict[str, Any]:
 
 @projects_router.get("")
 async def get_projects(request: Request) -> list[dict[str, Any]]:
-    """Return aggregated status for all registered projects.
+    """Return aggregated status for every project in the registry.
+
+    The registry (~/.hermes/daedalus/projects) is the single source of truth;
+    each repo path resolves its own ``.hermes/daedalus.yaml`` for settings.
+    Repos registered without a config yet appear as lightweight entries.
 
     Each entry includes:
         - name, repo, workdir (read-only identity fields)
-        - kanban_summary: counts by status (kanban mode only)
+        - kanban_summary: counts by status
         - open_prs: open/in-review PRs with counts and CI state
         - cron: schedule and delivery target
         - needs_attention: blocked/gave_up cards with ids and reasons
-        - tracking_mode: 'github' or 'kanban'
+        - tracking_mode: provider name when a board is configured, else 'kanban'
         - sources: enabled sources dict (stripped of secrets)
 
     All fields degrade gracefully — nulls for missing data, never 500.
     """
-    loader = ConfigLoader(DEFAULT_CONFIG_PATH)
-    resolved = loader.resolve_all()
-
-    # Collect projects from config
-    config_projects: dict[str, dict[str, Any]] = {}
-    for proj in resolved.get("projects", []):
-        repo = proj.get("repo", "")
-        if repo:
-            config_projects[repo] = proj
-
-    # Also collect from registry (repo paths registered but not yet in config)
     registry_repos: list[str] = []
     if registry is not None:
         try:
@@ -652,42 +508,26 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
         except Exception:
             registry_repos = []
 
-    # Build unique list; prefer config entries (which have name/workdir/settings)
-    seen_repos: set[str] = set()
-    projects: list[dict[str, Any]] = []
-
-    for proj in resolved.get("projects", []):
-        repo = proj.get("repo", "")
-        if not repo or repo in seen_repos:
-            continue
-        seen_repos.add(repo)
-        projects.append(_build_project_entry(proj, resolved.get("defaults", {})))
-
-    # Add registry-only repos as lightweight entries
     loader = ConfigLoader()
+    seen: set[str] = set()
+    projects: list[dict[str, Any]] = []
     for repo_path in registry_repos:
-        if repo_path in seen_repos:
+        if repo_path in seen:
             continue
-        seen_repos.add(repo_path)
-        # Resolve the per-repo config name (same source _resolve_project_path matches on)
-        name = Path(repo_path).name  # fallback
+        seen.add(repo_path)
         try:
             resolved = loader.resolve_repo_config(repo_path)
-            cfg_name = resolved.get("name", "").strip()
-            if cfg_name:
-                name = cfg_name
         except Exception:
-            pass  # graceful fallback to folder basename
-        projects.append(_build_registry_only_entry(repo_path, name))
+            # Registered but no per-repo config yet — lightweight entry.
+            projects.append(_build_registry_only_entry(repo_path, Path(repo_path).name))
+            continue
+        projects.append(_build_project_entry(resolved))
 
     return projects
 
 
-def _build_project_entry(
-    proj: dict[str, Any],
-    defaults: dict[str, Any],
-) -> dict[str, Any]:
-    """Build a single project status entry from a resolved config project."""
+def _build_project_entry(proj: dict[str, Any]) -> dict[str, Any]:
+    """Build a single project status entry from a resolved per-repo config."""
     name = proj.get("name", "")
     repo = proj.get("repo", "")
     workdir = proj.get("workdir", "")
@@ -696,11 +536,11 @@ def _build_project_entry(
     # Kanban summary
     kanban_summary = _kanban_summary(slug)
 
-    # Open PRs
-    open_prs = _open_prs(repo)
+    # Open PRs (via the project's configured VCS provider)
+    open_prs = _open_prs(_project_provider(proj))
 
     # Cron info
-    cron_cfg = proj.get("cron") or defaults.get("cron") or {}
+    cron_cfg = proj.get("cron") or {}
     cron: Optional[dict[str, Any]] = None
     if cron_cfg:
         cron_name = f"{name}-daedalus"
@@ -720,7 +560,7 @@ def _build_project_entry(
     needs_attention = _needs_attention(slug)
 
     # Sources (strip secrets)
-    sources = _strip_secrets(proj.get("sources") or defaults.get("sources") or {})
+    sources = _strip_secrets(proj.get("sources") or {})
 
     return {
         "name": name,
@@ -747,7 +587,7 @@ def _build_registry_only_entry(
         "repo": repo_path,
         "workdir": repo_path,
         "kanban_summary": _kanban_summary(slug),
-        "open_prs": _open_prs(repo_path) if "/" in repo_path else None,
+        "open_prs": None,  # no per-repo config -> no VCS provider to query
         "cron": None,
         "needs_attention": _needs_attention(slug),
         "tracking_mode": "kanban",
@@ -792,6 +632,37 @@ def _resolve_project_path(name: str) -> Path:
             return Path(rp)
 
     raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
+
+
+# Notification event types a cron.notifications[] entry can subscribe to.
+# Keep in sync with NOTIFY_EVENTS in scripts/daedalus_dispatch.py.
+NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready")
+
+
+def _validate_notifications(value: Any) -> list[str]:
+    """Validate a cron.notifications payload. Returns human-readable errors."""
+    if not isinstance(value, list):
+        return ["cron.notifications must be a list"]
+    errors: list[str] = []
+    for i, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            errors.append(f"cron.notifications[{i}] must be a mapping")
+            continue
+        target = entry.get("target")
+        if not isinstance(target, str) or not target.strip():
+            errors.append(f"cron.notifications[{i}].target must be a non-empty string "
+                          "(e.g. 'slack:C123', 'discord:#general')")
+        platform = entry.get("platform")
+        if platform is not None and not isinstance(platform, str):
+            errors.append(f"cron.notifications[{i}].platform must be a string")
+        events = entry.get("events")
+        if events is not None and (
+            not isinstance(events, list)
+            or any(e not in NOTIFY_EVENTS for e in events)
+        ):
+            errors.append(f"cron.notifications[{i}].events must be a list drawn from: "
+                          + ", ".join(NOTIFY_EVENTS))
+    return errors
 
 
 def _parse_cron_list_blocks(output: str) -> list[dict[str, str]]:
@@ -844,13 +715,37 @@ def _parse_cron_list_blocks(output: str) -> list[dict[str, str]]:
     return blocks
 
 
+def _cron_cli(args: list[str]) -> tuple[int, str]:
+    """Run a ``hermes cron`` subcommand. Returns (returncode, combined output).
+
+    Never raises — CLI absence/timeouts return (-1, <error text>).
+    """
+    try:
+        proc = subprocess.run(
+            ["hermes", "cron"] + args,
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode, (proc.stdout + proc.stderr)
+    except FileNotFoundError:
+        return -1, "hermes CLI not found"
+    except subprocess.TimeoutExpired:
+        return -1, f"hermes cron {args[0]} timed out after 10s"
+    except OSError as exc:
+        return -1, f"hermes cron {args[0]} failed: {exc}"
+
+
 def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     """Reconcile the real ``hermes cron`` job with the config on save.
 
-    Cron job name = ``f"{project_name}-daedalus"``.  Idempotent — resolve
-    existing jobs by name from ``hermes cron list --all``, remove each by its
-    hex job ID (sweeping all same-name duplicates), then re-create if
-    ``cron_cfg.schedule`` is non-empty.
+    Cron job name = ``f"{project_name}-daedalus"``. Each project owns exactly
+    one job. Editing a project UPDATES the existing job in place via the
+    native ``hermes cron edit <id>`` — it never stacks a duplicate:
+
+    - one existing job  → ``hermes cron edit <id> --schedule <s>``
+      (falls back to remove+create if the installed hermes lacks ``edit``)
+    - no existing job   → ``hermes cron create``
+    - duplicates found  → keep none, remove all by hex ID, create fresh
+    - empty schedule    → remove all matches
 
     A cron CLI failure is captured as an error string; this function NEVER
     raises, so a broken ``hermes`` binary cannot fail the config save.
@@ -858,7 +753,9 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     Args:
         project_name: The project name from the config.
         cron_cfg: The ``cron`` dict from the resolved project config.
-            Keys used: ``schedule`` (str), ``deliver`` (str, optional).
+            Keys used: ``schedule`` (str), ``deliver`` (str, optional),
+            ``notifications`` (list, optional — when set, the dispatcher
+            self-delivers and the cron gets NO --deliver target).
 
     Returns:
         ``{"cron": "<created|updated|removed|skipped>", "name": "<cron_name>",
@@ -872,41 +769,43 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     }
 
     schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
+    # With notifications[] the dispatcher fans out itself — the cron job must
+    # not double-deliver its stdout.
+    has_notifications = bool(cron_cfg.get("notifications")) if cron_cfg else False
+    deliver = "" if has_notifications else (cron_cfg.get("deliver", "").strip() if cron_cfg else "")
 
-    # 1. List all cron jobs, find matches by name, remove each by job ID.
-    try:
-        list_proc = subprocess.run(
-            ["hermes", "cron", "list", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if list_proc.returncode == 0:
-            blocks = _parse_cron_list_blocks(list_proc.stdout)
-            matching_ids = [b["job_id"] for b in blocks if b.get("name") == cron_name]
-            for job_id in matching_ids:
-                try:
-                    subprocess.run(
-                        ["hermes", "cron", "remove", job_id],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                except Exception:
-                    pass  # best-effort per-job removal
-    except Exception:
-        pass  # non-fatal — the list+remove is best-effort
+    # 1. Find existing jobs by name.
+    matching_ids: list[str] = []
+    rc, out = _cron_cli(["list", "--all"])
+    if rc == 0:
+        blocks = _parse_cron_list_blocks(out)
+        matching_ids = [b["job_id"] for b in blocks if b.get("name") == cron_name]
 
-    # 2. If schedule is empty, we're done (all matches removed above).
+    # 2. Empty schedule → remove all matches.
     if not schedule:
+        for job_id in matching_ids:
+            _cron_cli(["remove", job_id])
         result["cron"] = "removed"
         return result
 
-    # 3. Create the new job.
-    deliver = cron_cfg.get("deliver", "").strip() if cron_cfg else ""
+    # 3. Exactly one job → update it in place (native `hermes cron edit`).
+    if len(matching_ids) == 1:
+        edit_args = ["edit", matching_ids[0], "--schedule", schedule]
+        if deliver:
+            edit_args += ["--deliver", deliver]
+        rc, out = _cron_cli(edit_args)
+        if rc == 0:
+            result["cron"] = "updated"
+            return result
+        # Older hermes without `cron edit` (or edit failure): fall through to
+        # remove+create so the save still converges on one correct job.
+
+    # 4. Zero, several, or un-editable → remove all matches, create fresh.
+    for job_id in matching_ids:
+        _cron_cli(["remove", job_id])
 
     cmd = [
-        "hermes", "cron", "create", schedule,
+        "create", schedule,
         "--name", cron_name,
         "--script", "daedalus-cron.sh",
         "--no-agent",
@@ -914,25 +813,150 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     if deliver:
         cmd += ["--deliver", deliver]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode != 0:
-            result["error"] = (proc.stderr + proc.stdout).strip()[:500] or f"exit code {proc.returncode}"
-        else:
-            result["cron"] = "created" if "created" in (proc.stdout + proc.stderr).lower() else "updated"
-    except FileNotFoundError:
-        result["error"] = "hermes CLI not found"
-    except subprocess.TimeoutExpired:
-        result["error"] = "hermes cron create timed out after 10s"
-    except OSError as exc:
-        result["error"] = f"hermes cron create failed: {exc}"
-
+    rc, out = _cron_cli(cmd)
+    if rc != 0:
+        result["error"] = out.strip()[:500] or f"exit code {rc}"
+    else:
+        result["cron"] = "created" if "created" in out.lower() else "updated"
     return result
+
+
+_PLUGIN_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "daedalus.yaml"
+
+
+@project_config_router.post("/create")
+async def create_project(request: Request) -> dict[str, Any]:
+    """Create a new project — the API equivalent of scripts/setup.sh.
+
+    Scaffolds ``<workdir>/.hermes/daedalus.yaml`` from the packaged template,
+    deep-merges any config sections from the request body, registers the repo
+    in the daedalus registry, creates the project's own kanban board
+    (idempotent), and creates its own cron job.
+
+    Returns 409 when the repo already has a config (edit it instead),
+    422 for missing/invalid input. Never stores secrets in the config file.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Body must be a JSON object")
+
+    name = (body.get("name") or "").strip() if isinstance(body.get("name"), str) else ""
+    repo = (body.get("repo") or "").strip() if isinstance(body.get("repo"), str) else ""
+    workdir = (body.get("workdir") or "").strip() if isinstance(body.get("workdir"), str) else ""
+    if not name:
+        raise HTTPException(status_code=422, detail="'name' is required")
+    if not workdir:
+        raise HTTPException(status_code=422, detail="'workdir' is required")
+
+    workdir_path = Path(workdir).expanduser()
+    if not workdir_path.is_absolute():
+        raise HTTPException(status_code=422, detail="'workdir' must be an absolute path")
+    workdir_path = workdir_path.resolve()
+    if not workdir_path.is_dir():
+        raise HTTPException(status_code=422,
+                            detail=f"'workdir' does not exist: {workdir_path}")
+
+    # Auto-detect the provider + repo identity from the repo's origin remote
+    # when the request doesn't pin a provider explicitly.
+    body_vcs = body.get("vcs") if isinstance(body.get("vcs"), dict) else {}
+    detected = None
+    if detect_repo_vcs is not None and not (body_vcs or {}).get("provider"):
+        try:
+            detected = detect_repo_vcs(str(workdir_path))
+        except Exception:
+            detected = None
+    if not repo and detected:
+        repo = detected["repo"]
+    if not repo:
+        raise HTTPException(
+            status_code=422,
+            detail="'repo' is required (no origin remote found to auto-detect it from)",
+        )
+
+    cfg_path = workdir_path / ".hermes" / "daedalus.yaml"
+    if cfg_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Project already has a config at {cfg_path} — edit it instead",
+        )
+
+    # Scaffold from the packaged template (same one setup.sh uses).
+    try:
+        template = _PLUGIN_TEMPLATE_PATH.read_text()
+    except OSError:
+        raise HTTPException(status_code=500,
+                            detail=f"Plugin template missing at {_PLUGIN_TEMPLATE_PATH}")
+    rendered = (template.replace("{{NAME}}", name)
+                        .replace("{{REPO}}", repo)
+                        .replace("{{WORKDIR}}", str(workdir_path)))
+    try:
+        cfg = yaml.safe_load(rendered) or {}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to render config template")
+
+    # Deep-merge optional config sections from the request body.
+    for key in sorted(_CONFIG_SECTION_KEYS):
+        if key in body:
+            if body[key] is not None and not isinstance(body[key], dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"'{key}' must be a mapping, got {type(body[key]).__name__}",
+                )
+            cfg[key] = deep_merge(cfg.get(key) or {}, body[key] or {})
+
+    # Apply the auto-detected provider. Detection only runs when the request
+    # didn't pin one, so it overrides the template's github default — but any
+    # request-supplied extra keys (base_url, org, …) still win via setdefault.
+    if detected:
+        vcs_cfg = cfg.setdefault("vcs", {})
+        vcs_cfg["provider"] = detected["provider"]
+        for k, v in (detected.get("vcs_extra") or {}).items():
+            vcs_cfg.setdefault(k, v)
+
+    # Validate notifications + provider config before anything touches disk.
+    errors: list[str] = []
+    cron_cfg = cfg.get("cron") or {}
+    if cron_cfg.get("notifications") is not None:
+        errors += _validate_notifications(cron_cfg["notifications"])
+    errors += validate_vcs(cfg)
+    if errors:
+        raise HTTPException(status_code=422, detail={"errors": errors})
+
+    safe = _strip_secrets(cfg)
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(yaml.dump(safe, default_flow_style=False,
+                                      sort_keys=False, allow_unicode=True))
+    except OSError:
+        raise HTTPException(status_code=500, detail="Failed to write config file")
+
+    # Register in the daedalus registry (idempotent).
+    registered = False
+    if registry is not None:
+        try:
+            registry.add_project(str(workdir_path))
+            registered = True
+        except Exception:
+            registered = False
+
+    # Each project gets its OWN kanban board (idempotent create).
+    board_slug = _board_slug(repo, name)
+    board_ok = bool(ensure_board(board_slug)) if ensure_board is not None else False
+
+    # …and its OWN cron job.
+    cron_result = _reconcile_cron(name, cron_cfg)
+
+    return {
+        "status": "created",
+        "config_path": str(cfg_path),
+        "registered": registered,
+        "board": board_slug,
+        "board_created": board_ok,
+        "cron": cron_result,
+    }
 
 
 @project_config_router.get("/{name}/config")
@@ -1005,6 +1029,13 @@ async def post_project_config(request: Request, name: str) -> dict[str, Any]:
                 status_code=422,
                 detail=f"'{key}' must be a mapping, got {type(value).__name__}",
             )
+
+    # Validate multi-target notifications when present
+    cron_body = body.get("cron")
+    if isinstance(cron_body, dict) and cron_body.get("notifications") is not None:
+        notif_errors = _validate_notifications(cron_body["notifications"])
+        if notif_errors:
+            raise HTTPException(status_code=422, detail={"errors": notif_errors})
 
     # Deep-merge editable fields into existing config
     merged = deep_merge(existing, body)
@@ -1118,11 +1149,9 @@ async def test_deliver(request: Request) -> dict[str, Any]:
 # ── Meta helpers ─────────────────────────────────────────────────────────────
 
 
-def _project_repo(name: str) -> str:
-    """Resolve a project name to its owner/repo string.
+def _project_resolved(name: str) -> dict[str, Any]:
+    """Resolve a project name to its full per-repo config dict.
 
-    Uses _resolve_project_path to find the repo directory, then loads the
-    per-repo config to extract the canonical repo field (e.g. 'org/repo').
     Raises HTTPException(404) if the project is not found or has no repo.
     """
     repo_path = _resolve_project_path(name)
@@ -1134,50 +1163,55 @@ def _project_repo(name: str) -> str:
             status_code=404,
             detail=f"No daedalus config found for project '{name}'",
         )
-    repo = resolved.get("repo", "")
-    if not repo:
+    if not resolved.get("repo", ""):
         raise HTTPException(
             status_code=404,
             detail=f"Project '{name}' has no repo configured",
         )
-    return repo
+    return resolved
+
+
+def _project_repo(name: str) -> str:
+    """Resolve a project name to its owner/repo string (404 on missing)."""
+    return _project_resolved(name).get("repo", "")
 
 
 @meta_router.get("/branches")
 async def get_meta_branches(request: Request, project: str) -> dict[str, Any]:
-    """Return repo branches via gh api.
+    """Return repo branches via the project's VCS provider.
 
     Degrades gracefully to an empty list on any error.
     """
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"repo": "", "branches": []}
-    if _gh_json is None:
+    repo = resolved.get("repo", "")
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_branches:
         return {"repo": repo, "branches": []}
     try:
-        data = _gh_json(["api", f"repos/{repo}/branches?per_page=100"])
-        branches = [b["name"] for b in (data or [])] if data else []
-        return {"repo": repo, "branches": branches}
+        return {"repo": repo, "branches": provider.list_branches()}
     except Exception:
         return {"repo": repo, "branches": []}
 
 
 @meta_router.get("/labels")
 async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
-    """Return repo labels with names and colors via gh label list.
+    """Return repo labels with names and colors via the project's VCS provider.
 
     Degrades gracefully to an empty list on any error.
     """
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"repo": "", "labels": []}
-    if _gh_json is None:
+    repo = resolved.get("repo", "")
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_labels:
         return {"repo": repo, "labels": []}
     try:
-        data = _gh_json(["label", "list", "--repo", repo, "--json", "name,color", "--limit", "200"])
-        labels = [{"name": l["name"], "color": l.get("color", "")} for l in (data or [])]
+        labels = [{"name": l.name, "color": l.color} for l in provider.list_labels()]
         return {"repo": repo, "labels": labels}
     except Exception:
         return {"repo": repo, "labels": []}
@@ -1185,21 +1219,22 @@ async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
 
 @meta_router.get("/projects")
 async def get_meta_projects(request: Request, project: str) -> dict[str, Any]:
-    """Return GitHub Projects v2 boards for the repo's owner via gh project list.
+    """Return the provider's project boards (e.g. GitHub Projects v2).
 
     Degrades gracefully to an empty list on any error.
     """
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"owner": "", "projects": []}
+    repo = resolved.get("repo", "")
     owner = repo.split("/")[0] if "/" in repo else repo
-    if _gh_json is None:
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_boards:
         return {"owner": owner, "projects": []}
     try:
-        data = _gh_json(["project", "list", "--owner", owner, "--format", "json"])
-        projects = [{"number": p["number"], "title": p.get("title", "")} for p in (data or {}).get("projects", [])]
-        return {"owner": owner, "projects": projects}
+        boards = [{"number": b.number, "title": b.title} for b in provider.list_boards()]
+        return {"owner": owner, "projects": boards}
     except Exception:
         return {"owner": owner, "projects": []}
 
@@ -1208,7 +1243,7 @@ async def get_meta_projects(request: Request, project: str) -> dict[str, Any]:
 async def get_meta_statuses(
     request: Request, project: str, github_project_number: Optional[int] = None
 ) -> dict[str, Any]:
-    """Return Status field options for a GitHub Project board.
+    """Return Status field options for the configured board.
 
     Requires ``github_project_number`` to query the board's fields.
     Degrades gracefully to an empty list on any error.
@@ -1216,18 +1251,16 @@ async def get_meta_statuses(
     if github_project_number is None:
         return {"statuses": []}
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"statuses": []}
-    owner = repo.split("/")[0] if "/" in repo else repo
-    if _gh_json is None:
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_boards:
         return {"statuses": []}
     try:
-        data = _gh_json(["project", "field-list", str(github_project_number), "--owner", owner, "--format", "json"])
-        fields = (data or {}).get("fields", [])
-        for f in fields:
-            if str(f.get("name", "")).lower() == "status":
-                return {"statuses": [o.get("name", "") for o in f.get("options", [])]}
+        for f in provider.get_board_fields(str(github_project_number)):
+            if f.name.lower() == "status":
+                return {"statuses": [o.name for o in f.options]}
         return {"statuses": []}
     except Exception:
         return {"statuses": []}
@@ -1307,7 +1340,6 @@ def _cron_health(cron_name: str) -> dict[str, Any]:
 # ── Top-level router (defined at end so sub-routers are already populated) ───
 
 router = APIRouter(tags=["daedalus"])
-router.include_router(config_router)
 router.include_router(projects_router)
 router.include_router(project_config_router)
 router.include_router(meta_router)

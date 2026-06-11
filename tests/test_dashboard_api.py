@@ -1,9 +1,10 @@
 """
 Pytest for the Daedalus dashboard plugin API.
 
-Round-trips GET → POST → GET /config against a temporary daedalus.yaml.
-Tests validation edge cases (missing fields, invalid types, unknown profiles).
-Tests GET /projects endpoint with mocked kanban, gh, and registry.
+Projects come exclusively from the registry; each repo carries its own
+.hermes/daedalus.yaml. Tests GET /projects, the per-project config API,
+project creation, cron reconcile, and the meta endpoints — with mocked
+kanban, providers, and registry.
 """
 
 from __future__ import annotations
@@ -29,235 +30,36 @@ _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-# Import the router (it will import ConfigLoader from config/)
-from dashboard.plugin_api import router, DEFAULT_CONFIG_PATH, HERMES_PROFILES_DIR
+from dashboard.plugin_api import router
 
 
 @pytest.fixture
-def temp_config_path():
-    """Create a temporary daedalus.yaml and patch DEFAULT_CONFIG_PATH."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False
-    ) as f:
-        f.write(
-            yaml.dump(
-                {
-                    "defaults": {
-                        "vcs": {"target_branch": "dev"},
-                        "lifecycle": {"kanban": {"enabled": True}},
-                        "cron": {"schedule": "60m", "deliver": "slack:#engineering"},
-                    },
-                    "projects": [
-                        {
-                            "name": "test-project",
-                            "repo": "org/test-repo",
-                            "workdir": "/tmp/test-workdir",
-                            "tracking": {"github_project_number": 1},
-                            "execution": {"worker_profile": "developer"},
-                            "sources": {"github": {"enabled": True}, "local_specs": {"enabled": False}},
-                        }
-                    ],
-                }
-            )
-        )
-        tmp_path = f.name
-
-    with mock.patch(
-        "dashboard.plugin_api.DEFAULT_CONFIG_PATH", Path(tmp_path)
-    ):
-        yield tmp_path
-
-    Path(tmp_path).unlink(missing_ok=True)
+def registry_repo(tmp_path):
+    """Temp repo with .hermes/daedalus.yaml, registered via a mocked registry."""
+    repo = tmp_path / "test-repo"
+    (repo / ".hermes").mkdir(parents=True)
+    cfg = {
+        "name": "test-project",
+        "repo": "org/test-repo",
+        "workdir": str(repo),
+        "vcs": {"target_branch": "dev"},
+        "tracking": {"github_project_number": 1},
+        "execution": {"worker_profile": "developer"},
+        "cron": {"schedule": "60m", "deliver": "slack:#engineering"},
+        "sources": {"github": {"enabled": True}, "local_specs": {"enabled": False}},
+    }
+    (repo / ".hermes" / "daedalus.yaml").write_text(yaml.dump(cfg))
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        mock_registry.list_projects.return_value = [str(repo)]
+        yield repo
 
 
 @pytest.fixture
-def client(temp_config_path):
-    """Create a FastAPI TestClient with the daedalus routers mounted."""
+def client(registry_repo):
+    """FastAPI TestClient with the full daedalus router mounted."""
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/daedalus")
     return TestClient(app)
-
-
-@pytest.fixture
-def populated_profiles_dir():
-    """Create a temporary profiles directory with a known profile name."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        profiles_dir = Path(tmpdir)
-        # Create a known profile so the directory is non-empty
-        (profiles_dir / "developer").mkdir()
-        with mock.patch(
-            "dashboard.plugin_api.HERMES_PROFILES_DIR", profiles_dir
-        ):
-            yield profiles_dir
-
-
-# ── Round-trip tests ────────────────────────────────────────────────────────
-
-
-def test_get_config_returns_resolved_config(client):
-    """GET /config returns defaults, projects, and meta."""
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-
-    assert "defaults" in data
-    assert "projects" in data
-    assert "meta" in data
-    assert "profiles" in data["meta"]
-    assert "slack_targets" in data["meta"]
-    assert "path" in data["meta"]
-
-    # Projects should be resolved (merged with defaults)
-    projects = data["projects"]
-    assert len(projects) == 1
-    assert projects[0]["name"] == "test-project"
-    assert projects[0]["repo"] == "org/test-repo"
-    assert projects[0]["workdir"] == "/tmp/test-workdir"
-    # Inherited from defaults
-    assert projects[0]["vcs"]["target_branch"] == "dev"
-
-
-def test_get_config_strips_secrets(client, temp_config_path):
-    """GET /config never returns secret keys."""
-    # Write a config with a secret field
-    raw = yaml.safe_load(Path(temp_config_path).read_text())
-    raw["defaults"]["webhook"] = {"enabled": True, "secret": "shhh-dont-leak"}
-    Path(temp_config_path).write_text(yaml.dump(raw))
-
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200
-    data = resp.json()
-
-    # The 'secret' key should be stripped from defaults
-    defaults = data["defaults"]
-    if "webhook" in defaults:
-        assert "secret" not in defaults["webhook"]
-
-
-def test_round_trip_get_post_get(client, temp_config_path):
-    """GET → POST (modified) → GET: changes persist."""
-    # 1. GET initial config
-    resp1 = client.get("/api/plugins/daedalus/config")
-    assert resp1.status_code == 200
-    initial = resp1.json()
-
-    # 2. Modify and POST back
-    payload = {
-        "defaults": initial["defaults"],
-        "projects": initial["projects"],
-    }
-    # Add a second project
-    payload["projects"].append(
-        {
-            "name": "second-project",
-            "repo": "org/second",
-            "workdir": "/tmp/second",
-            "execution": {"worker_profile": "developer"},
-        }
-    )
-
-    resp2 = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp2.status_code == 200, resp2.text
-    assert resp2.json()["status"] == "saved"
-
-    # 3. GET again — should have two projects
-    resp3 = client.get("/api/plugins/daedalus/config")
-    assert resp3.status_code == 200
-    updated = resp3.json()
-    assert len(updated["projects"]) == 2
-    names = {p["name"] for p in updated["projects"]}
-    assert names == {"test-project", "second-project"}
-
-
-# ── Validation tests ────────────────────────────────────────────────────────
-
-
-def _valid_payload():
-    """Return a minimal valid POST payload."""
-    return {
-        "defaults": {},
-        "projects": [
-            {
-                "name": "valid",
-                "repo": "org/valid",
-                "workdir": "/tmp/valid",
-                "execution": {"worker_profile": "developer"},
-            }
-        ],
-    }
-
-
-def test_post_rejects_missing_name(client):
-    """POST rejects a project with no name."""
-    payload = _valid_payload()
-    payload["projects"][0]["name"] = ""
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "name" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_missing_repo(client):
-    """POST rejects a project with no repo."""
-    payload = _valid_payload()
-    payload["projects"][0]["repo"] = ""
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "repo" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_missing_workdir(client):
-    """POST rejects a project with no workdir."""
-    payload = _valid_payload()
-    payload["projects"][0]["workdir"] = ""
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "workdir" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_non_numeric_github_project_number(client):
-    """POST rejects a non-numeric github_project_number."""
-    payload = _valid_payload()
-    payload["projects"][0]["tracking"] = {"github_project_number": "not-a-number"}
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    assert "github_project_number" in str(resp.json()["detail"]["errors"]).lower()
-
-
-def test_post_rejects_unknown_worker_profile(client, populated_profiles_dir):
-    """POST rejects a worker_profile that doesn't exist (when profiles dir is populated)."""
-    payload = _valid_payload()
-    payload["projects"][0]["execution"] = {
-        "worker_profile": "nonexistent-profile-xyz"
-    }
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 422
-    errors_str = str(resp.json()["detail"]["errors"]).lower()
-    assert "worker_profile" in errors_str
-    assert "nonexistent-profile-xyz" in errors_str
-
-
-def test_post_accepts_valid_config(client):
-    """POST accepts a valid config and saves it."""
-    payload = _valid_payload()
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "saved"
-
-
-def test_post_accepts_optional_github_project_number(client):
-    """POST accepts a project without github_project_number (kanban-only mode)."""
-    payload = _valid_payload()
-    # No tracking key at all
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 200, resp.text
-
-
-def test_post_accepts_numeric_github_project_number(client):
-    """POST accepts a numeric github_project_number."""
-    payload = _valid_payload()
-    payload["projects"][0]["tracking"] = {"github_project_number": 42}
-    resp = client.post("/api/plugins/daedalus/config", json=payload)
-    assert resp.status_code == 200, resp.text
 
 
 # ── GET /projects tests ──────────────────────────────────────────────────────
@@ -272,22 +74,20 @@ def _make_kanban_tasks(statuses: list[str]) -> list[dict]:
     ]
 
 
-def test_get_projects_returns_one_entry_per_config_project(client):
-    """GET /projects returns one entry for each project in the config."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
-        mock_registry.list_projects.return_value = []
-        with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
-            mock_list.return_value = _make_kanban_tasks(["todo", "todo", "in_progress"])
+def test_get_projects_returns_one_entry_per_registered_repo(client, registry_repo):
+    """GET /projects returns one entry for each repo in the registry."""
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = _make_kanban_tasks(["todo", "todo", "in_progress"])
 
-            resp = client.get("/api/plugins/daedalus/projects")
-            assert resp.status_code == 200, resp.text
-            data = resp.json()
+        resp = client.get("/api/plugins/daedalus/projects")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
 
     assert len(data) == 1
     proj = data[0]
     assert proj["name"] == "test-project"
     assert proj["repo"] == "org/test-repo"
-    assert proj["workdir"] == "/tmp/test-workdir"
+    assert proj["workdir"] == str(registry_repo)
 
 
 def test_get_projects_has_all_required_fields(client):
@@ -381,12 +181,12 @@ def test_get_projects_tracking_mode_github(client):
     assert data[0]["tracking_mode"] == "github"
 
 
-def test_get_projects_tracking_mode_kanban_without_board(client, temp_config_path):
-    """tracking_mode is 'kanban' when github_project_number is absent."""
-    raw = yaml.safe_load(Path(temp_config_path).read_text())
-    # Remove github_project_number
-    raw["projects"][0]["tracking"] = {}
-    Path(temp_config_path).write_text(yaml.dump(raw))
+def test_get_projects_tracking_mode_kanban_without_board(client, registry_repo):
+    """tracking_mode is 'kanban' when no board is configured."""
+    cfg_path = registry_repo / ".hermes" / "daedalus.yaml"
+    raw = yaml.safe_load(cfg_path.read_text())
+    raw["tracking"] = {}
+    cfg_path.write_text(yaml.dump(raw))
 
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
@@ -396,6 +196,30 @@ def test_get_projects_tracking_mode_kanban_without_board(client, temp_config_pat
         data = resp.json()
 
     assert data[0]["tracking_mode"] == "kanban"
+
+
+def test_get_projects_tracking_mode_per_provider(client, registry_repo):
+    """tracking_mode reflects the provider when its board model is on."""
+    cfg_path = registry_repo / ".hermes" / "daedalus.yaml"
+    raw = yaml.safe_load(cfg_path.read_text())
+    raw["vcs"]["provider"] = "gitlab"
+    raw["tracking"] = {"label_board": True}
+    cfg_path.write_text(yaml.dump(raw))
+
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        resp = client.get("/api/plugins/daedalus/projects")
+        data = resp.json()
+    assert data[0]["tracking_mode"] == "gitlab"
+
+    raw["vcs"] = {"provider": "azuredevops", "org": "a", "project": "p", "repo": "r"}
+    raw["tracking"] = {}
+    cfg_path.write_text(yaml.dump(raw))
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        resp = client.get("/api/plugins/daedalus/projects")
+        data = resp.json()
+    assert data[0]["tracking_mode"] == "azuredevops"
 
 
 def test_get_projects_cron_info(client):
@@ -449,16 +273,21 @@ def test_get_projects_open_prs_mocked(client):
         {"number": 43, "title": "Add rate limit", "headRefName": "feat/rate-limit", "state": "open"},
     ]
 
+    fake_provider = mock.MagicMock()
+    fake_provider.supports_ci_status = True
+    fake_provider.list_prs.return_value = [
+        mock.MagicMock(number=p["number"], title=p["title"],
+                       head_branch=p["headRefName"]) for p in mock_pr_data
+    ]
+    fake_provider.pr_ci_green.side_effect = [True, False]
+
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
-        with mock.patch("dashboard.plugin_api._gh_json") as mock_gh:
-            mock_gh.return_value = mock_pr_data
-            with mock.patch("dashboard.plugin_api.pr_ci_green") as mock_ci:
-                mock_ci.side_effect = [True, False]
-
-                resp = client.get("/api/plugins/daedalus/projects")
-                assert resp.status_code == 200, resp.text
-                data = resp.json()
+        with mock.patch("dashboard.plugin_api.get_provider",
+                        return_value=fake_provider):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
 
     prs = data[0]["open_prs"]
     assert prs is not None
@@ -470,14 +299,13 @@ def test_get_projects_open_prs_mocked(client):
     assert prs["prs"][1]["ci_green"] is False
 
 
-def test_get_projects_graceful_degration_when_sources_return_nothing(client):
-    """When all data sources return nothing/None, the endpoint still returns 200."""
+def test_get_projects_graceful_degradation_when_sources_return_nothing(client):
+    """When kanban/provider sources return nothing, the endpoint still returns 200."""
     with mock.patch("dashboard.plugin_api.list_tasks", None):
-        with mock.patch("dashboard.plugin_api._gh_json", None):
-            with mock.patch("dashboard.plugin_api.registry", None):
-                resp = client.get("/api/plugins/daedalus/projects")
-                assert resp.status_code == 200, resp.text
-                data = resp.json()
+        with mock.patch("dashboard.plugin_api.get_provider", None):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
 
     assert len(data) >= 1
     proj = data[0]
@@ -488,17 +316,24 @@ def test_get_projects_graceful_degration_when_sources_return_nothing(client):
     assert proj["tracking_mode"] in ("github", "kanban")
 
 
-def test_get_projects_registry_only_entries(client, temp_config_path):
-    """Registry-only repos appear as lightweight entries alongside config projects."""
-    # Write a config with one project
-    raw = yaml.safe_load(Path(temp_config_path).read_text())
-    # Keep one project
-    raw["projects"] = [raw["projects"][0]]
-    Path(temp_config_path).write_text(yaml.dump(raw))
+def test_get_projects_empty_registry(registry_repo):
+    """An empty registry returns an empty list (no global config fallback)."""
+    app = FastAPI()
+    app.include_router(router, prefix="/api/plugins/daedalus")
+    c = TestClient(app)
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        mock_registry.list_projects.return_value = []
+        resp = c.get("/api/plugins/daedalus/projects")
+    assert resp.status_code == 200
+    assert resp.json() == []
 
+
+def test_get_projects_registry_only_entries(client, registry_repo):
+    """Registered repos without a config appear as lightweight entries."""
     with mock.patch("dashboard.plugin_api.registry") as mock_registry:
         mock_registry.list_projects.return_value = [
-            "/Users/benmarte/Documents/github/terrasow",
+            str(registry_repo),
+            "/repos/sampleproj",
         ]
         with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
             mock_list.return_value = []
@@ -507,14 +342,14 @@ def test_get_projects_registry_only_entries(client, temp_config_path):
             assert resp.status_code == 200, resp.text
             data = resp.json()
 
-    # Should have 2 entries: one from config, one from registry
+    # Two entries: one full (config), one lightweight (no config)
     assert len(data) == 2
     registry_entry = next(
-        (p for p in data if p["repo"] == "/Users/benmarte/Documents/github/terrasow"),
+        (p for p in data if p["repo"] == "/repos/sampleproj"),
         None,
     )
     assert registry_entry is not None
-    assert registry_entry["name"] == "terrasow"
+    assert registry_entry["name"] == "sampleproj"
     assert registry_entry["tracking_mode"] == "kanban"
     assert registry_entry["cron"] is None
 
@@ -720,6 +555,156 @@ def test_post_project_config_rejects_invalid_yaml_values(project_client, project
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# POST /project/create — dashboard add-project flow
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCreateProject:
+    """POST /project/create scaffolds config + registry + board + cron."""
+
+    def _post(self, client, payload):
+        return client.post("/api/plugins/daedalus/project/create", json=payload)
+
+    def _payload(self, workdir):
+        return {"name": "new-proj", "repo": "org/new-proj", "workdir": str(workdir)}
+
+    def test_create_success(self, project_client, tmp_path):
+        with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True) as mock_board, \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "new-proj-daedalus",
+                                      "error": None}) as mock_cron:
+            resp = self._post(project_client, {**self._payload(tmp_path),
+                                               "cron": {"schedule": "45m"}})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["status"] == "created"
+        assert data["board"] == "org-new-proj"
+        assert data["registered"] is True
+        assert data["cron"]["cron"] == "created"
+
+        # Config scaffolded on disk with identity + overrides applied
+        cfg_path = tmp_path / ".hermes" / "daedalus.yaml"
+        assert cfg_path.exists()
+        cfg = yaml.safe_load(cfg_path.read_text())
+        assert cfg["name"] == "new-proj"
+        assert cfg["repo"] == "org/new-proj"
+        assert cfg["cron"]["schedule"] == "45m"
+        assert cfg["vcs"]["provider"] == "github"  # template default
+
+        mock_registry.add_project.assert_called_once_with(str(tmp_path.resolve()))
+        mock_board.assert_called_once_with("org-new-proj")
+        mock_cron.assert_called_once()
+
+    def test_create_409_when_config_exists(self, project_client, project_repo_dir):
+        resp = self._post(project_client, {"name": "x", "repo": "o/r",
+                                           "workdir": str(project_repo_dir)})
+        assert resp.status_code == 409
+
+    def test_create_422_missing_fields(self, project_client, tmp_path):
+        for missing in ("name", "repo", "workdir"):
+            payload = self._payload(tmp_path)
+            payload.pop(missing)
+            resp = self._post(project_client, payload)
+            assert resp.status_code == 422, missing
+            assert missing in resp.json()["detail"]
+
+    def test_create_422_relative_or_missing_workdir(self, project_client, tmp_path):
+        resp = self._post(project_client, {"name": "x", "repo": "o/r",
+                                           "workdir": "relative/path"})
+        assert resp.status_code == 422
+        resp2 = self._post(project_client, {"name": "x", "repo": "o/r",
+                                            "workdir": str(tmp_path / "nope")})
+        assert resp2.status_code == 422
+
+    def test_create_validates_provider_config(self, project_client, tmp_path):
+        """A gitlab project without project_path/id is rejected before any write."""
+        resp = self._post(project_client, {
+            "name": "x", "repo": "not-a-path", "workdir": str(tmp_path),
+            "vcs": {"provider": "gitlab"},
+        })
+        assert resp.status_code == 422
+        assert not (tmp_path / ".hermes" / "daedalus.yaml").exists()
+
+    def test_create_validates_notifications(self, project_client, tmp_path):
+        resp = self._post(project_client, {
+            **self._payload(tmp_path),
+            "cron": {"schedule": "30m",
+                     "notifications": [{"platform": "Slack", "target": ""}]},
+        })
+        assert resp.status_code == 422
+        assert not (tmp_path / ".hermes" / "daedalus.yaml").exists()
+
+    def test_create_auto_detects_provider_and_repo(self, project_client, tmp_path):
+        """No repo/provider in the request → both detected from the origin remote."""
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
+                        "https://gitlab.corp.io/team/app.git"], check=True)
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client,
+                              {"name": "auto-proj", "workdir": str(tmp_path)})
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["repo"] == "team/app"
+        assert cfg["vcs"]["provider"] == "gitlab"
+        assert cfg["vcs"]["base_url"] == "https://gitlab.corp.io"
+
+    def test_create_explicit_provider_wins_over_detection(self, project_client, tmp_path):
+        """A pinned vcs.provider in the request suppresses auto-detection."""
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
+                        "https://gitlab.com/group/proj.git"], check=True)
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client, {
+                "name": "pinned", "repo": "org/pinned", "workdir": str(tmp_path),
+                "vcs": {"provider": "github"},
+            })
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["vcs"]["provider"] == "github"
+        assert cfg["repo"] == "org/pinned"
+
+    def test_create_no_repo_and_no_remote_is_422(self, project_client, tmp_path):
+        resp = self._post(project_client, {"name": "x", "workdir": str(tmp_path)})
+        assert resp.status_code == 422
+        assert "auto-detect" in resp.json()["detail"]
+
+    def test_create_scaffolds_all_sources_enabled(self, project_client, tmp_path):
+        """Template defaults: VCS issues + spec/plan drops + kanban triage all on."""
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client, self._payload(tmp_path))
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["sources"]["github_issues"]["enabled"] is True
+        assert cfg["sources"]["local_specs"]["enabled"] is True
+        assert cfg["sources"]["kanban_triage"]["enabled"] is True
+
+    def test_create_gitlab_project(self, project_client, tmp_path):
+        with mock.patch("dashboard.plugin_api.registry"), \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "created", "name": "x", "error": None}):
+            resp = self._post(project_client, {
+                "name": "gl-proj", "repo": "group/gl-proj", "workdir": str(tmp_path),
+                "vcs": {"provider": "gitlab"},
+            })
+        assert resp.status_code == 200, resp.text
+        cfg = yaml.safe_load((tmp_path / ".hermes" / "daedalus.yaml").read_text())
+        assert cfg["vcs"]["provider"] == "gitlab"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # _reconcile_cron unit tests — mocked subprocess
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -779,10 +764,11 @@ class TestReconcileCron:
         return mock.Mock(returncode=returncode, stdout="", stderr=stderr)
 
     def _make_dispatcher(self, list_stdout, remove_ok=True, create_ok=True,
-                         create_stdout="created: job j1"):
+                         edit_ok=True, create_stdout="created: job j1"):
         """Return a callable side_effect that dispatches on command args.
 
         - ``cron list --all`` → returns list_stdout
+        - ``cron edit <hex_id> ...`` → returns ok or fail
         - ``cron remove <hex_id>`` → returns ok or fail
         - ``cron create ...`` → returns ok or fail
         """
@@ -790,6 +776,13 @@ class TestReconcileCron:
             cmd = args
             if cmd[1] == "cron" and cmd[2] == "list" and "--all" in cmd:
                 return self._mock_run_ok(stdout=list_stdout)
+            if cmd[1] == "cron" and cmd[2] == "edit":
+                job_id = cmd[3]
+                assert re.match(r"^[0-9a-fA-F]{6,}$", job_id), \
+                    f"edit called with non-hex-id: {job_id}"
+                if edit_ok:
+                    return self._mock_run_ok(stdout="updated")
+                return self._mock_run_fail(returncode=2, stderr="unknown command: edit")
             if cmd[1] == "cron" and cmd[2] == "remove":
                 # Verify the third arg is a hex job ID (not a name)
                 job_id = cmd[3]
@@ -805,44 +798,34 @@ class TestReconcileCron:
             return self._mock_run_ok()
         return _dispatch
 
-    # ── happy path: one match, remove by id, create ──────────────────────
+    # ── happy path: one match → edit in place, never remove+create ───────
 
-    def test_creates_cron_with_schedule_no_deliver(self):
+    def test_updates_single_cron_in_place(self):
+        """One existing job → `hermes cron edit <id>` updates it; no duplicate."""
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
-        assert result["cron"] == "created"
+        assert result["cron"] == "updated"
         assert result["name"] == "test-project-daedalus"
         assert result["error"] is None
 
-        # Verify calls: list, remove by hex id, create
+        # Verify calls: list, edit by hex id — no remove, no create.
         calls = mock_run.call_args_list
-        assert len(calls) == 3
+        assert len(calls) == 2
 
-        # Call 0: list --all
         list_args = calls[0][0][0]
         assert list_args[1:4] == ["cron", "list", "--all"]
 
-        # Call 1: remove by hex id (not name)
-        remove_args = calls[1][0][0]
-        assert remove_args[1:3] == ["cron", "remove"]
-        assert remove_args[3] == "99f7d116a95b"  # hex id from list output
+        edit_args = calls[1][0][0]
+        assert edit_args[1:3] == ["cron", "edit"]
+        assert edit_args[3] == "99f7d116a95b"  # hex id from list output
+        assert "--schedule" in edit_args
+        assert "60m" in edit_args
 
-        # Call 2: create
-        create_args = calls[2][0][0]
-        assert create_args[1:3] == ["cron", "create"]
-        assert "60m" in create_args
-        assert "--name" in create_args
-        assert "test-project-daedalus" in create_args
-        assert "--script" in create_args
-        assert "daedalus-cron.sh" in create_args
-        assert "--no-agent" in create_args
-        assert "--deliver" not in create_args
-
-    def test_creates_cron_with_schedule_and_deliver(self):
+    def test_updates_cron_with_deliver(self):
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
@@ -852,13 +835,57 @@ class TestReconcileCron:
                 {"schedule": "30m", "deliver": "slack:#engineering"},
             )
 
+        assert result["cron"] == "updated"
+        assert result["error"] is None
+
+        edit_call = mock_run.call_args_list[1]
+        args = edit_call[0][0]
+        assert "--deliver" in args
+        assert "slack:#engineering" in args
+
+    def test_edit_unsupported_falls_back_to_remove_create(self):
+        """Older hermes without `cron edit` → remove by id + create fresh."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(
+                _CRON_LIST_ONE_MATCH, edit_ok=False
+            )
+            result = _reconcile_cron("test-project", {"schedule": "60m"})
+
         assert result["cron"] == "created"
         assert result["error"] is None
 
-        create_call = mock_run.call_args_list[2]
-        args = create_call[0][0]
-        assert "--deliver" in args
-        assert "slack:#engineering" in args
+        calls = mock_run.call_args_list
+        # list + failed edit + remove + create = 4 calls
+        assert len(calls) == 4
+        assert calls[1][0][0][1:3] == ["cron", "edit"]
+        assert calls[2][0][0][1:3] == ["cron", "remove"]
+        assert calls[2][0][0][3] == "99f7d116a95b"
+        create_args = calls[3][0][0]
+        assert create_args[1:3] == ["cron", "create"]
+        assert "--name" in create_args
+        assert "test-project-daedalus" in create_args
+        assert "--script" in create_args
+        assert "daedalus-cron.sh" in create_args
+        assert "--no-agent" in create_args
+
+    def test_notifications_suppress_cron_deliver(self):
+        """cron.notifications[] → dispatcher self-delivers, cron gets no --deliver."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
+            result = _reconcile_cron(
+                "test-project",
+                {"schedule": "30m", "deliver": "slack:#engineering",
+                 "notifications": [{"platform": "Discord",
+                                    "target": "discord:#daedalus"}]},
+            )
+
+        assert result["cron"] == "created"
+        create_args = mock_run.call_args_list[1][0][0]
+        assert "--deliver" not in create_args
 
     # ── sweep duplicates: two same-name jobs → both removed by id ────────
 
@@ -958,7 +985,7 @@ class TestReconcileCron:
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
             mock_run.side_effect = self._make_dispatcher(
-                _CRON_LIST_ONE_MATCH, create_ok=False
+                _CRON_LIST_NO_MATCH, create_ok=False
             )
             result = _reconcile_cron("test-project", {"schedule": "bad-schedule"})
 
@@ -969,19 +996,7 @@ class TestReconcileCron:
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = self._make_dispatcher(
-                _CRON_LIST_ONE_MATCH, create_ok=True
-            )
-            # Override: create call raises FileNotFoundError
-            orig = mock_run.side_effect
-            call_count = [0]
-            def raise_on_create(args, **kwargs):
-                call_count[0] += 1
-                if call_count[0] == 3:  # third call = create
-                    raise FileNotFoundError("hermes not on PATH")
-                return orig(args, **kwargs)
-            mock_run.side_effect = raise_on_create
-
+            mock_run.side_effect = FileNotFoundError("hermes not on PATH")
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
         assert result["error"] == "hermes CLI not found"
@@ -994,11 +1009,26 @@ class TestReconcileCron:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "  60m  "})
 
-        assert result["cron"] == "created"
-        create_call = mock_run.call_args_list[2]
-        args = create_call[0][0]
+        assert result["cron"] == "updated"
+        edit_call = mock_run.call_args_list[1]
+        args = edit_call[0][0]
         assert "60m" in args  # trimmed
         assert "  60m  " not in args
+
+    def test_repeated_saves_never_stack_jobs(self):
+        """Regression: saving twice (schedule change) must never produce a
+        second job — each save either edits in place or recreates exactly one."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
+            r1 = _reconcile_cron("test-project", {"schedule": "30m"})
+            r2 = _reconcile_cron("test-project", {"schedule": "45m"})
+
+        assert r1["cron"] == "updated" and r2["cron"] == "updated"
+        cmds = [c[0][0][2] for c in mock_run.call_args_list]
+        assert cmds == ["list", "edit", "list", "edit"]
+        assert "create" not in cmds  # no job ever stacked
 
     # ── _parse_cron_list_blocks unit tests ───────────────────────────────
 
@@ -1556,27 +1586,18 @@ class TestMetaTestDeliverEndpoint:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_router_mount_exposes_all_endpoints(temp_config_path, project_repo_dir):
+def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
     """Build a FastAPI app, mount the unified router, and assert every endpoint
-    group (/config, /projects, /project/{name}/config, /meta/notifications)
-    is reachable.
+    group (/projects, /project/{name}/config, /meta/notifications) is reachable.
 
-    This is the regression test for the bug where only the /config router was
-    mounted and /projects + /project/{name}/config were silently missing.
+    This is the regression test for the bug where some sub-routers were
+    silently missing from the unified router.
     """
     from dashboard.plugin_api import router as unified_router
 
     app = FastAPI()
     app.include_router(unified_router, prefix="/api/plugins/daedalus")
     client = TestClient(app)
-
-    # ── /config (GET) ────────────────────────────────────────────────────
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200, f"GET /config: {resp.status_code} {resp.text}"
-    data = resp.json()
-    assert "defaults" in data
-    assert "projects" in data
-    assert "meta" in data
 
     # ── /projects (GET) ──────────────────────────────────────────────────
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
@@ -1627,7 +1648,7 @@ def test_router_mount_exposes_all_endpoints(temp_config_path, project_repo_dir):
             ]
 
 
-def test_all_sub_routers_mounted_and_resolve(temp_config_path, project_repo_dir):
+def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
     """Build a FastAPI app, mount only plugin_api.router, introspect the module
     for all APIRouter instances (config, projects, project_config, meta),
     and assert each one's routes resolve to non-404 responses.
@@ -1641,7 +1662,7 @@ def test_all_sub_routers_mounted_and_resolve(temp_config_path, project_repo_dir)
 
     # ── Discover all APIRouter instances in the module ──────────────────
     sub_routers: dict[str, APIRouter] = {}
-    expected = {"config_router", "projects_router", "project_config_router", "meta_router"}
+    expected = {"projects_router", "project_config_router", "meta_router"}
     for name in expected:
         obj = getattr(papi, name, None)
         assert isinstance(obj, APIRouter), (
@@ -1682,10 +1703,6 @@ def test_all_sub_routers_mounted_and_resolve(temp_config_path, project_repo_dir)
     app = FastAPI()
     app.include_router(top_router, prefix="/api/plugins/daedalus")
     client = TestClient(app)
-
-    # ── /config (GET) ────────────────────────────────────────────────────
-    resp = client.get("/api/plugins/daedalus/config")
-    assert resp.status_code == 200, f"/config: {resp.status_code}"
 
     # ── /projects (GET) ──────────────────────────────────────────────────
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
@@ -2040,16 +2057,16 @@ class TestRegistryNameResolution:
         """When folder basename ≠ config name, the list entry uses config name."""
         from dashboard.plugin_api import _build_registry_only_entry
 
-        # Simulate dycotomic case: folder is 'dycotomic', config name is 'dycotomic.app'
+        # Folder basename is 'webshop' but the config names the project 'webshop.app'
         entry = _build_registry_only_entry(
-            "/Users/benmarte/Documents/github/rizq/dycotomic",
-            "dycotomic.app",  # resolved from daedalus.yaml
+            "/repos/acme/webshop",
+            "webshop.app",  # resolved from daedalus.yaml
         )
-        assert entry["name"] == "dycotomic.app"
-        assert entry["repo"] == "/Users/benmarte/Documents/github/rizq/dycotomic"
+        assert entry["name"] == "webshop.app"
+        assert entry["repo"] == "/repos/acme/webshop"
 
-    def test_get_projects_resolves_registry_name_from_config(self, client, temp_config_path):
-        """GET /projects uses resolved config name for registry-only entries."""
+    def test_get_projects_resolves_registry_name_from_config(self, client):
+        """GET /projects uses the resolved config name, not the folder basename."""
         import tempfile
 
         # Create a temp repo dir with .hermes/daedalus.yaml where name ≠ folder basename
@@ -2058,8 +2075,8 @@ class TestRegistryNameResolution:
             hermes_dir = repo / ".hermes"
             hermes_dir.mkdir()
             cfg = {
-                "name": "dycotomic.app",
-                "repo": "RIZQ-TECH/dycotomic.app",
+                "name": "webshop.app",
+                "repo": "ACME-ORG/webshop.app",
                 "workdir": str(repo),
             }
             (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
@@ -2073,16 +2090,13 @@ class TestRegistryNameResolution:
                     assert resp.status_code == 200, resp.text
                     data = resp.json()
 
-            # Find the registry-only entry
-            registry_entry = next(
-                (p for p in data if p["repo"] == str(repo)), None
+            entry = next(
+                (p for p in data if p["name"] == "webshop.app"), None
             )
-            assert registry_entry is not None, (
-                f"Registry entry not found in response. Projects: {[p['name'] for p in data]}"
+            assert entry is not None, (
+                f"Entry not found in response. Projects: {[p['name'] for p in data]}"
             )
-            assert registry_entry["name"] == "dycotomic.app", (
-                f"Expected 'dycotomic.app', got '{registry_entry['name']}'"
-            )
+            assert entry["repo"] == "ACME-ORG/webshop.app"
 
     def test_resolve_project_path_matches_config_name(self):
         """_resolve_project_path finds project by config name, not folder name."""
@@ -2094,8 +2108,8 @@ class TestRegistryNameResolution:
             hermes_dir = repo / ".hermes"
             hermes_dir.mkdir()
             cfg = {
-                "name": "dycotomic.app",
-                "repo": "RIZQ-TECH/dycotomic.app",
+                "name": "webshop.app",
+                "repo": "ACME-ORG/webshop.app",
                 "workdir": str(repo),
             }
             (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
@@ -2104,7 +2118,7 @@ class TestRegistryNameResolution:
                 mock_registry.list_projects.return_value = [str(repo)]
 
                 # Look up by config name — should find it
-                resolved = _resolve_project_path("dycotomic.app")
+                resolved = _resolve_project_path("webshop.app")
                 # macOS /var is a symlink to /private/var — compare real paths
                 assert os.path.realpath(str(resolved)) == os.path.realpath(str(repo))
 
@@ -2113,7 +2127,7 @@ class TestRegistryNameResolution:
                     _resolve_project_path(Path(tmpdir).name)
                 assert exc_info.value.status_code == 404
 
-    def test_fallback_to_folder_basename_when_no_config(self, client, temp_config_path):
+    def test_fallback_to_folder_basename_when_no_config(self, client):
         """When .hermes/daedalus.yaml doesn't exist, fall back to folder basename."""
         import tempfile
 
@@ -2137,7 +2151,7 @@ class TestRegistryNameResolution:
             # Falls back to folder basename
             assert registry_entry["name"] == Path(tmpdir).name
 
-    def test_existing_happy_path_still_green(self, client, temp_config_path):
+    def test_existing_happy_path_still_green(self, client):
         """When folder name == config name, everything still works."""
         import tempfile
 
@@ -2161,8 +2175,8 @@ class TestRegistryNameResolution:
                     assert resp.status_code == 200, resp.text
                     data = resp.json()
 
-            registry_entry = next(
-                (p for p in data if p["repo"] == str(repo)), None
+            entry = next(
+                (p for p in data if p["name"] == repo.name), None
             )
-            assert registry_entry is not None
-            assert registry_entry["name"] == repo.name
+            assert entry is not None
+            assert entry["repo"] == "org/test-repo"

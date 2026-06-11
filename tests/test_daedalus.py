@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Focused unit tests for the live daedalus surface:
-config loading/merging, kanban parsing, GitHub Project/PR state helpers,
-and Slack doc-report delivery.
+config loading/merging, kanban parsing, dispatcher provider integration,
+and doc-report delivery.
 
 Run: python3 tests/test_daedalus.py
 """
@@ -12,9 +12,59 @@ from unittest import mock
 # Make the package root importable (config/, core/).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import ConfigLoader, deep_merge, strip_project_key  # noqa: E402
-from core import github_project as gp  # noqa: E402
+from config import ConfigLoader, deep_merge  # noqa: E402
 from core import kanban  # noqa: E402
+
+
+class _FakeProvider:
+    """Stands in for a core.providers.VCSProvider in dispatcher tests."""
+
+    name = "github"
+
+    def board_configured(self):
+        return False
+
+    def status_name(self, key):
+        return {"ready": "Ready", "in_progress": "In progress",
+                "in_review": "In review", "done": "Done"}.get(key, key)
+
+    def board_numbers_with_statuses(self, names):
+        return set()
+
+    def board_set_status(self, n, status):
+        return True
+
+    def list_issues(self, state="open", labels=None, limit=50):
+        return []
+
+    def close_issue(self, n):
+        return True
+
+    def pr_state_for_issue(self, n):
+        return None
+
+    def pr_number_for_issue(self, n):
+        return None
+
+    def pr_ci_green(self, pr):
+        return False
+
+    def list_pr_comments(self, pr):
+        return []
+
+    def pr_has_delivery_marker(self, pr):
+        return False
+
+    def post_delivery_marker(self, pr, body=""):
+        return True
+
+
+gp = _FakeProvider()  # patched per-test via mock.patch.object
+
+
+class _Comment:
+    def __init__(self, body):
+        self.body = body
 
 _passed = 0
 _failed = 0
@@ -43,31 +93,26 @@ def test_deep_merge():
     check("deep_merge does not mutate the base", base == {"a": {"x": 1}})
 
 
-def test_strip_project_key():
-    check("strip_project_key removes the projects list",
-          "projects" not in strip_project_key({"projects": [], "vcs": {}}))
-
 
 def test_config_loader_resolve():
+    """resolve_repo_config merges the per-repo file over template defaults."""
+    import tempfile
     import yaml
-    tmp = "/tmp/_orch_test_config.yaml"
-    cfg = {
-        "defaults": {"vcs": {"target_branch": "dev"}, "lifecycle": {"kanban": {"enabled": True}}},
-        "projects": [
-            {"name": "p1", "repo": "O/p1", "workdir": "/w/p1", "tracking": {"github_project_number": 1}},
-            {"name": "p2", "repo": "O/p2", "workdir": "/w/p2", "vcs": {"target_branch": "main"}},
-        ],
-    }
-    Path(tmp).write_text(yaml.safe_dump(cfg))
-    loader = ConfigLoader(tmp)
-    r1 = loader.resolve_project("p1")
-    check("resolve_project keeps identity fields", r1["repo"] == "O/p1" and r1["workdir"] == "/w/p1")
-    check("resolve_project inherits defaults", r1["vcs"]["target_branch"] == "dev")
-    check("resolve_project carries project tracking", r1["tracking"]["github_project_number"] == 1)
-    r2 = loader.resolve_project("p2")
-    check("resolve_project lets a project override a default", r2["vcs"]["target_branch"] == "main")
-    check("list_projects returns every project", {p["name"] for p in loader.list_projects()} == {"p1", "p2"})
-    Path(tmp).unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = Path(tmpdir)
+        (repo / ".hermes").mkdir()
+        (repo / ".hermes" / "daedalus.yaml").write_text(yaml.safe_dump({
+            "name": "p1", "repo": "O/p1",
+            "vcs": {"target_branch": "release"},
+        }))
+        r1 = ConfigLoader().resolve_repo_config(str(repo))
+    check("resolve_repo_config keeps identity fields", r1["repo"] == "O/p1")
+    check("resolve_repo_config pins workdir to the repo path",
+          r1["workdir"] == str(repo.resolve()))
+    check("resolve_repo_config lets the repo override template defaults",
+          r1["vcs"]["target_branch"] == "release")
+    check("resolve_repo_config inherits template defaults",
+          r1["vcs"]["provider"] == "github" and r1["cron"]["schedule"] == "every 60m")
 
 
 # ── kanban: ls parsing ───────────────────────────────────────────────────────
@@ -144,32 +189,6 @@ def test_ensure_board_failure():
     check("ensure_board returns False on genuine failure", ok is False)
     mw.assert_called_once()
     assert "permission denied" in mw.call_args[0][2]
-
-
-# ── github_project: PR + CI state ────────────────────────────────────────────
-def test_pr_state_for_issue():
-    prs = [
-        {"number": 1, "state": "OPEN", "headRefName": "feature/x", "body": "Closes #329"},
-        {"number": 2, "state": "MERGED", "headRefName": "fix/issue-329-y", "body": ""},
-        {"number": 3, "state": "OPEN", "headRefName": "z", "body": "see #329 for context"},
-    ]
-    with mock.patch.object(gp, "_gh_json", return_value=prs):
-        st = gp.pr_state_for_issue("O/R", 329)
-    check("pr_state_for_issue prefers merged and matches closing-keyword/branch", st == "merged")
-    with mock.patch.object(gp, "_gh_json", return_value=[prs[2]]):
-        st2 = gp.pr_state_for_issue("O/R", 329)
-    check("pr_state_for_issue ignores a bare '#329' mention", st2 is None)
-
-
-def test_pr_ci_green():
-    with mock.patch.object(gp, "_gh_json",
-                           return_value={"statusCheckRollup": [{"name": "ci-complete", "conclusion": "SUCCESS"}]}):
-        check("pr_ci_green True when ci-complete is SUCCESS", gp.pr_ci_green("O/R", 1) is True)
-    with mock.patch.object(gp, "_gh_json",
-                           return_value={"statusCheckRollup": [{"name": "ci-complete", "conclusion": "FAILURE"}]}):
-        check("pr_ci_green False when ci-complete failed", gp.pr_ci_green("O/R", 1) is False)
-    with mock.patch.object(gp, "_gh_json", return_value={"statusCheckRollup": []}):
-        check("pr_ci_green False when there are no checks", gp.pr_ci_green("O/R", 1) is False)
 
 
 # ── dispatch: dual mode (GitHub board optional, kanban always) ───────────────
@@ -258,27 +277,6 @@ def test_resolve_repo_config_missing_file():
                   tmp in str(e))
 
 
-def test_resolve_repo_config_does_not_break_resolve_project():
-    """Adding resolve_repo_config must not affect existing resolve_project/resolve_all."""
-    import yaml
-    tmp = "/tmp/_orch_test_config.yaml"
-    cfg = {
-        "defaults": {"vcs": {"target_branch": "dev"}},
-        "projects": [
-            {"name": "p1", "repo": "O/p1", "workdir": "/w/p1"},
-        ],
-    }
-    Path(tmp).write_text(yaml.safe_dump(cfg))
-    loader = ConfigLoader(tmp)
-    r1 = loader.resolve_project("p1")
-    check("resolve_project still works after resolve_repo_config added",
-          r1["repo"] == "O/p1" and r1["workdir"] == "/w/p1")
-    ra = loader.resolve_all()
-    check("resolve_all still works after resolve_repo_config added",
-          len(ra["projects"]) == 1)
-    Path(tmp).unlink(missing_ok=True)
-
-
 def test_dispatch_dual_mode():
     disp = _load_dispatch()
     calls = {"decompose_all": 0, "create_triage": 0, "fetch_issues": 0}
@@ -290,25 +288,20 @@ def test_dispatch_dual_mode():
     disp.kanban.decompose = lambda *a, **k: True
     disp.kanban.dispatch = lambda s, max_spawns=5: True
     disp._fetch_issues = lambda r, f: (calls.__setitem__("fetch_issues", calls["fetch_issues"] + 1) or [{"number": 1, "title": "t"}])
-    disp.gp.pr_state_for_issue = lambda r, n: None
-    disp.gp.pr_ci_green = lambda r, pr: False
     base = {"repo": "O/R", "workdir": "/tmp", "name": "x", "issues": {"filters": {}}, "execution": {}}
 
-    s1 = disp.run({**base, "tracking": {}})  # no github_project_number -> kanban-only
+    s1 = disp.run({**base, "tracking": {}}, provider=_FakeProvider())  # no board -> kanban-only
     check("kanban-only mode decomposes triage cards", calls["decompose_all"] == 1)
-    check("kanban-only mode does NOT poll GitHub issues", calls["fetch_issues"] == 0)
+    check("kanban-only mode does NOT poll VCS issues", calls["fetch_issues"] == 0)
     check("kanban-only mode reports mode=kanban", s1.get("mode") == "kanban")
 
-    class FP:
-        def __init__(s, *a, **k): pass
-        def numbers_with_status(s, x): return {1}
-        def numbers_with_statuses(s, x): return {1}
-        def set_status(s, n, st): return True
-    disp.gp.GitHubProject = FP
-    s2 = disp.run({**base, "tracking": {"github_project_number": 1}})  # github mode
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return {1}
+    s2 = disp.run({**base, "tracking": {"github_project_number": 1}}, provider=FP())  # board mode
     check("github mode polls issues and creates a triage card", calls["fetch_issues"] >= 1 and calls["create_triage"] == 1)
     check("github mode does NOT use decompose --all", calls["decompose_all"] == 1)
-    check("github mode reports mode=github", s2.get("mode") == "github")
+    check("board mode reports provider name", s2.get("mode") == "github")
 
 
 # ── main(): registry sweep ──────────────────────────────────────────────────
@@ -394,87 +387,6 @@ def test_main_single_repo():
 # ── GitHub PR helpers (new) ──────────────────────────────────────────────────
 
 
-def test_pr_number_for_issue():
-    """pr_number_for_issue resolves a PR number from an issue via _pr_for_issue."""
-    prs = [
-        {"number": 42, "state": "OPEN", "headRefName": "fix/issue-7-stuff", "body": "Closes #7"},
-        {"number": 99, "state": "MERGED", "headRefName": "main", "body": "Fixes #7"},
-    ]
-    with mock.patch.object(gp, "_gh_json", return_value=prs):
-        result = gp.pr_number_for_issue("O/R", 7)
-    check("pr_number_for_issue prefers merged (99)", result == 99)
-
-    with mock.patch.object(gp, "_gh_json", return_value=[prs[0]]):
-        result2 = gp.pr_number_for_issue("O/R", 7)
-    check("pr_number_for_issue returns open PR when no merged", result2 == 42)
-
-    with mock.patch.object(gp, "_gh_json", return_value=[]):
-        result3 = gp.pr_number_for_issue("O/R", 404)
-    check("pr_number_for_issue returns None when no PR found", result3 is None)
-
-
-def test_pr_comments():
-    """pr_comments fetches PR comments via gh JSON."""
-    comments = [
-        {"id": 1, "author": {"login": "bot"}, "body": "**Agent: documentation**\n\nReport here."},
-        {"id": 2, "author": {"login": "human"}, "body": "Thanks!"},
-    ]
-    with mock.patch.object(gp, "_gh_json", return_value={"comments": comments}):
-        result = gp.pr_comments("O/R", 42)
-    check("pr_comments returns comment list", len(result) == 2)
-    check("pr_comments first comment has expected body",
-          "**Agent: documentation**" in result[0]["body"])
-
-    with mock.patch.object(gp, "_gh_json", return_value=None):
-        result2 = gp.pr_comments("O/R", 42)
-    check("pr_comments returns [] on gh failure", result2 == [])
-
-
-def test_pr_has_delivery_marker():
-    """pr_has_delivery_marker detects the hidden sentinel comment."""
-    marker = gp._SLACK_DELIVERED_MARKER
-
-    comments_with_marker = [
-        {"body": f"{marker}\n\nDelivered to Slack:\n\nReport text."},
-    ]
-    with mock.patch.object(gp, "pr_comments", return_value=comments_with_marker):
-        check("pr_has_delivery_marker True when sentinel present",
-              gp.pr_has_delivery_marker("O/R", 42) is True)
-
-    comments_without = [{"body": "Normal comment, nothing to see here."}]
-    with mock.patch.object(gp, "pr_comments", return_value=comments_without):
-        check("pr_has_delivery_marker False when sentinel absent",
-              gp.pr_has_delivery_marker("O/R", 42) is False)
-
-    with mock.patch.object(gp, "pr_comments", return_value=[]):
-        check("pr_has_delivery_marker False with no comments",
-              gp.pr_has_delivery_marker("O/R", 42) is False)
-
-
-def test_pr_post_delivery_marker():
-    """pr_post_delivery_marker calls gh pr comment with the sentinel."""
-    gh_calls = []
-
-    def fake_gh(args, timeout=30):
-        gh_calls.append(args)
-        return (0, "", "")
-
-    with mock.patch.object(gp, "_gh", fake_gh):
-        ok = gp.pr_post_delivery_marker("O/R", 42, "The report body")
-    check("pr_post_delivery_marker returns True on success", ok is True)
-    check("pr_post_delivery_marker called gh pr comment",
-          "pr" in gh_calls[0] and "comment" in gh_calls[0])
-    check("pr_post_delivery_marker includes sentinel in body",
-          gp._SLACK_DELIVERED_MARKER in gh_calls[0][gh_calls[0].index("--body") + 1])
-
-    with mock.patch.object(gp, "_gh", return_value=(1, "", "auth error")):
-        ok2 = gp.pr_post_delivery_marker("O/R", 42)
-    check("pr_post_delivery_marker returns False on gh failure", ok2 is False)
-
-
-# ── Slack delivery (_send_via_hermes + _deliver_doc_reports) ─────────────────
-
-
 def test_parse_pr_from_card():
     """_parse_pr_from_card extracts PR numbers from card body + summary."""
     disp = _load_dispatch()
@@ -489,25 +401,31 @@ def test_parse_pr_from_card():
     card3 = {"body": "No PR here.", "latest_summary": ""}
     check("_parse_pr_from_card returns None when no PR", disp._parse_pr_from_card(card3) is None)
 
+    card4 = {"body": "  \n  PR #7 is open.  \n  ", "latest_summary": None}
+    check("_parse_pr_from_card strips whitespace-padded body", disp._parse_pr_from_card(card4) == 7)
+
+    card5 = {"body": None, "latest_summary": "PR #13 merged."}
+    check("_parse_pr_from_card handles None body", disp._parse_pr_from_card(card5) == 13)
+
 
 def test_find_doc_comment():
     """_find_doc_comment returns the body of the first **Agent: documentation** comment."""
     disp = _load_dispatch()
 
     comments = [
-        {"body": "Regular review comment."},
-        {"body": "**Agent: documentation**\n\n# Resolution Report\n\nHere is the fix."},
-        {"body": "**Agent: documentation**\n\n# Another report"},
+        _Comment("Regular review comment."),
+        _Comment("**Agent: documentation**\n\n# Resolution Report\n\nHere is the fix."),
+        _Comment("**Agent: documentation**\n\n# Another report"),
     ]
-    with mock.patch.object(gp, "pr_comments", return_value=comments):
-        result = disp._find_doc_comment("O/R", 42)
+    with mock.patch.object(gp, "list_pr_comments", return_value=comments):
+        result = disp._find_doc_comment(gp, 42)
     check("_find_doc_comment returns first matching body",
           result.startswith("**Agent: documentation**"))
     check("_find_doc_comment has report content", "Resolution Report" in result)
 
-    no_doc = [{"body": "No doc comment here."}]
-    with mock.patch.object(gp, "pr_comments", return_value=no_doc):
-        result2 = disp._find_doc_comment("O/R", 42)
+    no_doc = [_Comment("No doc comment here.")]
+    with mock.patch.object(gp, "list_pr_comments", return_value=no_doc):
+        result2 = disp._find_doc_comment(gp, 42)
     check("_find_doc_comment returns '' when no match", result2 == "")
 
 
@@ -566,9 +484,9 @@ def test_deliver_doc_reports_idempotent():
                 # Mock: subprocess.run succeeds
                 with mock.patch.object(disp, "_send_via_hermes", return_value=True):
                     # Mock: sentinel post succeeds
-                    with mock.patch.object(gp, "pr_post_delivery_marker", return_value=True):
+                    with mock.patch.object(gp, "post_delivery_marker", return_value=True):
                         result1 = disp._deliver_doc_reports(
-                            "slug", "O/R", "slack:tasks",
+                            "slug", gp, "slack:tasks",
                         )
     check("first pass delivers one PR", result1 == [42])
 
@@ -576,7 +494,7 @@ def test_deliver_doc_reports_idempotent():
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
         with mock.patch.object(gp, "pr_has_delivery_marker", return_value=True):
             result2 = disp._deliver_doc_reports(
-                "slug", "O/R", "slack:tasks",
+                "slug", gp, "slack:tasks",
             )
     check("second pass skips (sentinel present)", result2 == [])
 
@@ -584,7 +502,7 @@ def test_deliver_doc_reports_idempotent():
 def test_deliver_doc_reports_no_target():
     """_deliver_doc_reports returns [] when notify_target is empty."""
     disp = _load_dispatch()
-    result = disp._deliver_doc_reports("slug", "O/R", "")
+    result = disp._deliver_doc_reports("slug", gp, "")
     check("empty notify_target returns []", result == [])
 
 
@@ -599,10 +517,10 @@ def test_deliver_doc_reports_send_failure():
 
     sentinel_calls = []
 
-    def fake_has_marker(repo, pr):
+    def fake_has_marker(pr):
         return False
 
-    def fake_post_marker(repo, pr, body=""):
+    def fake_post_marker(pr, body=""):
         sentinel_calls.append(pr)
         return True
 
@@ -611,9 +529,9 @@ def test_deliver_doc_reports_send_failure():
             with mock.patch.object(disp, "_find_doc_comment",
                                    return_value="**Agent: documentation**\n\nReport"):
                 with mock.patch.object(disp, "_send_via_hermes", return_value=False):
-                    with mock.patch.object(gp, "pr_post_delivery_marker", fake_post_marker):
+                    with mock.patch.object(gp, "post_delivery_marker", fake_post_marker):
                         result = disp._deliver_doc_reports(
-                            "slug", "O/R", "slack:tasks",
+                            "slug", gp, "slack:tasks",
                         )
     check("send failure returns empty delivered list", result == [])
     check("send failure does NOT post sentinel", len(sentinel_calls) == 0)
@@ -625,7 +543,7 @@ def test_deliver_doc_reports_non_doc_assignee():
     dev_card = {"id": "t_dev", "assignee": "developer", "body": "PR #42.",
                 "latest_summary": "", "parents": []}
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[dev_card]):
-        result = disp._deliver_doc_reports("slug", "O/R", "slack:tasks")
+        result = disp._deliver_doc_reports("slug", gp, "slack:tasks")
     check("non-doc assignee skipped", result == [])
 
 
@@ -637,7 +555,7 @@ def test_deliver_doc_reports_no_pr():
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
         with mock.patch.object(disp, "_parse_pr_from_card", return_value=None):
             with mock.patch.object(disp, "_resolve_pr_from_parents", return_value=None):
-                result = disp._deliver_doc_reports("slug", "O/R", "slack:tasks")
+                result = disp._deliver_doc_reports("slug", gp, "slack:tasks")
     check("no resolvable PR → skipped", result == [])
 
 
@@ -649,7 +567,7 @@ def test_deliver_doc_reports_no_doc_comment():
     with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
         with mock.patch.object(gp, "pr_has_delivery_marker", return_value=False):
             with mock.patch.object(disp, "_find_doc_comment", return_value=""):
-                result = disp._deliver_doc_reports("slug", "O/R", "slack:tasks")
+                result = disp._deliver_doc_reports("slug", gp, "slack:tasks")
     check("no doc comment → skipped", result == [])
 
 
@@ -666,7 +584,7 @@ def test_deliver_doc_reports_dry_run():
                 with mock.patch.object(disp, "_send_via_hermes",
                                        side_effect=lambda *a, **k: send_calls.append(1) or True):
                     result = disp._deliver_doc_reports(
-                        "slug", "O/R", "slack:tasks", dry_run=True,
+                        "slug", gp, "slack:tasks", dry_run=True,
                     )
     check("dry_run returns PR number", result == [42])
     check("dry_run does NOT call _send_via_hermes", len(send_calls) == 0)
@@ -679,12 +597,12 @@ def test_resolve_pr_from_parents():
                    "body": "Triage for #7."}
     with mock.patch.object(disp.kanban, "show_card", return_value=parent_card):
         with mock.patch.object(gp, "pr_number_for_issue", return_value=42):
-            result = disp._resolve_pr_from_parents("slug", "O/R",
+            result = disp._resolve_pr_from_parents("slug", gp,
                                                    {"parents": ["t_parent"]})
     check("_resolve_pr_from_parents resolves PR via parent", result == 42)
 
     # No parents
-    result2 = disp._resolve_pr_from_parents("slug", "O/R", {"parents": []})
+    result2 = disp._resolve_pr_from_parents("slug", gp, {"parents": []})
     check("_resolve_pr_from_parents returns None with no parents", result2 is None)
 
 
@@ -696,7 +614,7 @@ def test_human_summary_slack_delivered():
                "routed_actions": {}, "issues_seen": 5, "spec_created": [],
                "slack_delivered": [42, 99]}
     msg = disp._human_summary({"test": summary})
-    check("_human_summary includes Slack delivery", "📨 Slack PR #42, PR #99" in msg)
+    check("_human_summary includes doc-report delivery", "📨 delivered PR #42, PR #99" in msg)
 
     # Empty slack_delivered → no mention
     summary2 = {"board": "test", "mode": "github", "created": [],
@@ -716,8 +634,12 @@ def test_task_body_no_slack():
           "hermes send" not in body)
     check("_task_body mentions dispatcher handles Slack",
           "dispatcher" in body and "Slack" in body)
-    check("_task_body mentions gh pr comment",
-          "gh pr comment" in body)
+    check("_task_body instructs the API comment path (no CLI)",
+          "api.github.com/repos/O/R/issues" in body and "GITHUB_TOKEN" in body)
+    check("_task_body instructs the API PR-create path",
+          "api.github.com/repos/O/R/pulls" in body)
+    check("_task_body never mentions the gh CLI",
+          "gh pr" not in body and "gh issue" not in body and "gh auth" not in body)
     check("_task_body mentions Agent: documentation prefix",
           "**Agent: documentation**" in body)
 
@@ -735,7 +657,6 @@ def test_dispatch_summary_has_slack_delivered():
     disp.kanban.decompose = lambda *a, **k: True
     disp.kanban.dispatch = lambda s, max_spawns=5: True
     disp._fetch_issues = lambda r, f: [{"number": 1, "title": "t"}]
-    disp.gp.pr_state_for_issue = lambda r, n: None
 
     # Mock _deliver_doc_reports to return a known value
     with mock.patch.object(disp, "_deliver_doc_reports", return_value=[42]):
@@ -743,33 +664,132 @@ def test_dispatch_summary_has_slack_delivered():
                 "issues": {"filters": {}}, "execution": {}}
 
         # kanban-only mode
-        s1 = disp.run({**base, "tracking": {}})
+        s1 = disp.run({**base, "tracking": {}}, provider=_FakeProvider())
         check("kanban summary has slack_delivered", s1.get("slack_delivered") == [42])
 
-        # github mode
-        class FP:
-            def __init__(s, *a, **k): pass
-            def numbers_with_status(s, x): return {1}
-            def numbers_with_statuses(s, x): return {1}
-            def set_status(s, n, st): return True
-        disp.gp.GitHubProject = FP
-        s2 = disp.run({**base, "tracking": {"github_project_number": 1}})
-        check("github summary has slack_delivered", s2.get("slack_delivered") == [42])
+        # board mode
+        class FP(_FakeProvider):
+            def board_configured(self): return True
+            def board_numbers_with_statuses(self, names): return {1}
+        s2 = disp.run({**base, "tracking": {"github_project_number": 1}}, provider=FP())
+        check("board summary has slack_delivered", s2.get("slack_delivered") == [42])
+
+
+def test_notify_targets():
+    """_notify_targets: notifications[] wins, event-filters, falls back to deliver."""
+    disp = _load_dispatch()
+
+    legacy = {"cron": {"deliver": "slack:tasks"}}
+    check("legacy deliver receives every event",
+          disp._notify_targets(legacy, "doc-report") == ["slack:tasks"]
+          and disp._notify_targets(legacy, "dispatch-summary") == ["slack:tasks"])
+
+    check("no config → no targets", disp._notify_targets({}, "doc-report") == [])
+
+    multi = {"cron": {"deliver": "slack:legacy", "notifications": [
+        {"platform": "Slack", "target": "slack:C1", "events": ["doc-report"]},
+        {"platform": "Discord", "target": "discord:#general",
+         "events": ["dispatch-summary", "pr-ready"]},
+        {"platform": "Telegram", "target": "telegram:-100123"},  # no events → all
+        {"platform": "Signal", "target": ""},                    # invalid → skipped
+    ]}}
+    check("notifications[] overrides legacy deliver",
+          "slack:legacy" not in disp._notify_targets(multi, "doc-report"))
+    check("doc-report goes to subscribed + catch-all targets",
+          disp._notify_targets(multi, "doc-report") == ["slack:C1", "telegram:-100123"])
+    check("dispatch-summary respects event filters",
+          disp._notify_targets(multi, "dispatch-summary")
+          == ["discord:#general", "telegram:-100123"])
+    check("pipeline-failure reaches only catch-all",
+          disp._notify_targets(multi, "pipeline-failure") == ["telegram:-100123"])
+
+
+def test_summary_events():
+    disp = _load_dispatch()
+    check("plain tick → dispatch-summary only",
+          disp._summary_events({"created": [1]}) == {"dispatch-summary"})
+    check("error adds pipeline-failure",
+          "pipeline-failure" in disp._summary_events({"error": "boom"}))
+    check("advanced PRs add pr-ready",
+          "pr-ready" in disp._summary_events({"advance_prs": [7]}))
+    check("reconciled adds pr-ready",
+          "pr-ready" in disp._summary_events({"reconciled": [(7, "In review")]}))
+
+
+def test_notify_project_summary_fans_out():
+    """_notify_project_summary sends each project summary to its own targets."""
+    disp = _load_dispatch()
+    sent = []
+    summary = {"board": "b", "mode": "github", "created": [1], "reconciled": [],
+               "completed": [], "advance_prs": [], "routed_actions": {},
+               "issues_seen": 1, "spec_created": [], "slack_delivered": []}
+
+    resolved = {"cron": {"notifications": [
+        {"platform": "Slack", "target": "slack:C1", "events": ["dispatch-summary"]},
+        {"platform": "Discord", "target": "discord:#x", "events": ["doc-report"]},
+    ]}}
+    with mock.patch.object(disp, "_send_via_hermes",
+                           side_effect=lambda t, m: sent.append(t) or True):
+        handled = disp._notify_project_summary("proj", summary, resolved)
+    check("notifications project is handled (excluded from stdout)", handled is True)
+    check("summary sent only to dispatch-summary targets", sent == ["slack:C1"])
+
+    sent.clear()
+    legacy = {"cron": {"deliver": "slack:tasks"}}
+    with mock.patch.object(disp, "_send_via_hermes",
+                           side_effect=lambda t, m: sent.append(t) or True):
+        handled2 = disp._notify_project_summary("proj", summary, legacy)
+    check("legacy project flows through cron stdout (not self-sent)",
+          handled2 is False and sent == [])
+
+
+def test_deliver_doc_reports_multi_target():
+    """_deliver_doc_reports fans a report out to every configured target."""
+    disp = _load_dispatch()
+    doc_card = {"id": "t_doc", "assignee": "documentation", "body": "PR #42.",
+                "latest_summary": "", "parents": []}
+    sent = []
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
+        with mock.patch.object(gp, "pr_has_delivery_marker", return_value=False):
+            with mock.patch.object(disp, "_find_doc_comment",
+                                   return_value="**Agent: documentation**\n\nReport"):
+                with mock.patch.object(disp, "_send_via_hermes",
+                                       side_effect=lambda t, m: sent.append(t) or True):
+                    with mock.patch.object(gp, "post_delivery_marker", return_value=True):
+                        result = disp._deliver_doc_reports(
+                            "slug", gp, ["slack:C1", "discord:#docs"],
+                        )
+    check("multi-target delivers the PR once", result == [42])
+    check("report sent to every target", sent == ["slack:C1", "discord:#docs"])
+
+    # Partial failure: sentinel still posted (one target got it), PR delivered
+    sent.clear()
+    marker_posts = []
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
+        with mock.patch.object(gp, "pr_has_delivery_marker", return_value=False):
+            with mock.patch.object(disp, "_find_doc_comment",
+                                   return_value="**Agent: documentation**\n\nReport"):
+                with mock.patch.object(disp, "_send_via_hermes",
+                                       side_effect=lambda t, m: t == "slack:C1"):
+                    with mock.patch.object(gp, "post_delivery_marker",
+                                           side_effect=lambda pr, body="": marker_posts.append(pr) or True):
+                        result2 = disp._deliver_doc_reports(
+                            "slug", gp, ["slack:C1", "discord:#docs"],
+                        )
+    check("partial failure still counts as delivered", result2 == [42])
+    check("sentinel posted after partial success", marker_posts == [42])
 
 
 if __name__ == "__main__":
     print("Daedalus tests")
     print("-" * 60)
-    for fn in (test_deep_merge, test_strip_project_key, test_config_loader_resolve,
+    for fn in (test_deep_merge, test_config_loader_resolve,
                test_kanban_list_issue_numbers, test_create_triage_pins_workspace,
                test_kanban_review_handoff_pr,
-               test_pr_state_for_issue, test_pr_ci_green, test_dispatch_dual_mode,
+               test_dispatch_dual_mode,
                test_resolve_repo_config_valid, test_resolve_repo_config_sources_toggles,
                test_resolve_repo_config_missing_file,
-               test_resolve_repo_config_does_not_break_resolve_project,
                test_main_registry_sweep, test_main_single_repo,
-               test_pr_number_for_issue, test_pr_comments,
-               test_pr_has_delivery_marker, test_pr_post_delivery_marker,
                test_parse_pr_from_card, test_find_doc_comment,
                test_send_via_hermes, test_deliver_doc_reports_idempotent,
                test_deliver_doc_reports_no_target,
@@ -781,7 +801,11 @@ if __name__ == "__main__":
                test_resolve_pr_from_parents,
                test_human_summary_slack_delivered,
                test_task_body_no_slack,
-               test_dispatch_summary_has_slack_delivered):
+               test_dispatch_summary_has_slack_delivered,
+               test_notify_targets,
+               test_summary_events,
+               test_notify_project_summary_fans_out,
+               test_deliver_doc_reports_multi_target):
         fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")

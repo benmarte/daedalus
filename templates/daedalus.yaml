@@ -11,30 +11,80 @@
 
 # ── Identity ─────────────────────────────────────────────────────────────────
 name: "{{NAME}}"                        # Human-readable project name
-repo: "{{REPO}}"                        # GitHub owner/repo (derived from git remote)
+repo: "{{REPO}}"                        # owner/repo (GitHub) or group/project (GitLab)
 workdir: "{{WORKDIR}}"                  # Absolute path to the repo root
 
-# ── GitHub Project Board (optional) ──────────────────────────────────────────
+# ── Board tracking (optional) ─────────────────────────────────────────────────
 tracking:
-  # Uncomment and set to your GitHub Project board number to enable two-way
-  # status syncing (Hermes Kanban ↔ GitHub Project).
+  # GitHub: set your Project (v2) board number to enable two-way status syncing
+  # (Hermes Kanban ↔ GitHub Project).
   # github_project_number: 1
+  #
+  # GitLab: status syncing is label-driven (Issue Board lists keyed to the
+  # status_map labels below). Opt in with:
+  # label_board: true
+  #
+  # Azure DevOps: board columns map to work-item states automatically — no key
+  # needed; the status_map values below must match your states.
 
-# ── VCS ──────────────────────────────────────────────────────────────────────
+# ── VCS provider ──────────────────────────────────────────────────────────────
+# All access is via token-authenticated HTTPS APIs. Tokens come ONLY from
+# environment variables — never put a token in this file.
 vcs:
+  provider: "github"                    # github | gitlab | azuredevops
+  #                                     # setup.sh and the dashboard auto-detect
+  #                                     # this from the repo's origin remote
   target_branch: "main"                 # Base branch for PRs (dev, main, master…)
 
+  # token_env: "GITHUB_TOKEN"           # Override the env var holding the API token.
+  #                                     # Defaults: GITHUB_TOKEN/GH_TOKEN (github),
+  #                                     # GITLAB_TOKEN (gitlab), AZURE_DEVOPS_PAT (azuredevops)
+
+  # GitLab only (provider: gitlab) — defaults to top-level `repo` as the path:
+  # base_url: "https://gitlab.com"      # Self-hosted GitLab URL
+  # project_path: "group/project"       # OR use the numeric id:
+  # project_id: 12345
+
+  # Azure DevOps only (provider: azuredevops):
+  # org: "my-org"
+  # project: "MyProject"
+  # repo: "my-repo"
+  # work_item_type: "Issue"             # Work-item type polled as "issues"
+  # closed_state: "Done"                # State applied when an issue is closed
+
+  # Canonical pipeline status → your board's column/label/state names:
+  status_map:
+    ready: "Ready"
+    in_progress: "In progress"
+    in_review: "In review"
+    done: "Done"
+
 # ── Sources ──────────────────────────────────────────────────────────────────
-# Toggle which issue/spec sources the daedalus watches for this repo.
+# Which triggers the daedalus watches for this repo. ALL are on by default —
+# VCS issues, spec/plan .md drops, and manual kanban triage cards all work
+# out of the box; disable whichever you don't want.
 sources:
   github_issues:
-    enabled: true                       # Scan GitHub Issues for this repo
+    enabled: true                       # Poll the VCS provider's issues/work items
   local_specs:
-    enabled: false                      # Watch .hermes/pending/ for spec/plan files
+    enabled: true                       # Watch .hermes/pending/ for spec/plan files
   kanban_triage:
-    enabled: false                      # Allow Kanban-only triage cards (no GitHub source)
+    enabled: true                       # Kanban-only triage cards (no VCS source)
 
-# ── Cron ─────────────────────────────────────────────────────────────────────
+# ── Cron + Notifications ──────────────────────────────────────────────────────
 cron:
-  schedule: "every 60m"                       # How often the daedalus polls (every 60m, every 2h, 0 9 * * *)
-  deliver: ""                           # Notification target: slack, discord, telegram:chat_id, etc.
+  schedule: "every 60m"                 # How often the daedalus polls (every 60m, every 2h, 0 9 * * *)
+  deliver: ""                           # Legacy single target: slack:C123, discord:#general, …
+
+  # Multi-target notifications (takes precedence over `deliver` when set).
+  # Targets are `hermes send` strings for ANY configured Hermes platform
+  # (Slack, Discord, Telegram, Signal, WhatsApp, …). `events` filters what a
+  # target receives; omit it to receive everything.
+  # Events: doc-report | dispatch-summary | pipeline-failure | pr-ready
+  # notifications:
+  #   - platform: "Slack"
+  #     target: "slack:C0CHANNEL1"
+  #     events: ["doc-report", "pipeline-failure"]
+  #   - platform: "Discord"
+  #     target: "discord:#daedalus"
+  #     events: ["dispatch-summary", "pr-ready"]
