@@ -1977,7 +1977,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       };
       fetchJSON(API_PROJECT_CREATE, { method: "POST", body }).then(function(res) {
         setSaving(false);
-        if (res && res.status === "created") {
+        if (res && (res.status === "created" || res.status === "adopted")) {
           props.onCreated();
           return;
         }
