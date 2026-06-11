@@ -883,15 +883,17 @@ _PLUGIN_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "
 
 @project_config_router.post("/create")
 async def create_project(request: Request) -> dict[str, Any]:
-    """Create a new project — the API equivalent of scripts/setup.sh.
+    """Create or adopt a project — the API equivalent of scripts/setup.sh.
 
-    Scaffolds ``<workdir>/.hermes/daedalus.yaml`` from the packaged template,
-    deep-merges any config sections from the request body, registers the repo
-    in the daedalus registry, creates the project's own kanban board
-    (idempotent), and creates its own cron job.
+    If ``<workdir>/.hermes/daedalus.yaml`` does not yet exist, scaffolds it
+    from the packaged template and deep-merges any config sections from the
+    request body.  If it already exists, reads it as-is (adopted path) and
+    skips scaffolding — so re-adding an existing repo just registers it and
+    provisions the board + cron without overwriting any manual edits.
 
-    Returns 409 when the repo already has a config (edit it instead),
-    422 for missing/invalid input. Never stores secrets in the config file.
+    Returns ``status: "created"`` for new projects, ``status: "adopted"`` for
+    existing ones.  Returns 422 for missing/invalid input.  Never stores
+    secrets in the config file.
     """
     try:
         body = await request.json()
@@ -934,61 +936,68 @@ async def create_project(request: Request) -> dict[str, Any]:
         )
 
     cfg_path = workdir_path / ".hermes" / "daedalus.yaml"
-    if cfg_path.exists():
-        raise HTTPException(
-            status_code=409,
-            detail=f"Project already has a config at {cfg_path} — edit it instead",
-        )
+    adopted = cfg_path.exists()
 
-    # Scaffold from the packaged template (same one setup.sh uses).
-    try:
-        template = _PLUGIN_TEMPLATE_PATH.read_text()
-    except OSError:
-        raise HTTPException(status_code=500,
-                            detail=f"Plugin template missing at {_PLUGIN_TEMPLATE_PATH}")
-    rendered = (template.replace("{{NAME}}", name)
-                        .replace("{{REPO}}", repo)
-                        .replace("{{WORKDIR}}", str(workdir_path)))
-    try:
-        cfg = yaml.safe_load(rendered) or {}
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to render config template")
+    if adopted:
+        # Config already exists — read it and register/provision without overwriting.
+        try:
+            cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            raise HTTPException(status_code=500,
+                                detail=f"Existing config at {cfg_path} could not be parsed")
+        # Fill in name/repo from existing config if not supplied in request.
+        if not name:
+            name = (cfg.get("name") or "").strip()
+        if not repo:
+            repo = (cfg.get("repo") or "").strip()
+    else:
+        # Scaffold from the packaged template (same one setup.sh uses).
+        try:
+            template = _PLUGIN_TEMPLATE_PATH.read_text()
+        except OSError:
+            raise HTTPException(status_code=500,
+                                detail=f"Plugin template missing at {_PLUGIN_TEMPLATE_PATH}")
+        rendered = (template.replace("{{NAME}}", name)
+                            .replace("{{REPO}}", repo)
+                            .replace("{{WORKDIR}}", str(workdir_path)))
+        try:
+            cfg = yaml.safe_load(rendered) or {}
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to render config template")
 
-    # Deep-merge optional config sections from the request body.
-    for key in sorted(_CONFIG_SECTION_KEYS):
-        if key in body:
-            if body[key] is not None and not isinstance(body[key], dict):
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"'{key}' must be a mapping, got {type(body[key]).__name__}",
-                )
-            cfg[key] = deep_merge(cfg.get(key) or {}, body[key] or {})
+        # Deep-merge optional config sections from the request body.
+        for key in sorted(_CONFIG_SECTION_KEYS):
+            if key in body:
+                if body[key] is not None and not isinstance(body[key], dict):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"'{key}' must be a mapping, got {type(body[key]).__name__}",
+                    )
+                cfg[key] = deep_merge(cfg.get(key) or {}, body[key] or {})
 
-    # Apply the auto-detected provider. Detection only runs when the request
-    # didn't pin one, so it overrides the template's github default — but any
-    # request-supplied extra keys (base_url, org, …) still win via setdefault.
-    if detected:
-        vcs_cfg = cfg.setdefault("vcs", {})
-        vcs_cfg["provider"] = detected["provider"]
-        for k, v in (detected.get("vcs_extra") or {}).items():
-            vcs_cfg.setdefault(k, v)
+        # Apply the auto-detected provider.
+        if detected:
+            vcs_cfg = cfg.setdefault("vcs", {})
+            vcs_cfg["provider"] = detected["provider"]
+            for k, v in (detected.get("vcs_extra") or {}).items():
+                vcs_cfg.setdefault(k, v)
 
-    # Validate notifications + provider config before anything touches disk.
-    errors: list[str] = []
-    cron_cfg = cfg.get("cron") or {}
-    if cron_cfg.get("notifications") is not None:
-        errors += _validate_notifications(cron_cfg["notifications"])
-    errors += validate_vcs(cfg)
-    if errors:
-        raise HTTPException(status_code=422, detail={"errors": errors})
+        # Validate notifications + provider config before anything touches disk.
+        errors: list[str] = []
+        cron_cfg = cfg.get("cron") or {}
+        if cron_cfg.get("notifications") is not None:
+            errors += _validate_notifications(cron_cfg["notifications"])
+        errors += validate_vcs(cfg)
+        if errors:
+            raise HTTPException(status_code=422, detail={"errors": errors})
 
-    safe = _strip_secrets(cfg)
-    try:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(yaml.dump(safe, default_flow_style=False,
-                                      sort_keys=False, allow_unicode=True))
-    except OSError:
-        raise HTTPException(status_code=500, detail="Failed to write config file")
+        safe = _strip_secrets(cfg)
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(yaml.dump(safe, default_flow_style=False,
+                                          sort_keys=False, allow_unicode=True))
+        except OSError:
+            raise HTTPException(status_code=500, detail="Failed to write config file")
 
     # Register in the daedalus registry (idempotent).
     registered = False
@@ -1000,6 +1009,7 @@ async def create_project(request: Request) -> dict[str, Any]:
             registered = False
 
     # Each project gets its OWN kanban board (idempotent create).
+    cron_cfg = cfg.get("cron") or {}
     board_slug = _board_slug(repo, name)
     board_ok = bool(ensure_board(board_slug)) if ensure_board is not None else False
 
@@ -1007,7 +1017,7 @@ async def create_project(request: Request) -> dict[str, Any]:
     cron_result = _reconcile_cron(name, cron_cfg)
 
     return {
-        "status": "created",
+        "status": "adopted" if adopted else "created",
         "config_path": str(cfg_path),
         "registered": registered,
         "board": board_slug,

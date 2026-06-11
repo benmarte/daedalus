@@ -596,10 +596,17 @@ class TestCreateProject:
         mock_board.assert_called_once_with("org-new-proj")
         mock_cron.assert_called_once()
 
-    def test_create_409_when_config_exists(self, project_client, project_repo_dir):
-        resp = self._post(project_client, {"name": "x", "repo": "o/r",
-                                           "workdir": str(project_repo_dir)})
-        assert resp.status_code == 409
+    def test_create_adopts_existing_config(self, project_client, project_repo_dir):
+        """When daedalus.yaml already exists, adopt it (200 + status=adopted) instead of 409."""
+        with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+             mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
+             mock.patch("dashboard.plugin_api._reconcile_cron",
+                        return_value={"cron": "ok", "name": "x-daedalus", "error": None}):
+            resp = self._post(project_client, {"name": "x", "repo": "o/r",
+                                               "workdir": str(project_repo_dir)})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "adopted"
+        mock_registry.add_project.assert_called_once()
 
     def test_create_422_missing_fields(self, project_client, tmp_path):
         for missing in ("name", "repo", "workdir"):
