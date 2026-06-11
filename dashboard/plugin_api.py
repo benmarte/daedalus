@@ -66,6 +66,48 @@ project_config_router = APIRouter(prefix="/project", tags=["daedalus-project-con
 meta_router = APIRouter(prefix="/meta", tags=["daedalus-meta"])
 
 
+def _bootstrap_provider_env() -> None:
+    """Inject provider tokens from ~/.hermes/.env into os.environ.
+
+    The Hermes gateway process is typically started without the user's shell
+    environment, so provider tokens (GITHUB_TOKEN, GITLAB_TOKEN, etc.) that
+    live in ~/.hermes/.env are invisible to resolve_token() which only checks
+    os.environ. This runs once at module load using setdefault so it never
+    overwrites tokens that were already exported into the process environment.
+    """
+    _TOKEN_KEYS = {
+        "GITHUB_TOKEN", "GH_TOKEN",
+        "GITLAB_TOKEN", "AZURE_DEVOPS_PAT",
+        "BITBUCKET_TOKEN",
+    }
+    try:
+        # Use a temporary Path object; _real_home() is defined below, so read
+        # the env file using the same logic inline.
+        import pathlib as _pl
+        _home = _pl.Path.home()
+        _parts = _home.parts
+        if ".hermes" in _parts and "profiles" in _parts:
+            _idx = _parts.index(".hermes")
+            _home = _pl.Path(*_parts[:_idx])
+        _env_path = _home / ".hermes" / ".env"
+        if not _env_path.exists():
+            return
+        for _line in _env_path.read_text().split("\n"):
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            _k = _k.strip()
+            _v = _v.strip().strip('"').strip("'")
+            if _k in _TOKEN_KEYS and _v:
+                os.environ.setdefault(_k, _v)
+    except OSError:
+        pass
+
+
+_bootstrap_provider_env()
+
+
 def _real_home() -> Path:
     """Return the real macOS user home, even when HOME is sandboxed.
 
@@ -179,8 +221,8 @@ def _parse_send_list_output(output: str) -> dict[str, list[str]]:
         if line.lower() == "available messaging targets:":
             continue
 
-        # Method header: ends with ':' and is not indented
-        if not line.startswith(" ") and line.endswith(":"):
+        # Method header: ends with ':' and is not indented in the raw line
+        if not raw_line[0:1].isspace() and line.endswith(":"):
             # Strip trailing colon, then strip parenthesized profile
             # annotations like '(Glados)', so 'Discord (Glados):' → 'Discord'
             method_raw = line.rstrip(":").strip()
@@ -189,8 +231,9 @@ def _parse_send_list_output(output: str) -> dict[str, list[str]]:
             methods[current_method] = []
             continue
 
-        # Indented target line
-        if current_method is not None:
+        # Indented target line — only process lines indented in the raw output
+        # (footer prose like "Use these as..." starts at column 0 and must be skipped)
+        if current_method is not None and raw_line[0:1].isspace():
             # Strip trailing annotations like '(private)'
             target = line.strip()
             # Remove parenthesized suffixes: 'slack:tasks (private)' -> 'slack:tasks'
@@ -373,17 +416,27 @@ def _board_slug(repo: str, name: str = "") -> str:
 # ── Kanban helpers (degrade gracefully) ─────────────────────────────────────
 
 def _kanban_summary(slug: str) -> Optional[dict[str, int]]:
-    """Return counts of kanban cards by status, or None if unavailable."""
+    """Return counts of kanban cards by status, or None if the board is unavailable.
+
+    Returns an empty dict ``{}`` when the board exists but has no tasks yet —
+    this is distinct from ``None`` (board missing / CLI error) so the dashboard
+    can show "board ready, 0 tasks" rather than "no kanban data".
+    """
     if list_tasks is None:
         return None
     try:
         tasks = list_tasks(slug)
     except Exception:
         return None
-    if not tasks:
+    # list_tasks returns [] on CLI error AND on a genuinely empty board.
+    # We can't distinguish without an extra CLI call, but a registered project
+    # always has its board created at setup time, so treat [] as "board exists,
+    # no tasks yet" → return {} so the frontend renders the board as empty
+    # rather than missing.
+    if tasks is None:
         return None
     counts: dict[str, int] = {}
-    for t in tasks:
+    for t in (tasks or []):
         status = (t.get("status") or "unknown").lower()
         counts[status] = counts.get(status, 0) + 1
     return counts
@@ -539,22 +592,26 @@ def _build_project_entry(proj: dict[str, Any]) -> dict[str, Any]:
     # Open PRs (via the project's configured VCS provider)
     open_prs = _open_prs(_project_provider(proj))
 
-    # Cron info
+    # Cron info — always probe the live cron system so the card reflects
+    # reality even when the on-disk config is stale or has an empty cron block.
     cron_cfg = proj.get("cron") or {}
+    cron_name = f"{name}-daedalus"
+    health = _cron_health(cron_name)
+    # Use schedule from config first; fall back to the value parsed from the
+    # live cron job (populated by _cron_health when the job is found).
+    cfg_schedule = (cron_cfg.get("schedule") or "").strip()
+    live_schedule = (health.get("schedule") or "").strip()
+    schedule = cfg_schedule or live_schedule
     cron: Optional[dict[str, Any]] = None
-    if cron_cfg:
-        cron_name = f"{name}-daedalus"
+    if schedule or health.get("found"):
         cron = {
             "name": cron_name,
-            "schedule": cron_cfg.get("schedule"),
-            "deliver": cron_cfg.get("deliver"),
-            "last_run": cron_cfg.get("last_run"),
-            "health": _cron_health(cron_name),
+            "schedule": schedule or None,
+            "deliver": cron_cfg.get("deliver") or None,
+            "last_run": health.get("last_run") or cron_cfg.get("last_run") or None,
+            "health": health,
         }
-        # Remove empty values
         cron = {k: v for k, v in cron.items() if v is not None}
-        if not cron:
-            cron = None
 
     # Needs attention
     needs_attention = _needs_attention(slug)
@@ -1327,6 +1384,10 @@ def _cron_health(cron_name: str) -> dict[str, Any]:
         # Found it
         result["found"] = True
         result["state"] = state
+        # Extract Schedule: line (e.g. "Schedule:  every 60m")
+        sched_match = re.search(r"^\s*Schedule:\s+(.+)$", block, re.MULTILINE)
+        if sched_match:
+            result["schedule"] = sched_match.group(1).strip()
         # Extract Last run: line -> "iso_time  status"
         last_match = re.search(r"^\s*Last run:\s+(\S+)\s+(\S+)", block, re.MULTILINE)
         if last_match:
@@ -1335,6 +1396,135 @@ def _cron_health(cron_name: str) -> dict[str, Any]:
         break
 
     return result
+
+
+@meta_router.get("/detect")
+async def get_meta_detect(request: Request, workdir: str = "") -> dict[str, Any]:
+    """Auto-detect VCS provider, repo slug, and project name from a local path.
+
+    Used by the Add Project form to pre-fill fields when the user picks a folder.
+    Returns {"detected": false} on any error or when workdir is empty.
+    """
+    if not workdir:
+        return {"detected": False}
+    path = Path(workdir).expanduser().resolve()
+    if not path.is_dir():
+        return {"detected": False}
+    if detect_repo_vcs is None:
+        return {"detected": False}
+    try:
+        result = detect_repo_vcs(str(path))
+        repo = result.get("repo", "")
+        name = repo.split("/")[-1] if "/" in repo else path.name
+        return {
+            "detected": True,
+            "provider": result.get("provider", ""),
+            "repo": repo,
+            "name": name,
+        }
+    except Exception:
+        return {"detected": False}
+
+
+@meta_router.get("/pick-directory")
+async def get_meta_pick_directory(request: Request) -> dict[str, Any]:
+    """Open a native OS folder-picker dialog and return the selected path.
+
+    macOS only (uses osascript). Returns {"path": ""} when the user cancels.
+    """
+    import sys
+    if sys.platform != "darwin":
+        return {"path": "", "error": "native folder picker is only supported on macOS"}
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'POSIX path of (choose folder with prompt "Select repository folder")'],
+            capture_output=True, text=True, timeout=120,
+        )
+        path = result.stdout.strip().rstrip("/")
+        return {"path": path}
+    except subprocess.TimeoutExpired:
+        return {"path": ""}
+    except Exception as exc:
+        return {"path": "", "error": str(exc)}
+
+
+# ── Roster provisioning ──────────────────────────────────────────────────────
+
+_ROSTER_PROFILES = [
+    "project-manager", "planner", "developer",
+    "reviewer", "security-analyst", "documentation",
+]
+_PROVISION_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "provision_roster.sh"
+
+
+@meta_router.get("/roster-status")
+async def get_roster_status(request: Request) -> dict[str, Any]:
+    """Check which of the six specialist profiles are provisioned.
+
+    Returns ``{"all_provisioned": bool, "profiles": {name: bool}}``.
+    """
+    profiles_dir = _real_home() / ".hermes" / "profiles"
+    status: dict[str, bool] = {}
+    all_ok = True
+    for profile in _ROSTER_PROFILES:
+        exists = (profiles_dir / profile).is_dir()
+        status[profile] = exists
+        if not exists:
+            all_ok = False
+    return {"all_provisioned": all_ok, "profiles": status}
+
+
+@meta_router.post("/provision-roster")
+async def post_provision_roster(request: Request) -> dict[str, Any]:
+    """Run provision_roster.sh to install the six specialist profiles.
+
+    Reads any tokens already in ~/.hermes/.env and passes them as environment
+    variables so the profiles get push auth without the user re-typing them.
+
+    Returns ``{"ok": bool, "output": str, "error": str|None}``.
+    """
+    if not _PROVISION_SCRIPT.exists():
+        return {
+            "ok": False,
+            "output": "",
+            "error": f"provision_roster.sh not found at {_PROVISION_SCRIPT}",
+        }
+
+    # Build an env that includes tokens from ~/.hermes/.env so profiles get
+    # push auth automatically.
+    env = dict(os.environ)
+    env_path = _real_home() / ".hermes" / ".env"
+    if env_path.exists():
+        try:
+            for line in env_path.read_text().split("\n"):
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        except OSError:
+            pass
+
+    try:
+        result = subprocess.run(
+            ["bash", str(_PROVISION_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+        )
+        combined = (result.stdout + result.stderr).strip()
+        if result.returncode == 0:
+            return {"ok": True, "output": combined[:3000], "error": None}
+        return {
+            "ok": False,
+            "output": combined[:3000],
+            "error": f"script exited with code {result.returncode}",
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": "", "error": "provision_roster.sh timed out after 180s"}
+    except Exception as exc:
+        return {"ok": False, "output": "", "error": str(exc)[:500]}
 
 
 # ── Top-level router (defined at end so sub-routers are already populated) ───

@@ -194,7 +194,7 @@ class GitHubProvider(VCSProvider):
         nodes = ((((data or {}).get("repositoryOwner") or {}).get("projectsV2") or {})
                  .get("nodes") or [])
         return [BoardSummary(id=n.get("id") or "", number=n.get("number") or 0,
-                             title=n.get("title") or "") for n in nodes]
+                             title=n.get("title") or "") for n in nodes if n]
 
     def get_board_fields(self, board_id: str) -> List[FieldDef]:
         """``board_id`` is the project *number* (dashboard passes tracking config)."""
