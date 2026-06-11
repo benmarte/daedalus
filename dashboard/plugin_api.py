@@ -1123,6 +1123,53 @@ async def post_project_config(request: Request, name: str) -> dict[str, Any]:
     return {"status": "saved", "path": str(cfg_path), "cron": cron_result}
 
 
+@project_config_router.delete("/{name}")
+async def delete_project(name: str) -> dict[str, Any]:
+    """Remove a project from the registry and clean up its cron job and kanban board.
+
+    The project's .hermes/daedalus.yaml is intentionally left untouched so it
+    can be re-added at any time via '+ Add Project'.
+    """
+    workdir = _resolve_project_path(name)
+
+    removed: list[str] = []
+    skipped: list[str] = []
+
+    # 1. Remove cron job.
+    cron_name = f"{name}-daedalus"
+    ok, _ = _hermes_cmd("cron", "remove", cron_name)
+    if ok:
+        removed.append(f"cron job: {cron_name}")
+    else:
+        skipped.append(f"cron job: {cron_name} (not found or already removed)")
+
+    # 2. Remove kanban board.
+    loader = ConfigLoader()
+    try:
+        cfg = loader.resolve_repo_config(str(workdir))
+        repo = cfg.get("repo") or ""
+    except Exception:
+        repo = ""
+    slug = _board_slug(repo, name)
+    ok2, _ = _hermes_cmd("kanban", "boards", "rm", slug, "--delete")
+    if ok2:
+        removed.append(f"kanban board: {slug}")
+    else:
+        skipped.append(f"kanban board: {slug} (not found or already removed)")
+
+    # 3. Remove from registry — do this last so lookups above still work.
+    if registry is not None:
+        try:
+            registry.remove_project(str(workdir))
+            removed.append(f"registry entry: {workdir}")
+        except Exception as exc:
+            skipped.append(f"registry entry: {exc}")
+    else:
+        skipped.append("registry: module unavailable")
+
+    return {"ok": True, "removed": removed, "skipped": skipped}
+
+
 # ── Meta endpoints ───────────────────────────────────────────────────────────
 
 

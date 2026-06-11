@@ -1132,6 +1132,10 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var notifications = ns[0], setNotifications = ns[1];
     var sm = useState("");
     var selectedMethod = sm[0], setSelectedMethod = sm[1];
+    var rc = useState(false);
+    var confirmRemove = rc[0], setConfirmRemove = rc[1];
+    var rm = useState(false);
+    var removing = rm[0], setRemoving = rm[1];
     var br = useState([]);
     var branches = br[0], setBranches = br[1];
     var la = useState([]);
@@ -1709,11 +1713,37 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         React.createElement(
           "div",
           { style: S.modalBar },
-          React.createElement(Button, { label: saving ? "Saving\u2026" : "Save", variant: "primary", disabled: saving, onClick: save }),
-          React.createElement(Button, { label: "Cancel", onClick: props.onClose })
+          React.createElement(Button, { label: saving ? "Saving\u2026" : "Save", variant: "primary", disabled: saving || removing, onClick: save }),
+          React.createElement(Button, { label: "Cancel", disabled: removing, onClick: props.onClose }),
+          React.createElement(
+            "div",
+            { style: { marginLeft: "auto" } },
+            confirmRemove ? React.createElement(
+              "span",
+              { style: { display: "flex", gap: "8px", alignItems: "center" } },
+              React.createElement("span", { style: { fontSize: "12px", color: "#f87171" } }, "Remove from dashboard?"),
+              React.createElement(Button, { label: removing ? "Removing\u2026" : "Yes, remove", variant: "danger", disabled: removing, onClick: removeProject }),
+              React.createElement(Button, { label: "No", disabled: removing, onClick: function() {
+                setConfirmRemove(false);
+              } })
+            ) : React.createElement(Button, { label: "Remove Project", variant: "danger", onClick: function() {
+              setConfirmRemove(true);
+            } })
+          )
         )
       )
     );
+    function removeProject() {
+      setRemoving(true);
+      fetchJSON(apiProjectConfig(name), { method: "DELETE" }).then(function() {
+        setRemoving(false);
+        props.onRemoved();
+      }).catch(function(err) {
+        setRemoving(false);
+        setResult({ ok: false, errors: ["Remove failed: " + String(err && err.message || err)] });
+        setConfirmRemove(false);
+      });
+    }
   }
   function DeliverMultiPicker(props) {
     var targets = props.targets || [];
@@ -2406,6 +2436,10 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       modalProject ? React.createElement(ConfigModal, {
         name: modalProject,
         onClose: function() {
+          setModalProject(null);
+          load();
+        },
+        onRemoved: function() {
           setModalProject(null);
           load();
         }
