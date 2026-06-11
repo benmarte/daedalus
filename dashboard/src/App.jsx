@@ -1562,21 +1562,26 @@ function AddProjectModal(props) {
   var sv = useState(false); var saving = sv[0], setSaving = sv[1];
   var er = useState(null); var errors = er[0], setErrors = er[1];
 
+  function applyDetected(d) {
+    if (!d || !d.detected) return;
+    if (d.name && !name) setName(d.name);
+    if (d.repo && !repo) setRepo(d.repo);
+    if (d.provider) {
+      setProvider(d.provider);
+      setSrcToggles(function (prev) { return Object.assign({}, prev, { github_issues: true }); });
+    }
+    if (d.vcs_extra && Object.keys(d.vcs_extra).length > 0) {
+      setExtra(function (prev) { return Object.assign({}, prev, d.vcs_extra); });
+    }
+  }
+
   useEffect(function () {
     var trimmed = workdir.trim();
     if (!trimmed) return;
     var cancelled = false;
     var timer = setTimeout(function () {
       fetchJSON("/api/plugins/daedalus/meta/detect?workdir=" + encodeURIComponent(trimmed))
-        .then(function (d) {
-          if (cancelled || !d || !d.detected) return;
-          if (d.name && !name) setName(d.name);
-          if (d.repo && !repo) setRepo(d.repo);
-          if (d.provider) {
-            setProvider(d.provider);
-            setSrcToggles(function (prev) { return Object.assign({}, prev, { github_issues: true }); });
-          }
-        })
+        .then(function (d) { if (!cancelled) applyDetected(d); })
         .catch(function () {});
     }, 600);
     return function () { cancelled = true; clearTimeout(timer); };
@@ -1647,15 +1652,8 @@ function AddProjectModal(props) {
                     if (!d || !d.path) return;
                     setWorkdir(d.path);
                     fetchJSON("/api/plugins/daedalus/meta/detect?workdir=" + encodeURIComponent(d.path))
-                      .then(function (det) {
-                        if (!det || !det.detected) return;
-                        if (det.name && !name) setName(det.name);
-                        if (det.repo && !repo) setRepo(det.repo);
-                        if (det.provider) {
-                          setProvider(det.provider);
-                          setSrcToggles(function (prev) { return Object.assign({}, prev, { github_issues: true }); });
-                        }
-                      }).catch(function () {});
+                      .then(function (det) { applyDetected(det); })
+                      .catch(function () {});
                   }).catch(function () {});
               },
             }, "Browse…")

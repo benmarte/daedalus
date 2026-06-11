@@ -1479,6 +1479,7 @@ async def get_meta_detect(request: Request, workdir: str = "") -> dict[str, Any]
             "provider": result.get("provider", ""),
             "repo": repo,
             "name": name,
+            "vcs_extra": result.get("vcs_extra") or {},
         }
     except Exception:
         return {"detected": False}
