@@ -794,13 +794,66 @@ def _resolve_project_path(name: str) -> Path:
     raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
 
 
+def _parse_cron_list_blocks(output: str) -> list[dict[str, str]]:
+    """Parse ``hermes cron list --all`` output into job blocks.
+
+    A new block starts at a line matching ``^\\s*[0-9a-fA-F]{6,}\\s+\\[``
+    (e.g. ``  99f7d116a95b [active]``).  Inside each block, capture the
+    ``Name:`` value.  Box-drawing header/footer lines and warning lines are
+    skipped.
+
+    Returns a list of dicts with keys ``job_id`` and ``name``.
+    """
+    blocks: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+
+    for raw_line in output.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Skip box-drawing header/footer and warning lines
+        if (
+            line.startswith("┌")
+            or line.startswith("└")
+            or line.startswith("│")
+            or line.startswith("⚠")
+        ):
+            continue
+
+        # Block header: hex_id [status]
+        if re.match(r"^[0-9a-fA-F]{6,}\s+\[", line):
+            # Flush previous block
+            if current is not None and current.get("job_id") and current.get("name"):
+                blocks.append(current)
+            # Start new block — extract job_id from header
+            job_id = line.split()[0]
+            current = {"job_id": job_id, "name": ""}
+            continue
+
+        # Inside a block: capture Name:
+        if current is not None:
+            m = re.match(r"^Name:\s+(.*)", line)
+            if m:
+                current["name"] = m.group(1).strip()
+
+    # Flush final block
+    if current is not None and current.get("job_id") and current.get("name"):
+        blocks.append(current)
+
+    return blocks
+
+
 def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     """Reconcile the real ``hermes cron`` job with the config on save.
 
-    Cron job name = ``f"{project_name}-daedalus"``.  Idempotent — remove any
-    existing job first, then re-create if ``cron_cfg.schedule`` is non-empty.
-    A cron CLI failure is captured as an error string; this function NEVER raises, so
-    a broken ``hermes`` binary cannot fail the config save.
+    Cron job name = ``f"{project_name}-daedalus"``.  Idempotent — resolve
+    existing jobs by name from ``hermes cron list --all``, remove each by its
+    hex job ID (sweeping all same-name duplicates), then re-create if
+    ``cron_cfg.schedule`` is non-empty.
+
+    A cron CLI failure is captured as an error string; this function NEVER
+    raises, so a broken ``hermes`` binary cannot fail the config save.
 
     Args:
         project_name: The project name from the config.
@@ -818,23 +871,38 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
         "error": None,
     }
 
-    # 1. Remove any existing job (ignore "not found").
+    schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
+
+    # 1. List all cron jobs, find matches by name, remove each by job ID.
     try:
-        subprocess.run(
-            ["hermes", "cron", "remove", cron_name],
+        list_proc = subprocess.run(
+            ["hermes", "cron", "list", "--all"],
             capture_output=True,
             text=True,
             timeout=10,
         )
+        if list_proc.returncode == 0:
+            blocks = _parse_cron_list_blocks(list_proc.stdout)
+            matching_ids = [b["job_id"] for b in blocks if b.get("name") == cron_name]
+            for job_id in matching_ids:
+                try:
+                    subprocess.run(
+                        ["hermes", "cron", "remove", job_id],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    pass  # best-effort per-job removal
     except Exception:
-        pass  # non-fatal — the remove is best-effort
+        pass  # non-fatal — the list+remove is best-effort
 
-    # 2. If a schedule is set, re-create.
-    schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
+    # 2. If schedule is empty, we're done (all matches removed above).
     if not schedule:
         result["cron"] = "removed"
         return result
 
+    # 3. Create the new job.
     deliver = cron_cfg.get("deliver", "").strip() if cron_cfg else ""
 
     cmd = [

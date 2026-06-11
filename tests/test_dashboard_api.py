@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -722,6 +723,51 @@ def test_post_project_config_rejects_invalid_yaml_values(project_client, project
 # _reconcile_cron unit tests — mocked subprocess
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Sample cron list output for mocking
+_CRON_LIST_ONE_MATCH = """\
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Scheduled Jobs                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  99f7d116a95b [active]
+    Name:      test-project-daedalus
+    Schedule:  once in 15m
+    Script:    daedalus-cron.sh
+
+  ⚠  Gateway is not running — jobs won't fire automatically.
+"""
+
+_CRON_LIST_TWO_MATCHES = """\
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Scheduled Jobs                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  a1b2c3d4e5f6 [active]
+    Name:      test-project-daedalus
+    Schedule:  once in 15m
+    Script:    daedalus-cron.sh
+
+  99f7d116a95b [active]
+    Name:      test-project-daedalus
+    Schedule:  once in 30m
+    Script:    daedalus-cron.sh
+
+  ⚠  Gateway is not running — jobs won't fire automatically.
+"""
+
+_CRON_LIST_NO_MATCH = """\
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Scheduled Jobs                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  deadbeef1234 [active]
+    Name:      other-project-daedalus
+    Schedule:  once in 60m
+    Script:    daedalus-cron.sh
+
+  ⚠  Gateway is not running — jobs won't fire automatically.
+"""
+
 
 class TestReconcileCron:
     """Unit tests for _reconcile_cron with mocked subprocess.run."""
@@ -729,45 +775,78 @@ class TestReconcileCron:
     def _mock_run_ok(self, stdout="", stderr=""):
         return mock.Mock(returncode=0, stdout=stdout, stderr=stderr)
 
-    def _mock_run_fail(self, returncode=1, stderr="error creating cron"):
+    def _mock_run_fail(self, returncode=1, stderr="error"):
         return mock.Mock(returncode=returncode, stdout="", stderr=stderr)
+
+    def _make_dispatcher(self, list_stdout, remove_ok=True, create_ok=True,
+                         create_stdout="created: job j1"):
+        """Return a callable side_effect that dispatches on command args.
+
+        - ``cron list --all`` → returns list_stdout
+        - ``cron remove <hex_id>`` → returns ok or fail
+        - ``cron create ...`` → returns ok or fail
+        """
+        def _dispatch(args, **kwargs):
+            cmd = args
+            if cmd[1] == "cron" and cmd[2] == "list" and "--all" in cmd:
+                return self._mock_run_ok(stdout=list_stdout)
+            if cmd[1] == "cron" and cmd[2] == "remove":
+                # Verify the third arg is a hex job ID (not a name)
+                job_id = cmd[3]
+                assert re.match(r"^[0-9a-fA-F]{6,}$", job_id), \
+                    f"remove called with non-hex-id: {job_id}"
+                if remove_ok:
+                    return self._mock_run_ok()
+                return self._mock_run_fail()
+            if cmd[1] == "cron" and cmd[2] == "create":
+                if create_ok:
+                    return self._mock_run_ok(stdout=create_stdout)
+                return self._mock_run_fail(returncode=2, stderr="hermes: schedule invalid")
+            return self._mock_run_ok()
+        return _dispatch
+
+    # ── happy path: one match, remove by id, create ──────────────────────
 
     def test_creates_cron_with_schedule_no_deliver(self):
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._mock_run_ok(),                               # remove
-                self._mock_run_ok(stdout="created: job j1"),       # create
-            ]
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
         assert result["cron"] == "created"
         assert result["name"] == "test-project-daedalus"
         assert result["error"] is None
 
-        # Verify the create call args (it's the second subprocess.run call)
-        create_call = mock_run.call_args_list[1]
-        args = create_call[0][0]
-        assert args[0] == "hermes"
-        assert args[1] == "cron"
-        assert args[2] == "create"
-        assert "60m" in args
-        assert "--name" in args
-        assert "test-project-daedalus" in args
-        assert "--script" in args
-        assert "daedalus-cron.sh" in args
-        assert "--no-agent" in args
-        assert "--deliver" not in args  # no deliver set
+        # Verify calls: list, remove by hex id, create
+        calls = mock_run.call_args_list
+        assert len(calls) == 3
+
+        # Call 0: list --all
+        list_args = calls[0][0][0]
+        assert list_args[1:4] == ["cron", "list", "--all"]
+
+        # Call 1: remove by hex id (not name)
+        remove_args = calls[1][0][0]
+        assert remove_args[1:3] == ["cron", "remove"]
+        assert remove_args[3] == "99f7d116a95b"  # hex id from list output
+
+        # Call 2: create
+        create_args = calls[2][0][0]
+        assert create_args[1:3] == ["cron", "create"]
+        assert "60m" in create_args
+        assert "--name" in create_args
+        assert "test-project-daedalus" in create_args
+        assert "--script" in create_args
+        assert "daedalus-cron.sh" in create_args
+        assert "--no-agent" in create_args
+        assert "--deliver" not in create_args
 
     def test_creates_cron_with_schedule_and_deliver(self):
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._mock_run_ok(),
-                self._mock_run_ok(stdout="created: job j1"),
-            ]
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron(
                 "test-project",
                 {"schedule": "30m", "deliver": "slack:#engineering"},
@@ -776,76 +855,132 @@ class TestReconcileCron:
         assert result["cron"] == "created"
         assert result["error"] is None
 
-        create_call = mock_run.call_args_list[1]
+        create_call = mock_run.call_args_list[2]
         args = create_call[0][0]
         assert "--deliver" in args
         assert "slack:#engineering" in args
+
+    # ── sweep duplicates: two same-name jobs → both removed by id ────────
+
+    def test_sweeps_duplicate_cron_jobs(self):
+        """Two jobs with same name → both removed by hex id, then one created."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_TWO_MATCHES)
+            result = _reconcile_cron("test-project", {"schedule": "60m"})
+
+        assert result["cron"] == "created"
+        assert result["error"] is None
+
+        calls = mock_run.call_args_list
+        # list + 2 removes + create = 4 calls
+        assert len(calls) == 4
+
+        # Both remove calls use hex ids
+        remove1_args = calls[1][0][0]
+        remove2_args = calls[2][0][0]
+        assert remove1_args[3] == "a1b2c3d4e5f6"
+        assert remove2_args[3] == "99f7d116a95b"
+
+    # ── no match → no remove calls, just create ──────────────────────────
+
+    def test_no_match_still_creates(self):
+        """No matching job in list → no remove calls, still creates."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
+            result = _reconcile_cron("test-project", {"schedule": "60m"})
+
+        assert result["cron"] == "created"
+        assert result["error"] is None
+
+        calls = mock_run.call_args_list
+        # list + create = 2 calls (no remove)
+        assert len(calls) == 2
+        assert calls[0][0][0][1:4] == ["cron", "list", "--all"]
+        assert calls[1][0][0][1:3] == ["cron", "create"]
+
+    # ── empty schedule → remove matches, no create ───────────────────────
 
     def test_removes_cron_when_schedule_empty(self):
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._mock_run_ok(),  # remove
-                # No create call expected
-            ]
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": ""})
 
         assert result["cron"] == "removed"
         assert result["error"] is None
-        # Only one call — the remove
-        assert mock_run.call_count == 1
+        # list + remove = 2 calls (no create)
+        assert mock_run.call_count == 2
 
     def test_removes_cron_when_cron_cfg_none(self):
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.return_value = self._mock_run_ok()
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {})
 
         assert result["cron"] == "removed"
         assert result["error"] is None
-        assert mock_run.call_count == 1
+        assert mock_run.call_count == 2
 
-    def test_remove_failure_is_non_fatal(self):
-        """Even if 'hermes cron remove' fails, we still attempt create."""
+    # ── error resilience ─────────────────────────────────────────────────
+
+    def test_list_failure_is_non_fatal(self):
+        """If 'hermes cron list' fails, we still attempt create."""
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._mock_run_fail(returncode=1, stderr="not found"),  # remove fails
-                self._mock_run_ok(stdout="created: job j1"),            # create works
-            ]
+            mock_run.side_effect = self._make_dispatcher(
+                _CRON_LIST_ONE_MATCH, create_ok=True
+            )
+            # Override: first call (list) fails
+            orig = mock_run.side_effect
+            call_count = [0]
+            def fail_list_then_dispatch(args, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return self._mock_run_fail(returncode=1, stderr="list failed")
+                return orig(args, **kwargs)
+            mock_run.side_effect = fail_list_then_dispatch
+
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
         assert result["cron"] == "created"
         assert result["error"] is None
-        assert mock_run.call_count == 2
 
     def test_create_failure_captures_error(self):
         """A cron create failure is captured, not raised."""
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._mock_run_ok(),
-                self._mock_run_fail(returncode=2, stderr="hermes: schedule invalid"),
-            ]
+            mock_run.side_effect = self._make_dispatcher(
+                _CRON_LIST_ONE_MATCH, create_ok=False
+            )
             result = _reconcile_cron("test-project", {"schedule": "bad-schedule"})
 
         assert result["error"] is not None
         assert "schedule invalid" in result["error"]
-        # The config is still saved — error is just reported
 
     def test_hermes_cli_not_found(self):
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._mock_run_ok(),  # remove call (first call uses a different mock_run)
-            ]
-            # Second call raises FileNotFoundError
-            mock_run.side_effect = FileNotFoundError("hermes not on PATH")
+            mock_run.side_effect = self._make_dispatcher(
+                _CRON_LIST_ONE_MATCH, create_ok=True
+            )
+            # Override: create call raises FileNotFoundError
+            orig = mock_run.side_effect
+            call_count = [0]
+            def raise_on_create(args, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 3:  # third call = create
+                    raise FileNotFoundError("hermes not on PATH")
+                return orig(args, **kwargs)
+            mock_run.side_effect = raise_on_create
 
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -856,17 +991,48 @@ class TestReconcileCron:
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._mock_run_ok(),
-                self._mock_run_ok(stdout="created: job j1"),
-            ]
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "  60m  "})
 
         assert result["cron"] == "created"
-        create_call = mock_run.call_args_list[1]
+        create_call = mock_run.call_args_list[2]
         args = create_call[0][0]
         assert "60m" in args  # trimmed
         assert "  60m  " not in args
+
+    # ── _parse_cron_list_blocks unit tests ───────────────────────────────
+
+    def test_parse_cron_list_blocks_one_job(self):
+        from dashboard.plugin_api import _parse_cron_list_blocks
+
+        blocks = _parse_cron_list_blocks(_CRON_LIST_ONE_MATCH)
+        assert len(blocks) == 1
+        assert blocks[0]["job_id"] == "99f7d116a95b"
+        assert blocks[0]["name"] == "test-project-daedalus"
+
+    def test_parse_cron_list_blocks_two_jobs(self):
+        from dashboard.plugin_api import _parse_cron_list_blocks
+
+        blocks = _parse_cron_list_blocks(_CRON_LIST_TWO_MATCHES)
+        assert len(blocks) == 2
+        assert blocks[0]["job_id"] == "a1b2c3d4e5f6"
+        assert blocks[0]["name"] == "test-project-daedalus"
+        assert blocks[1]["job_id"] == "99f7d116a95b"
+        assert blocks[1]["name"] == "test-project-daedalus"
+
+    def test_parse_cron_list_blocks_empty(self):
+        from dashboard.plugin_api import _parse_cron_list_blocks
+
+        blocks = _parse_cron_list_blocks("")
+        assert blocks == []
+
+    def test_parse_cron_list_blocks_skips_warning(self):
+        from dashboard.plugin_api import _parse_cron_list_blocks
+
+        # Warning-only output (no jobs)
+        warning_only = "  ⚠  Gateway is not running — jobs won't fire automatically.\n"
+        blocks = _parse_cron_list_blocks(warning_only)
+        assert blocks == []
 
 
 class TestPostProjectConfigCron:
