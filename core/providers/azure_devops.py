@@ -140,6 +140,7 @@ class AzureDevOpsProvider(VCSProvider):
                 number=pr.get("pullRequestId"),
                 state=_PR_STATE.get((pr.get("status") or "").lower(), pr.get("status") or ""),
                 head_branch=(pr.get("sourceRefName") or "").replace("refs/heads/", ""),
+                title=pr.get("title") or "",
                 body=pr.get("description") or "",
                 url=pr.get("url") or "",
                 head_sha=((pr.get("lastMergeSourceCommit") or {}).get("commitId") or "")))

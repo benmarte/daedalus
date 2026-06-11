@@ -75,6 +75,10 @@ def test_pr_state_for_issue_branch_heuristics(provider):
     assert provider.pr_state_for_issue(7) == "open"
     provider._http.get_json.return_value = [_pr(4, "open", head="unrelated")]
     assert provider.pr_state_for_issue(7) is None
+    # A bare "#7" mention without a closing keyword must NOT link the PR
+    provider._http.get_json.return_value = [_pr(4, "open", head="z",
+                                                body="see #7 for context")]
+    assert provider.pr_state_for_issue(7) is None
 
 
 def test_find_pr_for_branch(provider):

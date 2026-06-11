@@ -103,6 +103,7 @@ class GitHubProvider(VCSProvider):
             head = pr.get("head") or {}
             out.append(PRSummary(number=pr.get("number"), state=st,
                                  head_branch=head.get("ref") or "",
+                                 title=pr.get("title") or "",
                                  body=pr.get("body") or "",
                                  url=pr.get("html_url") or "",
                                  head_sha=head.get("sha") or ""))

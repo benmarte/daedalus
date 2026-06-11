@@ -89,6 +89,27 @@ def test_missing_token_does_not_disable_provider():
         assert isinstance(get_provider(ADO_CFG), AzureDevOpsProvider)
 
 
+def test_validate_vcs():
+    from config import validate_vcs
+    assert validate_vcs({"repo": "o/r"}) == []                      # default github
+    assert validate_vcs({"repo": "o/r", "vcs": {"provider": "azure-devops",
+                                                "org": "a", "project": "p",
+                                                "repo": "r"}}) == []
+    assert any("owner/repo" in e for e in validate_vcs({"repo": "norepo"}))
+    assert any("project_path" in e
+               for e in validate_vcs({"vcs": {"provider": "gitlab"}}))
+    assert any("vcs.org" in e
+               for e in validate_vcs({"vcs": {"provider": "ado", "project": "p",
+                                              "repo": "r"}}))
+    assert any("not one of" in e
+               for e in validate_vcs({"vcs": {"provider": "cvs"}}))
+    assert any("status_map" in e
+               for e in validate_vcs({"repo": "o/r",
+                                      "vcs": {"status_map": {"bogus": "X"}}}))
+    assert validate_vcs({"repo": "o/r",
+                         "vcs": {"status_map": {"done": "Shipped"}}}) == []
+
+
 def test_status_map_defaults_and_override():
     p = get_provider({"repo": "o/r", "vcs": {"status_map": {"done": "Shipped"}}})
     assert p.status_name("done") == "Shipped"

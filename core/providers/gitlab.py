@@ -109,6 +109,7 @@ class GitLabProvider(VCSProvider):
                 number=mr.get("iid"),
                 state=_MR_STATE.get((mr.get("state") or "").lower(), mr.get("state") or ""),
                 head_branch=mr.get("source_branch") or "",
+                title=mr.get("title") or "",
                 body=mr.get("description") or "",
                 url=mr.get("web_url") or "",
                 head_sha=mr.get("sha") or ""))

@@ -449,16 +449,21 @@ def test_get_projects_open_prs_mocked(client):
         {"number": 43, "title": "Add rate limit", "headRefName": "feat/rate-limit", "state": "open"},
     ]
 
+    fake_provider = mock.MagicMock()
+    fake_provider.supports_ci_status = True
+    fake_provider.list_prs.return_value = [
+        mock.MagicMock(number=p["number"], title=p["title"],
+                       head_branch=p["headRefName"]) for p in mock_pr_data
+    ]
+    fake_provider.pr_ci_green.side_effect = [True, False]
+
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
-        with mock.patch("dashboard.plugin_api._gh_json") as mock_gh:
-            mock_gh.return_value = mock_pr_data
-            with mock.patch("dashboard.plugin_api.pr_ci_green") as mock_ci:
-                mock_ci.side_effect = [True, False]
-
-                resp = client.get("/api/plugins/daedalus/projects")
-                assert resp.status_code == 200, resp.text
-                data = resp.json()
+        with mock.patch("dashboard.plugin_api.get_provider",
+                        return_value=fake_provider):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
 
     prs = data[0]["open_prs"]
     assert prs is not None
@@ -473,7 +478,7 @@ def test_get_projects_open_prs_mocked(client):
 def test_get_projects_graceful_degration_when_sources_return_nothing(client):
     """When all data sources return nothing/None, the endpoint still returns 200."""
     with mock.patch("dashboard.plugin_api.list_tasks", None):
-        with mock.patch("dashboard.plugin_api._gh_json", None):
+        with mock.patch("dashboard.plugin_api.get_provider", None):
             with mock.patch("dashboard.plugin_api.registry", None):
                 resp = client.get("/api/plugins/daedalus/projects")
                 assert resp.status_code == 200, resp.text

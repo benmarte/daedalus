@@ -52,10 +52,9 @@ except ImportError:
     list_tasks = None  # type: ignore[assignment]
     kanban_diagnostics = None  # type: ignore[assignment]
 try:
-    from core.github_project import _gh_json, pr_ci_green
+    from core.providers import get_provider
 except ImportError:
-    _gh_json = None  # type: ignore[assignment]
-    pr_ci_green = None  # type: ignore[assignment]
+    get_provider = None  # type: ignore[assignment]
 
 config_router = APIRouter(prefix="/config", tags=["daedalus-config"])
 projects_router = APIRouter(prefix="/projects", tags=["daedalus-projects"])
@@ -444,34 +443,43 @@ def _needs_attention(slug: str) -> Optional[list[dict[str, str]]]:
     return items if items else None
 
 
-# ── GitHub PR helpers (degrade gracefully) ──────────────────────────────────
+# ── VCS PR helpers (degrade gracefully) ─────────────────────────────────────
 
-def _open_prs(repo: str) -> Optional[dict[str, Any]]:
+def _project_provider(resolved: dict[str, Any]):
+    """Build the VCS provider for a resolved project config, or None."""
+    if get_provider is None or not resolved:
+        return None
+    try:
+        return get_provider(resolved)
+    except Exception:
+        return None
+
+
+def _open_prs(provider) -> Optional[dict[str, Any]]:
     """Return open/in-review PRs with counts, numbers, and CI state.
 
-    Returns None when gh is unavailable or the repo has no open PRs.
+    Returns None when no provider is available or the repo has no open PRs.
     """
-    if _gh_json is None:
+    if provider is None:
         return None
-    data = _gh_json([
-        "pr", "list", "--repo", repo, "--state", "open", "--limit", "20",
-        "--json", "number,title,headRefName,state",
-    ])
-    if not data:
+    try:
+        prs = provider.list_prs(state="open", limit=20)
+    except Exception:
+        return None
+    if not prs:
         return None
     pr_list: list[dict[str, Any]] = []
-    for pr in data:
-        num = pr.get("number")
+    for pr in prs:
         ci = None
-        if num is not None and pr_ci_green is not None:
+        if pr.number is not None and provider.supports_ci_status:
             try:
-                ci = pr_ci_green(repo, int(num))
+                ci = provider.pr_ci_green(int(pr.number))
             except Exception:
                 ci = None
         pr_list.append({
-            "number": num,
-            "title": pr.get("title", ""),
-            "branch": pr.get("headRefName", ""),
+            "number": pr.number,
+            "title": pr.title,
+            "branch": pr.head_branch,
             "ci_green": ci,
         })
     return {
@@ -696,8 +704,8 @@ def _build_project_entry(
     # Kanban summary
     kanban_summary = _kanban_summary(slug)
 
-    # Open PRs
-    open_prs = _open_prs(repo)
+    # Open PRs (via the project's configured VCS provider)
+    open_prs = _open_prs(_project_provider(proj))
 
     # Cron info
     cron_cfg = proj.get("cron") or defaults.get("cron") or {}
@@ -747,7 +755,7 @@ def _build_registry_only_entry(
         "repo": repo_path,
         "workdir": repo_path,
         "kanban_summary": _kanban_summary(slug),
-        "open_prs": _open_prs(repo_path) if "/" in repo_path else None,
+        "open_prs": None,  # no per-repo config -> no VCS provider to query
         "cron": None,
         "needs_attention": _needs_attention(slug),
         "tracking_mode": "kanban",
@@ -1118,11 +1126,9 @@ async def test_deliver(request: Request) -> dict[str, Any]:
 # ── Meta helpers ─────────────────────────────────────────────────────────────
 
 
-def _project_repo(name: str) -> str:
-    """Resolve a project name to its owner/repo string.
+def _project_resolved(name: str) -> dict[str, Any]:
+    """Resolve a project name to its full per-repo config dict.
 
-    Uses _resolve_project_path to find the repo directory, then loads the
-    per-repo config to extract the canonical repo field (e.g. 'org/repo').
     Raises HTTPException(404) if the project is not found or has no repo.
     """
     repo_path = _resolve_project_path(name)
@@ -1134,50 +1140,55 @@ def _project_repo(name: str) -> str:
             status_code=404,
             detail=f"No daedalus config found for project '{name}'",
         )
-    repo = resolved.get("repo", "")
-    if not repo:
+    if not resolved.get("repo", ""):
         raise HTTPException(
             status_code=404,
             detail=f"Project '{name}' has no repo configured",
         )
-    return repo
+    return resolved
+
+
+def _project_repo(name: str) -> str:
+    """Resolve a project name to its owner/repo string (404 on missing)."""
+    return _project_resolved(name).get("repo", "")
 
 
 @meta_router.get("/branches")
 async def get_meta_branches(request: Request, project: str) -> dict[str, Any]:
-    """Return repo branches via gh api.
+    """Return repo branches via the project's VCS provider.
 
     Degrades gracefully to an empty list on any error.
     """
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"repo": "", "branches": []}
-    if _gh_json is None:
+    repo = resolved.get("repo", "")
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_branches:
         return {"repo": repo, "branches": []}
     try:
-        data = _gh_json(["api", f"repos/{repo}/branches?per_page=100"])
-        branches = [b["name"] for b in (data or [])] if data else []
-        return {"repo": repo, "branches": branches}
+        return {"repo": repo, "branches": provider.list_branches()}
     except Exception:
         return {"repo": repo, "branches": []}
 
 
 @meta_router.get("/labels")
 async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
-    """Return repo labels with names and colors via gh label list.
+    """Return repo labels with names and colors via the project's VCS provider.
 
     Degrades gracefully to an empty list on any error.
     """
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"repo": "", "labels": []}
-    if _gh_json is None:
+    repo = resolved.get("repo", "")
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_labels:
         return {"repo": repo, "labels": []}
     try:
-        data = _gh_json(["label", "list", "--repo", repo, "--json", "name,color", "--limit", "200"])
-        labels = [{"name": l["name"], "color": l.get("color", "")} for l in (data or [])]
+        labels = [{"name": l.name, "color": l.color} for l in provider.list_labels()]
         return {"repo": repo, "labels": labels}
     except Exception:
         return {"repo": repo, "labels": []}
@@ -1185,21 +1196,22 @@ async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
 
 @meta_router.get("/projects")
 async def get_meta_projects(request: Request, project: str) -> dict[str, Any]:
-    """Return GitHub Projects v2 boards for the repo's owner via gh project list.
+    """Return the provider's project boards (e.g. GitHub Projects v2).
 
     Degrades gracefully to an empty list on any error.
     """
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"owner": "", "projects": []}
+    repo = resolved.get("repo", "")
     owner = repo.split("/")[0] if "/" in repo else repo
-    if _gh_json is None:
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_boards:
         return {"owner": owner, "projects": []}
     try:
-        data = _gh_json(["project", "list", "--owner", owner, "--format", "json"])
-        projects = [{"number": p["number"], "title": p.get("title", "")} for p in (data or {}).get("projects", [])]
-        return {"owner": owner, "projects": projects}
+        boards = [{"number": b.number, "title": b.title} for b in provider.list_boards()]
+        return {"owner": owner, "projects": boards}
     except Exception:
         return {"owner": owner, "projects": []}
 
@@ -1208,7 +1220,7 @@ async def get_meta_projects(request: Request, project: str) -> dict[str, Any]:
 async def get_meta_statuses(
     request: Request, project: str, github_project_number: Optional[int] = None
 ) -> dict[str, Any]:
-    """Return Status field options for a GitHub Project board.
+    """Return Status field options for the configured board.
 
     Requires ``github_project_number`` to query the board's fields.
     Degrades gracefully to an empty list on any error.
@@ -1216,18 +1228,16 @@ async def get_meta_statuses(
     if github_project_number is None:
         return {"statuses": []}
     try:
-        repo = _project_repo(project)
+        resolved = _project_resolved(project)
     except HTTPException:
         return {"statuses": []}
-    owner = repo.split("/")[0] if "/" in repo else repo
-    if _gh_json is None:
+    provider = _project_provider(resolved)
+    if provider is None or not provider.supports_boards:
         return {"statuses": []}
     try:
-        data = _gh_json(["project", "field-list", str(github_project_number), "--owner", owner, "--format", "json"])
-        fields = (data or {}).get("fields", [])
-        for f in fields:
-            if str(f.get("name", "")).lower() == "status":
-                return {"statuses": [o.get("name", "") for o in f.get("options", [])]}
+        for f in provider.get_board_fields(str(github_project_number)):
+            if f.name.lower() == "status":
+                return {"statuses": [o.name for o in f.options]}
         return {"statuses": []}
     except Exception:
         return {"statuses": []}

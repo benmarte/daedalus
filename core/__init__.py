@@ -6,7 +6,7 @@ The live dispatch model creates a Hermes kanban card carrying the issue plus
 It does NOT execute the lifecycle in-process. Submodules:
 
 - kanban          — Hermes kanban board integration (the universal tracker)
-- github_project  — optional GitHub Projects status adapter (off unless configured)
+- providers       — VCS providers (GitHub / GitLab / Azure DevOps) over HTTPS APIs
 - lifecycle       — LifecycleEngine: the 8-phase lifecycle logic + unit tests
 - registry        — plain-text project registry (add, list, remove repo paths)
 

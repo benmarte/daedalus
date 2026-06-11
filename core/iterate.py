@@ -4,8 +4,9 @@ For every blocked card on the board, classify its blocked state into an action,
 then execute that action (complete, create fix-up tasks, unblock, escalate).
 Runs as part of the daedalus dispatcher auto-advance block.
 
-Pure helpers are unit-testable; the executors call ``core.kanban`` and
-``core.github_project`` and are guarded so failures log and continue.
+Pure helpers are unit-testable; the executors call ``core.kanban`` and the
+configured VCS provider (``core.providers``) and are guarded so failures log
+and continue.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from core import github_project as gp
 from core import kanban
 
 logger = logging.getLogger("daedalus.iterate")
@@ -553,6 +553,7 @@ def run_iterate(
     repo: str,
     *,
     resolved: Optional[Dict[str, Any]] = None,
+    provider: Optional[Any] = None,
     dry_run: bool = False,
 ) -> tuple[Dict[str, int], List[int]]:
     """Run the auto-advance routing and self-healing loop.
@@ -563,8 +564,11 @@ def run_iterate(
 
     Args:
         slug: Kanban board slug.
-        repo: GitHub repo (org/name).
+        repo: Repo identifier (org/name) — used in card bodies only.
         resolved: Optional resolved project config (for workdir, notify_target).
+        provider: Optional VCS provider (core.providers.VCSProvider) for PR/CI
+            lookups. Without one, branch→PR resolution is skipped and CI is
+            treated as not-green.
         dry_run: If True, log intentions without mutating anything.
 
     Returns:
@@ -612,16 +616,16 @@ def run_iterate(
         # Fallback: if handoff has no PR #, try the card's branch_name.
         if pr is None:
             branch_name = (card.get("branch_name") or "").strip()
-            if branch_name:
-                pr = gp.open_pr_for_branch(repo, branch_name)
+            if branch_name and provider is not None:
+                pr = provider.find_pr_for_branch(branch_name)
                 if pr is not None:
                     logger.info("iterate: %s resolved PR #%s via branch %s",
                                 tid, pr, branch_name)
 
         ci_green = False
-        if pr is not None:
+        if pr is not None and provider is not None:
             if pr not in ci_cache:
-                ci_cache[pr] = gp.pr_ci_green(repo, pr)
+                ci_cache[pr] = provider.pr_ci_green(pr)
             ci_green = ci_cache[pr]
 
         action = classify_blocked(assignee, handoff, ci_green,

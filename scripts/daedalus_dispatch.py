@@ -38,8 +38,8 @@ if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
 from config import ConfigLoader  # noqa: E402
-from core import github_project as gp  # noqa: E402
 from core import iterate  # noqa: E402
+from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
 from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
@@ -55,22 +55,14 @@ def _board_slug(repo: str, name: str = "") -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
 
 
-def _fetch_issues(repo: str, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Open issues matching the configured label filter (ANY label), deduped."""
+    if provider is None:
+        return []
     state = filters.get("state", "open")
     limit = int(filters.get("limit", 20))
     labels = [l for l in (filters.get("labels") or []) if l]
-    label_sets = [[l] for l in labels] or [[]]
-    seen: Dict[int, Dict[str, Any]] = {}
-    for ls in label_sets:
-        args = ["issue", "list", "--repo", repo, "--state", state, "--limit", str(limit),
-                "--json", "number,title,body,labels"]
-        for l in ls:
-            args += ["--label", l]
-        data = gp._gh_json(args)
-        for it in (data or []):
-            seen.setdefault(it["number"], it)
-    return list(seen.values())[:limit]
+    return [i.as_dict() for i in provider.list_issues(state=state, labels=labels, limit=limit)]
 
 
 def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
@@ -108,37 +100,41 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
 
 
 def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatch: int = 5,
-        dry_run: bool = False) -> Dict[str, Any]:
+        dry_run: bool = False, provider=None) -> Dict[str, Any]:
     """Reconcile statuses, create tasks for new issues, and dispatch. Returns a summary.
 
-    When dry_run is True, no GitHub status moves, kanban cards, or dispatches happen —
+    When dry_run is True, no board status moves, kanban cards, or dispatches happen —
     every mutating action is logged as "[dry-run] would ..." and reflected in the
     returned summary, so a tick can be safely previewed before scheduling the cron.
+
+    ``provider`` (a core.providers.VCSProvider) is built from the resolved config
+    when not injected (tests inject a fake).
     """
     repo = resolved.get("repo", "")
-    owner = repo.split("/")[0] if "/" in repo else repo
     filters = (resolved.get("issues") or {}).get("filters", {})
     execution = resolved.get("execution") or {}
     iterations = int(execution.get("max_lifecycle_iterations", 3))   # self-improving loop cap (configurable)
     # Worker assignment is handled by decompose() routing on profile descriptions,
     # so no single worker_profile is pinned here.
     workdir = resolved.get("workdir", "")
-    # Slack/etc. target the documentation agent posts its completion report to.
+    # Messaging target the documentation agent's completion report is sent to.
     notify_target = (resolved.get("cron") or {}).get("deliver", "")
     base_branch = (resolved.get("vcs") or {}).get("target_branch", "dev")
     slug = _board_slug(repo, resolved.get("name", ""))
-    proj_num = (resolved.get("tracking") or {}).get("github_project_number")
-    ghproj = gp.GitHubProject(owner, proj_num) if proj_num else None
-    if not ghproj:
-        logger.warning("dispatch: no tracking.github_project_number set — skipping GitHub status moves")
+    if provider is None:
+        provider = providers.get_provider(resolved)
+    board_mode = bool(provider is not None and provider.board_configured())
+    if not board_mode:
+        logger.warning("dispatch: no VCS board configured — skipping board status moves")
 
-    # Ready-gating: when a Project board is configured, ONLY issues whose Project
-    # status is in the configured ready_statuses become new work. PR-state reconciliation
+    # Ready-gating: when a board is configured, ONLY issues whose board status is
+    # in the configured ready_statuses become new work. PR-state reconciliation
     # (open/merged -> In review) below still runs for every open issue, regardless of status.
     ready: Optional[set] = None
-    if ghproj:
-        ready_statuses = (resolved.get("tracking") or {}).get("ready_statuses") or ["Ready"]
-        ready = ghproj.numbers_with_statuses(ready_statuses)
+    if board_mode:
+        ready_statuses = ((resolved.get("tracking") or {}).get("ready_statuses")
+                          or [provider.status_name("ready")])
+        ready = provider.board_numbers_with_statuses(ready_statuses)
         logger.info("dispatch: %d issue(s) in %s: %s", len(ready), ready_statuses, sorted(ready))
 
     kanban.ensure_board(slug)
@@ -184,7 +180,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                         d.get("severity", "?"), d.get("task_id", "?"),
                         d.get("message", ""))
     iterate_counts, advance_prs = iterate.run_iterate(
-        slug, repo, resolved=resolved, dry_run=dry_run,
+        slug, repo, resolved=resolved, provider=provider, dry_run=dry_run,
     )
     # Separate advance PR numbers from routed actions (dev_fix / escalate) for
     # the human summary so PR numbers are reported correctly.
@@ -193,22 +189,22 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     if any(c > 0 for c in iterate_counts.values()) and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
-    # ── Slack doc-report delivery ────────────────────────────────────────────
+    # ── doc-report delivery ──────────────────────────────────────────────────
     # The dispatcher delivers documentation reports (PR comments prefixed
     # `**Agent: documentation**`) to the configured notify_target, because
-    # agents run in isolated profile HOMEs without Slack config. Idempotent
+    # agents run in isolated profile HOMEs without messaging config. Idempotent
     # via a hidden PR comment sentinel.
     slack_delivered = _deliver_doc_reports(
-        slug, repo, notify_target, dry_run=dry_run,
+        slug, provider, notify_target, dry_run=dry_run,
     )
 
     created, reconciled, completed = [], [], []
     issues: List[Dict[str, Any]] = []
 
-    if not ghproj:
-        # Kanban-only mode: no GitHub Project board, so the kanban board IS the
-        # tracker. A human creates a triage card (dashboard / `hermes kanban
-        # create --triage`); we fan every triage card out across the roster and
+    if not board_mode:
+        # Kanban-only mode: no VCS board, so the kanban board IS the tracker.
+        # A human creates a triage card (dashboard / `hermes kanban create
+        # --triage`); we fan every triage card out across the roster and
         # dispatch. (auto-advance above already flows review-required handoffs.)
         if dry_run:
             logger.info("[dry-run] kanban-only: would decompose triage cards + dispatch")
@@ -223,9 +219,10 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         logger.info("dispatch summary: %s", summary)
         return summary
 
-    # GitHub-Project mode: poll Ready issues, reconcile PR state, triage+decompose.
+    # Board mode: poll Ready issues, reconcile PR state, triage+decompose.
+    in_review_name = provider.status_name("in_review")
     existing = kanban.list_issue_numbers(slug)
-    issues = _fetch_issues(repo, filters)
+    issues = _fetch_issues(provider, filters)
 
     for issue in issues:
         n = issue["number"]
@@ -233,7 +230,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # kanban card. Issues the daedalus never dispatched (incl. everything not
         # in "Ready") are left untouched, so a tick never surprises non-Ready issues.
         if n in existing:
-            pr = gp.pr_state_for_issue(repo, n)
+            pr = provider.pr_state_for_issue(n)
             if pr == "merged":
                 # Merged into dev = work complete. GitHub does NOT auto-close issues
                 # on a non-default-branch merge, so we do it: card -> Done + close.
@@ -241,30 +238,29 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                     logger.info("[dry-run] would set #%s -> Done + close issue (PR merged)", n)
                     completed.append(n)
                 else:
-                    if ghproj:
-                        ghproj.set_status(n, "Done")
-                    if gp.close_issue(repo, n):
+                    provider.board_set_status(n, provider.status_name("done"))
+                    if provider.close_issue(n):
                         completed.append(n)
             elif pr == "open":
                 # PR open and awaiting review -> In review.
                 if dry_run:
-                    logger.info("[dry-run] would set #%s -> In review (PR open)", n)
-                    reconciled.append((n, "In review"))
-                elif ghproj and ghproj.set_status(n, "In review"):
-                    reconciled.append((n, "In review"))
+                    logger.info("[dry-run] would set #%s -> %s (PR open)", n, in_review_name)
+                    reconciled.append((n, in_review_name))
+                elif provider.board_set_status(n, in_review_name):
+                    reconciled.append((n, in_review_name))
             # No/closed PR on a managed issue: leave it (worker still in progress).
             continue
         # Unmanaged issue: only "Ready" items become new work.
         if ready is not None and n not in ready:
             continue  # Ready-gating: not in "Ready" -> don't dispatch yet
-        if gp.pr_state_for_issue(repo, n):
+        if provider.pr_state_for_issue(n):
             # Already has an open/merged PR -> work exists; don't dispatch a
             # duplicate worker. (Checked only for Ready candidates to limit API calls.)
             logger.info("dispatch: #%s is Ready but already has a PR — skipping (no duplicate)", n)
             continue
         if len(created) >= max_dispatch:
             break  # cap new tasks per tick
-        # New work (deterministic, code): GitHub overall status -> In progress, then
+        # New work (deterministic, code): board status -> In progress, then
         # create a TRIAGE card and decompose it so the roster fans out across
         # developer -> reviewer -> security-analyst -> documentation. Hermes tracks
         # each sub-task live on the board.
@@ -274,8 +270,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             created.append(n)
             existing.add(n)
             continue
-        if ghproj:
-            ghproj.set_status(n, "In progress")
+        provider.board_set_status(n, provider.status_name("in_progress"))
         # Pin the triage to the project checkout; Hermes propagates the workspace to
         # every decomposed child, so no worker can wander into the wrong repo.
         tid = kanban.create_triage(slug, n, issue.get("title", ""),
@@ -290,7 +285,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     if created and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)  # nudge (gateway also auto-dispatches)
 
-    summary = {"board": slug, "mode": "github", "created": created, "reconciled": reconciled,
+    summary = {"board": slug, "mode": provider.name, "created": created, "reconciled": reconciled,
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),
                "spec_created": spec_created, "slack_delivered": slack_delivered}
@@ -385,10 +380,10 @@ def _send_via_hermes(notify_target: str, report_body: str) -> bool:
 
 
 def _deliver_doc_reports(
-    slug: str, repo: str, notify_target: str,
+    slug: str, provider, notify_target: str,
     *, dry_run: bool = False,
 ) -> List[int]:
-    """Deliver completed documentation reports to Slack from the dispatcher.
+    """Deliver completed documentation reports to the messaging target.
 
     Scans the board's DONE cards for documentation cards whose linked PR has a
     ``**Agent: documentation**`` comment. For each such PR, fetches the report
@@ -404,7 +399,7 @@ def _deliver_doc_reports(
     Returns the list of PR numbers that were successfully delivered (for the
     human summary).
     """
-    if not notify_target:
+    if not notify_target or provider is None:
         return []
 
     delivered: List[int] = []
@@ -420,7 +415,7 @@ def _deliver_doc_reports(
         pr_number = _parse_pr_from_card(card)
         if pr_number is None:
             # Try parent → issue number → PR
-            pr_number = _resolve_pr_from_parents(slug, repo, card)
+            pr_number = _resolve_pr_from_parents(slug, provider, card)
 
         if pr_number is None:
             logger.debug(
@@ -430,7 +425,7 @@ def _deliver_doc_reports(
             continue
 
         # Idempotence: skip if already delivered
-        if gp.pr_has_delivery_marker(repo, pr_number):
+        if provider.pr_has_delivery_marker(pr_number):
             logger.debug(
                 "dispatch: PR #%s already has slack-delivered marker — skipping",
                 pr_number,
@@ -438,7 +433,7 @@ def _deliver_doc_reports(
             continue
 
         # Find the **Agent: documentation** comment on the PR
-        report_body = _find_doc_comment(repo, pr_number)
+        report_body = _find_doc_comment(provider, pr_number)
         if not report_body:
             logger.debug(
                 "dispatch: PR #%s has no **Agent: documentation** comment yet — skipping",
@@ -454,13 +449,13 @@ def _deliver_doc_reports(
             delivered.append(pr_number)
             continue
 
-        # Deliver to Slack via dispatcher's root context
+        # Deliver via the dispatcher's root context
         if not _send_via_hermes(notify_target, report_body):
             # Send failure → do NOT post the sentinel (retry next tick)
             continue
 
         # Post sentinel so we never re-deliver
-        if not gp.pr_post_delivery_marker(repo, pr_number, report_body):
+        if not provider.post_delivery_marker(pr_number, report_body):
             # Sentinel post failure is noisy but not fatal — we delivered.
             # Next tick might re-deliver but the dedup sentinel is best-effort.
             logger.warning(
@@ -485,7 +480,7 @@ def _parse_pr_from_card(card: dict) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _resolve_pr_from_parents(slug: str, repo: str, card: dict) -> Optional[int]:
+def _resolve_pr_from_parents(slug: str, provider, card: dict) -> Optional[int]:
     """Walk parent cards to find an issue number, then resolve to a PR."""
     parents = card.get("parents") or []
     for pid in parents:
@@ -496,16 +491,16 @@ def _resolve_pr_from_parents(slug: str, repo: str, card: dict) -> Optional[int]:
         m = re.search(r"#(\d+)", (parent.get("title") or ""))
         if m:
             issue_num = int(m.group(1))
-            pr = gp.pr_number_for_issue(repo, issue_num)
+            pr = provider.pr_number_for_issue(issue_num)
             if pr:
                 return pr
     return None
 
 
-def _find_doc_comment(repo: str, pr_number: int) -> str:
+def _find_doc_comment(provider, pr_number: int) -> str:
     """Return the body of the first ``**Agent: documentation**`` PR comment, or ''."""
-    for c in gp.pr_comments(repo, pr_number):
-        body = c.get("body") or ""
+    for c in provider.list_pr_comments(pr_number):
+        body = c.body or ""
         if "**Agent: documentation**" in body:
             return body
     return ""

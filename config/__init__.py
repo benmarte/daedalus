@@ -62,6 +62,45 @@ def strip_project_key(config: dict) -> dict:
     return result
 
 
+VALID_VCS_PROVIDERS = ("github", "gitlab", "azuredevops")
+
+
+def validate_vcs(resolved: dict) -> list[str]:
+    """Validate the vcs section of a resolved per-repo config.
+
+    Returns a list of human-readable errors (empty when valid). A missing
+    vcs section defaults to GitHub for backward compatibility.
+    """
+    errors: list[str] = []
+    vcs = resolved.get("vcs") or {}
+    provider = (vcs.get("provider") or "github").lower().replace("-", "").replace("_", "")
+    provider = {"azure": "azuredevops", "ado": "azuredevops"}.get(provider, provider)
+    if provider not in VALID_VCS_PROVIDERS:
+        errors.append(f"vcs.provider '{vcs.get('provider')}' is not one of: "
+                      + ", ".join(VALID_VCS_PROVIDERS))
+        return errors
+    if provider == "github":
+        repo = (resolved.get("repo") or "").strip()
+        if "/" not in repo:
+            errors.append("github provider requires top-level repo: \"owner/repo\"")
+    elif provider == "gitlab":
+        path = (vcs.get("project_path") or resolved.get("repo") or "").strip()
+        if not vcs.get("project_id") and "/" not in path:
+            errors.append("gitlab provider requires vcs.project_id or "
+                          "vcs.project_path (\"group/project\")")
+    elif provider == "azuredevops":
+        for key in ("org", "project", "repo"):
+            if not (vcs.get(key) or "").strip():
+                errors.append(f"azuredevops provider requires vcs.{key}")
+    for key, val in (vcs.get("status_map") or {}).items():
+        if key not in ("ready", "in_progress", "in_review", "done"):
+            errors.append(f"vcs.status_map: unknown status key '{key}' "
+                          "(expected ready/in_progress/in_review/done)")
+        elif not isinstance(val, str) or not val.strip():
+            errors.append(f"vcs.status_map.{key} must be a non-empty string")
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # ConfigLoader
 # ---------------------------------------------------------------------------
