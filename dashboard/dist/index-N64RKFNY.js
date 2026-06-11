@@ -230,6 +230,9 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
   var apiProjectConfig = function(name) {
     return "/api/plugins/daedalus/project/" + encodeURIComponent(name) + "/config";
   };
+  var apiProject = function(name) {
+    return "/api/plugins/daedalus/project/" + encodeURIComponent(name);
+  };
   var apiMetaUrl = function(name, endpoint) {
     return "/api/plugins/daedalus/meta/" + endpoint + "?project=" + encodeURIComponent(name);
   };
@@ -1735,7 +1738,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     );
     function removeProject() {
       setRemoving(true);
-      fetchJSON(apiProjectConfig(name), { method: "DELETE" }).then(function() {
+      fetchJSON(apiProject(name), { method: "DELETE" }).then(function() {
         setRemoving(false);
         props.onRemoved();
       }).catch(function(err) {

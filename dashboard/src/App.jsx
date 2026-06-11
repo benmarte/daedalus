@@ -86,6 +86,7 @@ var API_PROJECTS = "/api/plugins/daedalus/projects";
 var API_PROJECT_CREATE = "/api/plugins/daedalus/project/create";
 var API_UNINSTALL = "/api/plugins/daedalus/meta/uninstall";
 var apiProjectConfig = function (name) { return "/api/plugins/daedalus/project/" + encodeURIComponent(name) + "/config"; };
+var apiProject = function (name) { return "/api/plugins/daedalus/project/" + encodeURIComponent(name); };
 var apiMetaUrl = function (name, endpoint) { return "/api/plugins/daedalus/meta/" + endpoint + "?project=" + encodeURIComponent(name); };
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -1378,7 +1379,7 @@ function ConfigModal(props) {
 
   function removeProject() {
     setRemoving(true);
-    fetchJSON(apiProjectConfig(name), { method: "DELETE" })
+    fetchJSON(apiProject(name), { method: "DELETE" })
       .then(function () {
         setRemoving(false);
         props.onRemoved();
