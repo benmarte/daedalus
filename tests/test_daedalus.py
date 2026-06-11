@@ -640,7 +640,7 @@ def test_human_summary_slack_delivered():
                "routed_actions": {}, "issues_seen": 5, "spec_created": [],
                "slack_delivered": [42, 99]}
     msg = disp._human_summary({"test": summary})
-    check("_human_summary includes Slack delivery", "📨 Slack PR #42, PR #99" in msg)
+    check("_human_summary includes doc-report delivery", "📨 delivered PR #42, PR #99" in msg)
 
     # Empty slack_delivered → no mention
     summary2 = {"board": "test", "mode": "github", "created": [],
@@ -697,6 +697,111 @@ def test_dispatch_summary_has_slack_delivered():
         check("board summary has slack_delivered", s2.get("slack_delivered") == [42])
 
 
+def test_notify_targets():
+    """_notify_targets: notifications[] wins, event-filters, falls back to deliver."""
+    disp = _load_dispatch()
+
+    legacy = {"cron": {"deliver": "slack:tasks"}}
+    check("legacy deliver receives every event",
+          disp._notify_targets(legacy, "doc-report") == ["slack:tasks"]
+          and disp._notify_targets(legacy, "dispatch-summary") == ["slack:tasks"])
+
+    check("no config → no targets", disp._notify_targets({}, "doc-report") == [])
+
+    multi = {"cron": {"deliver": "slack:legacy", "notifications": [
+        {"platform": "Slack", "target": "slack:C1", "events": ["doc-report"]},
+        {"platform": "Discord", "target": "discord:#general",
+         "events": ["dispatch-summary", "pr-ready"]},
+        {"platform": "Telegram", "target": "telegram:-100123"},  # no events → all
+        {"platform": "Signal", "target": ""},                    # invalid → skipped
+    ]}}
+    check("notifications[] overrides legacy deliver",
+          "slack:legacy" not in disp._notify_targets(multi, "doc-report"))
+    check("doc-report goes to subscribed + catch-all targets",
+          disp._notify_targets(multi, "doc-report") == ["slack:C1", "telegram:-100123"])
+    check("dispatch-summary respects event filters",
+          disp._notify_targets(multi, "dispatch-summary")
+          == ["discord:#general", "telegram:-100123"])
+    check("pipeline-failure reaches only catch-all",
+          disp._notify_targets(multi, "pipeline-failure") == ["telegram:-100123"])
+
+
+def test_summary_events():
+    disp = _load_dispatch()
+    check("plain tick → dispatch-summary only",
+          disp._summary_events({"created": [1]}) == {"dispatch-summary"})
+    check("error adds pipeline-failure",
+          "pipeline-failure" in disp._summary_events({"error": "boom"}))
+    check("advanced PRs add pr-ready",
+          "pr-ready" in disp._summary_events({"advance_prs": [7]}))
+    check("reconciled adds pr-ready",
+          "pr-ready" in disp._summary_events({"reconciled": [(7, "In review")]}))
+
+
+def test_notify_project_summary_fans_out():
+    """_notify_project_summary sends each project summary to its own targets."""
+    disp = _load_dispatch()
+    sent = []
+    summary = {"board": "b", "mode": "github", "created": [1], "reconciled": [],
+               "completed": [], "advance_prs": [], "routed_actions": {},
+               "issues_seen": 1, "spec_created": [], "slack_delivered": []}
+
+    resolved = {"cron": {"notifications": [
+        {"platform": "Slack", "target": "slack:C1", "events": ["dispatch-summary"]},
+        {"platform": "Discord", "target": "discord:#x", "events": ["doc-report"]},
+    ]}}
+    with mock.patch.object(disp, "_send_via_hermes",
+                           side_effect=lambda t, m: sent.append(t) or True):
+        handled = disp._notify_project_summary("proj", summary, resolved)
+    check("notifications project is handled (excluded from stdout)", handled is True)
+    check("summary sent only to dispatch-summary targets", sent == ["slack:C1"])
+
+    sent.clear()
+    legacy = {"cron": {"deliver": "slack:tasks"}}
+    with mock.patch.object(disp, "_send_via_hermes",
+                           side_effect=lambda t, m: sent.append(t) or True):
+        handled2 = disp._notify_project_summary("proj", summary, legacy)
+    check("legacy project flows through cron stdout (not self-sent)",
+          handled2 is False and sent == [])
+
+
+def test_deliver_doc_reports_multi_target():
+    """_deliver_doc_reports fans a report out to every configured target."""
+    disp = _load_dispatch()
+    doc_card = {"id": "t_doc", "assignee": "documentation", "body": "PR #42.",
+                "latest_summary": "", "parents": []}
+    sent = []
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
+        with mock.patch.object(gp, "pr_has_delivery_marker", return_value=False):
+            with mock.patch.object(disp, "_find_doc_comment",
+                                   return_value="**Agent: documentation**\n\nReport"):
+                with mock.patch.object(disp, "_send_via_hermes",
+                                       side_effect=lambda t, m: sent.append(t) or True):
+                    with mock.patch.object(gp, "post_delivery_marker", return_value=True):
+                        result = disp._deliver_doc_reports(
+                            "slug", gp, ["slack:C1", "discord:#docs"],
+                        )
+    check("multi-target delivers the PR once", result == [42])
+    check("report sent to every target", sent == ["slack:C1", "discord:#docs"])
+
+    # Partial failure: sentinel still posted (one target got it), PR delivered
+    sent.clear()
+    marker_posts = []
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
+        with mock.patch.object(gp, "pr_has_delivery_marker", return_value=False):
+            with mock.patch.object(disp, "_find_doc_comment",
+                                   return_value="**Agent: documentation**\n\nReport"):
+                with mock.patch.object(disp, "_send_via_hermes",
+                                       side_effect=lambda t, m: t == "slack:C1"):
+                    with mock.patch.object(gp, "post_delivery_marker",
+                                           side_effect=lambda pr, body="": marker_posts.append(pr) or True):
+                        result2 = disp._deliver_doc_reports(
+                            "slug", gp, ["slack:C1", "discord:#docs"],
+                        )
+    check("partial failure still counts as delivered", result2 == [42])
+    check("sentinel posted after partial success", marker_posts == [42])
+
+
 if __name__ == "__main__":
     print("Daedalus tests")
     print("-" * 60)
@@ -719,7 +824,11 @@ if __name__ == "__main__":
                test_resolve_pr_from_parents,
                test_human_summary_slack_delivered,
                test_task_body_no_slack,
-               test_dispatch_summary_has_slack_delivered):
+               test_dispatch_summary_has_slack_delivered,
+               test_notify_targets,
+               test_summary_events,
+               test_notify_project_summary_fans_out,
+               test_deliver_doc_reports_multi_target):
         fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")

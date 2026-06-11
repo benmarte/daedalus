@@ -48,6 +48,36 @@ logger = logging.getLogger("daedalus.dispatch")
 
 _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify → Ship")
 
+# Notification event types a cron.notifications[] entry can subscribe to.
+NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready")
+
+
+def _notify_targets(resolved: Dict[str, Any], event: str) -> List[str]:
+    """Delivery targets for a notification event.
+
+    ``cron.notifications`` (list of {platform, target, events}) takes
+    precedence; entries with no ``events`` list receive every event.
+    Falls back to the legacy single ``cron.deliver`` string, which receives
+    every event. Targets are ``hermes send`` strings (``slack:C123``,
+    ``discord:#general``, ``telegram:-100123``, ``signal:+15551234``, …).
+    """
+    cron = resolved.get("cron") or {}
+    notifications = cron.get("notifications")
+    if notifications:
+        out: List[str] = []
+        for entry in notifications:
+            if not isinstance(entry, dict):
+                continue
+            target = (entry.get("target") or "").strip()
+            if not target:
+                continue
+            events = entry.get("events") or list(NOTIFY_EVENTS)
+            if event in events and target not in out:
+                out.append(target)
+        return out
+    deliver = (cron.get("deliver") or "").strip()
+    return [deliver] if deliver else []
+
 
 def _board_slug(repo: str, name: str = "") -> str:
     import re
@@ -203,11 +233,11 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
 
     # ── doc-report delivery ──────────────────────────────────────────────────
     # The dispatcher delivers documentation reports (PR comments prefixed
-    # `**Agent: documentation**`) to the configured notify_target, because
-    # agents run in isolated profile HOMEs without messaging config. Idempotent
-    # via a hidden PR comment sentinel.
+    # `**Agent: documentation**`) to every configured doc-report target,
+    # because agents run in isolated profile HOMEs without messaging config.
+    # Idempotent via a hidden PR comment sentinel.
     slack_delivered = _deliver_doc_reports(
-        slug, provider, notify_target, dry_run=dry_run,
+        slug, provider, _notify_targets(resolved, "doc-report"), dry_run=dry_run,
     )
 
     created, reconciled, completed = [], [], []
@@ -339,7 +369,7 @@ def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False) 
         if s.get("reconciled"):
             bits.append("🔄 " + ", ".join(f"#{n}→{st}" for n, st in s["reconciled"]))
         if s.get("slack_delivered"):
-            bits.append("📨 Slack " + ", ".join(f"PR #{pr}" for pr in s["slack_delivered"]))
+            bits.append("📨 delivered " + ", ".join(f"PR #{pr}" for pr in s["slack_delivered"]))
         if bits:
             lines.append(f"• *{name}* ({s.get('mode', '?')}): " + "; ".join(bits))
     if not lines:
@@ -393,26 +423,30 @@ def _send_via_hermes(notify_target: str, report_body: str) -> bool:
 
 
 def _deliver_doc_reports(
-    slug: str, provider, notify_target: str,
+    slug: str, provider, notify_targets,
     *, dry_run: bool = False,
 ) -> List[int]:
-    """Deliver completed documentation reports to the messaging target.
+    """Deliver completed documentation reports to the messaging target(s).
 
     Scans the board's DONE cards for documentation cards whose linked PR has a
     ``**Agent: documentation**`` comment. For each such PR, fetches the report
-    body from the comment and sends it to ``notify_target`` via ``hermes send``.
+    body from the comment and sends it to every target in ``notify_targets``
+    (a list of ``hermes send`` target strings; a bare string is accepted for
+    backward compatibility).
 
     Idempotent: posts a hidden sentinel PR comment
     (``<!-- daedalus:slack-delivered -->``) after delivery; skips PRs that already
-    have it.
-
-    Degrades gracefully: ``hermes send`` failure logs a warning and does NOT
-    post the sentinel, so the next tick will retry.
+    have it. The sentinel is posted once ANY target received the report (so a
+    flaky secondary channel can't re-spam the channels that already got it);
+    failed targets are logged.
 
     Returns the list of PR numbers that were successfully delivered (for the
     human summary).
     """
-    if not notify_target or provider is None:
+    if isinstance(notify_targets, str):
+        notify_targets = [notify_targets] if notify_targets else []
+    notify_targets = [t for t in (notify_targets or []) if t]
+    if not notify_targets or provider is None:
         return []
 
     delivered: List[int] = []
@@ -457,15 +491,22 @@ def _deliver_doc_reports(
         if dry_run:
             logger.info(
                 "[dry-run] would deliver doc report for PR #%s to %s",
-                pr_number, notify_target,
+                pr_number, ", ".join(notify_targets),
             )
             delivered.append(pr_number)
             continue
 
-        # Deliver via the dispatcher's root context
-        if not _send_via_hermes(notify_target, report_body):
-            # Send failure → do NOT post the sentinel (retry next tick)
+        # Deliver via the dispatcher's root context — fan out to every target.
+        sent_to = [t for t in notify_targets if _send_via_hermes(t, report_body)]
+        if not sent_to:
+            # Total send failure → do NOT post the sentinel (retry next tick)
             continue
+        if len(sent_to) < len(notify_targets):
+            logger.warning(
+                "dispatch: doc report for PR #%s reached %d/%d targets (failed: %s)",
+                pr_number, len(sent_to), len(notify_targets),
+                ", ".join(t for t in notify_targets if t not in sent_to),
+            )
 
         # Post sentinel so we never re-deliver
         if not provider.post_delivery_marker(pr_number, report_body):
@@ -478,7 +519,8 @@ def _deliver_doc_reports(
 
         delivered.append(pr_number)
         logger.info(
-            "dispatch: delivered doc report for PR #%s to %s", pr_number, notify_target,
+            "dispatch: delivered doc report for PR #%s to %s",
+            pr_number, ", ".join(sent_to),
         )
 
     return delivered
@@ -491,6 +533,43 @@ def _parse_pr_from_card(card: dict) -> Optional[int]:
     text = f"{body}\n{summary}"
     m = re.search(r"PR #(\d+)", text)
     return int(m.group(1)) if m else None
+
+
+def _summary_events(summary: Dict[str, Any]) -> set:
+    """Event types a tick summary triggers (for notifications[] filtering)."""
+    events = {"dispatch-summary"}
+    if summary.get("error"):
+        events.add("pipeline-failure")
+    if summary.get("advance_prs") or summary.get("reconciled"):
+        events.add("pr-ready")
+    return events
+
+
+def _notify_project_summary(name: str, summary: Dict[str, Any],
+                            resolved: Dict[str, Any], *, dry_run: bool = False) -> bool:
+    """Self-deliver a project's tick summary to its ``cron.notifications`` targets.
+
+    Returns True when the project uses ``notifications[]`` — the caller must
+    then NOT include it in stdout (which the legacy cron ``--deliver`` path
+    would deliver a second time). Legacy single-``deliver`` projects return
+    False and keep flowing through cron stdout delivery.
+    """
+    if not ((resolved.get("cron") or {}).get("notifications")):
+        return False
+    msg = _human_summary({name: summary}, dry_run=dry_run)
+    if not msg:
+        return True  # silent tick — handled, nothing to send
+    targets: List[str] = []
+    for event in sorted(_summary_events(summary)):
+        for t in _notify_targets(resolved, event):
+            if t not in targets:
+                targets.append(t)
+    for t in targets:
+        if dry_run:
+            logger.info("[dry-run] would send dispatch summary for %s to %s", name, t)
+        else:
+            _send_via_hermes(t, msg)
+    return True
 
 
 def _resolve_pr_from_parents(slug: str, provider, card: dict) -> Optional[int]:
@@ -564,6 +643,8 @@ def main() -> int:
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
+        if _notify_project_summary(name, summaries[name], resolved, dry_run=dry_run):
+            return 0
         msg = _human_summary(summaries, dry_run=dry_run)
         if msg:
             print(msg)
@@ -575,6 +656,7 @@ def main() -> int:
         logger.info("dispatch: registry is empty — nothing to do")
         return 0
 
+    resolved_map: Dict[str, Dict[str, Any]] = {}
     for rp in repo_paths:
         try:
             resolved = loader.resolve_repo_config(rp)
@@ -585,16 +667,24 @@ def main() -> int:
             logger.warning("dispatch: could not resolve %s: %s", rp, e)
             continue
         name = resolved.get("name", rp)
+        resolved_map[name] = resolved
         try:
             summaries[name] = run(resolved, dry_run=dry_run)
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
 
-    # stdout is what the no-agent cron delivers to Slack — human-readable, and
-    # EMPTY on a no-op tick so the cron stays silent (no JSON spam). Full detail
-    # still goes to stderr via the per-project logger.info above.
-    msg = _human_summary(summaries, dry_run=dry_run)
+    # Projects with cron.notifications self-deliver their summary (multi-target,
+    # any platform); the rest flow through stdout, which the no-agent cron
+    # delivers to its legacy --deliver target. stdout stays EMPTY on a no-op
+    # tick so the cron is silent (no JSON spam). Full detail still goes to
+    # stderr via the per-project logger.info above.
+    legacy: Dict[str, Dict[str, Any]] = {}
+    for name, s in summaries.items():
+        r = resolved_map.get(name)
+        if r is None or not _notify_project_summary(name, s, r, dry_run=dry_run):
+            legacy[name] = s
+    msg = _human_summary(legacy, dry_run=dry_run)
     if msg:
         print(msg)
     return 0

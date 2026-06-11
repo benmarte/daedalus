@@ -67,7 +67,20 @@ sources:
   kanban_triage:
     enabled: false                      # Allow Kanban-only triage cards (no VCS source)
 
-# ── Cron ─────────────────────────────────────────────────────────────────────
+# ── Cron + Notifications ──────────────────────────────────────────────────────
 cron:
-  schedule: "every 60m"                       # How often the daedalus polls (every 60m, every 2h, 0 9 * * *)
-  deliver: ""                           # Notification target: slack, discord, telegram:chat_id, etc.
+  schedule: "every 60m"                 # How often the daedalus polls (every 60m, every 2h, 0 9 * * *)
+  deliver: ""                           # Legacy single target: slack:C123, discord:#general, …
+
+  # Multi-target notifications (takes precedence over `deliver` when set).
+  # Targets are `hermes send` strings for ANY configured Hermes platform
+  # (Slack, Discord, Telegram, Signal, WhatsApp, …). `events` filters what a
+  # target receives; omit it to receive everything.
+  # Events: doc-report | dispatch-summary | pipeline-failure | pr-ready
+  # notifications:
+  #   - platform: "Slack"
+  #     target: "slack:C0CHANNEL1"
+  #     events: ["doc-report", "pipeline-failure"]
+  #   - platform: "Discord"
+  #     target: "discord:#daedalus"
+  #     events: ["dispatch-summary", "pr-ready"]

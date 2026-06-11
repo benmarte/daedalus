@@ -802,6 +802,37 @@ def _resolve_project_path(name: str) -> Path:
     raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
 
 
+# Notification event types a cron.notifications[] entry can subscribe to.
+# Keep in sync with NOTIFY_EVENTS in scripts/daedalus_dispatch.py.
+NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready")
+
+
+def _validate_notifications(value: Any) -> list[str]:
+    """Validate a cron.notifications payload. Returns human-readable errors."""
+    if not isinstance(value, list):
+        return ["cron.notifications must be a list"]
+    errors: list[str] = []
+    for i, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            errors.append(f"cron.notifications[{i}] must be a mapping")
+            continue
+        target = entry.get("target")
+        if not isinstance(target, str) or not target.strip():
+            errors.append(f"cron.notifications[{i}].target must be a non-empty string "
+                          "(e.g. 'slack:C123', 'discord:#general')")
+        platform = entry.get("platform")
+        if platform is not None and not isinstance(platform, str):
+            errors.append(f"cron.notifications[{i}].platform must be a string")
+        events = entry.get("events")
+        if events is not None and (
+            not isinstance(events, list)
+            or any(e not in NOTIFY_EVENTS for e in events)
+        ):
+            errors.append(f"cron.notifications[{i}].events must be a list drawn from: "
+                          + ", ".join(NOTIFY_EVENTS))
+    return errors
+
+
 def _parse_cron_list_blocks(output: str) -> list[dict[str, str]]:
     """Parse ``hermes cron list --all`` output into job blocks.
 
@@ -852,13 +883,37 @@ def _parse_cron_list_blocks(output: str) -> list[dict[str, str]]:
     return blocks
 
 
+def _cron_cli(args: list[str]) -> tuple[int, str]:
+    """Run a ``hermes cron`` subcommand. Returns (returncode, combined output).
+
+    Never raises — CLI absence/timeouts return (-1, <error text>).
+    """
+    try:
+        proc = subprocess.run(
+            ["hermes", "cron"] + args,
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode, (proc.stdout + proc.stderr)
+    except FileNotFoundError:
+        return -1, "hermes CLI not found"
+    except subprocess.TimeoutExpired:
+        return -1, f"hermes cron {args[0]} timed out after 10s"
+    except OSError as exc:
+        return -1, f"hermes cron {args[0]} failed: {exc}"
+
+
 def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     """Reconcile the real ``hermes cron`` job with the config on save.
 
-    Cron job name = ``f"{project_name}-daedalus"``.  Idempotent — resolve
-    existing jobs by name from ``hermes cron list --all``, remove each by its
-    hex job ID (sweeping all same-name duplicates), then re-create if
-    ``cron_cfg.schedule`` is non-empty.
+    Cron job name = ``f"{project_name}-daedalus"``. Each project owns exactly
+    one job. Editing a project UPDATES the existing job in place via the
+    native ``hermes cron edit <id>`` — it never stacks a duplicate:
+
+    - one existing job  → ``hermes cron edit <id> --schedule <s>``
+      (falls back to remove+create if the installed hermes lacks ``edit``)
+    - no existing job   → ``hermes cron create``
+    - duplicates found  → keep none, remove all by hex ID, create fresh
+    - empty schedule    → remove all matches
 
     A cron CLI failure is captured as an error string; this function NEVER
     raises, so a broken ``hermes`` binary cannot fail the config save.
@@ -866,7 +921,9 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     Args:
         project_name: The project name from the config.
         cron_cfg: The ``cron`` dict from the resolved project config.
-            Keys used: ``schedule`` (str), ``deliver`` (str, optional).
+            Keys used: ``schedule`` (str), ``deliver`` (str, optional),
+            ``notifications`` (list, optional — when set, the dispatcher
+            self-delivers and the cron gets NO --deliver target).
 
     Returns:
         ``{"cron": "<created|updated|removed|skipped>", "name": "<cron_name>",
@@ -880,41 +937,43 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     }
 
     schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
+    # With notifications[] the dispatcher fans out itself — the cron job must
+    # not double-deliver its stdout.
+    has_notifications = bool(cron_cfg.get("notifications")) if cron_cfg else False
+    deliver = "" if has_notifications else (cron_cfg.get("deliver", "").strip() if cron_cfg else "")
 
-    # 1. List all cron jobs, find matches by name, remove each by job ID.
-    try:
-        list_proc = subprocess.run(
-            ["hermes", "cron", "list", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if list_proc.returncode == 0:
-            blocks = _parse_cron_list_blocks(list_proc.stdout)
-            matching_ids = [b["job_id"] for b in blocks if b.get("name") == cron_name]
-            for job_id in matching_ids:
-                try:
-                    subprocess.run(
-                        ["hermes", "cron", "remove", job_id],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                except Exception:
-                    pass  # best-effort per-job removal
-    except Exception:
-        pass  # non-fatal — the list+remove is best-effort
+    # 1. Find existing jobs by name.
+    matching_ids: list[str] = []
+    rc, out = _cron_cli(["list", "--all"])
+    if rc == 0:
+        blocks = _parse_cron_list_blocks(out)
+        matching_ids = [b["job_id"] for b in blocks if b.get("name") == cron_name]
 
-    # 2. If schedule is empty, we're done (all matches removed above).
+    # 2. Empty schedule → remove all matches.
     if not schedule:
+        for job_id in matching_ids:
+            _cron_cli(["remove", job_id])
         result["cron"] = "removed"
         return result
 
-    # 3. Create the new job.
-    deliver = cron_cfg.get("deliver", "").strip() if cron_cfg else ""
+    # 3. Exactly one job → update it in place (native `hermes cron edit`).
+    if len(matching_ids) == 1:
+        edit_args = ["edit", matching_ids[0], "--schedule", schedule]
+        if deliver:
+            edit_args += ["--deliver", deliver]
+        rc, out = _cron_cli(edit_args)
+        if rc == 0:
+            result["cron"] = "updated"
+            return result
+        # Older hermes without `cron edit` (or edit failure): fall through to
+        # remove+create so the save still converges on one correct job.
+
+    # 4. Zero, several, or un-editable → remove all matches, create fresh.
+    for job_id in matching_ids:
+        _cron_cli(["remove", job_id])
 
     cmd = [
-        "hermes", "cron", "create", schedule,
+        "create", schedule,
         "--name", cron_name,
         "--script", "daedalus-cron.sh",
         "--no-agent",
@@ -922,24 +981,11 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     if deliver:
         cmd += ["--deliver", deliver]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode != 0:
-            result["error"] = (proc.stderr + proc.stdout).strip()[:500] or f"exit code {proc.returncode}"
-        else:
-            result["cron"] = "created" if "created" in (proc.stdout + proc.stderr).lower() else "updated"
-    except FileNotFoundError:
-        result["error"] = "hermes CLI not found"
-    except subprocess.TimeoutExpired:
-        result["error"] = "hermes cron create timed out after 10s"
-    except OSError as exc:
-        result["error"] = f"hermes cron create failed: {exc}"
-
+    rc, out = _cron_cli(cmd)
+    if rc != 0:
+        result["error"] = out.strip()[:500] or f"exit code {rc}"
+    else:
+        result["cron"] = "created" if "created" in out.lower() else "updated"
     return result
 
 
@@ -1013,6 +1059,13 @@ async def post_project_config(request: Request, name: str) -> dict[str, Any]:
                 status_code=422,
                 detail=f"'{key}' must be a mapping, got {type(value).__name__}",
             )
+
+    # Validate multi-target notifications when present
+    cron_body = body.get("cron")
+    if isinstance(cron_body, dict) and cron_body.get("notifications") is not None:
+        notif_errors = _validate_notifications(cron_body["notifications"])
+        if notif_errors:
+            raise HTTPException(status_code=422, detail={"errors": notif_errors})
 
     # Deep-merge editable fields into existing config
     merged = deep_merge(existing, body)
