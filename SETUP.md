@@ -17,8 +17,9 @@ Roster: **project-manager · planner · developer · reviewer · security-analys
 
 ## Prerequisites (each colleague, once)
 1. **Hermes Agent** installed + gateway running (`hermes gateway` / `hermes gateway install`).
-2. The **`agent-skills` plugin** installed (provides the lifecycle skills at
-   `~/.hermes/plugins/agent-skills/skills/`).
+2. The **`agent-skills` plugin** (provides the lifecycle skills at
+   `~/.hermes/plugins/agent-skills/skills/`) — installed **automatically** by
+   `provision_roster.sh` if missing; no manual step needed.
 3. A working **`default` profile** with their own LLM provider keys (any capable
    model works — the script clones config/keys from `default`).
 4. A **VCS API token** for each provider you use:

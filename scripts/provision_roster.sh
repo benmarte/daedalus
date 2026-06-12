@@ -22,8 +22,21 @@ SRC="$HERMES/plugins/agent-skills/skills"
 PROFILES="$HERMES/profiles"
 
 if [ ! -d "$SRC" ]; then
-  echo "FATAL: agent-skills source not found at $SRC" >&2
-  exit 1
+  echo "agent-skills plugin not found at $SRC — installing automatically..."
+  if ! command -v hermes >/dev/null 2>&1; then
+    echo "FATAL: 'hermes' CLI not found — is Hermes installed?" >&2
+    exit 1
+  fi
+  if ! hermes plugins install addyosmani/agent-skills --enable; then
+    echo "FATAL: could not auto-install agent-skills." >&2
+    echo "  Manual fix: hermes plugins install addyosmani/agent-skills --enable" >&2
+    exit 1
+  fi
+  if [ ! -d "$SRC" ]; then
+    echo "FATAL: agent-skills installed but skills not found at $SRC" >&2
+    exit 1
+  fi
+  echo "agent-skills plugin installed."
 fi
 
 # Token + git identity the workers use for git push + provider API calls.
