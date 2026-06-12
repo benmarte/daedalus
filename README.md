@@ -24,6 +24,24 @@ issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
 
 ---
 
+## Table of contents
+
+- [Why this exists](#why-this-exists-read-this-part)
+- [How it works](#how-it-works)
+- [Design decisions](#design-decisions)
+- [Multi-repo: one Daedalus, many repos](#multi-repo-one-daedalus-many-repos)
+- [Repository layout](#repository-layout)
+- [Prerequisites](#prerequisites)
+- [VCS providers](#vcs-providers)
+  - [Creating the tokens (PAT scopes)](#creating-the-tokens-pat-scopes)
+- [Notifications](#notifications)
+- [Quickstart](#quickstart)
+- [Team setup](#team-setup)
+- [Uninstall / reset](#uninstall--reset)
+- [Known limitations](#known-limitations)
+
+---
+
 ## Why this exists (read this part)
 
 AI coding agents are powerful but, left alone, **chaotic**. On a single issue this
@@ -347,8 +365,18 @@ hermes cron add daedalus --schedule "every 3m" \
   --script "python3 ~/.hermes/plugins/daedalus/scripts/daedalus_dispatch.py"
 ```
 
-> Per-project conventions and the legacy native-roster setup are in **[`SETUP.md`](SETUP.md)**.
+---
 
+## Team setup
+
+See **[`SETUP.md`](SETUP.md)** for everything beyond the single-machine quickstart:
+
+- **Sharing across teammates** — the repo is secret-free; each person runs `provision_roster.sh` locally with their own LLM keys and VCS tokens. No shared profile exports (those bundle credentials).
+- **Per-project conventions** — custom `status_map` column names, branch prefixes, bot identity (`ROSTER_GH_TOKEN` / `ROSTER_BOT_NAME`), and how to pin a dedicated read-mostly dispatcher token.
+- **Multi-user cron** — running the dispatcher on a shared server so the pipeline advances without anyone's laptop being open.
+- **Full installation guide** — step-by-step with screenshots: [`docs/INSTALLATION_GUIDE.md`](docs/INSTALLATION_GUIDE.md).
+
+---
 
 ## Uninstall / reset
 
