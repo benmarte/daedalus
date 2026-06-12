@@ -1715,10 +1715,14 @@ async def get_check_update() -> dict[str, Any]:
 
     repo = m.group(1)
     try:
+        headers: dict = {"Accept": "application/vnd.github+json",
+                         "User-Agent": "daedalus-plugin/update-check"}
+        token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(
             f"https://api.github.com/repos/{repo}/tags",
-            headers={"Accept": "application/vnd.github+json",
-                     "User-Agent": "daedalus-plugin/update-check"},
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             tags = json.loads(resp.read())
