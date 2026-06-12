@@ -1780,10 +1780,17 @@ function App() {
   if (loading) return React.createElement("div", { style: S.wrap },
     React.createElement("div", { style: { textAlign: "center", padding: "60px", color: "#888" } }, "Loading projects…")
   );
-  if (loadErr) return React.createElement("div", { style: S.wrap },
-    React.createElement("div", { style: S.err }, "Failed to load: ", loadErr),
-    React.createElement("button", { style: S.btn, onClick: load }, "Retry")
-  );
+  if (loadErr) {
+    var isNotLoaded = loadErr.indexOf("No such API endpoint") !== -1 || loadErr.indexOf("404") !== -1;
+    return React.createElement("div", { style: S.wrap },
+      React.createElement("div", { style: S.err },
+        isNotLoaded
+          ? "Plugin not active — restart the Hermes gateway to load Daedalus (hermes gateway restart)"
+          : "Failed to load: " + loadErr
+      ),
+      React.createElement("button", { style: S.btn, onClick: load }, "Retry")
+    );
+  }
 
   var projects = data || [];
 
