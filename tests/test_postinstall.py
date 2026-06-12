@@ -93,35 +93,53 @@ class TestCheckDefaultProfile:
         assert str(home / "config.yaml") in msg
 
 
-class TestCheckAgentSkills:
-    """_check_agent_skills returns clear messages."""
+class TestEnsureAgentSkills:
+    """_ensure_agent_skills reports installed skills or auto-installs them."""
 
     def test_agent_skills_present(self, postinstall, tmp_path):
         home = tmp_path / ".hermes"
         (home / "plugins" / "agent-skills" / "skills" / "test-skill").mkdir(parents=True)
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
-            ok, msg = postinstall._check_agent_skills()
+            ok, msg = postinstall._ensure_agent_skills()
         assert ok is True
         assert "OK:" in msg
 
-    def test_agent_skills_missing(self, postinstall, tmp_path):
+    def test_agent_skills_missing_auto_installs(self, postinstall, tmp_path):
         home = tmp_path / ".hermes_no_skills"
         home.mkdir()
-        with mock.patch.object(postinstall, "_HERMES_HOME", home):
-            ok, msg = postinstall._check_agent_skills()
-        assert ok is False
-        assert "MISSING" in msg
-        assert "hermes plugins install" in msg.lower()
-        assert "agent-skills" in msg.lower()
+        skills_dir = home / "plugins" / "agent-skills" / "skills"
 
-    def test_agent_skills_dir_not_exists(self, postinstall, tmp_path):
+        def fake_install(cmd, **kwargs):
+            assert "agent-skills" in " ".join(cmd)
+            skills_dir.mkdir(parents=True)
+            return mock.Mock(returncode=0, stdout="installed", stderr="")
+
+        with mock.patch.object(postinstall, "_HERMES_HOME", home), \
+             mock.patch.object(postinstall.subprocess, "run", side_effect=fake_install):
+            ok, msg = postinstall._ensure_agent_skills()
+        assert ok is True
+        assert "automatically" in msg
+
+    def test_agent_skills_install_fails(self, postinstall, tmp_path):
         home = tmp_path / ".hermes_noplugins"
         home.mkdir()
         (home / "plugins").mkdir()
-        with mock.patch.object(postinstall, "_HERMES_HOME", home):
-            ok, msg = postinstall._check_agent_skills()
+        failed = mock.Mock(returncode=1, stdout="", stderr="clone error")
+        with mock.patch.object(postinstall, "_HERMES_HOME", home), \
+             mock.patch.object(postinstall.subprocess, "run", return_value=failed):
+            ok, msg = postinstall._ensure_agent_skills()
         assert ok is False
-        assert "MISSING" in msg
+        assert "FAIL" in msg
+        assert "hermes plugins install" in msg.lower()
+
+    def test_agent_skills_hermes_cli_missing(self, postinstall, tmp_path):
+        home = tmp_path / ".hermes_nocli"
+        home.mkdir()
+        with mock.patch.object(postinstall, "_HERMES_HOME", home), \
+             mock.patch.object(postinstall.subprocess, "run", side_effect=FileNotFoundError):
+            ok, msg = postinstall._ensure_agent_skills()
+        assert ok is False
+        assert "hermes" in msg.lower()
 
 
 class TestCheckVcsTokens:
@@ -282,5 +300,5 @@ class TestMain:
         assert postinstall is not None
         assert hasattr(postinstall, "main")
         assert hasattr(postinstall, "_check_default_profile")
-        assert hasattr(postinstall, "_check_agent_skills")
+        assert hasattr(postinstall, "_ensure_agent_skills")
         assert hasattr(postinstall, "_check_vcs_tokens")
