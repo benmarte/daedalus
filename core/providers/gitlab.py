@@ -226,8 +226,10 @@ class GitLabProvider(VCSProvider):
 
     def list_labels(self) -> List[LabelDef]:
         try:
+            # include_ancestor_groups returns group-level labels too, not just project-level.
             data = self._http.get_paginated(f"{self._proj}/labels",
-                                            style="x_next_page", max_pages=2)
+                                            params={"include_ancestor_groups": "true"},
+                                            style="x_next_page", max_pages=5)
         except ProviderError as e:
             self._log.warning("list_labels failed: %s", e)
             return []

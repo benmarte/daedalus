@@ -1420,7 +1420,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           providerExtraFields(
             getIn(config, ["vcs", "provider"], "github"),
             function(path, fb) {
-              return getIn(config, path, fb);
+              var val = getIn(config, path, fb);
+              if (!val && path[0] === "vcs" && path[1] === "project_path") {
+                return getIn(config, ["repo"], fb || "");
+              }
+              return val;
             },
             updateField
           ),

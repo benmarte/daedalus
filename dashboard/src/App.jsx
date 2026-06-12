@@ -1125,7 +1125,14 @@ function ConfigModal(props) {
       ),
       providerExtraFields(
         getIn(config, ["vcs", "provider"], "github"),
-        function (path, fb) { return getIn(config, path, fb); },
+        function (path, fb) {
+          var val = getIn(config, path, fb);
+          // Fall back to top-level repo for GitLab project_path when not explicitly set.
+          if (!val && path[0] === "vcs" && path[1] === "project_path") {
+            return getIn(config, ["repo"], fb || "");
+          }
+          return val;
+        },
         updateField
       ),
       React.createElement("div", { style: S.fieldRow },
