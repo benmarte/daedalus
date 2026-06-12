@@ -29,19 +29,20 @@ def test_gitlab_com():
     d = detect_from_url("git@gitlab.com:group/proj.git")
     assert d["provider"] == "gitlab"
     assert d["repo"] == "group/proj"
-    assert d["vcs_extra"] == {}
+    assert d["vcs_extra"] == {"project_path": "group/proj"}
 
 
 def test_gitlab_nested_groups():
     d = detect_from_url("https://gitlab.com/group/sub/proj.git")
     assert d["repo"] == "group/sub/proj"
+    assert d["vcs_extra"]["project_path"] == "group/sub/proj"
 
 
 def test_gitlab_self_hosted_sets_base_url():
     d = detect_from_url("https://gitlab.corp.io/team/app.git")
     assert d["provider"] == "gitlab"
     assert d["repo"] == "team/app"
-    assert d["vcs_extra"] == {"base_url": "https://gitlab.corp.io"}
+    assert d["vcs_extra"] == {"project_path": "team/app", "base_url": "https://gitlab.corp.io"}
 
 
 # ── Azure DevOps ──────────────────────────────────────────────────────────────

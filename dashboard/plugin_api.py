@@ -505,17 +505,17 @@ def _open_prs(provider) -> Optional[dict[str, Any]]:
         return None
     pr_list: list[dict[str, Any]] = []
     for pr in prs:
-        ci = None
+        ci_status = None
         if pr.number is not None and provider.supports_ci_status:
             try:
-                ci = provider.pr_ci_green(int(pr.number))
+                ci_status = provider.get_pr_ci_status(int(pr.number))
             except Exception:
-                ci = None
+                ci_status = None
         pr_list.append({
             "number": pr.number,
             "title": pr.title,
             "branch": pr.head_branch,
-            "ci_green": ci,
+            "ci_status": ci_status,
         })
     return {
         "count": len(pr_list),

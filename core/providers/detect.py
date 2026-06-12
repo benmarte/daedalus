@@ -85,9 +85,10 @@ def detect_from_url(url: str) -> Optional[Dict[str, Any]]:
     # ── GitLab (gitlab.com or self-hosted with "gitlab" in the hostname) ──
     if host == "gitlab.com" or "gitlab" in host:
         if len(parts) >= 2:
+            project_path = "/".join(parts)
             result: Dict[str, Any] = {"provider": "gitlab",
-                                      "repo": "/".join(parts),  # nested groups OK
-                                      "vcs_extra": {}}
+                                      "repo": project_path,  # nested groups OK
+                                      "vcs_extra": {"project_path": project_path}}
             if host != "gitlab.com":
                 result["vcs_extra"]["base_url"] = f"https://{host}"
             return result

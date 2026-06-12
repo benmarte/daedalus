@@ -131,7 +131,9 @@ class AzureDevOpsProvider(VCSProvider):
                 params={"fields": "System.State", **_API})
             state = (data.get("fields") or {}).get("System.State", "")
             closed_state = (self._cfg.get("vcs") or {}).get("closed_state") or "Done"
-            return "closed" if state == closed_state else "open"
+            # Accept the configured closed_state plus all standard Azure terminal states.
+            terminal = {closed_state.lower(), "done", "closed", "resolved", "removed"}
+            return "closed" if state.lower() in terminal else "open"
         except ProviderError:
             return None
 
@@ -173,12 +175,16 @@ class AzureDevOpsProvider(VCSProvider):
             ctx = s.get("context") or {}
             key = f"{ctx.get('genre') or ''}/{ctx.get('name') or ''}"
             latest[key] = (s.get("state") or "").lower()
-        states = set(latest.values())
-        if states & {"failed", "error"}:
+        # notApplicable/notSet are neutral — they don't block or indicate failure.
+        # Filter them out so they don't prevent a GREEN result or inflate PENDING.
+        effective = {s for s in latest.values() if s not in ("notapplicable", "notset", "")}
+        if not effective:
+            return CIStatus.UNKNOWN
+        if effective & {"failed", "error"}:
             return CIStatus.RED
-        if states & {"pending", "notapplicable", "notset"}:
+        if effective & {"pending"}:
             return CIStatus.PENDING
-        if states == {"succeeded"}:
+        if effective <= {"succeeded"}:
             return CIStatus.GREEN
         return CIStatus.UNKNOWN
 

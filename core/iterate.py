@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core import kanban
+from core.providers.base import CIStatus
 
 logger = logging.getLogger("daedalus.iterate")
 
@@ -591,8 +592,9 @@ def run_iterate(
     if not blocked_cards:
         return counts, advance_prs
 
-    # Collect PR→CI cache so we don't call gh for the same PR twice
-    ci_cache: Dict[int, bool] = {}
+    # Collect PR→CI cache so we don't call the provider for the same PR twice.
+    # Stores the raw CIStatus string (not bool) so UNKNOWN/PENDING are distinguishable.
+    ci_cache: Dict[int, str] = {}
 
     for card in blocked_cards:
         tid = card.get("id")
@@ -623,13 +625,20 @@ def run_iterate(
                                 tid, pr, branch_name)
 
         ci_green = False
+        raw_ci = CIStatus.UNKNOWN
         if pr is not None and provider is not None:
             if pr not in ci_cache:
-                ci_cache[pr] = provider.pr_ci_green(pr)
-            ci_green = ci_cache[pr]
+                ci_cache[pr] = provider.get_pr_ci_status(pr)
+            raw_ci = ci_cache[pr]
+            ci_green = (raw_ci == CIStatus.GREEN)
 
         action = classify_blocked(assignee, handoff, ci_green,
                                   fix_attempts=fix_attempts, pr_number=pr)
+
+        # Don't fire DEV_FIX_CI when CI hasn't reported yet (only RED warrants a fix card).
+        if action == DEV_FIX_CI and raw_ci not in (CIStatus.RED,):
+            logger.info("iterate: %s DEV_FIX_CI suppressed — CI is %s (not RED)", tid, raw_ci)
+            continue
 
         if not action:
             continue  # nothing to do for this card

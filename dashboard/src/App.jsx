@@ -297,7 +297,7 @@ function ProjectCard(props) {
   var p = props.project;
   var hasAttention = p.needs_attention && p.needs_attention.length > 0;
   var openPrs = p.open_prs;
-  var hasRedCI = openPrs && openPrs.prs && openPrs.prs.some(function (pr) { return pr.ci_green === false; });
+  var hasRedCI = openPrs && openPrs.prs && openPrs.prs.some(function (pr) { return pr.ci_status === "red"; });
   var cardBorder = hasAttention ? "1px solid #f87171" : hasRedCI ? "1px solid #dc2626" : S.card.border;
 
   var kanbanCounts = p.kanban_summary;
@@ -350,7 +350,7 @@ function ProjectCard(props) {
 
         // PRs
         openPrs ? React.createElement("div", { style: S.cardRowItem },
-          React.createElement("span", { style: Object.assign({}, S.dot, openPrs.prs && openPrs.prs.every(function (p2) { return p2.ci_green; }) ? S.dotGreen : S.dotYellow) }),
+          React.createElement("span", { style: Object.assign({}, S.dot, openPrs.prs && openPrs.prs.every(function (p2) { return p2.ci_status === "green"; }) ? S.dotGreen : S.dotYellow) }),
           prCount + " open PR" + (prCount !== 1 ? "s" : "")
         ) : null,
 

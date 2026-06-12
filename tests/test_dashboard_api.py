@@ -270,7 +270,7 @@ def test_get_projects_degrade_gracefully_no_kanban(client):
 
 
 def test_get_projects_open_prs_mocked(client):
-    """open_prs returns mocked PR data with ci_green field."""
+    """open_prs returns mocked PR data with ci_status field."""
     mock_pr_data = [
         {"number": 42, "title": "Fix auth", "headRefName": "fix/auth", "state": "open"},
         {"number": 43, "title": "Add rate limit", "headRefName": "feat/rate-limit", "state": "open"},
@@ -282,7 +282,7 @@ def test_get_projects_open_prs_mocked(client):
         mock.MagicMock(number=p["number"], title=p["title"],
                        head_branch=p["headRefName"]) for p in mock_pr_data
     ]
-    fake_provider.pr_ci_green.side_effect = [True, False]
+    fake_provider.get_pr_ci_status.side_effect = ["green", "red"]
 
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
@@ -297,9 +297,9 @@ def test_get_projects_open_prs_mocked(client):
     assert prs["count"] == 2
     assert len(prs["prs"]) == 2
     assert prs["prs"][0]["number"] == 42
-    assert prs["prs"][0]["ci_green"] is True
+    assert prs["prs"][0]["ci_status"] == "green"
     assert prs["prs"][1]["number"] == 43
-    assert prs["prs"][1]["ci_green"] is False
+    assert prs["prs"][1]["ci_status"] == "red"
 
 
 def test_get_projects_graceful_degradation_when_sources_return_nothing(client):
