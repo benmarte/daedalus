@@ -1751,7 +1751,9 @@ function App() {
     fetchJSON("/api/plugins/daedalus/meta/update-plugin", { method: "POST" })
       .then(function (r) {
         setUpdating(false);
-        setUpdateResult(r || { ok: false, output: "no response" });
+        var result = r || { ok: false, output: "no response" };
+        setUpdateResult(result);
+        if (result.ok) setHasUpdate(false);
       })
       .catch(function (err) {
         setUpdating(false);
@@ -1862,7 +1864,7 @@ function App() {
       React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } },
         updateResult ? React.createElement("span", {
           style: { fontSize: "11px", color: updateResult.ok ? "#4ade80" : "#f87171" }
-        }, updateResult.ok ? "Updated — restart gateway to apply" : "Update failed: " + (updateResult.output || "").slice(0, 80)) : null,
+        }, updateResult.ok ? "Updated — restart the gateway then reload this tab" : "Update failed: " + (updateResult.output || "").slice(0, 80)) : null,
         hasUpdate ? React.createElement("button", {
           onClick: updatePlugin,
           disabled: updating,
