@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-postinstall.py — Prerequisite checker + roster provisioner for the daedalus plugin.
+postinstall.py — Prerequisite installer + roster provisioner for the daedalus plugin.
 
-Checks that the host environment is ready (default profile, agent-skills plugin),
-then runs scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
+Ensures the host environment is ready (default profile, agent-skills plugin),
+installing agent-skills automatically if missing, then runs
+scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
 No gh CLI involved — VCS access is via provider APIs with tokens from env.
 
 Usage:
-    python3 scripts/postinstall.py          # check + provision
-    python3 scripts/postinstall.py --check  # check only, don't provision
+    python3 scripts/postinstall.py          # ensure prereqs + provision
+    python3 scripts/postinstall.py --check  # check only, don't install or provision
 
 Exit codes:
     0 — all prereqs met (and provision succeeded if not --check)
@@ -44,16 +45,31 @@ def _check_default_profile() -> tuple[bool, str]:
     )
 
 
-def _check_agent_skills() -> tuple[bool, str]:
-    """Verify the agent-skills plugin is installed with its skills directory."""
+def _ensure_agent_skills() -> tuple[bool, str]:
+    """Ensure the agent-skills plugin is installed; auto-installs if missing."""
     skills_dir = _HERMES_HOME / "plugins" / "agent-skills" / "skills"
     if skills_dir.is_dir():
         return True, f"OK: agent-skills plugin installed at {skills_dir}"
+    print("  agent-skills not found — installing automatically...")
+    try:
+        result = subprocess.run(
+            ["hermes", "plugins", "install", "addyosmani/agent-skills", "--enable"],
+            capture_output=True, text=True, timeout=90,
+        )
+    except FileNotFoundError:
+        return False, "FAIL: 'hermes' CLI not found — is Hermes installed?"
+    except subprocess.TimeoutExpired:
+        return False, "FAIL: hermes plugins install timed out after 90s"
+    if result.returncode == 0 and skills_dir.is_dir():
+        return True, "OK: agent-skills plugin installed automatically"
+    detail = (result.stderr or result.stdout or "").strip()[:200]
     return False, (
-        f"MISSING: agent-skills plugin not found at {skills_dir}\n"
-        f"  Fix: install the agent-skills plugin —\n"
-        f"       hermes plugins install nousresearch/hermes-agent-skills --enable"
+        f"FAIL: could not auto-install agent-skills\n"
+        f"  {detail}\n"
+        f"  Manual fix: hermes plugins install addyosmani/agent-skills --enable"
     )
+
+
 
 
 def _check_vcs_tokens() -> tuple[bool, str]:
@@ -147,8 +163,8 @@ def main(check_only: bool = False) -> int:
 
     checks = [
         ("default profile", _check_default_profile),
-        ("agent-skills plugin", _check_agent_skills),
-        ("vcs tokens", _check_vcs_tokens),
+        ("agent-skills plugin", _ensure_agent_skills),
+("vcs tokens", _check_vcs_tokens),
     ]
 
     all_ok = True

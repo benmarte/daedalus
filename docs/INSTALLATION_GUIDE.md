@@ -31,19 +31,11 @@ This guide walks you through every step: installing the plugin, provisioning the
 | Requirement | Why it's needed |
 |---|---|
 | [Hermes](https://herm.es) installed with a working default profile | The runtime that runs agents and the dashboard |
-| [agent-skills](https://github.com/addyosmani/agent-skills) Hermes plugin | Provides the base skills each agent role loads — **must be installed first** |
-| Python 3 + `pyyaml` | Runs the dispatcher (the scheduling engine) |
-| `pre-commit` | Enforced before any PR can be opened (the "ship gate") |
 | A VCS API token for the platform you use | Lets Daedalus poll issues and open PRs on your behalf |
 
+> **Everything else is automatic.** When you click **Install Agents**, Daedalus installs the [agent-skills](https://github.com/addyosmani/agent-skills) plugin automatically if it is missing. No manual setup required.
+
 > **No `gh`, `glab`, or `az` CLI needed.** Daedalus talks directly to your VCS platform's HTTPS API. No additional CLIs required.
-
-**Install agent-skills first** — Daedalus's roster depends on it:
-
-```bash
-hermes plugins install addyosmani/agent-skills --enable
-hermes gateway restart
-```
 
 ---
 
@@ -82,7 +74,7 @@ Verify the profiles by going to **Profiles** in Hermes:
 |---|---|
 | **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines |
 | **planner** | Breaks an issue into a concrete plan with acceptance criteria |
-| **developer** | Writes code, runs tests, passes the pre-commit ship gate |
+| **developer** | Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR |
 | **reviewer** | Reviews the PR for correctness, style, and logic |
 | **security-analyst** | Audits for secrets, injection risks, and over-permissioned code — runs in parallel with the reviewer |
 | **documentation** | Writes a completion report, posts it on the PR, and sends it to notification channels |

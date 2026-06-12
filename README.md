@@ -14,11 +14,13 @@ issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
    triage card ──decompose──► developer ─► reviewer ─► security ─► documentation
       │                          │            │           │            │
    board: In progress       opens PR     approves     audits     posts report
-                            (ship-gate                            to PR + your
-                             enforced)                            chat channels
+                            (lint/format                          to PR + your
+                             ship gate)                           chat channels
       ▼
    PR green → you merge → issue auto-closed, card → Done
 ```
+
+![Daedalus dashboard — one card per managed project, showing kanban counts, open PRs with CI status, and cron schedule](docs/screenshots/guide/09-dashboard-with-project.png)
 
 ---
 
@@ -45,7 +47,7 @@ demo" into "a tool the team can depend on."
 | Without this | With this |
 |---|---|
 | One issue spawns 9 PRs | One issue → one tracked card → one PR |
-| Agent "forgets" to lint → red PR | **Ship-gate** blocks PR creation until backend **and** frontend lint/typecheck pass |
+| Agent "forgets" to lint → red PR | **Ship-gate** detects and runs the project's lint/format tools before the PR is opened — no tool mandated |
 | A single agent marks its own work done | **Decompose** into developer → reviewer → security → documentation |
 | You babysit every handoff | **Auto-advance**: each stage completes on green CI and flows to the next |
 | Issues merged to `dev` stay open forever | Dispatcher **closes the issue + moves card to Done** on merge |
@@ -86,11 +88,13 @@ Each piece exists because the obvious approach failed:
 
 - **Ready-gating** — the dispatcher works *only* issues you put in `Ready`. You stay in
   control of what the fleet touches; it never surprises you by grabbing the backlog.
-- **Ship-gate** (a Hermes `pre_tool_call` hook) — blocks PR creation until the repo's
-  own checks pass. It's *language-agnostic* (runs the repo's `pre-commit`) plus a
-  per-repo extra-checks script for things CI runs that pre-commit doesn't (e.g. a
-  frontend `bun run lint && bun run typecheck`). A "remember to run pre-commit" note in
-  agent memory was skipped repeatedly; a gate cannot be.
+- **Ship-gate** — before pushing, the developer agent detects the project's configured
+  lint and format tools and runs them: `.pre-commit-config.yaml` → `pre-commit run --all-files`;
+  `package.json` lint/format scripts → `npm run lint && npm run format`;
+  `pyproject.toml` ruff config → `ruff check --fix && ruff format`;
+  `Makefile` lint target → `make lint`. Skips gracefully when nothing is configured.
+  Auto-fixes are committed before the PR is opened. A "remember to run linting" note
+  in agent memory was skipped repeatedly; a gate in the task instructions cannot be.
 - **Triage + decompose** — real separation of concerns across specialist agents
   (developer / reviewer / security-analyst / documentation), not one agent grading its
   own homework.
@@ -172,22 +176,15 @@ and shared across a team.
 | Requirement | Why |
 |---|---|
 | [Hermes](https://herm.es) installed + model auth | The runtime everything runs on |
-| [agent-skills](https://github.com/addyosmani/agent-skills) Hermes plugin | The 6 specialist profiles (developer, reviewer, security-analyst, documentation, planner, project-manager) extend agent-skills profiles — **must be installed before provisioning the roster** |
-| `python3` + `pyyaml` | Dispatcher and postinstall script |
 | `bun` | Dashboard build (only needed if you modify `dashboard/src/`) |
-| `pre-commit` | Ship-gate enforces the repo's pre-commit checks before a PR can open |
+
+**Everything else is automatic.** Clicking **Install Agents** in the dashboard (or running `postinstall.py`) auto-installs [agent-skills](https://github.com/addyosmani/agent-skills) if it is missing. `pyyaml` ships inside the Hermes venv. The developer agent auto-detects the project's lint/format tooling at ship time — no specific tool is required up front.
 
 **No VCS CLIs needed — ever.** Everything (dispatcher, dashboard, AND worker
 agents) talks to your VCS host via its **HTTPS API** with a token from the
 environment. Worker `git push` authenticates through a per-profile credential
 store written by the roster provisioner; PRs and comments go through the
 provider API with the token already in each worker's env.
-
-Install agent-skills before anything else:
-```bash
-hermes plugins install addyosmani/agent-skills --enable
-hermes gateway restart
-```
 
 ## VCS providers
 
@@ -284,31 +281,29 @@ login keychain or set a non-keychain helper:
 
 ## Quickstart
 
-**0. Install agent-skills** (required before the roster can be provisioned):
-```bash
-hermes plugins install addyosmani/agent-skills --enable
-hermes gateway restart
-```
-
-**1. Install the plugin** (official Hermes plugin):
+**1. Install the plugin:**
 ```bash
 hermes plugins install benmarte/daedalus --enable
 hermes gateway restart            # load the plugin
 ```
 
+![Hermes Plugins page — Daedalus listed as installed and enabled](docs/screenshots/guide/00-plugins-page.png)
+
 > **macOS note:** on macOS without launchd management, `hermes gateway restart` falls
 > back to running the gateway as a **background process**. It works, but does NOT
 > auto-start at login or auto-restart on crash.
 
-**2. Provision the agent roster** (the 6 specialist profiles — fails loudly if a
-prerequisite is missing, e.g. no `default` profile / `agent-skills`; missing VCS
-tokens are a warning, not a blocker):
+**2. Provision the agent roster** — open `hermes dashboard` → **Daedalus** tab →
+click **Install Agents**. This auto-installs agent-skills if missing and creates the
+6 specialist profiles (takes ~10–20 s). Or from the terminal:
 ```bash
 python3 ~/.hermes/plugins/daedalus/scripts/postinstall.py
 hermes profile list               # expect: developer reviewer security-analyst documentation planner project-manager
 ```
 
-**3. Onboard a target repo** — either click **“+ Add Project”** in the dashboard
+![Daedalus dashboard on fresh install — Install Agents banner prompts provisioning](docs/screenshots/guide/01-install-agents-banner.png)
+
+**3. Onboard a target repo** — either click **”+ Add Project”** in the dashboard
 (scaffolds the config, registers the repo, creates its kanban board + cron), or
 from the terminal:
 ```bash
@@ -316,6 +311,9 @@ cd /path/to/your/repo
 bash ~/.hermes/plugins/daedalus/scripts/setup.sh
 # then edit .hermes/daedalus.yaml (vcs provider, tracking, sources, cron) — repo/workdir are fixed
 ```
+
+![Add Project Step 1 — paste the repo path and Daedalus auto-detects the provider and repo slug](docs/screenshots/guide/05-add-project-step1-filled.png)
+
 Prefer hand-writing the config? That works too: copy
 [`templates/daedalus.yaml`](templates/daedalus.yaml) to `<repo>/.hermes/daedalus.yaml`,
 edit it, then run `setup.sh` once to register the repo (it never overwrites an
@@ -340,6 +338,8 @@ configured chat channels. You merge (agents never merge `main`).
 **5. Visual config + status** — `hermes dashboard` → the **Daedalus** tab: a card per
 project with live status (kanban counts, open PRs + CI, needs-attention, cron), and an
 editor for each project's config (`repo`/`workdir` are read-only).
+
+![Hermes kanban board for a Daedalus project — columns ready for work](docs/screenshots/guide/10-kanban-board.png)
 
 **6. Automate** — schedule the dispatcher so advancing/onboarding run unattended:
 ```bash
