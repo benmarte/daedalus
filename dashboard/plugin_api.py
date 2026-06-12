@@ -1685,6 +1685,52 @@ async def get_meta_version() -> dict[str, Any]:
         return {"version": "unknown"}
 
 
+@meta_router.get("/check-update")
+async def get_check_update() -> dict[str, Any]:
+    """Compare the installed version against the latest GitHub tag.
+
+    Reads ``source`` from plugin.yaml, hits the GitHub tags API, and
+    returns whether a newer tag exists.  Fails gracefully to
+    ``{"has_update": false}`` on any network or parse error.
+
+    Returns:
+        ``{"has_update": bool, "current": str, "latest": str|null}``
+    """
+    plugin_yaml = Path(__file__).resolve().parent.parent / "plugin.yaml"
+    try:
+        with open(plugin_yaml) as f:
+            data = yaml.safe_load(f) or {}
+        current = (data.get("version") or "unknown").strip()
+        source = (data.get("source") or "").strip()
+    except Exception:
+        return {"has_update": False, "current": "unknown", "latest": None}
+
+    if not source:
+        return {"has_update": False, "current": current, "latest": None}
+
+    # Extract owner/repo from https://github.com/owner/repo
+    m = re.match(r"https?://github\.com/([^/]+/[^/.]+?)(?:\.git)?$", source)
+    if not m:
+        return {"has_update": False, "current": current, "latest": None}
+
+    repo = m.group(1)
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/tags",
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": "daedalus-plugin/update-check"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            tags = json.loads(resp.read())
+        if not isinstance(tags, list) or not tags:
+            return {"has_update": False, "current": current, "latest": None}
+        latest = (tags[0].get("name") or "").lstrip("v").strip()
+        has_update = bool(latest) and latest != current
+        return {"has_update": has_update, "current": current, "latest": latest or None}
+    except Exception:
+        return {"has_update": False, "current": current, "latest": None}
+
+
 @meta_router.post("/update-plugin")
 async def post_update_plugin() -> dict[str, Any]:
     """Update the Daedalus plugin to the latest version via hermes plugins update."""

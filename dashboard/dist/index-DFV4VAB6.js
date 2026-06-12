@@ -2076,6 +2076,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var showUninstall = ui[0], setShowUninstall = ui[1];
     var vr = useState(null);
     var pluginVersion = vr[0], setPluginVersion = vr[1];
+    var hu = useState(null);
+    var hasUpdate = hu[0], setHasUpdate = hu[1];
     var up = useState(false);
     var updating = up[0], setUpdating = up[1];
     var ur = useState(null);
@@ -2105,6 +2107,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       fetchJSON("/api/plugins/daedalus/meta/version").then(function(d) {
         setPluginVersion(d && d.version || null);
       }).catch(function() {
+      });
+      fetchJSON("/api/plugins/daedalus/meta/check-update").then(function(d) {
+        setHasUpdate(d && d.has_update === true);
+      }).catch(function() {
+        setHasUpdate(false);
       });
     }, []);
     function updatePlugin() {
@@ -2246,7 +2253,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         },
         React.createElement(
           "div",
-          { style: { fontSize: "11px", color: "#555" } },
+          { style: { fontSize: "12px", color: "#888" } },
           "Daedalus" + (pluginVersion ? " v" + pluginVersion : "")
         ),
         React.createElement(
@@ -2255,11 +2262,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           updateResult ? React.createElement("span", {
             style: { fontSize: "11px", color: updateResult.ok ? "#4ade80" : "#f87171" }
           }, updateResult.ok ? "Updated \u2014 restart gateway to apply" : "Update failed: " + (updateResult.output || "").slice(0, 80)) : null,
-          React.createElement("button", {
+          hasUpdate ? React.createElement("button", {
             onClick: updatePlugin,
             disabled: updating,
             style: Object.assign({}, S.btnSmall, updating ? { opacity: 0.5 } : {})
-          }, updating ? "Updating\u2026" : "Update Plugin"),
+          }, updating ? "Updating\u2026" : "Update Plugin") : null,
           React.createElement("button", {
             onClick: function() {
               setShowUninstall(true);
