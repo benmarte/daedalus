@@ -416,24 +416,27 @@ def _board_slug(repo: str, name: str = "") -> str:
 
 # ── Kanban helpers (degrade gracefully) ─────────────────────────────────────
 
-def _kanban_summary(slug: str) -> Optional[dict[str, int]]:
+def _fetch_project_tasks(slug: str) -> Optional[list[dict[str, Any]]]:
+    """Fetch all tasks for a board once; callers share this result."""
+    if list_tasks is None:
+        return None
+    try:
+        return list_tasks(slug)
+    except Exception:
+        return None
+
+
+def _kanban_summary(slug: str, tasks: Optional[list[dict[str, Any]]] = None) -> Optional[dict[str, int]]:
     """Return counts of kanban cards by status, or None if the board is unavailable.
 
     Returns an empty dict ``{}`` when the board exists but has no tasks yet —
     this is distinct from ``None`` (board missing / CLI error) so the dashboard
     can show "board ready, 0 tasks" rather than "no kanban data".
+
+    Accepts a pre-fetched ``tasks`` list to avoid a redundant list_tasks call.
     """
-    if list_tasks is None:
-        return None
-    try:
-        tasks = list_tasks(slug)
-    except Exception:
-        return None
-    # list_tasks returns [] on CLI error AND on a genuinely empty board.
-    # We can't distinguish without an extra CLI call, but a registered project
-    # always has its board created at setup time, so treat [] as "board exists,
-    # no tasks yet" → return {} so the frontend renders the board as empty
-    # rather than missing.
+    if tasks is None:
+        tasks = _fetch_project_tasks(slug)
     if tasks is None:
         return None
     counts: dict[str, int] = {}
@@ -443,28 +446,35 @@ def _kanban_summary(slug: str) -> Optional[dict[str, int]]:
     return counts
 
 
-def _needs_attention(slug: str) -> Optional[list[dict[str, str]]]:
-    """Return blocked/gave_up cards with ids and short reasons, or None."""
+def _needs_attention(slug: str, all_tasks: Optional[list[dict[str, Any]]] = None) -> Optional[list[dict[str, str]]]:
+    """Return blocked/gave_up cards with ids and short reasons, or None.
+
+    Accepts a pre-fetched ``all_tasks`` list to avoid a redundant list_tasks
+    call when the caller already has all tasks (e.g. _kanban_summary).
+    """
     if list_tasks is None:
         return None
     attention_states = {"blocked", "gave_up"}
-    items: list[dict[str, str]] = []
-    for state in attention_states:
+    tasks = all_tasks
+    if tasks is None:
         try:
-            tasks = list_tasks(slug, status=state)
+            tasks = list_tasks(slug)
         except Exception:
+            return None
+    items: list[dict[str, str]] = []
+    for t in (tasks or []):
+        state = (t.get("status") or "").lower()
+        if state not in attention_states:
             continue
-        for t in (tasks or []):
-            entry: dict[str, str] = {
-                "task_id": t.get("id", ""),
-                "title": t.get("title", ""),
-                "status": state,
-            }
-            # Extract block reason from summary or result
-            summary = t.get("summary") or t.get("result") or ""
-            if summary:
-                entry["reason"] = summary[:200]
-            items.append(entry)
+        entry: dict[str, str] = {
+            "task_id": t.get("id", ""),
+            "title": t.get("title", ""),
+            "status": state,
+        }
+        summary = t.get("summary") or t.get("result") or ""
+        if summary:
+            entry["reason"] = summary[:200]
+        items.append(entry)
     return items if items else None
 
 
@@ -540,21 +550,12 @@ def _tracking_mode(project_cfg: dict[str, Any]) -> str:
 async def get_projects(request: Request) -> list[dict[str, Any]]:
     """Return aggregated status for every project in the registry.
 
-    The registry (~/.hermes/daedalus/projects) is the single source of truth;
-    each repo path resolves its own ``.hermes/daedalus.yaml`` for settings.
-    Repos registered without a config yet appear as lightweight entries.
-
-    Each entry includes:
-        - name, repo, workdir (read-only identity fields)
-        - kanban_summary: counts by status
-        - open_prs: open/in-review PRs with counts and CI state
-        - cron: schedule and delivery target
-        - needs_attention: blocked/gave_up cards with ids and reasons
-        - tracking_mode: provider name when a board is configured, else 'kanban'
-        - sources: enabled sources dict (stripped of secrets)
-
-    All fields degrade gracefully — nulls for missing data, never 500.
+    Performance: cron health is fetched ONCE for all projects (single subprocess),
+    kanban tasks are fetched once per project (shared between summary + attention),
+    and all projects are built concurrently via asyncio.gather + asyncio.to_thread.
     """
+    import asyncio
+
     registry_repos: list[str] = []
     if registry is not None:
         try:
@@ -562,44 +563,63 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
         except Exception:
             registry_repos = []
 
-    loader = ConfigLoader()
+    # Deduplicate while preserving order.
     seen: set[str] = set()
-    projects: list[dict[str, Any]] = []
-    for repo_path in registry_repos:
-        if repo_path in seen:
-            continue
-        seen.add(repo_path)
+    unique_repos: list[str] = []
+    for r in registry_repos:
+        if r not in seen:
+            seen.add(r)
+            unique_repos.append(r)
+
+    # Fetch all cron health in a single subprocess call, shared across projects.
+    cron_all: dict[str, dict[str, Any]] = await asyncio.to_thread(_cron_health_all)
+
+    loader = ConfigLoader()
+
+    def _build_one(repo_path: str) -> dict[str, Any]:
         try:
             resolved = loader.resolve_repo_config(repo_path)
         except Exception:
-            # Registered but no per-repo config yet — lightweight entry.
-            projects.append(_build_registry_only_entry(repo_path, Path(repo_path).name))
-            continue
-        projects.append(_build_project_entry(resolved))
+            return _build_registry_only_entry(repo_path, Path(repo_path).name, cron_all)
+        return _build_project_entry(resolved, cron_all)
 
+    results = await asyncio.gather(
+        *[asyncio.to_thread(_build_one, rp) for rp in unique_repos],
+        return_exceptions=True,
+    )
+    projects: list[dict[str, Any]] = []
+    for r in results:
+        if isinstance(r, Exception):
+            continue
+        projects.append(r)  # type: ignore[arg-type]
     return projects
 
 
-def _build_project_entry(proj: dict[str, Any]) -> dict[str, Any]:
+def _build_project_entry(proj: dict[str, Any],
+                          cron_all: Optional[dict[str, dict[str, Any]]] = None) -> dict[str, Any]:
     """Build a single project status entry from a resolved per-repo config."""
     name = proj.get("name", "")
     repo = proj.get("repo", "")
     workdir = proj.get("workdir", "")
     slug = _board_slug(repo, name)
 
-    # Kanban summary
-    kanban_summary = _kanban_summary(slug)
+    # Fetch tasks once — shared by kanban_summary and needs_attention.
+    tasks = _fetch_project_tasks(slug)
+    kanban_summary = _kanban_summary(slug, tasks=tasks)
+    needs_attention = _needs_attention(slug, all_tasks=tasks)
 
     # Open PRs (via the project's configured VCS provider)
     open_prs = _open_prs(_project_provider(proj))
 
-    # Cron info — always probe the live cron system so the card reflects
-    # reality even when the on-disk config is stale or has an empty cron block.
+    # Cron info — use pre-fetched batch result when available.
     cron_cfg = proj.get("cron") or {}
     cron_name = f"{name}-daedalus"
-    health = _cron_health(cron_name)
-    # Use schedule from config first; fall back to the value parsed from the
-    # live cron job (populated by _cron_health when the job is found).
+    if cron_all is not None:
+        health = cron_all.get(cron_name) or {"name": cron_name, "found": False,
+                                              "state": None, "last_run": None,
+                                              "last_status": None}
+    else:
+        health = _cron_health(cron_name)
     cfg_schedule = (cron_cfg.get("schedule") or "").strip()
     live_schedule = (health.get("schedule") or "").strip()
     schedule = cfg_schedule or live_schedule
@@ -613,9 +633,6 @@ def _build_project_entry(proj: dict[str, Any]) -> dict[str, Any]:
             "health": health,
         }
         cron = {k: v for k, v in cron.items() if v is not None}
-
-    # Needs attention
-    needs_attention = _needs_attention(slug)
 
     # Sources (strip secrets)
     sources = _strip_secrets(proj.get("sources") or {})
@@ -636,18 +653,20 @@ def _build_project_entry(proj: dict[str, Any]) -> dict[str, Any]:
 def _build_registry_only_entry(
     repo_path: str,
     name: str,
+    cron_all: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Build a lightweight entry for a repo in the registry but not in config."""
     slug = _board_slug(repo_path, name)
+    tasks = _fetch_project_tasks(slug)
 
     return {
         "name": name,
         "repo": repo_path,
         "workdir": repo_path,
-        "kanban_summary": _kanban_summary(slug),
-        "open_prs": None,  # no per-repo config -> no VCS provider to query
+        "kanban_summary": _kanban_summary(slug, tasks=tasks),
+        "open_prs": None,
         "cron": None,
-        "needs_attention": _needs_attention(slug),
+        "needs_attention": _needs_attention(slug, all_tasks=tasks),
         "tracking_mode": "kanban",
         "sources": None,
     }
@@ -1384,6 +1403,58 @@ async def get_meta_statuses(
 # ── Cron health ──────────────────────────────────────────────────────────────
 
 
+def _cron_health_all() -> dict[str, dict[str, Any]]:
+    """Run ``hermes cron list --all`` once and return a map of {cron_name: health}.
+
+    Called once per GET /projects tick so N projects share a single subprocess
+    call instead of each spawning their own.
+    """
+    try:
+        proc = subprocess.run(
+            ["hermes", "cron", "list", "--all"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            return {}
+        output = proc.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {}
+
+    header_re = re.compile(r"^\s*[0-9a-fA-F]{6,}\s+\[(\w+)\]")
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in output.split("\n"):
+        if header_re.match(line):
+            if current:
+                blocks.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+
+    result: dict[str, dict[str, Any]] = {}
+    for block in blocks:
+        header_line = block.split("\n")[0]
+        m = header_re.match(header_line)
+        state = m.group(1) if m else ""
+        name_match = re.search(r"^\s*Name:\s*(.+)$", block, re.MULTILINE)
+        if not name_match:
+            continue
+        name = name_match.group(1).strip()
+        entry: dict[str, Any] = {"name": name, "found": True, "state": state,
+                                  "last_run": None, "last_status": None}
+        sched_match = re.search(r"^\s*Schedule:\s+(.+)$", block, re.MULTILINE)
+        if sched_match:
+            entry["schedule"] = sched_match.group(1).strip()
+        last_match = re.search(r"^\s*Last run:\s+(\S+)\s+(\S+)", block, re.MULTILINE)
+        if last_match:
+            entry["last_run"] = last_match.group(1)
+            entry["last_status"] = last_match.group(2)
+        result[name] = entry
+    return result
+
+
 def _cron_health(cron_name: str) -> dict[str, Any]:
     """Check cron job health by parsing ``hermes cron list --all`` output.
 
@@ -1600,6 +1671,37 @@ def _hermes_cmd(*args: str, timeout: int = 30) -> tuple[bool, str]:
         return r.returncode == 0, (r.stdout + r.stderr).strip()
     except Exception as exc:
         return False, str(exc)
+
+
+@meta_router.get("/version")
+async def get_meta_version() -> dict[str, Any]:
+    """Return the installed plugin version from plugin.yaml."""
+    plugin_yaml = Path(__file__).resolve().parent.parent / "plugin.yaml"
+    try:
+        with open(plugin_yaml) as f:
+            data = yaml.safe_load(f) or {}
+        return {"version": data.get("version") or "unknown"}
+    except Exception:
+        return {"version": "unknown"}
+
+
+@meta_router.post("/update-plugin")
+async def post_update_plugin() -> dict[str, Any]:
+    """Update the Daedalus plugin to the latest version via hermes plugins update."""
+    try:
+        proc = subprocess.run(
+            ["hermes", "plugins", "update", "daedalus"],
+            capture_output=True, text=True, timeout=120,
+        )
+        ok = proc.returncode == 0
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return {"ok": ok, "output": output.strip()}
+    except FileNotFoundError:
+        return {"ok": False, "output": "hermes CLI not found"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": "Update timed out after 120s"}
+    except Exception as exc:
+        return {"ok": False, "output": str(exc)}
 
 
 @meta_router.post("/uninstall")

@@ -2074,6 +2074,12 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var rosterResult = rr[0], setRosterResult = rr[1];
     var ui = useState(false);
     var showUninstall = ui[0], setShowUninstall = ui[1];
+    var vr = useState(null);
+    var pluginVersion = vr[0], setPluginVersion = vr[1];
+    var up = useState(false);
+    var updating = up[0], setUpdating = up[1];
+    var ur = useState(null);
+    var updateResult = ur[0], setUpdateResult = ur[1];
     var load = useCallback(function() {
       setLoading(true);
       setLoadErr(null);
@@ -2095,6 +2101,23 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setRosterStatus(null);
       });
     }, []);
+    useEffect(function() {
+      fetchJSON("/api/plugins/daedalus/meta/version").then(function(d) {
+        setPluginVersion(d && d.version || null);
+      }).catch(function() {
+      });
+    }, []);
+    function updatePlugin() {
+      setUpdating(true);
+      setUpdateResult(null);
+      fetchJSON("/api/plugins/daedalus/meta/update-plugin", { method: "POST" }).then(function(r) {
+        setUpdating(false);
+        setUpdateResult(r || { ok: false, output: "no response" });
+      }).catch(function(err) {
+        setUpdating(false);
+        setUpdateResult({ ok: false, output: String(err && err.message || err) });
+      });
+    }
     function provisionRoster() {
       setProvisioningRoster(true);
       setRosterResult(null);
@@ -2206,16 +2229,44 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         { style: { textAlign: "center", marginTop: "20px" } },
         React.createElement(Button, { label: "Refresh", onClick: load })
       ),
-      // Uninstall footer
+      // Footer: version + update + uninstall
       React.createElement(
         "div",
-        { style: { textAlign: "center", marginTop: "40px", paddingTop: "20px", borderTop: "1px solid #2a2a2a" } },
-        React.createElement("button", {
-          onClick: function() {
-            setShowUninstall(true);
-          },
-          style: Object.assign({}, S.btn, { color: "#f87171", borderColor: "#7f1d1d", fontSize: "12px" })
-        }, "Uninstall Daedalus")
+        {
+          style: {
+            marginTop: "40px",
+            paddingTop: "16px",
+            borderTop: "1px solid #2a2a2a",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "8px"
+          }
+        },
+        React.createElement(
+          "div",
+          { style: { fontSize: "11px", color: "#555" } },
+          "Daedalus" + (pluginVersion ? " v" + pluginVersion : "")
+        ),
+        React.createElement(
+          "div",
+          { style: { display: "flex", gap: "8px", alignItems: "center" } },
+          updateResult ? React.createElement("span", {
+            style: { fontSize: "11px", color: updateResult.ok ? "#4ade80" : "#f87171" }
+          }, updateResult.ok ? "Updated \u2014 restart gateway to apply" : "Update failed: " + (updateResult.output || "").slice(0, 80)) : null,
+          React.createElement("button", {
+            onClick: updatePlugin,
+            disabled: updating,
+            style: Object.assign({}, S.btnSmall, updating ? { opacity: 0.5 } : {})
+          }, updating ? "Updating\u2026" : "Update Plugin"),
+          React.createElement("button", {
+            onClick: function() {
+              setShowUninstall(true);
+            },
+            style: Object.assign({}, S.btnSmall, { color: "#f87171", borderColor: "#7f1d1d" })
+          }, "Uninstall")
+        )
       ),
       // Modals
       modalProject ? React.createElement(ConfigModal, {

@@ -147,6 +147,9 @@ def test_get_projects_needs_attention_blocked_and_gave_up(client):
     ]
 
     def mock_list_tasks(slug, status=""):
+        # New implementation calls list_tasks(slug) once (no filter) and filters in Python.
+        if not status:
+            return blocked + gave_up
         if status == "blocked":
             return blocked
         elif status == "gave_up":
