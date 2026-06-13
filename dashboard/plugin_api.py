@@ -1342,12 +1342,20 @@ async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
         return {"repo": "", "labels": []}
     repo = resolved.get("repo", "")
     provider = _project_provider(resolved)
-    if provider is None or not provider.supports_labels:
+    if provider is None:
+        import logging
+        logging.getLogger("daedalus.meta").warning(
+            "get_meta_labels: no provider for project %r — check vcs config and token", project)
+        return {"repo": repo, "labels": []}
+    if not provider.supports_labels:
         return {"repo": repo, "labels": []}
     try:
         labels = [{"name": l.name, "color": l.color} for l in provider.list_labels()]
         return {"repo": repo, "labels": labels}
-    except Exception:
+    except Exception as exc:
+        import logging
+        logging.getLogger("daedalus.meta").warning(
+            "get_meta_labels: list_labels raised for project %r: %s", project, exc)
         return {"repo": repo, "labels": []}
 
 

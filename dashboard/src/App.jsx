@@ -918,6 +918,7 @@ function ConfigModal(props) {
   // Meta data for data-driven fields (branches, labels, statuses, projects)
   var br = useState([]); var branches = br[0], setBranches = br[1];
   var la = useState([]); var labels = la[0], setLabels = la[1];
+  var ll = useState(false); var labelsLoaded = ll[0], setLabelsLoaded = ll[1];
   var st = useState([]); var statuses = st[0], setStatuses = st[1];
   var gp = useState([]); var ghProjects = gp[0], setGhProjects = gp[1];
 
@@ -966,9 +967,11 @@ function ConfigModal(props) {
 
   // Fetch labels for issues filter checkboxes.
   useEffect(function () {
+    setLabelsLoaded(false);
     fetchJSON(apiMetaUrl(name, "labels")).then(function (data) {
       setLabels((data && data.labels) ? data.labels : []);
-    }).catch(function () { setLabels([]); });
+      setLabelsLoaded(true);
+    }).catch(function () { setLabels([]); setLabelsLoaded(true); });
   }, [name]);
 
   // Fetch GitHub Projects for board select.
@@ -1265,8 +1268,8 @@ function ConfigModal(props) {
           selected: getIn(config, ["issues", "filters", "labels"], []),
           options: (labels || []).map(function (l) { return { value: l.name, label: l.name, color: l.color }; }),
           onChange: function (arr) { updateField("issues.filters.labels", arr); },
-          placeholder: labels.length === 0 ? "— loading labels… —" : "└ select a label to filter",
-          emptyHint: "Requires 'repo' scope on your GITHUB_TOKEN to load labels"
+          placeholder: !labelsLoaded ? "— loading labels… —" : (labels.length === 0 ? "— no labels found —" : "└ select a label to filter"),
+          emptyHint: "No labels found — check that your VCS token has the correct scopes and the project path is set"
         })
       ),
 

@@ -28,6 +28,8 @@ issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
 
 - [Why this exists](#why-this-exists-read-this-part)
 - [How it works](#how-it-works)
+- [Agent roster](#agent-roster)
+- [Self-healing loop](#self-healing-loop)
 - [Design decisions](#design-decisions)
 - [Multi-repo: one Daedalus, many repos](#multi-repo-one-daedalus-many-repos)
 - [Repository layout](#repository-layout)
@@ -97,6 +99,152 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
 
 The kanban board and VCS board status are bookkept **in code on every tick**, so tracking is
 deterministic — never dependent on an agent remembering to update anything.
+
+---
+
+## Agent roster
+
+Clicking **Install Agents** provisions 6 specialist Hermes profiles. Each is a
+separate agent with its own context, credentials, and curated skill set — no
+profile can see another's in-progress work. The separation enforces the
+"no grading your own homework" principle: every handoff is a different agent with
+a different perspective.
+
+| Profile | Role | Writes code? |
+|---|---|---|
+| `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. | No |
+| `planner-daedalus` | Task graph, interface contracts, architecture decisions. | No |
+| `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
+| `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. | No |
+| `security-analyst-daedalus` | Security audit — OWASP, injection, secrets, authn/z. Blocks on risk with severity-rated findings. | No |
+| `documentation-daedalus` | READMEs, ADRs, changelogs, completion report posted to the PR and chat channels. | No |
+
+### Skills per profile
+
+Each profile installs only the [agent-skills](https://github.com/addyosmani/agent-skills)
+workflows relevant to its phase. Skills are curated process templates — an agent
+follows the skill's checklist rather than winging the approach, which is what
+makes the pipeline repeatable rather than demo-quality.
+
+**`project-manager-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `idea-refine` | Structured divergent → convergent thinking; turns vague requests into buildable scopes |
+| `spec-driven-development` | Requirements and acceptance criteria before any code exists |
+| `planning-and-task-breakdown` | Decomposes a spec into ordered, verifiable work chunks |
+| `shipping-and-launch` | Pre-launch checklist: risk review, rollback plan, monitoring |
+| `using-agent-skills` | Meta-skill: skill discovery and invocation rules |
+
+**`planner-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `spec-driven-development` | Requirements and acceptance criteria |
+| `planning-and-task-breakdown` | Task graph with stable inter-task interface contracts |
+| `context-engineering` | Loads the right context at the right time; avoids token waste |
+| `source-driven-development` | Verifies assumptions against official docs before committing to an approach |
+| `api-and-interface-design` | Stable interface definitions with clear contracts and evolution rules |
+| `using-agent-skills` | Meta-skill |
+
+**`developer-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `context-engineering` | Scoped context loading |
+| `source-driven-development` | Docs-first verification before implementing |
+| `incremental-implementation` | Thin vertical slices: implement → test → verify, one slice at a time |
+| `test-driven-development` | Failing test first, then make it pass |
+| `frontend-ui-engineering` | Production-quality UI with accessibility |
+| `api-and-interface-design` | Interface-stable implementation |
+| `debugging-and-error-recovery` | Reproduce → localize → fix → guard |
+| `git-workflow-and-versioning` | Atomic commits, clean branch history |
+| `using-agent-skills` | Meta-skill |
+
+**`reviewer-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `code-review-and-quality` | Five-axis review: correctness, readability, architecture, security, performance |
+| `code-simplification` | Identifies complexity that can be reduced without behavior change |
+| `performance-optimization` | Measure first; optimize only what evidence shows matters |
+| `test-driven-development` | Verifies test coverage is adequate |
+| `debugging-and-error-recovery` | Traces potential failure paths in the diff |
+| `git-workflow-and-versioning` | Reviews commit history quality |
+| `using-agent-skills` | Meta-skill |
+
+**`security-analyst-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `security-and-hardening` | OWASP prevention, input validation, least-privilege, secrets audit, injection/SSRF |
+| `code-review-and-quality` | Quality gate alongside the security findings |
+| `source-driven-development` | Verifies security claims against authoritative references |
+| `debugging-and-error-recovery` | Traces exploit paths and edge-case failure modes |
+| `using-agent-skills` | Meta-skill |
+
+**`documentation-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `documentation-and-adrs` | READMEs, Architecture Decision Records, changelogs |
+| `source-driven-development` | Verifies documentation accuracy against the actual code |
+| `context-engineering` | Loads only the relevant merged changes into context |
+| `using-agent-skills` | Meta-skill |
+
+---
+
+## Self-healing loop
+
+`core/iterate.py` runs on every cron tick after the main dispatch. It scans every
+blocked card and routes it to the agent that can clear it — the pipeline never
+stalls waiting for a human unless it has already retried 3 times.
+
+```
+blocked card detected
+        │
+        ├─ developer card + CI green + review-required?
+        │       └──► advance
+        │             complete the developer card
+        │             chain flows automatically to reviewer + security-analyst
+        │
+        ├─ developer card + CI red?
+        │       └──► dev_fix_ci
+        │             create an idempotent fix card assigned to developer-daedalus
+        │             key: fix-ci-{card_id}-attempt-{N}
+        │             only fires when CI is definitively RED (not UNKNOWN/PENDING)
+        │
+        ├─ reviewer or security-analyst card + changes requested?
+        │       └──► pm_route
+        │             create a PM routing card assigned to project-manager-daedalus
+        │             PM reads the findings and decides the fix owner:
+        │               developer-daedalus, security-analyst-daedalus, or re-spec
+        │             the reviewer/security card is marked "awaiting-fix"
+        │
+        ├─ reviewer or security-analyst card + approved?
+        │       └──► approve_advance
+        │             complete the card; next stage starts
+        │
+        └─ any action, attempt count > 3?
+                └──► escalate
+                      post a comment to the card
+                      leave it blocked for a human
+                      no new fix cards are ever created beyond this cap
+```
+
+**Idempotency.** Fix cards are keyed `fix-ci-{card_id}-attempt-N` and
+`pm-route-{card_id}-attempt-N`. Before creating one, the loop cross-checks the
+live board for a card with that key — multiple dispatcher instances (or a restart
+mid-tick) never double-create fix cards. Attempt counts survive across ticks in
+`.hermes/daedalus-fix-attempts.json`.
+
+**Awaiting-fix unblock.** When a developer fix card completes, the loop
+automatically unblocks any reviewer or security-analyst cards that were marked
+"awaiting-fix" for that issue. They re-enter the queue without human intervention.
+
+**Escalation cap.** `MAX_FIX_ATTEMPTS = 3`. After three attempts the loop posts a
+comment, leaves the card blocked, and stops. The pipeline never runs away — every
+blocked card has a finite ceiling and exactly one deterministic path forward.
 
 ---
 
