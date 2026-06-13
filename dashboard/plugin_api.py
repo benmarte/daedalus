@@ -1754,6 +1754,29 @@ async def post_update_plugin() -> dict[str, Any]:
         return {"ok": False, "output": str(exc)}
 
 
+@meta_router.post("/restart")
+async def post_restart() -> dict[str, Any]:
+    """Restart the Hermes gateway process.
+
+    Spawns 'hermes gateway restart' in the background and returns immediately —
+    the gateway process dies so the HTTP response may not always be received by
+    the client.
+    """
+    try:
+        # Detach so the child outlives this process being killed by the restart.
+        subprocess.Popen(
+            ["hermes", "gateway", "restart"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        return {"ok": True}
+    except FileNotFoundError:
+        return {"ok": False, "output": "hermes CLI not found"}
+    except Exception as exc:
+        return {"ok": False, "output": str(exc)}
+
+
 @meta_router.post("/uninstall")
 async def post_uninstall() -> dict[str, Any]:
     """Clean up all Daedalus host-side state and remove the plugin.

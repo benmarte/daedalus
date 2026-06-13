@@ -1719,6 +1719,8 @@ function App() {
   var hu = useState(null); var hasUpdate = hu[0], setHasUpdate = hu[1];
   var up = useState(false); var updating = up[0], setUpdating = up[1];
   var ur = useState(null); var updateResult = ur[0], setUpdateResult = ur[1];
+  var rg = useState(false); var restarting = rg[0], setRestarting = rg[1];
+  var rgr = useState(null); var restartResult = rgr[0], setRestartResult = rgr[1];
 
   var load = useCallback(function () {
     setLoading(true); setLoadErr(null);
@@ -1761,6 +1763,20 @@ function App() {
       });
   }
 
+  function restartHermes() {
+    setRestarting(true); setRestartResult(null);
+    fetchJSON("/api/plugins/daedalus/meta/restart", { method: "POST" })
+      .then(function () {
+        setRestarting(false);
+        setRestartResult({ ok: true });
+      })
+      .catch(function () {
+        // Gateway killed itself — treat as success and prompt user to reload.
+        setRestarting(false);
+        setRestartResult({ ok: true });
+      });
+  }
+
   function provisionRoster() {
     setProvisioningRoster(true); setRosterResult(null);
     fetchJSON("/api/plugins/daedalus/meta/provision-roster", { method: "POST" })
@@ -1787,10 +1803,23 @@ function App() {
     return React.createElement("div", { style: S.wrap },
       React.createElement("div", { style: S.err },
         isNotLoaded
-          ? "Plugin not active — restart the Hermes gateway to load Daedalus (hermes gateway restart)"
+          ? "Plugin not active — restart the Hermes gateway to activate Daedalus."
           : "Failed to load: " + loadErr
       ),
-      React.createElement("button", { style: S.btn, onClick: load }, "Retry")
+      restartResult && restartResult.ok
+        ? React.createElement("div", { style: { color: "#4ade80", marginBottom: "8px", fontSize: "13px" } },
+            "Restarting… reload this tab in a few seconds.")
+        : null,
+      isNotLoaded
+        ? React.createElement("div", { style: { display: "flex", gap: "8px" } },
+            React.createElement("button", {
+              style: Object.assign({}, S.btn, restarting ? { opacity: 0.6, cursor: "not-allowed" } : {}),
+              disabled: restarting,
+              onClick: restartHermes,
+            }, restarting ? "Restarting…" : "Restart Hermes"),
+            React.createElement("button", { style: S.btn, onClick: load }, "Retry")
+          )
+        : React.createElement("button", { style: S.btn, onClick: load }, "Retry")
     );
   }
 

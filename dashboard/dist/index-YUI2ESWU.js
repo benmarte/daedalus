@@ -2086,6 +2086,10 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var updating = up[0], setUpdating = up[1];
     var ur = useState(null);
     var updateResult = ur[0], setUpdateResult = ur[1];
+    var rg = useState(false);
+    var restarting = rg[0], setRestarting = rg[1];
+    var rgr = useState(null);
+    var restartResult = rgr[0], setRestartResult = rgr[1];
     var load = useCallback(function() {
       setLoading(true);
       setLoadErr(null);
@@ -2131,6 +2135,17 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setUpdateResult({ ok: false, output: String(err && err.message || err) });
       });
     }
+    function restartHermes() {
+      setRestarting(true);
+      setRestartResult(null);
+      fetchJSON("/api/plugins/daedalus/meta/restart", { method: "POST" }).then(function() {
+        setRestarting(false);
+        setRestartResult({ ok: true });
+      }).catch(function() {
+        setRestarting(false);
+        setRestartResult({ ok: true });
+      });
+    }
     function provisionRoster() {
       setProvisioningRoster(true);
       setRosterResult(null);
@@ -2161,9 +2176,23 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         React.createElement(
           "div",
           { style: S.err },
-          isNotLoaded ? "Plugin not active \u2014 restart the Hermes gateway to load Daedalus (hermes gateway restart)" : "Failed to load: " + loadErr
+          isNotLoaded ? "Plugin not active \u2014 restart the Hermes gateway to activate Daedalus." : "Failed to load: " + loadErr
         ),
-        React.createElement("button", { style: S.btn, onClick: load }, "Retry")
+        restartResult && restartResult.ok ? React.createElement(
+          "div",
+          { style: { color: "#4ade80", marginBottom: "8px", fontSize: "13px" } },
+          "Restarting\u2026 reload this tab in a few seconds."
+        ) : null,
+        isNotLoaded ? React.createElement(
+          "div",
+          { style: { display: "flex", gap: "8px" } },
+          React.createElement("button", {
+            style: Object.assign({}, S.btn, restarting ? { opacity: 0.6, cursor: "not-allowed" } : {}),
+            disabled: restarting,
+            onClick: restartHermes
+          }, restarting ? "Restarting\u2026" : "Restart Hermes"),
+          React.createElement("button", { style: S.btn, onClick: load }, "Retry")
+        ) : React.createElement("button", { style: S.btn, onClick: load }, "Retry")
       );
     }
     var projects = data || [];
