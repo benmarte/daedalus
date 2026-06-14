@@ -1762,7 +1762,7 @@ async def post_update_plugin() -> dict[str, Any]:
         return {"ok": False, "output": str(exc)}
 
 
-@meta_router.post("/restart")
+@meta_router.get("/restart")
 async def post_restart() -> dict[str, Any]:
     """Restart the Hermes gateway process.
 

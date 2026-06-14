@@ -1768,7 +1768,7 @@ function App() {
 
   function restartHermes() {
     setRestarting(true); setRestartResult(null);
-    fetchJSON("/api/plugins/daedalus/meta/restart", { method: "POST" })
+    fetchJSON("/api/plugins/daedalus/meta/restart")
       .then(function () {
         setRestarting(false);
         setRestartResult({ ok: true });
