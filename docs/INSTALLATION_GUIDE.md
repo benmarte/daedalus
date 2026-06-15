@@ -1,6 +1,6 @@
 # Daedalus — Installation & Usage Guide
 
-**Daedalus** is a [Hermes](https://herm.es) plugin that automates the journey from a GitHub, GitLab, or Azure DevOps issue all the way to a reviewed, mergeable pull request. You mark an issue **Ready**, and a team of six AI agents handles the implementation, code review, security audit, and documentation. When the PR is merged, Daedalus closes the issue and moves the board card to **Done**.
+**Daedalus** is a [Hermes](https://herm.es) plugin that automates the journey from a GitHub, GitLab, or Azure DevOps issue all the way to a reviewed, mergeable pull request. You mark an issue **Ready**, and a team of seven AI agents validates it, implements it, reviews it, security-audits it, and documents it. When the PR is merged, Daedalus closes the issue and moves the board card to **Done**.
 
 This guide walks you through every step: installing the plugin, provisioning the agents, adding your first project, and keeping everything up to date.
 
@@ -62,16 +62,17 @@ Open the Hermes dashboard and go to the **Daedalus** tab. On a fresh install, yo
 
 ![Empty Daedalus dashboard showing the Install Agents banner](screenshots/guide/01-install-agents-banner.png)
 
-Click **Install Agents**. Daedalus runs its provisioner and creates six specialist profiles. This takes about 10–20 seconds.
+Click **Install Agents**. Daedalus runs its provisioner and creates seven specialist profiles. This takes about 10–20 seconds.
 
 Verify the profiles by going to **Profiles** in Hermes:
 
-![Hermes Profiles page showing the 6 Daedalus agent profiles](screenshots/guide/02-profiles-page.png)
+![Hermes Profiles page showing the 7 Daedalus agent profiles](screenshots/guide/02-profiles-page.png)
 
-### The Six Agent Roles
+### The Seven Agent Roles
 
 | Role | What it does |
 |---|---|
+| **validator** | Runs first on every issue — confirms it is real, reproducible, and not already fixed before any code is written. Classifies as CONFIRMED (proceed), ALREADY_FIXED (closes issue), DUPLICATE (closes issue), or NEEDS_MORE_INFO (blocks, requests detail). |
 | **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines |
 | **planner** | Breaks an issue into a concrete plan with acceptance criteria |
 | **developer** | Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR |
@@ -79,7 +80,7 @@ Verify the profiles by going to **Profiles** in Hermes:
 | **security-analyst** | Audits for secrets, injection risks, and over-permissioned code — runs in parallel with the reviewer |
 | **documentation** | Writes a completion report, posts it on the PR, and sends it to notification channels |
 
-> **Why separate roles?** An agent reviewing its own work is the same as no review. Hard role separation ensures each stage is independently verified.
+> **Why separate roles?** An agent reviewing its own work is the same as no review. Hard role separation ensures each stage is independently verified. The validator prevents the entire pipeline from running on issues that aren't real work.
 
 After provisioning, the Daedalus tab shows a clean empty dashboard ready for your first project:
 
@@ -195,9 +196,10 @@ Every time the cron job fires, Daedalus runs its dispatch loop:
 
 1. Polls your VCS platform for issues in the **Ready** state.
 2. Skips issues that already have an open PR (no duplicate work).
-3. Kicks off the agent pipeline for new Ready issues.
+3. Kicks off the agent pipeline for new Ready issues — starting with the **validator**, which confirms the issue is real before the developer touches any code.
 4. Auto-advances any pipeline stage that's unblocked (e.g. CI turned green).
 5. Closes issues and marks cards **Done** when their PRs are merged.
+6. Cleans up kanban tasks for any issue the validator closed as already-fixed or a duplicate.
 
 View the cron job for your project in the Hermes **Cron** page:
 
@@ -330,7 +332,7 @@ Scroll to the bottom of the Daedalus dashboard tab and click **Uninstall**. A co
 
 ![Uninstall Daedalus confirmation modal](screenshots/guide/13-uninstall-confirm.png)
 
-The uninstall removes: all cron jobs, all six agent profiles, all kanban boards, the project registry, and the plugin package itself.
+The uninstall removes: all cron jobs, all seven agent profiles, all kanban boards, the project registry, and the plugin package itself.
 
 **Option B — Terminal:**
 
@@ -343,7 +345,7 @@ Options:
 # Keep the plugin installed but reset all host state:
 bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh --keep-plugin
 
-# Keep the 6 agent profiles:
+# Keep the 7 agent profiles:
 bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh --keep-profiles
 
 # Non-interactive (for scripting):
@@ -407,7 +409,7 @@ git config --global credential.helper ""
 
 - **Multi-user team setup:** See [SETUP.md](../SETUP.md) for sharing configuration across teammates without sharing tokens, and for how each person provisions their own roster from the same repo.
 
-- **Notifications:** Configure Slack, Discord, Telegram, or any Hermes-supported platform in the project config modal's **Notifications** section. Use **Send test message** to verify connectivity before the first dispatch.
+- **Notifications:** Configure Slack, Discord, Telegram, or any Hermes-supported platform in the project config modal's **Notifications** section. Use **Send test message** to verify connectivity before the first dispatch. All messages include clickable links to issues and PRs, structured dispatch summaries, and rich doc report envelopes with navigation links — no extra configuration needed.
 
 - **Custom board column names:** If your board uses different column names (e.g. `To do` instead of `Ready`), edit `vcs.status_map` in `.hermes/daedalus.yaml` or via the config modal.
 

@@ -11,11 +11,11 @@ notification channels (Slack, Discord, Telegram, Signal, WhatsApp, …).
 issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
       │  (cron tick — deterministic, code)
       ▼
-   triage card ──decompose──► developer ─► reviewer ─► security ─► documentation
-      │                          │            │           │            │
-   board: In progress       opens PR     approves     audits     posts report
-                            (lint/format                          to PR + your
-                             ship gate)                           chat channels
+   triage card ──decompose──► validator ─► developer ─► reviewer ─► security ─► documentation
+      │                          │             │            │           │            │
+   board: In progress      confirms issue  opens PR     approves    audits     posts report
+                           is real / not   (lint/format                        to PR + your
+                           already fixed    ship gate)                         chat channels
       ▼
    PR green → you merge → issue auto-closed, card → Done
 ```
@@ -67,8 +67,9 @@ demo" into "a tool the team can depend on."
 | Without this | With this |
 |---|---|
 | One issue spawns 9 PRs | One issue → one tracked card → one PR |
+| Agent starts coding a bug that was fixed last week | **Validator** confirms the issue is real, unaddressed, and has enough detail before any code is written |
 | Agent "forgets" to lint → red PR | **Ship-gate** detects and runs the project's lint/format tools before the PR is opened — no tool mandated |
-| A single agent marks its own work done | **Decompose** into developer → reviewer → security → documentation |
+| A single agent marks its own work done | **Decompose** into validator → developer → reviewer → security → documentation |
 | You babysit every handoff | **Auto-advance**: each stage completes on green CI and flows to the next |
 | Issues merged to `dev` stay open forever | Dispatcher **closes the issue + moves card to Done** on merge |
 | "Works on my machine" | One config, checked in, runs on any teammate's Hermes |
@@ -88,6 +89,8 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    - flips the board to **In progress**, creates a **triage card**, and **decomposes**
      it across the roster.
 3. **Agents** (Hermes kanban workers) execute their tasks:
+   - **validator** checks that the issue is real, not already fixed, not a duplicate, and has enough
+     detail — if not, it closes or blocks the issue and the rest of the chain never starts,
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR,
    - **reviewer** reviews, **security-analyst** audits, **documentation** writes a
      completion report and posts it to the **PR and your chat channels**.
@@ -104,7 +107,7 @@ deterministic — never dependent on an agent remembering to update anything.
 
 ## Agent roster
 
-Clicking **Install Agents** provisions 6 specialist Hermes profiles. Each is a
+Clicking **Install Agents** provisions 7 specialist Hermes profiles. Each is a
 separate agent with its own context, credentials, and curated skill set — no
 profile can see another's in-progress work. The separation enforces the
 "no grading your own homework" principle: every handoff is a different agent with
@@ -112,6 +115,7 @@ a different perspective.
 
 | Profile | Role | Writes code? |
 |---|---|---|
+| `validator-daedalus` | Validates the issue before any code is written: reproduces the bug, checks git history for existing fixes, detects duplicates. Classifies as CONFIRMED / ALREADY_FIXED / DUPLICATE / NEEDS_MORE_INFO. Closes or blocks the issue on non-CONFIRMED outcomes. | No |
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. | No |
 | `planner-daedalus` | Task graph, interface contracts, architecture decisions. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
@@ -125,6 +129,16 @@ Each profile installs only the [agent-skills](https://github.com/addyosmani/agen
 workflows relevant to its phase. Skills are curated process templates — an agent
 follows the skill's checklist rather than winging the approach, which is what
 makes the pipeline repeatable rather than demo-quality.
+
+**`validator-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `debugging-and-error-recovery` | Reproduces the reported issue to confirm it still exists |
+| `context-engineering` | Loads the minimal codebase context needed for accurate validation |
+| `source-driven-development` | Verifies the issue description against the actual code state |
+| `git-workflow-and-versioning` | Searches commit history for evidence the problem is already fixed |
+| `using-agent-skills` | Meta-skill |
 
 **`project-manager-daedalus`**
 
@@ -252,6 +266,11 @@ blocked card has a finite ceiling and exactly one deterministic path forward.
 
 Each piece exists because the obvious approach failed:
 
+- **Issue validation gate** — a `validator-daedalus` agent runs as step 0 on every issue,
+  before any code is written. It checks git history for existing fixes, tries to reproduce bugs
+  against the live codebase, and detects duplicates. On ALREADY_FIXED or DUPLICATE it closes the
+  VCS issue and cancels the pipeline. On NEEDS_MORE_INFO it blocks and comments asking the reporter.
+  Only CONFIRMED issues reach the developer — no wasted compute on stale or invalid tickets.
 - **Ready-gating** — the dispatcher works *only* issues you put in `Ready`. You stay in
   control of what the fleet touches; it never surprises you by grabbing the backlog.
 - **Ship-gate** — before pushing, the developer agent detects the project's configured
@@ -324,7 +343,8 @@ on its board.
 |------|------------|
 | `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
-| `scripts/provision_roster.sh` | Provisions the 6-agent Hermes roster. |
+| `core/notify_templates.py` | Rich markdown notification templates (dispatch summary, doc report envelope, PR-ready, pipeline-failure) with clickable issue/PR links for every Hermes messaging platform. |
+| `scripts/provision_roster.sh` | Provisions the 7-agent Hermes roster. |
 | `core/providers/` | VCS provider layer: GitHub (REST + GraphQL Projects v2), GitLab (REST), Azure DevOps (REST/WIQL) — token-authenticated HTTPS APIs, extensible via `register_provider()`. |
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
 | `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |
@@ -436,6 +456,14 @@ modes per project:
   **Notifications** editor — channels are discovered from `hermes send --list`,
   with manual entry as fallback.
 
+All notifications are rendered as **rich structured markdown** with clickable
+links to issues and PRs — `[#15](url)` links that render as hyperlinks on Slack,
+Teams, Discord, and every other Hermes-supported platform. The dispatch summary
+includes per-project sections for dispatched issues, completions, advanced PRs,
+auto-remediation actions, and delivered doc reports. Documentation reports are
+wrapped in a structured envelope with a header, navigation links, and issue
+cross-reference before delivery.
+
 ## Troubleshooting
 
 **macOS "Keychain Not Found" prompt during install?** It's a benign interaction
@@ -461,10 +489,10 @@ hermes gateway restart            # load the plugin
 
 **2. Provision the agent roster** — open `hermes dashboard` → **Daedalus** tab →
 click **Install Agents**. This auto-installs agent-skills if missing and creates the
-6 specialist profiles (takes ~10–20 s). Or from the terminal:
+7 specialist profiles (takes ~10–20 s). Or from the terminal:
 ```bash
 python3 ~/.hermes/plugins/daedalus/scripts/postinstall.py
-hermes profile list               # expect: developer reviewer security-analyst documentation planner project-manager
+hermes profile list               # expect: validator developer reviewer security-analyst documentation planner project-manager
 ```
 
 ![Daedalus dashboard on fresh install — Install Agents banner prompts provisioning](docs/screenshots/guide/01-install-agents-banner.png)
@@ -552,7 +580,7 @@ what will be removed before confirming (or use `-y` for scripting).
 # Skip the plugin removal (keep daedalus installed, reset host state only):
 bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-plugin
 
-# Keep the 6 agent profiles:
+# Keep the 7 agent profiles:
 bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-profiles
 
 # Both — keep profiles AND the plugin, reset everything else:

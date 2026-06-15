@@ -58,6 +58,15 @@ class _FakeProvider:
     def post_delivery_marker(self, pr, body=""):
         return True
 
+    # URL builders (new notify_templates integration)
+    display_repo = "owner/repo"
+
+    def issue_url(self, n):
+        return f"https://github.com/owner/repo/issues/{n}"
+
+    def pr_url(self, n):
+        return f"https://github.com/owner/repo/pull/{n}"
+
 
 gp = _FakeProvider()  # patched per-test via mock.patch.object
 

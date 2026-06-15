@@ -246,6 +246,19 @@ class AzureDevOpsProvider(VCSProvider):
         return [(r.get("name") or "").replace("refs/heads/", "")
                 for r in (data or {}).get("value") or [] if r.get("name")]
 
+    # ── URL builders ─────────────────────────────────────────────────────────
+    def issue_url(self, issue_number: int) -> str:
+        return (f"https://dev.azure.com/{quote(self.org)}/{quote(self.project)}"
+                f"/_workitems/edit/{issue_number}")
+
+    def pr_url(self, pr_number: int) -> str:
+        return (f"https://dev.azure.com/{quote(self.org)}/{quote(self.project)}"
+                f"/_git/{quote(self.repo)}/pullrequest/{pr_number}")
+
+    @property
+    def display_repo(self) -> str:
+        return f"{self.org}/{self.project}/{self.repo}"
+
     def list_labels(self) -> List[LabelDef]:
         """Work-item tags (closest Azure analogue to labels)."""
         try:

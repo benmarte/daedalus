@@ -5,8 +5,12 @@ This repo provisions a **lean roster of specialist Hermes agents** that take a
 ready-to-merge PR — using **native Hermes Kanban**
 (decompose → role profiles → dispatch → review).
 
-Roster: **project-manager · planner · developer · reviewer · security-analyst · documentation**
+Roster: **validator · project-manager · planner · developer · reviewer · security-analyst · documentation**
 (each loads only its lifecycle agent-skills).
+
+The **validator** runs first on every issue — before the developer touches any code. It confirms
+the issue is real, not already fixed, not a duplicate, and has enough detail to implement. Issues
+that fail validation are closed or blocked automatically; no developer cycles are wasted on noise.
 
 ## Sharing model (important)
 - **Share = this git repo.** It is secret-free. Everyone reproduces the roster locally with their
@@ -34,11 +38,22 @@ Roster: **project-manager · planner · developer · reviewer · security-analys
    **Where tokens go:**
    - Add them to **`~/.hermes/.env`** (e.g. `GITHUB_TOKEN=ghp_...`) — Hermes loads
      this file at startup, which covers the dispatcher cron and the dashboard.
+     The cron wrapper also sources this file explicitly so tokens are available
+     even when cron does not inherit your shell environment.
      Restart the gateway + dashboard after editing it.
    - **Export them in your shell before running `provision_roster.sh`** — the
      provisioner copies them into each worker profile's `.env` +
      `.git-credentials`, and adds them to `terminal.env_passthrough` so the
      workers' terminal shells can actually see them.
+
+   > **Token validation:** `provision_roster.sh` validates each token before
+   > writing it to any profile. It rejects values that look masked or hashed
+   > (e.g. `SHA256:...` or `***`), and requires `GITHUB_TOKEN` to start with a
+   > known prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`). If your token is
+   > sourced from a CI/CD secret store it may be redacted — always export the
+   > **raw, unmasked value** before running the provisioner. Missing tokens are
+   > allowed (kanban-only setups don't need them) and produce only an advisory
+   > note.
 
 ## Provision the roster
 ```bash

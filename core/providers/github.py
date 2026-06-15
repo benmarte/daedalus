@@ -182,6 +182,16 @@ class GitHubProvider(VCSProvider):
             return False
         return True
 
+    def update_pr_body(self, pr_number: int, body: str) -> bool:
+        """Overwrite the PR body (PATCH /pulls/{pr_number})."""
+        try:
+            self._http.patch_json(f"/repos/{self.repo}/pulls/{pr_number}", {"body": body})
+        except ProviderError as e:
+            self._log.warning("update_pr_body PR #%s failed: %s", pr_number, e)
+            return False
+        self._log.info("update_pr_body: patched #%s with closing keyword", pr_number)
+        return True
+
     # ── GraphQL (Projects v2) ────────────────────────────────────────────────
     def _graphql(self, query: str, variables: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
@@ -327,6 +337,17 @@ class GitHubProvider(VCSProvider):
         self._log.info("board: #%s -> %s", issue_number, status_name)
         self.invalidate_board_cache()
         return True
+
+    # ── URL builders ─────────────────────────────────────────────────────────
+    def issue_url(self, issue_number: int) -> str:
+        return f"https://github.com/{self.repo}/issues/{issue_number}"
+
+    def pr_url(self, pr_number: int) -> str:
+        return f"https://github.com/{self.repo}/pull/{pr_number}"
+
+    @property
+    def display_repo(self) -> str:
+        return self.repo
 
     # ── meta ─────────────────────────────────────────────────────────────────
     def list_branches(self) -> List[str]:

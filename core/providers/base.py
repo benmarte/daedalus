@@ -125,6 +125,9 @@ class LabelDef:
     color: str = ""
 
 
+_CLOSING_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b")
+
+
 def issue_linked_to_pr(pr: PRSummary, issue_number: int) -> bool:
     """Branch-name / closing-keyword heuristic shared by all providers.
 
@@ -134,9 +137,20 @@ def issue_linked_to_pr(pr: PRSummary, issue_number: int) -> bool:
     n = str(issue_number)
     head = pr.head_branch or ""
     body = pr.body or ""
-    closing = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#" + n + r"\b")
     return (f"issue-{n}" in head or f"/{n}-" in head or head.endswith(f"-{n}")
-            or bool(closing.search(body)))
+            or any(m.group(1) == n for m in _CLOSING_RE.finditer(body)))
+
+
+def ensure_closing_keyword(body: str, issue_number: int) -> str:
+    """Return ``body`` guaranteed to contain a GitHub auto-closing keyword for
+    ``issue_number``.  If the body already has one, it is returned unchanged.
+    Otherwise ``Closes #<n>`` is prepended as the first line so GitHub's merge
+    hook picks it up regardless of where it appears in a long body.
+    """
+    if any(m.group(1) == str(issue_number) for m in _CLOSING_RE.finditer(body or "")):
+        return body
+    prefix = f"Closes #{issue_number}\n\n"
+    return prefix + (body or "")
 
 
 class VCSProvider(abc.ABC):
@@ -219,6 +233,24 @@ class VCSProvider(abc.ABC):
 
     def post_pr_comment(self, pr_number: int, body: str) -> bool:
         return False
+
+    def update_pr_body(self, pr_number: int, body: str) -> bool:
+        """Overwrite the PR body. Returns True on success, False if unsupported/failed."""
+        return False
+
+    # ── URL builders (for rich notification links) ───────────────────────────
+    def issue_url(self, issue_number: int) -> str:
+        """Canonical web URL for an issue/work-item. Returns '' if not known."""
+        return ""
+
+    def pr_url(self, pr_number: int) -> str:
+        """Canonical web URL for a PR/MR. Returns '' if not known."""
+        return ""
+
+    @property
+    def display_repo(self) -> str:
+        """Human-readable repo identifier for notifications."""
+        return self._cfg.get("repo") or ""
 
     def pr_has_delivery_marker(self, pr_number: int) -> bool:
         return any(DELIVERY_MARKER in (c.body or "") for c in self.list_pr_comments(pr_number))

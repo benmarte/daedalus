@@ -48,6 +48,9 @@ class GitLabProvider(VCSProvider):
                               "API calls limited to public, unauthenticated access")
         self._http = HTTPClient(f"{base_url}/api/v4", headers, token=token)
         self.supports_boards = bool((self._cfg.get("tracking") or {}).get("label_board"))
+        # Stored for URL building — populated only when project_path (not numeric ID) is known.
+        self._web_base = base_url
+        self._project_web_path = project_path if "/" in project_path else ""
 
     @property
     def _proj(self) -> str:
@@ -213,6 +216,21 @@ class GitLabProvider(VCSProvider):
             return False
         self._log.info("board: #%s -> %s", issue_number, status_name)
         return True
+
+    # ── URL builders ─────────────────────────────────────────────────────────
+    def issue_url(self, issue_number: int) -> str:
+        if not self._project_web_path:
+            return ""
+        return f"{self._web_base}/{self._project_web_path}/-/issues/{issue_number}"
+
+    def pr_url(self, pr_number: int) -> str:
+        if not self._project_web_path:
+            return ""
+        return f"{self._web_base}/{self._project_web_path}/-/merge_requests/{pr_number}"
+
+    @property
+    def display_repo(self) -> str:
+        return self._project_web_path or self._cfg.get("repo") or ""
 
     # ── meta ─────────────────────────────────────────────────────────────────
     def list_branches(self) -> List[str]:

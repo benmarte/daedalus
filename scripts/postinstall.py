@@ -102,6 +102,10 @@ def _install_cron_wrapper() -> tuple[bool, str]:
 
     script_content = (
         "#!/usr/bin/env bash\n"
+        "# Source Hermes environment variables (including GITHUB_TOKEN)\n"
+        "if [ -f \"$HOME/.hermes/.env\" ]; then\n"
+        "  export $(grep -v '^#' \"$HOME/.hermes/.env\" | xargs)\n"
+        "fi\n"
         'exec python3 "$HOME/.hermes/plugins/daedalus/scripts/daedalus_dispatch.py" "$@"\n'
     )
 

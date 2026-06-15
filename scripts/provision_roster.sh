@@ -2,10 +2,10 @@
 #
 # provision_roster.sh — idempotent provisioning of the native-Hermes lifecycle role roster.
 #
-# Creates six specialist profiles, each loading ONLY its lifecycle agent-skills, so the
+# Creates seven specialist profiles, each loading ONLY its lifecycle agent-skills, so the
 # native Kanban decomposer can route a triage card through the agent-skills development
-# lifecycle (planner -> developer -> reviewer -> security-analyst -> documentation, with
-# project-manager owning intake + acceptance).
+# lifecycle (validator -> developer -> reviewer -> security-analyst -> documentation, with
+# planner owning architecture and project-manager owning intake + acceptance).
 #
 # Strategy: delete + recreate each role so the end state is identical every run (this script
 # is the source of truth). Profiles are cloned from `default` for model + provider keys,
@@ -67,7 +67,83 @@ else
   fi
 fi
 
-# Remove legacy / stray profiles from earlier spikes so the roster is exactly the six below.
+# ── Token validation ─────────────────────────────────────────────────────────
+# Reject tokens that are clearly masked, truncated, or invalid so we don't
+# bake a broken credential into every profile .env.  Valid tokens are either
+# absent (kanban-only is fine) or look like the real thing.
+
+_validate_token() {
+  local var_name="$1"   # e.g. GITHUB_TOKEN
+  local value="$2"
+  local prefix_pattern="$3"  # bash extended glob, e.g. "ghp_*|gho_*|ghu_*|ghs_*|ghr_*"
+  local label="$4"           # human-readable name
+
+  if [ -z "$value" ]; then
+    echo "NOTE: $var_name is not set — skipping (kanban-only setups don't need it)." >&2
+    return 0
+  fi
+
+  # Reject obviously masked / hashed values (CI/CD secrets leak as SHA256:xxx= or ***)
+  if echo "$value" | grep -qE '(\*{3,}|SHA256:|:[A-Za-z0-9+/]{40,}={0,2}$)'; then
+    echo "" >&2
+    echo "╔══════════════════════════════════════════════════════════════════╗" >&2
+    echo "║  ERROR: $var_name appears to be masked or hashed.               " >&2
+    echo "║                                                                  " >&2
+    echo "║  Value starts with: $(echo "$value" | cut -c1-30)...            " >&2
+    echo "║                                                                  " >&2
+    echo "║  This is NOT a valid $label token. Baking it into every         " >&2
+    echo "║  agent profile would cause 401 Unauthorized errors on every     " >&2
+    echo "║  git push, PR comment, and API call.                            " >&2
+    echo "║                                                                  " >&2
+    echo "║  Fix: export the raw, unmasked token value and re-run:          " >&2
+    echo "║    export $var_name=<raw-token>                                  " >&2
+    echo "║    bash scripts/provision_roster.sh                              " >&2
+    echo "╚══════════════════════════════════════════════════════════════════╝" >&2
+    echo "" >&2
+    exit 1
+  fi
+
+  # For GITHUB_TOKEN: must start with a known prefix (ghp_, gho_, ghu_, ghs_, ghr_)
+  if [ -n "$prefix_pattern" ]; then
+    local matched=0
+    for prefix in $prefix_pattern; do
+      case "$value" in
+        ${prefix}*) matched=1; break ;;
+      esac
+    done
+    if [ "$matched" -eq 0 ]; then
+      echo "" >&2
+      echo "╔══════════════════════════════════════════════════════════════════╗" >&2
+      echo "║  ERROR: $var_name does not look like a valid $label token.      " >&2
+      echo "║                                                                  " >&2
+      echo "║  Expected prefix: $prefix_pattern                               " >&2
+      echo "║  Got: $(echo "$value" | cut -c1-10)...                          " >&2
+      echo "║                                                                  " >&2
+      echo "║  Ensure you are exporting the raw token (not a masked CI        " >&2
+      echo "║  secret or base64-encoded value) and re-run:                    " >&2
+      echo "║    export $var_name=<raw-token>                                  " >&2
+      echo "║    bash scripts/provision_roster.sh                              " >&2
+      echo "╚══════════════════════════════════════════════════════════════════╝" >&2
+      echo "" >&2
+      exit 1
+    fi
+  fi
+}
+
+# Validate each token that is currently set.
+_validate_token "GITHUB_TOKEN (resolved as GH_TOKEN)" "$GH_TOKEN" \
+  "ghp_ gho_ ghu_ ghs_ ghr_" "GitHub"
+
+if [ -n "${GITLAB_TOKEN:-}" ]; then
+  # GitLab tokens are long alphanumeric strings; no fixed prefix but must not be masked.
+  _validate_token "GITLAB_TOKEN" "${GITLAB_TOKEN}" "" "GitLab"
+fi
+
+if [ -n "${AZURE_DEVOPS_PAT:-}" ]; then
+  _validate_token "AZURE_DEVOPS_PAT" "${AZURE_DEVOPS_PAT}" "" "Azure DevOps"
+fi
+
+# Remove legacy / stray profiles from earlier spikes so the roster is exactly the seven below.
 for legacy in builder probe-role; do
   hermes profile delete "$legacy" -y >/dev/null 2>&1 || true
 done
@@ -164,7 +240,11 @@ PY
   echo "  skills: $(ls "$dst" 2>/dev/null | tr '\n' ' ')"
 }
 
-# ── Role -> agent-skills matrix (lifecycle-aligned, 6-agent lean team) ──────────────────
+# ── Role -> agent-skills matrix (lifecycle-aligned, 7-agent lean team) ──────────────────
+
+setup_role validator-daedalus \
+  "Validates that an issue is real, reproducible, and not already addressed before any code is written. Classifies issues as CONFIRMED, ALREADY_FIXED, DUPLICATE, or NEEDS_MORE_INFO. Blocks the pipeline early on noise so no developer cycles are wasted." \
+  debugging-and-error-recovery context-engineering source-driven-development git-workflow-and-versioning using-agent-skills
 
 setup_role project-manager-daedalus \
   "Refines an issue into clear scope and acceptance criteria, breaks it into work, tracks acceptance, and runs the pre-ship checklist. Coordinates the team; writes no code." \

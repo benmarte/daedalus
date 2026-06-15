@@ -43,6 +43,8 @@ from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
 from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
+from core import notify_templates  # noqa: E402
+from core.providers.base import ensure_closing_keyword  # noqa: E402
 
 logger = logging.getLogger("daedalus.dispatch")
 
@@ -108,13 +110,45 @@ _PR_COMMENT_HOWTO = {
                    "env var (Basic auth, base64 of ':' + PAT)",
 }
 
+_CLOSE_ISSUE_HOWTO = {
+    "github": (
+        "PATCH https://api.github.com/repos/{repo}/issues/{n} "
+        "-H 'Authorization: Bearer $GITHUB_TOKEN' "
+        "-H 'Accept: application/vnd.github+json' "
+        "-d '{{\"state\":\"closed\",\"state_reason\":\"{reason}\"}}'"
+    ),
+    "gitlab": (
+        "PUT /api/v4/projects/<project-id>/issues/{n} "
+        "-H 'PRIVATE-TOKEN: $GITLAB_TOKEN' "
+        "-d '{{\"state_event\":\"close\"}}'"
+    ),
+    "azuredevops": (
+        "PATCH .../workitems/{n} (Basic auth with $AZURE_DEVOPS_PAT) "
+        "-d '[{{\"op\":\"add\",\"path\":\"/fields/System.State\",\"value\":\"Done\"}}]'"
+    ),
+}
+
 _PR_CREATE_HOWTO = {
-    "github": "the GitHub API (POST https://api.github.com/repos/{repo}/pulls with "
-              "'Authorization: Bearer $GITHUB_TOKEN')",
-    "gitlab": "the GitLab API (POST /api/v4/projects/<project-id>/merge_requests with "
-              "'PRIVATE-TOKEN: $GITLAB_TOKEN')",
-    "azuredevops": "the Azure DevOps API (POST .../pullrequests, Basic auth with "
-                   "$AZURE_DEVOPS_PAT)",
+    "github": (
+        "the GitHub API: "
+        "POST https://api.github.com/repos/{repo}/pulls "
+        "-H 'Authorization: Bearer $GITHUB_TOKEN' "
+        "-d '{{\"title\":\"<title>\",\"head\":\"<branch>\",\"base\":\"<base>\","
+        "\"body\":\"Closes #<issue_number>\\n\\n<rest of description>\"}}' "
+        "— the body field MUST begin with 'Closes #<issue_number>' on its own line"
+    ),
+    "gitlab": (
+        "the GitLab API: "
+        "POST /api/v4/projects/<project-id>/merge_requests "
+        "-H 'PRIVATE-TOKEN: $GITLAB_TOKEN' "
+        "-d '{{\"source_branch\":\"<branch>\",\"target_branch\":\"<base>\","
+        "\"title\":\"<title>\",\"description\":\"Closes #<issue_number>\\n\\n<rest>\"}}' "
+        "— the description field MUST begin with 'Closes #<issue_number>' on its own line"
+    ),
+    "azuredevops": (
+        "the Azure DevOps API (POST .../pullrequests, Basic auth with $AZURE_DEVOPS_PAT) "
+        "— include 'Fixes #<issue_number>' in the description field"
+    ),
 }
 
 
@@ -122,21 +156,58 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                notify_target: str = "", base_branch: str = "dev",
                provider_name: str = "github") -> str:
     """Triage body for decompose(): describes the FULL lifecycle so the decomposer
-    fans it out across the roster (developer → reviewer → security-analyst →
+    fans it out across the roster (validator → developer → reviewer → security-analyst →
     documentation). Each role's instructions are spelled out so routing is clean."""
     n = issue.get("number")
     title = issue.get("title", "")
     body = (issue.get("body") or "").strip()
+    issue_url = issue.get("url", "")
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     pr_create_howto = _PR_CREATE_HOWTO.get(provider_name,
                                            _PR_CREATE_HOWTO["github"]).format(repo=repo)
+    close_howto_completed = (_CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
+                             .format(repo=repo, n=n, reason="completed"))
+    close_howto_wontfix = (_CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
+                           .format(repo=repo, n=n, reason="not_planned"))
     return (
         f"Deliver issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
-        f"Decompose this into the following role tasks and assign each to the right agent:\n\n"
-        f"1. DEVELOPER — implement the fix/feature. Follow the agent-skills lifecycle "
-        f"({_LIFECYCLE}). Branch fix/issue-{n}-<slug>, write code + tests, iterate up to {iterations}x "
+        f"Decompose this into the following role tasks IN ORDER — each depends on the previous:\n\n"
+        f"0. VALIDATOR — before any code is written, validate that issue #{n} is real, "
+        f"reproducible, and not already addressed. Work in {workdir}.\n"
+        f"   Steps:\n"
+        f"   a) Read the issue body below carefully.\n"
+        f"   b) Search recent git history: "
+        f"`git -C {workdir} log --oneline -50 | grep -iE '<keywords from title>'` "
+        f"and grep the codebase for identifiers mentioned in the issue.\n"
+        f"   c) For bugs: run any tests related to the affected area "
+        f"(`pytest -k <keyword>` / `npm test -- <keyword>`) to confirm the failure still exists.\n"
+        f"   d) Check for open PRs or issues covering the same problem.\n"
+        f"   Classify and act on EXACTLY ONE outcome:\n\n"
+        f"   CONFIRMED — issue is real and unaddressed.\n"
+        f"     → Complete your card with a 1–2 sentence reproduction note. "
+        f"DEVELOPER proceeds.\n\n"
+        f"   ALREADY_FIXED — git history or code shows the problem is gone.\n"
+        f"     → Post a comment on issue #{n} via {comment_howto} naming the commit/PR that fixed it.\n"
+        f"     → Close the issue: {close_howto_completed}\n"
+        f"     → Complete your card with summary starting 'STOP: already fixed — '. "
+        f"The dispatcher will archive all remaining tasks on the next cycle.\n\n"
+        f"   DUPLICATE — another open issue or merged PR covers the same root cause.\n"
+        f"     → Post a comment on issue #{n} linking to the original.\n"
+        f"     → Close as duplicate: {close_howto_wontfix}\n"
+        f"     → Complete your card with summary starting 'STOP: duplicate of #<N>'. "
+        f"The dispatcher will archive all remaining tasks on the next cycle.\n\n"
+        f"   NEEDS_MORE_INFO — the issue lacks enough detail to reproduce or implement.\n"
+        f"     → Post a comment on issue #{n} listing exactly what info is needed (steps to "
+        f"reproduce, expected vs actual output, version/environment).\n"
+        f"     → Block your card with summary 'BLOCKED: needs more info'. "
+        f"DEVELOPER does not start. A human re-marks the issue Ready after the reporter responds.\n\n"
+        f"1. DEVELOPER — implement the fix/feature. "
+        f"⚠️ FIRST: check VALIDATOR's card summary. If it starts with 'STOP:' or 'BLOCKED:', "
+        f"mark this card complete immediately and do no work. "
+        f"Otherwise: follow the agent-skills lifecycle ({_LIFECYCLE}). "
+        f"Branch fix/issue-{n}-<slug>, write code + tests, iterate up to {iterations}x "
         f"if review fails. "
         f"Before pushing, run the project's configured lint and format tools (ship gate — "
         f"use whatever is present, skip gracefully if nothing is configured): "
@@ -147,9 +218,15 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"Commit any auto-fixes before pushing. "
         f"Push the branch (git credentials are pre-configured) and open a PR "
         f"into {base_branch} via {pr_create_howto} — no gh/glab/az CLI is installed. "
-        f"The PR body MUST include `Closes #{n}` on its own line "
-        f"(REQUIRED — links the issue and tracks it to completion), plus Problem, Fix, How to test, "
-        f"Manual testing.\n"
+        f"⚠️ CRITICAL — NON-NEGOTIABLE PR BODY REQUIREMENT: "
+        f"The FIRST LINE of the PR body MUST be exactly `Closes #{n}` on its own line "
+        f"(e.g. 'Closes #{n}\\n\\n...'). "
+        f"This is not optional: without it GitHub will NOT auto-close issue #{n} on merge, "
+        f"the Daedalus dispatcher will believe the work is still pending, "
+        f"and the Kanban task will be stuck in-progress forever. "
+        f"Acceptable synonyms: 'Fixes #{n}' or 'Resolves #{n}'. "
+        f"After 'Closes #{n}' the PR body MUST follow this exact structure:\n\n"
+        f"```\n{notify_templates.PR_BODY_TEMPLATE.replace('<issue_number>', str(n))}\n```\n\n"
         f"2. REVIEWER — review the developer's PR for correctness, quality, and performance; request "
         f"changes or approve.\n"
         f"3. SECURITY-ANALYST — audit the PR diff for vulnerabilities (authz, secrets, injection, "
@@ -157,12 +234,11 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"4. DOCUMENTATION — after the PR is open and reviewed, write a detailed completion report and "
         f"post it as a comment on the PR ({comment_howto}). "
         f"Use the PR number from the chain above (developer/reviewer cards carry it). "
-        f"The report MUST cover: the issue (#{n} + summary), what was fixed, the files edited (with a "
-        f"one-line note per file), how it was resolved, the PR link, and step-by-step instructions to "
-        f"test it manually. Use clear Markdown with a heading and a file-change table. "
-        f"Prefix the comment with `**Agent: documentation**` so the dispatcher can locate it. "
-        f"NOTE: Slack delivery is handled automatically by the dispatcher — do NOT attempt to "
-        f"deliver the report yourself.\n\n"
+        f"The comment MUST follow this exact structure:\n\n"
+        f"```\n{notify_templates.DOC_COMMENT_TEMPLATE.replace('<issue_number>', str(n)).replace('<issue_url>', issue_url)}\n```\n\n"
+        f"Replace every <placeholder> with the real value. "
+        f"NOTE: messaging-platform delivery is handled automatically by the dispatcher — do NOT "
+        f"attempt to send the report yourself.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
 
@@ -311,6 +387,30 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                         completed.append(n)
             elif pr == "open":
                 # PR open and awaiting review -> In review.
+                # Safety net: if the PR body lacks a closing keyword, inject one
+                # now so GitHub auto-closes the issue on merge even if the agent
+                # forgot to include it.
+                open_pr = provider._pr_for_issue(n)
+                if open_pr and open_pr.number:
+                    patched_body = ensure_closing_keyword(open_pr.body or "", n)
+                    if patched_body != (open_pr.body or ""):
+                        if dry_run:
+                            logger.info(
+                                "[dry-run] PR #%s body missing 'Closes #%s' — would patch",
+                                open_pr.number, n,
+                            )
+                        else:
+                            if provider.update_pr_body(open_pr.number, patched_body):
+                                logger.info(
+                                    "dispatch: injected 'Closes #%s' into PR #%s body",
+                                    n, open_pr.number,
+                                )
+                            else:
+                                logger.warning(
+                                    "dispatch: could not patch PR #%s body — "
+                                    "issue #%s may not auto-close on merge",
+                                    open_pr.number, n,
+                                )
                 if dry_run:
                     logger.info("[dry-run] would set #%s -> %s (PR open)", n, in_review_name)
                     reconciled.append((n, in_review_name))
@@ -383,46 +483,15 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     return summary
 
 
-def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False) -> str:
-    """Human-readable Slack/cron message — or '' when nothing happened.
+def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False,
+                   provider_map: Optional[Dict[str, Any]] = None) -> str:
+    """Rich markdown dispatch notification — or '' when nothing happened.
 
-    The --no-agent cron delivers stdout verbatim and treats empty stdout as
-    SILENT, so a no-op tick produces no message (no spam); only ticks with real
-    activity post a readable summary.
+    The --no-agent cron delivers stdout verbatim; empty stdout is SILENT so a
+    no-op tick produces no message (no spam). Passes ``provider_map`` through to
+    ``notify_templates`` so issue/PR references become hyperlinks where possible.
     """
-    lines = []
-    for name, s in summaries.items():
-        if s.get("error"):
-            lines.append(f"• *{name}* — ⚠️ error: {s['error']}")
-            continue
-        bits = []
-        if s.get("created"):
-            bits.append("dispatched " + ", ".join(f"#{n}" for n in s["created"]))
-        if s.get("completed"):
-            bits.append("✅ closed " + ", ".join(f"#{n}" for n in s["completed"]))
-        if s.get("advance_prs"):
-            bits.append("⏭️ advanced PR " + ", ".join(f"#{pr}" for pr in s["advance_prs"]))
-        ra = s.get("routed_actions")
-        if ra:
-            parts = []
-            if ra.get("dev_fix_ci"):
-                parts.append(f"ci-fix:{ra['dev_fix_ci']}")
-            if ra.get("pm_route"):
-                parts.append(f"pm-route:{ra['pm_route']}")
-            if ra.get("escalate"):
-                parts.append(f"escalate:{ra['escalate']}")
-            if parts:
-                bits.append("🔧 " + ", ".join(parts))
-        if s.get("reconciled"):
-            bits.append("🔄 " + ", ".join(f"#{n}→{st}" for n, st in s["reconciled"]))
-        if s.get("slack_delivered"):
-            bits.append("📨 delivered " + ", ".join(f"PR #{pr}" for pr in s["slack_delivered"]))
-        if bits:
-            lines.append(f"• *{name}* ({s.get('mode', '?')}): " + "; ".join(bits))
-    if not lines:
-        return ""  # nothing happened -> silent
-    header = "*🤖 Daedalus dispatch*" + (" _(dry-run)_" if dry_run else "")
-    return header + "\n" + "\n".join(lines)
+    return notify_templates.render_all_summaries(summaries, provider_map, dry_run=dry_run)
 
 
 # ── Slack delivery (dispatcher context, NOT agent) ──────────────────────────
@@ -543,8 +612,19 @@ def _deliver_doc_reports(
             delivered.append(pr_number)
             continue
 
+        # Wrap the raw PR comment in a rich notification envelope.
+        issue_number = notify_templates.extract_issue_number(report_body)
+        notification = notify_templates.render_doc_report_notification(
+            repo=provider.display_repo,
+            pr_number=pr_number,
+            pr_url=provider.pr_url(pr_number),
+            report_body=report_body,
+            issue_number=issue_number,
+            issue_url=provider.issue_url(issue_number) if issue_number else "",
+        )
+
         # Deliver via the dispatcher's root context — fan out to every target.
-        sent_to = [t for t in notify_targets if _send_via_hermes(t, report_body)]
+        sent_to = [t for t in notify_targets if _send_via_hermes(t, notification)]
         if not sent_to:
             # Total send failure → do NOT post the sentinel (retry next tick)
             continue
@@ -603,7 +683,11 @@ def _notify_project_summary(name: str, summary: Dict[str, Any],
     """
     if not ((resolved.get("cron") or {}).get("notifications")):
         return False
-    msg = _human_summary({name: summary}, dry_run=dry_run)
+    try:
+        provider = providers.get_provider(resolved)
+    except Exception:
+        provider = None
+    msg = notify_templates.render_dispatch_summary(name, summary, provider, dry_run=dry_run)
     if not msg:
         return True  # silent tick — handled, nothing to send
     targets: List[str] = []
@@ -692,7 +776,12 @@ def main() -> int:
             summaries[name] = {"error": str(e)}
         if _notify_project_summary(name, summaries[name], resolved, dry_run=dry_run):
             return 0
-        msg = _human_summary(summaries, dry_run=dry_run)
+        try:
+            _single_provider = providers.get_provider(resolved)
+        except Exception:
+            _single_provider = None
+        msg = _human_summary(summaries, dry_run=dry_run,
+                             provider_map={name: _single_provider})
         if msg:
             print(msg)
         return 0
@@ -727,11 +816,16 @@ def main() -> int:
     # tick so the cron is silent (no JSON spam). Full detail still goes to
     # stderr via the per-project logger.info above.
     legacy: Dict[str, Dict[str, Any]] = {}
+    legacy_providers: Dict[str, Any] = {}
     for name, s in summaries.items():
         r = resolved_map.get(name)
         if r is None or not _notify_project_summary(name, s, r, dry_run=dry_run):
             legacy[name] = s
-    msg = _human_summary(legacy, dry_run=dry_run)
+            try:
+                legacy_providers[name] = providers.get_provider(r) if r else None
+            except Exception:
+                legacy_providers[name] = None
+    msg = _human_summary(legacy, dry_run=dry_run, provider_map=legacy_providers)
     if msg:
         print(msg)
     return 0
