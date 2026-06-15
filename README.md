@@ -90,7 +90,9 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
      it across the roster.
 3. **Agents** (Hermes kanban workers) execute their tasks:
    - **validator** checks that the issue is real, not already fixed, not a duplicate, and has enough
-     detail — if not, it closes or blocks the issue and the rest of the chain never starts,
+     detail — it also detects security threats (prompt injection, social engineering, auth bypass,
+     backdoor requests, supply-chain attacks) and escalates immediately to a human — if anything
+     fails validation, the rest of the chain never starts,
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR,
    - **reviewer** reviews, **security-analyst** audits, **documentation** writes a
      completion report and posts it to the **PR and your chat channels**.
@@ -115,7 +117,7 @@ a different perspective.
 
 | Profile | Role | Writes code? |
 |---|---|---|
-| `validator-daedalus` | Validates the issue before any code is written: reproduces the bug, checks git history for existing fixes, detects duplicates. Classifies as CONFIRMED / ALREADY_FIXED / DUPLICATE / NEEDS_MORE_INFO. Closes or blocks the issue on non-CONFIRMED outcomes. | No |
+| `validator-daedalus` | Validates the issue before any code is written: reproduces the bug, checks git history for existing fixes, detects duplicates. Also detects security threats — prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks. Classifies as CONFIRMED / ALREADY_FIXED / DUPLICATE / NEEDS_MORE_INFO / SECURITY_THREAT. On SECURITY_THREAT, posts a comment, sends a notification, and blocks pending human review. | No |
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. | No |
 | `planner-daedalus` | Task graph, interface contracts, architecture decisions. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
@@ -137,6 +139,7 @@ makes the pipeline repeatable rather than demo-quality.
 | `debugging-and-error-recovery` | Reproduces the reported issue to confirm it still exists |
 | `context-engineering` | Loads the minimal codebase context needed for accurate validation |
 | `source-driven-development` | Verifies the issue description against the actual code state |
+| `security-and-hardening` | Recognizes threat patterns: prompt injection, social engineering, auth bypass, backdoor requests, supply-chain attacks |
 | `git-workflow-and-versioning` | Searches commit history for evidence the problem is already fixed |
 | `using-agent-skills` | Meta-skill |
 
@@ -268,9 +271,13 @@ Each piece exists because the obvious approach failed:
 
 - **Issue validation gate** — a `validator-daedalus` agent runs as step 0 on every issue,
   before any code is written. It checks git history for existing fixes, tries to reproduce bugs
-  against the live codebase, and detects duplicates. On ALREADY_FIXED or DUPLICATE it closes the
-  VCS issue and cancels the pipeline. On NEEDS_MORE_INFO it blocks and comments asking the reporter.
-  Only CONFIRMED issues reach the developer — no wasted compute on stale or invalid tickets.
+  against the live codebase, detects duplicates, and scans for security threats (prompt injection,
+  social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks).
+  On ALREADY_FIXED or DUPLICATE it closes the VCS issue and cancels the pipeline.
+  On NEEDS_MORE_INFO it blocks and comments asking the reporter.
+  On SECURITY_THREAT it posts a comment on the issue, fires a `security-escalation` notification
+  to configured channels, and blocks pending human review — the pipeline never starts.
+  Only CONFIRMED issues reach the developer — no wasted compute on stale, invalid, or malicious tickets.
 - **Ready-gating** — the dispatcher works *only* issues you put in `Ready`. You stay in
   control of what the fleet touches; it never surprises you by grabbing the backlog.
 - **Ship-gate** — before pushing, the developer agent detects the project's configured

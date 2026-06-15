@@ -286,6 +286,34 @@ def render_pipeline_failure(
 
 # ── PR-ready notification ─────────────────────────────────────────────────────
 
+def render_security_escalation(
+    name: str,
+    issue_number: int,
+    issue_title: str,
+    concern: str,
+    *,
+    issue_url: str = "",
+    provider=None,
+) -> str:
+    """Urgent notification when the validator flags an issue as a potential security threat.
+
+    Sent immediately when the validator detects prompt injection, social
+    engineering, credential exfiltration, backdoor requests, or supply-chain
+    attack patterns. The pipeline is blocked pending human review.
+    """
+    issue_ref = _link(f"#{issue_number}: {issue_title}", issue_url) if issue_url else f"#{issue_number}: {issue_title}"
+    return (
+        f"## 🚨 Security Escalation — **{name}**\n\n"
+        f"**Issue:** {issue_ref}\n\n"
+        f"**Concern:**\n{concern}\n\n"
+        f"---\n"
+        f"The Daedalus pipeline has been **blocked** on this issue. "
+        f"No code will be written until a human reviews and re-classifies it. "
+        f"If the issue is legitimate, close and re-open it with additional context "
+        f"that addresses the concern above, then move it back to **Ready**."
+    )
+
+
 def render_pr_ready(
     name: str,
     pr_number: int,

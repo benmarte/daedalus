@@ -72,7 +72,7 @@ Verify the profiles by going to **Profiles** in Hermes:
 
 | Role | What it does |
 |---|---|
-| **validator** | Runs first on every issue — confirms it is real, reproducible, and not already fixed before any code is written. Classifies as CONFIRMED (proceed), ALREADY_FIXED (closes issue), DUPLICATE (closes issue), or NEEDS_MORE_INFO (blocks, requests detail). |
+| **validator** | Runs first on every issue — confirms it is real, reproducible, and not already fixed before any code is written. Also detects security threats (prompt injection, social engineering, auth bypass, backdoor requests, supply-chain attacks). Classifies as CONFIRMED (proceed), ALREADY_FIXED (closes issue), DUPLICATE (closes issue), NEEDS_MORE_INFO (blocks, requests detail), or SECURITY_THREAT (blocks, notifies humans, pipeline halted). |
 | **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines |
 | **planner** | Breaks an issue into a concrete plan with acceptance criteria |
 | **developer** | Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR |
@@ -144,7 +144,8 @@ Step 2 opens automatically after Step 1. This is where you set branches, boards,
 
 **Notifications:**
 - Configure one or more delivery targets (Slack, Discord, etc.) for dispatch summaries, documentation reports, and pipeline failure alerts.
-- Click **+ Add notification target** to add a channel. Each target can be filtered to specific event types (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`).
+- Click **+ Add notification target** to add a channel. Each target can be filtered to specific event types (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`, `security-escalation`).
+- **`security-escalation`** fires immediately when the validator flags an issue as a potential threat. It is recommended to route this event to a high-visibility channel (e.g. `#security-alerts`) so a human can review and re-classify the issue quickly.
 
 ![Step 2 notifications section — add notification targets and configure event filters](screenshots/guide/08-add-project-step2-notify.png)
 
@@ -196,10 +197,11 @@ Every time the cron job fires, Daedalus runs its dispatch loop:
 
 1. Polls your VCS platform for issues in the **Ready** state.
 2. Skips issues that already have an open PR (no duplicate work).
-3. Kicks off the agent pipeline for new Ready issues — starting with the **validator**, which confirms the issue is real before the developer touches any code.
+3. Kicks off the agent pipeline for new Ready issues — starting with the **validator**, which confirms the issue is real and checks for security threats before the developer touches any code.
 4. Auto-advances any pipeline stage that's unblocked (e.g. CI turned green).
 5. Closes issues and marks cards **Done** when their PRs are merged.
 6. Cleans up kanban tasks for any issue the validator closed as already-fixed or a duplicate.
+7. On a **SECURITY_THREAT** classification, the validator posts an issue comment, fires a `security-escalation` notification to configured channels, and blocks the pipeline pending human review.
 
 View the cron job for your project in the Hermes **Cron** page:
 
