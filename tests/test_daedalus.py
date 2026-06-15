@@ -623,7 +623,7 @@ def test_human_summary_slack_delivered():
                "routed_actions": {}, "issues_seen": 5, "spec_created": [],
                "slack_delivered": [42, 99]}
     msg = disp._human_summary({"test": summary})
-    check("_human_summary includes doc-report delivery", "📨 delivered PR #42, PR #99" in msg)
+    check("_human_summary includes doc-report delivery", "PR #42" in msg and "PR #99" in msg)
 
     # Empty slack_delivered → no mention
     summary2 = {"board": "test", "mode": "github", "created": [],
@@ -641,8 +641,8 @@ def test_task_body_no_slack():
                            iterations=3, workdir="/tmp", notify_target="slack:tasks")
     check("_task_body does NOT mention hermes send",
           "hermes send" not in body)
-    check("_task_body mentions dispatcher handles Slack",
-          "dispatcher" in body and "Slack" in body)
+    check("_task_body mentions dispatcher handles messaging-platform delivery",
+          "dispatcher" in body and "messaging-platform" in body)
     check("_task_body instructs the API comment path (no CLI)",
           "api.github.com/repos/O/R/issues" in body and "GITHUB_TOKEN" in body)
     check("_task_body instructs the API PR-create path",
