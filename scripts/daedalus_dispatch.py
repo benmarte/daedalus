@@ -251,8 +251,14 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"reproduce, expected vs actual output, version/environment).\n"
         f"     → Block your card with summary 'BLOCKED: needs more info'. "
         f"DEVELOPER does not start. A human re-marks the issue Ready after the reporter responds.\n\n"
-        f"1. DEVELOPER — implement the fix/feature. Follow the agent-skills lifecycle "
-        f"({_LIFECYCLE}). Branch fix/issue-{n}-<slug>, write code + tests, iterate up to {iterations}x "
+        f"1. DEVELOPER — CIRCUIT-BREAKER (check first, before writing any code): inspect the "
+        f"VALIDATOR kanban card for issue #{n}. If its summary starts with 'BLOCKED:', 'ESCALATE:', "
+        f"or 'STOP:', mark YOUR card Complete immediately with summary 'Skipped: validator block' "
+        f"and exit. Do NOT write code, create branches, or open PRs. A human must clear the "
+        f"validator block before development may begin.\n"
+        f"   If the validator card is CONFIRMED, implement the fix/feature. "
+        f"Follow the agent-skills lifecycle ({_LIFECYCLE}). "
+        f"Branch fix/issue-{n}-<slug>, write code + tests, iterate up to {iterations}x "
         f"if review fails. "
         f"Before pushing, run the project's configured lint and format tools (ship gate — "
         f"use whatever is present, skip gracefully if nothing is configured): "
@@ -268,12 +274,21 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"targets '{base_branch}', the Daedalus dispatcher relies on this exact keyword to "
         f"automatically close the issue and mark the Kanban task Done upon merge.) Also include "
         f"sections for: Problem, Fix, How to test, and Manual testing.\n\n"
-        f"2. REVIEWER — review the developer's PR for correctness, quality, and performance; request "
-        f"changes or approve.\n"
-        f"3. SECURITY-ANALYST — audit the PR diff for vulnerabilities (authz, secrets, injection, "
-        f"input validation); flag findings or sign off.\n"
-        f"4. DOCUMENTATION — after the PR is open and reviewed, write a detailed completion report and "
-        f"post it as a comment on the PR ({comment_howto}). "
+        f"2. REVIEWER — CIRCUIT-BREAKER: check the VALIDATOR card for issue #{n}. "
+        f"If it starts with 'BLOCKED:', 'ESCALATE:', or 'STOP:', mark your card Complete with "
+        f"summary 'Skipped: validator block' and exit immediately. Do not review.\n"
+        f"   If the validator is CONFIRMED, review the developer's PR for correctness, quality, "
+        f"and performance; request changes or approve.\n"
+        f"3. SECURITY-ANALYST — CIRCUIT-BREAKER: check the VALIDATOR card for issue #{n}. "
+        f"If it starts with 'BLOCKED:', 'ESCALATE:', or 'STOP:', mark your card Complete with "
+        f"summary 'Skipped: validator block' and exit immediately.\n"
+        f"   If the validator is CONFIRMED, audit the PR diff for vulnerabilities (authz, secrets, "
+        f"injection, input validation); flag findings or sign off.\n"
+        f"4. DOCUMENTATION — CIRCUIT-BREAKER: check the VALIDATOR card for issue #{n}. "
+        f"If it starts with 'BLOCKED:', 'ESCALATE:', or 'STOP:', mark your card Complete with "
+        f"summary 'Skipped: validator block' and exit immediately.\n"
+        f"   If the validator is CONFIRMED, after the PR is open and reviewed, write a detailed "
+        f"completion report and post it as a comment on the PR ({comment_howto}). "
         f"Use the PR number from the chain above (developer/reviewer cards carry it). "
         f"The comment MUST follow this exact structure:\n\n"
         f"```\n{notify_templates.DOC_COMMENT_TEMPLATE.replace('<issue_number>', str(n)).replace('<issue_url>', issue_url)}\n```\n\n"
@@ -282,6 +297,58 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"attempt to send the report yourself.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
+
+
+def _enforce_validator_blocks(
+    slug: str, provider, existing: set, *, dry_run: bool = False
+) -> List[int]:
+    """For every blocked kanban card that is a validator card for a managed issue:
+    set the VCS board status to 'Blocked' (auto-creating the column if needed),
+    and complete all non-blocked downstream tasks so they cannot be dispatched.
+
+    Called each tick AFTER existing issue numbers are known so we only touch
+    issues the dispatcher is actually managing.  Returns enforced issue numbers.
+    """
+    if provider is None or not provider.board_configured():
+        return []
+    blocked = kanban.list_blocked(slug)
+    if not blocked:
+        return []
+
+    enforced: List[int] = []
+    for card in blocked:
+        assignee_card = (card.get("assignee") or "").strip()
+        summary = (card.get("summary") or card.get("last_summary") or "").lower()
+        # Identify validator cards by profile name OR by the block-summary prefix
+        is_validator = (
+            assignee_card == "validator-daedalus"
+            or summary.startswith("blocked:")
+            or summary.startswith("escalate:")
+        )
+        if not is_validator:
+            continue
+        m = re.search(r"#(\d+)", card.get("title") or "")
+        if not m:
+            continue
+        n = int(m.group(1))
+        if n not in existing:
+            continue
+        if dry_run:
+            logger.info(
+                "[dry-run] validator blocked #%s — would set 'Blocked' on board + cancel downstream tasks", n
+            )
+            enforced.append(n)
+            continue
+        provider.board_set_status(n, "Blocked")
+        logger.info("dispatch: validator blocked #%s — set board status to Blocked", n)
+        cancelled = kanban.close_non_blocked_issue_tasks(slug, n)
+        if cancelled:
+            logger.info(
+                "dispatch: cancelled %d downstream task(s) for blocked #%s: %s",
+                len(cancelled), n, cancelled,
+            )
+        enforced.append(n)
+    return enforced
 
 
 def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatch: int = 5,
@@ -408,6 +475,11 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     in_review_name = provider.status_name("in_review")
     existing = kanban.list_issue_numbers(slug)
     issues = _fetch_issues(provider, filters)
+
+    # Enforce validator blocks: set 'Blocked' column on VCS board and cancel
+    # downstream tasks for any issue whose validator card is currently blocked.
+    # Runs each tick so issues blocked mid-cycle are caught immediately.
+    _enforce_validator_blocks(slug, provider, existing, dry_run=dry_run)
 
     for issue in issues:
         n = issue["number"]

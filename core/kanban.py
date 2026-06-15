@@ -307,6 +307,28 @@ def list_tasks(slug: str, status: str = "") -> List[dict]:
         return []
 
 
+def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:
+    """Complete pending/in-progress tasks for issue_number, skipping blocked ones.
+
+    Used when the validator has blocked an issue — downstream tasks (developer,
+    reviewer, etc.) are completed immediately so they can't be dispatched, but
+    the validator's blocked card is left intact so humans can see the reason.
+    """
+    tasks = list_tasks(slug)
+    pattern = f"#{issue_number}"
+    completed_ids: List[str] = []
+    for t in tasks:
+        if pattern not in (t.get("title") or ""):
+            continue
+        status = (t.get("status") or "").lower()
+        if status in ("done", "complete", "completed", "blocked"):
+            continue  # leave the blocked validator card; skip already-done tasks
+        tid = t.get("id") or t.get("task_id")
+        if tid and complete(slug, str(tid)):
+            completed_ids.append(str(tid))
+    return completed_ids
+
+
 def close_issue_tasks(slug: str, issue_number: int) -> List[str]:
     """Complete all non-done kanban tasks that reference #issue_number in their title.
 

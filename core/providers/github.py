@@ -309,6 +309,61 @@ class GitHubProvider(VCSProvider):
                 if isinstance(it.get("number"), int)
                 and (it.get("status") or "").lower() in targets}
 
+    def board_ensure_status_option(self, status_name: str, color: str = "RED") -> bool:
+        """Create ``status_name`` as a Status field option if it doesn't exist yet.
+
+        Fetches existing options (preserving their colors) and appends the new
+        one via updateProjectV2Field, then clears the board meta cache so the
+        next board_set_status call picks up the new option ID.
+        """
+        meta = self._load_board_meta()
+        if not meta:
+            return False
+        if (status_name or "").lower() in meta["options"]:
+            return True  # already exists
+
+        # Fetch existing options with their colors so we can preserve them.
+        q = """query($owner:String!,$number:Int!){
+                 repositoryOwner(login:$owner){
+                   ... on ProjectV2Owner {
+                     projectV2(number:$number){
+                       field(name:"Status"){
+                         ... on ProjectV2SingleSelectField{
+                           options{ name color description }
+                         }
+                       }
+                     }
+                   }
+                 }
+               }"""
+        data = self._graphql(q, {"owner": self.owner, "number": int(self._board_number or 0)})
+        field_data = (((((data or {}).get("repositoryOwner") or {})
+                        .get("projectV2") or {}).get("field") or {}))
+        existing = field_data.get("options") or []
+        options = [
+            {"name": o["name"],
+             "color": o.get("color") or "GRAY",
+             "description": o.get("description") or ""}
+            for o in existing if o.get("name")
+        ]
+        options.append({"name": status_name, "color": color, "description": ""})
+
+        m = """mutation($projectId:ID!,$fieldId:ID!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){
+                 updateProjectV2Field(input:{
+                   projectId:$projectId, fieldId:$fieldId, singleSelectOptions:$options
+                 }){ projectV2Field{ id } }
+               }"""
+        result = self._graphql(m, {"projectId": meta["project_id"],
+                                    "fieldId": meta["status_field_id"],
+                                    "options": options})
+        if result is None:
+            self._log.warning("board: failed to create status option '%s'", status_name)
+            return False
+        self._log.info("board: created status option '%s' on project #%s",
+                       status_name, self._board_number)
+        self._board_meta = None  # clear cache so next call reloads with the new option
+        return True
+
     def board_set_status(self, issue_number: int, status_name: str) -> bool:
         if not self.board_configured():
             return False
@@ -316,6 +371,11 @@ class GitHubProvider(VCSProvider):
         if not meta:
             return False
         option_id = meta["options"].get((status_name or "").lower())
+        if not option_id:
+            # Column doesn't exist yet — create it automatically then retry.
+            if self.board_ensure_status_option(status_name):
+                meta = self._load_board_meta()
+                option_id = (meta or {}).get("options", {}).get((status_name or "").lower())
         if not option_id:
             self._log.warning("board: status '%s' not an option on #%s",
                               status_name, self._board_number)

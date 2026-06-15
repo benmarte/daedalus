@@ -272,6 +272,10 @@ class VCSProvider(abc.ABC):
         """Move an issue's board card to ``status_name``. False on any failure."""
         return False
 
+    def board_ensure_status_option(self, status_name: str, color: str = "RED") -> bool:
+        """Create ``status_name`` as a board status option if it doesn't exist yet."""
+        return False
+
     def reconcile_board_status(self, issue_number: int) -> Optional[str]:
         """Set card status from PR state: open → in_review, merged → done.
 
