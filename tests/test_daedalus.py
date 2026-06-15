@@ -288,12 +288,14 @@ def test_resolve_repo_config_missing_file():
 
 def test_dispatch_dual_mode():
     disp = _load_dispatch()
-    calls = {"decompose_all": 0, "create_triage": 0, "fetch_issues": 0}
+    calls = {"decompose_all": 0, "create_triage": 0, "create_task": 0, "fetch_issues": 0}
     disp.kanban.ensure_board = lambda s: None
     disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_tasks = lambda *a, **k: []  # no confirmed validators yet
     disp.kanban.list_issue_numbers = lambda s: set()
     disp.kanban.decompose_all_triage = lambda s: calls.__setitem__("decompose_all", calls["decompose_all"] + 1) or True
     disp.kanban.create_triage = lambda *a, **k: calls.__setitem__("create_triage", calls["create_triage"] + 1) or "t_x"
+    disp.kanban.create_task = lambda *a, **k: calls.__setitem__("create_task", calls["create_task"] + 1) or "t_v"
     disp.kanban.decompose = lambda *a, **k: True
     disp.kanban.dispatch = lambda s, max_spawns=5: True
     disp._fetch_issues = lambda r, f: (calls.__setitem__("fetch_issues", calls["fetch_issues"] + 1) or [{"number": 1, "title": "t"}])
@@ -308,7 +310,9 @@ def test_dispatch_dual_mode():
         def board_configured(self): return True
         def board_numbers_with_statuses(self, names): return {1}
     s2 = disp.run({**base, "tracking": {"github_project_number": 1}}, provider=FP())  # board mode
-    check("github mode polls issues and creates a triage card", calls["fetch_issues"] >= 1 and calls["create_triage"] == 1)
+    check("github mode polls issues and creates a validator task (phase 1 only)",
+          calls["fetch_issues"] >= 1 and calls["create_task"] == 1)
+    check("github mode does NOT decompose all roles in phase 1", calls["create_triage"] == 0)
     check("github mode does NOT use decompose --all", calls["decompose_all"] == 1)
     check("board mode reports provider name", s2.get("mode") == "github")
 
@@ -660,9 +664,11 @@ def test_dispatch_summary_has_slack_delivered():
     # Stub all the heavy machinery
     disp.kanban.ensure_board = lambda s: None
     disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_tasks = lambda *a, **k: []  # no confirmed validators yet
     disp.kanban.list_issue_numbers = lambda s: set()
     disp.kanban.decompose_all_triage = lambda s: True
     disp.kanban.create_triage = lambda *a, **k: "t_x"
+    disp.kanban.create_task = lambda *a, **k: "t_v"
     disp.kanban.decompose = lambda *a, **k: True
     disp.kanban.dispatch = lambda s, max_spawns=5: True
     disp._fetch_issues = lambda r, f: [{"number": 1, "title": "t"}]
