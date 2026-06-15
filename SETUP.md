@@ -8,9 +8,17 @@ ready-to-merge PR — using **native Hermes Kanban**
 Roster: **validator · project-manager · planner · developer · reviewer · security-analyst · documentation**
 (each loads only its lifecycle agent-skills).
 
-The **validator** runs first on every issue — before the developer touches any code. It confirms
-the issue is real, not already fixed, not a duplicate, and has enough detail to implement. Issues
-that fail validation are closed or blocked automatically; no developer cycles are wasted on noise.
+The **validator** runs alone as Phase 1 on every issue — the dispatcher creates only the validator
+task initially. Developer, reviewer, security-analyst, and documentation tasks are not created until
+the validator completes with a `CONFIRMED:` summary. This is enforced at the infrastructure level:
+downstream tasks simply don't exist until the validator decides. Six outcomes: **CONFIRMED** (triggers
+Phase 2 — downstream tasks created on next tick), **ALREADY_FIXED** (closes issue), **DUPLICATE**
+(closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks,
+posts issue comment, sends security-escalation notification), **BLOCK_FOR_REVIEW** (high-privilege
+request lacking verifiable context — blocks, posts comment listing missing details, sends
+security-escalation notification). All blocking outcomes auto-move the VCS board card to "Blocked",
+creating the column automatically if needed. All roles post a mandatory summary comment on the
+GitHub issue after completing their step.
 
 ## Sharing model (important)
 - **Share = this git repo.** It is secret-free. Everyone reproduces the roster locally with their

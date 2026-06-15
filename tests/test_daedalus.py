@@ -291,30 +291,38 @@ def test_dispatch_dual_mode():
     calls = {"decompose_all": 0, "create_triage": 0, "create_task": 0, "fetch_issues": 0}
     disp.kanban.ensure_board = lambda s: None
     disp.kanban.list_blocked = lambda s: []
-    disp.kanban.list_tasks = lambda *a, **k: []  # no confirmed validators yet
     disp.kanban.list_issue_numbers = lambda s: set()
     disp.kanban.decompose_all_triage = lambda s: calls.__setitem__("decompose_all", calls["decompose_all"] + 1) or True
     disp.kanban.create_triage = lambda *a, **k: calls.__setitem__("create_triage", calls["create_triage"] + 1) or "t_x"
-    disp.kanban.create_task = lambda *a, **k: calls.__setitem__("create_task", calls["create_task"] + 1) or "t_v"
     disp.kanban.decompose = lambda *a, **k: True
     disp.kanban.dispatch = lambda s, max_spawns=5: True
     disp._fetch_issues = lambda r, f: (calls.__setitem__("fetch_issues", calls["fetch_issues"] + 1) or [{"number": 1, "title": "t"}])
     base = {"repo": "O/R", "workdir": "/tmp", "name": "x", "issues": {"filters": {}}, "execution": {}}
 
-    s1 = disp.run({**base, "tracking": {}}, provider=_FakeProvider())  # no board -> kanban-only
-    check("kanban-only mode decomposes triage cards", calls["decompose_all"] == 1)
-    check("kanban-only mode does NOT poll VCS issues", calls["fetch_issues"] == 0)
-    check("kanban-only mode reports mode=kanban", s1.get("mode") == "kanban")
+    # Save and restore create_task + list_tasks to avoid cross-file test isolation issues
+    _orig_create_task = disp.kanban.create_task
+    _orig_list_tasks = disp.kanban.list_tasks
+    try:
+        disp.kanban.list_tasks = lambda *a, **k: []  # no confirmed validators yet
+        disp.kanban.create_task = lambda *a, **k: calls.__setitem__("create_task", calls["create_task"] + 1) or "t_v"
 
-    class FP(_FakeProvider):
-        def board_configured(self): return True
-        def board_numbers_with_statuses(self, names): return {1}
-    s2 = disp.run({**base, "tracking": {"github_project_number": 1}}, provider=FP())  # board mode
-    check("github mode polls issues and creates a validator task (phase 1 only)",
-          calls["fetch_issues"] >= 1 and calls["create_task"] == 1)
-    check("github mode does NOT decompose all roles in phase 1", calls["create_triage"] == 0)
-    check("github mode does NOT use decompose --all", calls["decompose_all"] == 1)
-    check("board mode reports provider name", s2.get("mode") == "github")
+        s1 = disp.run({**base, "tracking": {}}, provider=_FakeProvider())  # no board -> kanban-only
+        check("kanban-only mode decomposes triage cards", calls["decompose_all"] == 1)
+        check("kanban-only mode does NOT poll VCS issues", calls["fetch_issues"] == 0)
+        check("kanban-only mode reports mode=kanban", s1.get("mode") == "kanban")
+
+        class FP(_FakeProvider):
+            def board_configured(self): return True
+            def board_numbers_with_statuses(self, names): return {1}
+        s2 = disp.run({**base, "tracking": {"github_project_number": 1}}, provider=FP())  # board mode
+        check("github mode polls issues and creates a validator task (phase 1 only)",
+              calls["fetch_issues"] >= 1 and calls["create_task"] == 1)
+        check("github mode does NOT decompose all roles in phase 1", calls["create_triage"] == 0)
+        check("github mode does NOT use decompose --all", calls["decompose_all"] == 1)
+        check("board mode reports provider name", s2.get("mode") == "github")
+    finally:
+        disp.kanban.create_task = _orig_create_task
+        disp.kanban.list_tasks = _orig_list_tasks
 
 
 # ── main(): registry sweep ──────────────────────────────────────────────────
@@ -664,14 +672,18 @@ def test_dispatch_summary_has_slack_delivered():
     # Stub all the heavy machinery
     disp.kanban.ensure_board = lambda s: None
     disp.kanban.list_blocked = lambda s: []
-    disp.kanban.list_tasks = lambda *a, **k: []  # no confirmed validators yet
     disp.kanban.list_issue_numbers = lambda s: set()
     disp.kanban.decompose_all_triage = lambda s: True
     disp.kanban.create_triage = lambda *a, **k: "t_x"
-    disp.kanban.create_task = lambda *a, **k: "t_v"
     disp.kanban.decompose = lambda *a, **k: True
     disp.kanban.dispatch = lambda s, max_spawns=5: True
     disp._fetch_issues = lambda r, f: [{"number": 1, "title": "t"}]
+
+    # Save and restore create_task + list_tasks to avoid cross-file isolation issues
+    _orig_create_task = disp.kanban.create_task
+    _orig_list_tasks = disp.kanban.list_tasks
+    disp.kanban.create_task = lambda *a, **k: "t_v"
+    disp.kanban.list_tasks = lambda *a, **k: []  # no confirmed validators yet
 
     # Mock _deliver_doc_reports to return a known value
     with mock.patch.object(disp, "_deliver_doc_reports", return_value=[42]):
@@ -688,6 +700,9 @@ def test_dispatch_summary_has_slack_delivered():
             def board_numbers_with_statuses(self, names): return {1}
         s2 = disp.run({**base, "tracking": {"github_project_number": 1}}, provider=FP())
         check("board summary has slack_delivered", s2.get("slack_delivered") == [42])
+
+    disp.kanban.create_task = _orig_create_task
+    disp.kanban.list_tasks = _orig_list_tasks
 
 
 def test_notify_targets():

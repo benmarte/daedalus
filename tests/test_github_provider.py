@@ -171,15 +171,41 @@ ITEMS_GQL = {
             {"id": "I_3", "content": {}, "fieldValueByName": None}]}}}}
 
 
-def _gql_mock(provider, mutation_result=None):
+def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
+    """Stateful GraphQL mock. Tracks options added via updateProjectV2Field so
+    that subsequent fields(first queries include them (simulates real GitHub)."""
+    extra_opts: list = []  # options created via board_ensure_status_option
+
     def fake_post(path, payload, **kw):
         q = payload["query"]
         if "projectsV2(first" in q:
             return {"data": BOARD_GQL}
         if "fields(first" in q:
-            return {"data": FIELDS_GQL}
+            # Include any options added via updateProjectV2Field
+            opts = [{"id": "o1", "name": "Ready"}, {"id": "o2", "name": "Done"}]
+            for o in extra_opts:
+                opts.append({"id": f"o_{o['name'].lower()}", "name": o["name"]})
+            data = {"repositoryOwner": {"projectV2": {"fields": {"nodes": [
+                {"id": "F_title", "name": "Title"},
+                {"id": "F_status", "name": "Status", "options": opts},
+            ]}}}}
+            return {"data": data}
         if "items(first" in q:
             return {"data": ITEMS_GQL}
+        if 'field(name:"Status")' in q:
+            # Response for board_ensure_status_option's options-with-colors query
+            return {"data": {"repositoryOwner": {"projectV2": {"field": {"options": [
+                {"name": "Ready", "color": "GREEN", "description": ""},
+                {"name": "Done", "color": "BLUE", "description": ""},
+            ]}}}}}
+        if "updateProjectV2Field" in q:
+            # Track newly added options for future fields(first queries
+            for o in (payload.get("variables") or {}).get("options", []):
+                if o.get("name") not in ("Ready", "Done"):
+                    extra_opts.append(o)
+            if field_mutation_result is not None:
+                return field_mutation_result
+            return {"data": {"updateProjectV2Field": {"projectV2Field": {"id": "F_status"}}}}
         if "updateProjectV2ItemFieldValue" in q:
             return mutation_result or {"data": {"updateProjectV2ItemFieldValue":
                                                 {"projectV2Item": {"id": "I_1"}}}}
@@ -199,7 +225,23 @@ def test_board_set_status(provider):
 
 
 def test_board_set_status_unknown_option(provider):
+    """board_set_status auto-creates a missing option via board_ensure_status_option,
+    then sets the status — the stateful mock simulates GitHub returning the new option."""
     _gql_mock(provider)
+    assert provider.board_set_status(7, "Blocked") is True
+
+
+def test_board_set_status_option_create_fails(provider):
+    """board_set_status returns False when the option creation mutation fails."""
+    _gql_mock(provider, field_mutation_result=None)
+    # Override: make updateProjectV2Field return None so creation fails
+    base = provider._http.post_json.side_effect
+
+    def fail_field_mutation(path, payload, **kw):
+        if "updateProjectV2Field" in payload.get("query", ""):
+            return None
+        return base(path, payload, **kw)
+    provider._http.post_json.side_effect = fail_field_mutation
     assert provider.board_set_status(7, "Nonexistent") is False
 
 

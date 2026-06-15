@@ -72,15 +72,15 @@ Verify the profiles by going to **Profiles** in Hermes:
 
 | Role | What it does |
 |---|---|
-| **validator** | Runs first on every issue — confirms it is real, reproducible, and not already fixed before any code is written. Also detects security threats (prompt injection, social engineering, auth bypass, backdoor requests, supply-chain attacks). Classifies as CONFIRMED (proceed), ALREADY_FIXED (closes issue), DUPLICATE (closes issue), NEEDS_MORE_INFO (blocks, requests detail), or SECURITY_THREAT (blocks, notifies humans, pipeline halted). |
+| **validator** | **Runs alone in Phase 1.** No developer, reviewer, or other agent starts until this completes. Confirms the issue is real, reproducible, not already fixed. Detects security threats (prompt injection, social engineering, auth bypass, backdoor patterns, supply-chain attacks) and high-privilege requests lacking verifiable context. Six outcomes: **CONFIRMED** (Phase 2 begins on next tick), **ALREADY_FIXED** (closes issue), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, fires `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege action without identity/justification/approval — blocks, posts comment listing exactly what's missing, fires `security-escalation`). Posts a summary comment to the GitHub issue regardless of outcome. Blocking outcomes auto-move the VCS card to a **Blocked** column (created automatically if missing). |
 | **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines |
 | **planner** | Breaks an issue into a concrete plan with acceptance criteria |
-| **developer** | Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR |
-| **reviewer** | Reviews the PR for correctness, style, and logic |
-| **security-analyst** | Audits for secrets, injection risks, and over-permissioned code — runs in parallel with the reviewer |
-| **documentation** | Writes a completion report, posts it on the PR, and sends it to notification channels |
+| **developer** | Phase 2 only. Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR. Posts a summary comment to the GitHub issue on completion. |
+| **reviewer** | Reviews the PR for correctness, style, and logic. Posts a summary comment to the GitHub issue on completion. |
+| **security-analyst** | Audits for secrets, injection risks, and over-permissioned code. Posts a summary comment to the GitHub issue on completion. |
+| **documentation** | Writes a completion report, posts it on the PR, and sends it to notification channels. Posts a summary comment to the GitHub issue on completion. |
 
-> **Why separate roles?** An agent reviewing its own work is the same as no review. Hard role separation ensures each stage is independently verified. The validator prevents the entire pipeline from running on issues that aren't real work.
+> **Why separate roles?** An agent reviewing its own work is the same as no review. Hard role separation ensures each stage is independently verified. The validator prevents the entire pipeline from running on issues that aren't real work — and the enforcement is structural: downstream tasks don't exist until the validator says CONFIRMED.
 
 After provisioning, the Daedalus tab shows a clean empty dashboard ready for your first project:
 
@@ -179,9 +179,17 @@ Click the **gear icon** on any card to open its config modal, where you can chan
 Every Daedalus project gets its own **kanban board** inside Hermes. Cards move through columns as the agents work:
 
 1. An issue is moved to **Ready** on your VCS board.
-2. The next cron tick creates a triage card and decomposes it into tasks per agent role.
-3. Cards advance as work is completed — developer opens a PR, reviewer approves, security clears it, documentation posts the report.
-4. When you **merge the PR**, the card moves to **Done** and the original issue is closed.
+2. The next cron tick creates **one validator task** (Phase 1). No developer, reviewer, or other
+   downstream task exists yet — this is a hard infrastructure enforcement, not an instruction.
+3. The **validator** confirms the issue is real, checks for security threats, and completes with
+   outcome `CONFIRMED: <note>`. On SECURITY_THREAT or BLOCK_FOR_REVIEW it blocks the card and
+   fires a `security-escalation` notification. A Blocked column is created on your VCS board
+   automatically if it doesn't exist.
+4. The next cron tick after CONFIRMED detects the prefix and creates Phase 2: a triage card
+   decomposed across developer → reviewer → security-analyst → documentation.
+5. Cards advance as work is completed — developer opens a PR, reviewer approves, security clears
+   it, documentation posts the report. Each role posts a summary comment on the GitHub issue.
+6. When you **merge the PR**, the card moves to **Done** and the original issue is closed.
 
 View the board at any time from the Hermes **Kanban** page:
 
@@ -197,11 +205,16 @@ Every time the cron job fires, Daedalus runs its dispatch loop:
 
 1. Polls your VCS platform for issues in the **Ready** state.
 2. Skips issues that already have an open PR (no duplicate work).
-3. Kicks off the agent pipeline for new Ready issues — starting with the **validator**, which confirms the issue is real and checks for security threats before the developer touches any code.
-4. Auto-advances any pipeline stage that's unblocked (e.g. CI turned green).
-5. Closes issues and marks cards **Done** when their PRs are merged.
-6. Cleans up kanban tasks for any issue the validator closed as already-fixed or a duplicate.
-7. On a **SECURITY_THREAT** classification, the validator posts an issue comment, fires a `security-escalation` notification to configured channels, and blocks the pipeline pending human review.
+3. For new Ready issues: creates a **validator-only task** (Phase 1). Developer and other agents
+   do not get tasks yet.
+4. Scans done validator tasks for a `CONFIRMED:` summary — when found, creates the downstream
+   triage card (Phase 2: developer → reviewer → security-analyst → documentation).
+5. On **SECURITY_THREAT** or **BLOCK_FOR_REVIEW**: validator blocks the pipeline, posts an issue
+   comment, and fires a `security-escalation` notification to configured channels. The VCS board
+   card is moved to **Blocked** (column auto-created if it doesn't exist).
+6. Auto-advances any pipeline stage that's unblocked (e.g. CI turned green).
+7. Closes issues and marks cards **Done** when their PRs are merged.
+8. Cleans up kanban tasks for any issue the validator closed as already-fixed or a duplicate.
 
 View the cron job for your project in the Hermes **Cron** page:
 

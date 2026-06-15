@@ -11,11 +11,19 @@ notification channels (Slack, Discord, Telegram, Signal, WhatsApp, …).
 issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
       │  (cron tick — deterministic, code)
       ▼
-   triage card ──decompose──► validator ─► developer ─► reviewer ─► security ─► documentation
-      │                          │             │            │           │            │
-   board: In progress      confirms issue  opens PR     approves    audits     posts report
-                           is real / not   (lint/format                        to PR + your
-                           already fixed    ship gate)                         chat channels
+ Phase 1: validator task created (ONLY the validator — no other agent starts)
+      │                 │
+      │           SECURITY_THREAT → post issue comment + security-escalation
+      │           BLOCK_FOR_REVIEW → post comment listing missing details, block
+      │           ALREADY_FIXED / DUPLICATE → close issue, pipeline ends
+      │           NEEDS_MORE_INFO → block, comment asking reporter, pipeline waits
+      │           CONFIRMED: <note>  ← exact prefix triggers Phase 2
+      ▼
+ Phase 2: triage card ──decompose──► developer ─► reviewer ─► security ─► documentation
+      │                                  │            │           │            │
+   board: In progress               opens PR      approves    audits     posts report
+                                  (lint/format                           to PR + your
+                                   ship gate)                            chat channels
       ▼
    PR green → you merge → issue auto-closed, card → Done
 ```
@@ -86,16 +94,25 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    nothing else moves without it.
 2. A **cron tick** runs `daedalus_dispatch.py` (`--no-agent`, pure code). It:
    - selects **only `Ready`** issues (and skips any that already have a PR),
-   - flips the board to **In progress**, creates a **triage card**, and **decomposes**
-     it across the roster.
+   - flips the board to **In progress** and creates **one validator task** (Phase 1).
+     No developer, reviewer, or other downstream task is created yet — this is
+     enforced at the infrastructure level, not by instructions alone.
 3. **Agents** (Hermes kanban workers) execute their tasks:
-   - **validator** checks that the issue is real, not already fixed, not a duplicate, and has enough
-     detail — it also detects security threats (prompt injection, social engineering, auth bypass,
-     backdoor requests, supply-chain attacks) and escalates immediately to a human — if anything
-     fails validation, the rest of the chain never starts,
+   - **validator** (Phase 1) checks that the issue is real, not already fixed, not a duplicate,
+     and has enough detail. Also scans for security threats (prompt injection, social engineering,
+     auth bypass, backdoor patterns, supply-chain attacks) and for high-privilege requests lacking
+     verifiable context (BLOCK_FOR_REVIEW). On SECURITY_THREAT or BLOCK_FOR_REVIEW it blocks the
+     pipeline and fires a `security-escalation` notification. The validator posts a summary comment
+     on the GitHub issue and completes with a `CONFIRMED: <note>` summary — the dispatcher detects
+     this exact prefix to trigger Phase 2. If the outcome is anything other than CONFIRMED, Phase 2
+     never runs.
+   - **developer/reviewer/security-analyst/documentation** (Phase 2) — tasks are created by the
+     dispatcher only after it detects the validator's `CONFIRMED:` summary. The dispatcher creates
+     these atomically on the next tick: a triage card is decomposed across all four roles simultaneously.
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR,
    - **reviewer** reviews, **security-analyst** audits, **documentation** writes a
-     completion report and posts it to the **PR and your chat channels**.
+     completion report and posts it to the **PR and your chat channels**. All roles post
+     a summary comment on the GitHub issue after completing their step.
 4. Each tick **auto-advances** any stage that's blocked on review once its PR's CI is
    green — the chain flows hands-off.
 5. When you **merge** the PR, the next tick sets the card **Done** and **closes the
@@ -117,7 +134,7 @@ a different perspective.
 
 | Profile | Role | Writes code? |
 |---|---|---|
-| `validator-daedalus` | Validates the issue before any code is written: reproduces the bug, checks git history for existing fixes, detects duplicates. Also detects security threats — prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks. Classifies as CONFIRMED / ALREADY_FIXED / DUPLICATE / NEEDS_MORE_INFO / SECURITY_THREAT. On SECURITY_THREAT, posts a comment, sends a notification, and blocks pending human review. | No |
+| `validator-daedalus` | **Phase 1 — runs alone before any other agent.** Validates the issue: reproduces the bug, checks git history, detects duplicates. Scans for security threats (prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks). Six possible outcomes: **CONFIRMED** (proceeds; summary prefix `CONFIRMED:` triggers Phase 2), **ALREADY_FIXED** (closes issue, pipeline ends), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, sends `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege request lacks verifiable context — blocks, posts comment listing missing details, sends `security-escalation` notification). Posts a summary comment to the GitHub issue regardless of outcome. | No |
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. | No |
 | `planner-daedalus` | Task graph, interface contracts, architecture decisions. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
@@ -269,15 +286,23 @@ blocked card has a finite ceiling and exactly one deterministic path forward.
 
 Each piece exists because the obvious approach failed:
 
-- **Issue validation gate** — a `validator-daedalus` agent runs as step 0 on every issue,
-  before any code is written. It checks git history for existing fixes, tries to reproduce bugs
-  against the live codebase, detects duplicates, and scans for security threats (prompt injection,
-  social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks).
-  On ALREADY_FIXED or DUPLICATE it closes the VCS issue and cancels the pipeline.
-  On NEEDS_MORE_INFO it blocks and comments asking the reporter.
-  On SECURITY_THREAT it posts a comment on the issue, fires a `security-escalation` notification
-  to configured channels, and blocks pending human review — the pipeline never starts.
-  Only CONFIRMED issues reach the developer — no wasted compute on stale, invalid, or malicious tickets.
+- **Two-phase dispatch with hard validator gate** — the dispatcher creates *only* the
+  `validator-daedalus` task in Phase 1. Developer, reviewer, security-analyst, and
+  documentation tasks do not exist yet — they cannot be dispatched, period. On every cron tick,
+  the dispatcher scans done validator tasks for a `CONFIRMED:` summary prefix; only then does it
+  create the Phase 2 downstream triage and decompose it. This enforcement is structural (no tasks
+  to dispatch), not instructional (agent is told to check). Six validator outcomes:
+  **CONFIRMED** (`CONFIRMED: <note>` summary triggers Phase 2),
+  **ALREADY_FIXED** (closes issue, no Phase 2),
+  **DUPLICATE** (closes issue, no Phase 2),
+  **NEEDS_MORE_INFO** (blocks, comments asking reporter; pipeline waits for a human to re-Ready),
+  **SECURITY_THREAT** (posts issue comment, fires `security-escalation` notification, blocks),
+  **BLOCK_FOR_REVIEW** (high-privilege action lacking verifiable context — identity, business justification,
+  approval ticket; posts comment listing exactly what's missing, fires `security-escalation`, blocks).
+  All blocking outcomes also auto-move the VCS board card to a "Blocked" column, creating it
+  automatically if it doesn't exist.
+  Every role posts a mandatory summary comment on the GitHub issue after completing — the issue
+  history always reflects the current pipeline state, not just the internal kanban board.
 - **Ready-gating** — the dispatcher works *only* issues you put in `Ready`. You stay in
   control of what the fleet touches; it never surprises you by grabbing the backlog.
 - **Ship-gate** — before pushing, the developer agent detects the project's configured
@@ -458,10 +483,12 @@ modes per project:
   dispatcher's summary; doc reports go to the same target.
 - **Multi-target** (`cron.notifications`) — a list of `{platform, target,
   events}` entries; each channel picks which events it receives
-  (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`; omit
-  `events` to receive everything). Configure it in the dashboard's
-  **Notifications** editor — channels are discovered from `hermes send --list`,
-  with manual entry as fallback.
+  (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`,
+  `security-escalation`; omit `events` to receive everything).
+  Route `security-escalation` to a high-visibility channel (e.g. `#security-alerts`)
+  — it fires on SECURITY_THREAT and BLOCK_FOR_REVIEW for immediate human review.
+  Configure it in the dashboard's **Notifications** editor — channels are discovered
+  from `hermes send --list`, with manual entry as fallback.
 
 All notifications are rendered as **rich structured markdown** with clickable
 links to issues and PRs — `[#15](url)` links that render as hyperlinks on Slack,
