@@ -181,23 +181,18 @@ def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
         if "projectsV2(first" in q:
             return {"data": BOARD_GQL}
         if "fields(first" in q:
-            # Include any options added via updateProjectV2Field
+            # Include any options added via updateProjectV2Field.
+            # Uses "repository" key to match the updated get_board_fields query.
             opts = [{"id": "o1", "name": "Ready"}, {"id": "o2", "name": "Done"}]
             for o in extra_opts:
                 opts.append({"id": f"o_{o['name'].lower()}", "name": o["name"]})
-            data = {"repositoryOwner": {"projectV2": {"fields": {"nodes": [
+            data = {"repository": {"projectV2": {"fields": {"nodes": [
                 {"id": "F_title", "name": "Title"},
                 {"id": "F_status", "name": "Status", "options": opts},
             ]}}}}
             return {"data": data}
         if "items(first" in q:
             return {"data": ITEMS_GQL}
-        if 'field(name:"Status")' in q:
-            # Response for board_ensure_status_option's options-with-colors query
-            return {"data": {"repositoryOwner": {"projectV2": {"field": {"options": [
-                {"name": "Ready", "color": "GREEN", "description": ""},
-                {"name": "Done", "color": "BLUE", "description": ""},
-            ]}}}}}
         if "updateProjectV2Field" in q:
             # Track newly added options for future fields(first queries
             for o in (payload.get("variables") or {}).get("options", []):

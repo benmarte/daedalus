@@ -221,13 +221,14 @@ class GitHubProvider(VCSProvider):
             number = int(board_id)
         except (TypeError, ValueError):
             return []
-        q = """query($owner:String!,$number:Int!){ repositoryOwner(login:$owner){
-                 ... on ProjectV2Owner { projectV2(number:$number){
+        q = """query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner, name:$name){
+                 projectV2(number:$number){
                    fields(first:30){ nodes{
                      ... on ProjectV2SingleSelectField { id name options{ id name } }
-                     ... on ProjectV2FieldCommon { id name } } } } } } }"""
-        data = self._graphql(q, {"owner": self.owner, "number": number})
-        nodes = (((((data or {}).get("repositoryOwner") or {}).get("projectV2") or {})
+                     ... on ProjectV2FieldCommon { id name } } } } } }"""
+        data = self._graphql(q, {"owner": self.owner,
+                                  "name": self.repo.split("/", 1)[1], "number": number})
+        nodes = (((((data or {}).get("repository") or {}).get("projectV2") or {})
                   .get("fields") or {}).get("nodes") or [])
         out: List[FieldDef] = []
         for f in nodes:
@@ -322,39 +323,24 @@ class GitHubProvider(VCSProvider):
         if (status_name or "").lower() in meta["options"]:
             return True  # already exists
 
-        # Fetch existing options with their colors so we can preserve them.
-        q = """query($owner:String!,$number:Int!){
-                 repositoryOwner(login:$owner){
-                   ... on ProjectV2Owner {
-                     projectV2(number:$number){
-                       field(name:"Status"){
-                         ... on ProjectV2SingleSelectField{
-                           options{ name color description }
-                         }
-                       }
-                     }
-                   }
-                 }
-               }"""
-        data = self._graphql(q, {"owner": self.owner, "number": int(self._board_number or 0)})
-        field_data = (((((data or {}).get("repositoryOwner") or {})
-                        .get("projectV2") or {}).get("field") or {}))
-        existing = field_data.get("options") or []
+        # Reuse get_board_fields to avoid the "Selections can't be made directly on
+        # unions" error that field(name:"Status") triggers on some GitHub instances.
+        fields = self.get_board_fields(str(self._board_number))
+        status_field = next((f for f in fields if f.name.lower() == "status"), None)
+        if not status_field:
+            return False
         options = [
-            {"name": o["name"],
-             "color": o.get("color") or "GRAY",
-             "description": o.get("description") or ""}
-            for o in existing if o.get("name")
+            {"name": o.name, "color": "GRAY", "description": ""}
+            for o in status_field.options
         ]
         options.append({"name": status_name, "color": color, "description": ""})
 
-        m = """mutation($projectId:ID!,$fieldId:ID!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){
+        m = """mutation($fieldId:ID!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){
                  updateProjectV2Field(input:{
-                   projectId:$projectId, fieldId:$fieldId, singleSelectOptions:$options
+                   fieldId:$fieldId, singleSelectOptions:$options
                  }){ projectV2Field{ id } }
                }"""
-        result = self._graphql(m, {"projectId": meta["project_id"],
-                                    "fieldId": meta["status_field_id"],
+        result = self._graphql(m, {"fieldId": meta["status_field_id"],
                                     "options": options})
         if result is None:
             self._log.warning("board: failed to create status option '%s'", status_name)

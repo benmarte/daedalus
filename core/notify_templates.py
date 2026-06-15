@@ -147,9 +147,10 @@ def render_dispatch_summary(
     reconciled = summary.get("reconciled") or []
     delivered = summary.get("slack_delivered") or []
     spec_created = summary.get("spec_created") or []
+    blocked = summary.get("blocked") or []
 
     if not (created or completed or advance_prs or routed or reconciled
-            or delivered or spec_created):
+            or delivered or spec_created or blocked):
         return ""
 
     mode = summary.get("mode", "?")
@@ -166,6 +167,11 @@ def render_dispatch_summary(
         lines += ["", "### 📄 Spec Files Dispatched"]
         for sf in spec_created:
             lines.append(f"- `{sf}`")
+
+    if blocked:
+        lines += ["", "### 🛑 Blocked (Security / Escalation)"]
+        for n in blocked:
+            lines.append(f"- {_issue_link(n, provider)} — requires human review")
 
     if created:
         lines += ["", "### 📋 Dispatched"]

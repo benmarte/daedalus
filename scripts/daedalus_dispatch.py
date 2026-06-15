@@ -697,7 +697,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     # Enforce validator blocks: set 'Blocked' column on VCS board and cancel
     # downstream tasks for any issue whose validator card is currently blocked.
     # Runs each tick so issues blocked mid-cycle are caught immediately.
-    _enforce_validator_blocks(slug, provider, existing, dry_run=dry_run)
+    blocked_issues = _enforce_validator_blocks(slug, provider, existing, dry_run=dry_run)
 
     # Phase-2 trigger: for validator-confirmed issues, create the downstream
     # triage+decompose so developer/reviewer/security/documentation can start.
@@ -830,7 +830,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     summary = {"board": slug, "mode": provider.name, "created": created, "reconciled": reconciled,
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),
-               "spec_created": spec_created, "slack_delivered": slack_delivered}
+               "spec_created": spec_created, "slack_delivered": slack_delivered,
+               "blocked": blocked_issues}
     logger.info("dispatch summary: %s", summary)
     return summary
 
@@ -1021,6 +1022,8 @@ def _summary_events(summary: Dict[str, Any]) -> set:
         events.add("pipeline-failure")
     if summary.get("advance_prs") or summary.get("reconciled"):
         events.add("pr-ready")
+    if summary.get("blocked"):
+        events.add("security-escalation")
     return events
 
 
