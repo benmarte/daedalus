@@ -184,6 +184,8 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
     return (
         f"Deliver issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
+        f"🚨 MANDATORY FOR ALL ROLES: Upon completing your assigned step (whether finishing, requesting changes, or blocking), you MUST post a summary comment to the GitHub issue #{n} using: {comment_howto}.\n"
+        f"Your comment must clearly state: your role, your findings/decision, and the explicit next steps. This ensures the GitHub issue history accurately reflects the current state, keeping human reviewers informed directly in GitHub, not just on the internal Kanban board.\n\n"
         f"Decompose this into the following role tasks IN ORDER — each depends on the previous:\n\n"
         f"0. VALIDATOR — before any code is written, validate that issue #{n} is real, "
         f"reproducible, and not already addressed. Work in {workdir}.\n"
