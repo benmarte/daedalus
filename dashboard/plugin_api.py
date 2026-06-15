@@ -1590,6 +1590,7 @@ async def get_meta_pick_directory(request: Request) -> dict[str, Any]:
 # ── Roster provisioning ──────────────────────────────────────────────────────
 
 _ROSTER_PROFILES = [
+    "validator-daedalus",
     "project-manager-daedalus", "planner-daedalus", "developer-daedalus",
     "reviewer-daedalus", "security-analyst-daedalus", "documentation-daedalus",
 ]
@@ -1598,7 +1599,7 @@ _PROVISION_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "provis
 
 @meta_router.get("/roster-status")
 async def get_roster_status(request: Request) -> dict[str, Any]:
-    """Check which of the six specialist profiles are provisioned.
+    """Check which of the seven specialist profiles are provisioned.
 
     Returns ``{"all_provisioned": bool, "profiles": {name: bool}}``.
     """
@@ -1615,7 +1616,7 @@ async def get_roster_status(request: Request) -> dict[str, Any]:
 
 @meta_router.post("/provision-roster")
 async def post_provision_roster(request: Request) -> dict[str, Any]:
-    """Run provision_roster.sh to install the six specialist profiles.
+    """Run provision_roster.sh to install the seven specialist profiles.
 
     Reads any tokens already in ~/.hermes/.env and passes them as environment
     variables so the profiles get push auth without the user re-typing them.
@@ -1666,6 +1667,7 @@ async def post_provision_roster(request: Request) -> dict[str, Any]:
 
 
 _DAEDALUS_PROFILES = [
+    "validator-daedalus",
     "developer-daedalus", "reviewer-daedalus", "security-analyst-daedalus",
     "documentation-daedalus", "planner-daedalus", "project-manager-daedalus",
 ]
@@ -1745,7 +1747,13 @@ async def get_check_update() -> dict[str, Any]:
 
 @meta_router.post("/update-plugin")
 async def post_update_plugin() -> dict[str, Any]:
-    """Update the Daedalus plugin to the latest version via hermes plugins update."""
+    """Update the Daedalus plugin then re-provision the roster.
+
+    Runs ``hermes plugins update daedalus`` to pull the latest code, then
+    immediately re-runs ``provision_roster.sh`` so new agent profiles (e.g.
+    validator-daedalus added in beta.7) are installed without a separate
+    "Install Agents" click.
+    """
     try:
         proc = subprocess.run(
             ["hermes", "plugins", "update", "daedalus"],
@@ -1753,7 +1761,34 @@ async def post_update_plugin() -> dict[str, Any]:
         )
         ok = proc.returncode == 0
         output = (proc.stdout or "") + (proc.stderr or "")
-        return {"ok": ok, "output": output.strip()}
+        if not ok:
+            return {"ok": False, "output": output.strip()}
+
+        # Re-run the provisioner so any newly added profiles are installed.
+        provision_out = ""
+        if _PROVISION_SCRIPT.exists():
+            env = dict(os.environ)
+            env_path = _real_home() / ".hermes" / ".env"
+            if env_path.exists():
+                try:
+                    for line in env_path.read_text().split("\n"):
+                        line = line.strip()
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            env.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                except OSError:
+                    pass
+            try:
+                pr = subprocess.run(
+                    ["bash", str(_PROVISION_SCRIPT)],
+                    capture_output=True, text=True, timeout=180, env=env,
+                )
+                provision_out = (pr.stdout + pr.stderr).strip()
+            except Exception as exc:
+                provision_out = f"[provisioner error: {exc}]"
+
+        combined = (output.strip() + ("\n" + provision_out if provision_out else "")).strip()
+        return {"ok": True, "output": combined[:4000]}
     except FileNotFoundError:
         return {"ok": False, "output": "hermes CLI not found"}
     except subprocess.TimeoutExpired:

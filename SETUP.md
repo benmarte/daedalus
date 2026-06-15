@@ -59,9 +59,9 @@ that fail validation are closed or blocked automatically; no developer cycles ar
 ```bash
 git clone <this-repo> && cd daedalus
 bash scripts/provision_roster.sh        # idempotent — re-run any time to reset to spec
-hermes profile list                     # expect the 6 roles
+hermes profile list                     # expect the 7 roles
 ```
-What it does: creates the 6 profiles (cloning config/keys from `default`), seeds each with **only**
+What it does: creates the 7 profiles (cloning config/keys from `default`), seeds each with **only**
 its matrix agent-skills, writes a **per-profile git credential store** (`~/.git-credentials`,
 0600, keychain-free) so `git push` works inside each isolated HOME, and drops the provider
 tokens into each profile `.env` for API calls (open PR / comment via curl).

@@ -1734,7 +1734,7 @@ function App() {
   }, []);
   useEffect(function () { load(); }, [load]);
 
-  // Check whether the six specialist profiles are provisioned.
+  // Check whether the seven specialist profiles are provisioned.
   useEffect(function () {
     fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function (d) {
       setRosterStatus(d || null);
@@ -1758,7 +1758,14 @@ function App() {
         setUpdating(false);
         var result = r || { ok: false, output: "no response" };
         setUpdateResult(result);
-        if (result.ok) setHasUpdate(false);
+        if (result.ok) {
+          setHasUpdate(false);
+          // Re-fetch roster status — provisioner ran as part of the update,
+          // so the banner reflects the new profile set accurately.
+          fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function (d) {
+            setRosterStatus(d || null);
+          }).catch(function () {});
+        }
       })
       .catch(function (err) {
         setUpdating(false);
@@ -1840,7 +1847,7 @@ function App() {
       })
     ),
 
-    // Roster provisioning banner — shown when any of the 6 profiles are missing
+    // Roster provisioning banner — shown when any of the 7 profiles are missing
     rosterStatus && !rosterStatus.all_provisioned ? React.createElement("div", {
       style: {
         border: "1px solid #444", borderRadius: "8px", padding: "12px 16px",
