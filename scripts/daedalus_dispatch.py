@@ -424,8 +424,11 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                     completed.append(n)
                 else:
                     provider.board_set_status(n, provider.status_name("done"))
-                    if provider.close_issue(n):
-                        completed.append(n)
+                    provider.close_issue(n)
+                    # Archive kanban tasks immediately so the orphan cleanup path
+                    # on the next tick doesn't re-report this issue as completed.
+                    kanban.close_issue_tasks(slug, n)
+                    completed.append(n)
             elif pr == "open":
                 # PR open and awaiting review -> In review.
                 # Safety net: if the PR body lacks a closing keyword, inject one
@@ -515,7 +518,10 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         closed_tasks = kanban.close_issue_tasks(slug, n)
         logger.info("dispatch: #%s closed externally → Done (%d task(s) completed: %s)",
                     n, len(closed_tasks), closed_tasks)
-        completed.append(n)
+        # Only report as completed if we actually archived tasks — guards against
+        # re-reporting on every tick when hermes kanban ls still returns done tasks.
+        if closed_tasks:
+            completed.append(n)
 
     summary = {"board": slug, "mode": provider.name, "created": created, "reconciled": reconciled,
                "completed": completed, "advance_prs": advance_prs,
