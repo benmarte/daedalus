@@ -110,6 +110,8 @@ class BoardSummary:
 class FieldOption:
     id: str
     name: str
+    color: str = ""
+    description: str = ""
 
 
 @dataclass

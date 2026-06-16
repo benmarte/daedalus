@@ -183,9 +183,11 @@ def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
         if "fields(first" in q:
             # Include any options added via updateProjectV2Field.
             # Uses "repository" key to match the updated get_board_fields query.
-            opts = [{"id": "o1", "name": "Ready"}, {"id": "o2", "name": "Done"}]
+            opts = [{"id": "o1", "name": "Ready", "color": "GREEN", "description": ""},
+                    {"id": "o2", "name": "Done", "color": "BLUE", "description": ""}]
             for o in extra_opts:
-                opts.append({"id": f"o_{o['name'].lower()}", "name": o["name"]})
+                opts.append({"id": f"o_{o['name'].lower()}", "name": o["name"],
+                             "color": o.get("color") or "GRAY", "description": ""})
             data = {"repository": {"projectV2": {"fields": {"nodes": [
                 {"id": "F_title", "name": "Title"},
                 {"id": "F_status", "name": "Status", "options": opts},
@@ -200,7 +202,7 @@ def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
                     extra_opts.append(o)
             if field_mutation_result is not None:
                 return field_mutation_result
-            return {"data": {"updateProjectV2Field": {"projectV2Field": {"id": "F_status"}}}}
+            return {"data": {"updateProjectV2Field": {"clientMutationId": None}}}
         if "updateProjectV2ItemFieldValue" in q:
             return mutation_result or {"data": {"updateProjectV2ItemFieldValue":
                                                 {"projectV2Item": {"id": "I_1"}}}}

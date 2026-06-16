@@ -455,6 +455,47 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
     )
 
 
+_ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
+
+
+def _has_notified_block(slug: str, issue_number: int) -> bool:
+    """Return True if we already sent a block-escalation notification for this issue.
+
+    Uses the validator kanban task's comments as a persistent, zero-overhead
+    idempotency store — no local JSON files needed.
+    """
+    pattern = f"#{issue_number}"
+    for task in kanban.list_tasks(slug):
+        if pattern not in (task.get("title") or ""):
+            continue
+        if (task.get("assignee") or "") != "validator-daedalus":
+            continue
+        tid = str(task.get("id") or task.get("task_id") or "")
+        if not tid:
+            continue
+        card = kanban.show_card(slug, tid)
+        if not card:
+            continue
+        for c in card.get("comments") or []:
+            if _ESCALATION_MARKER in (c.get("body") or ""):
+                return True
+    return False
+
+
+def _mark_notified_block(slug: str, issue_number: int) -> None:
+    """Stamp the validator task so future ticks skip re-sending the escalation."""
+    pattern = f"#{issue_number}"
+    for task in kanban.list_tasks(slug):
+        if pattern not in (task.get("title") or ""):
+            continue
+        if (task.get("assignee") or "") != "validator-daedalus":
+            continue
+        tid = str(task.get("id") or task.get("task_id") or "")
+        if tid:
+            kanban.comment(slug, tid, _ESCALATION_MARKER)
+            return
+
+
 def _has_downstream_tasks(slug: str, issue_number: int) -> bool:
     """Return True if any non-validator kanban task exists for issue_number.
 
@@ -565,7 +606,11 @@ def _enforce_validator_blocks(
                 "dispatch: cancelled %d downstream task(s) for blocked #%s: %s",
                 len(cancelled), n, cancelled,
             )
-        enforced.append(n)
+        # Only include in the returned list (which triggers notifications) once —
+        # subsequent ticks still enforce board/kanban state but stay silent.
+        if not _has_notified_block(slug, n):
+            enforced.append(n)
+            _mark_notified_block(slug, n)
     return enforced
 
 

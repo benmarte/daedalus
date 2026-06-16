@@ -224,8 +224,9 @@ class GitHubProvider(VCSProvider):
         q = """query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner, name:$name){
                  projectV2(number:$number){
                    fields(first:30){ nodes{
-                     ... on ProjectV2SingleSelectField { id name options{ id name } }
-                     ... on ProjectV2FieldCommon { id name } } } } } }"""
+                     ... on ProjectV2SingleSelectField { id name options{ id name color description } }
+                     ... on ProjectV2Field { id name }
+                     ... on ProjectV2IterationField { id name } } } } } }"""
         data = self._graphql(q, {"owner": self.owner,
                                   "name": self.repo.split("/", 1)[1], "number": number})
         nodes = (((((data or {}).get("repository") or {}).get("projectV2") or {})
@@ -235,7 +236,9 @@ class GitHubProvider(VCSProvider):
             if not f or not f.get("id"):
                 continue
             out.append(FieldDef(id=f["id"], name=f.get("name") or "",
-                                options=[FieldOption(id=o.get("id") or "", name=o.get("name") or "")
+                                options=[FieldOption(id=o.get("id") or "", name=o.get("name") or "",
+                                                     color=o.get("color") or "",
+                                                     description=o.get("description") or "")
                                          for o in f.get("options") or []]))
         return out
 
@@ -328,17 +331,19 @@ class GitHubProvider(VCSProvider):
         fields = self.get_board_fields(str(self._board_number))
         status_field = next((f for f in fields if f.name.lower() == "status"), None)
         if not status_field:
+            self._log.warning("board: no Status field found on project #%s", self._board_number)
             return False
         options = [
-            {"name": o.name, "color": "GRAY", "description": ""}
-            for o in status_field.options
+            {"name": o.name, "color": o.color or "GRAY", "description": o.description or ""}
+            for o in status_field.options if o.name
         ]
         options.append({"name": status_name, "color": color, "description": ""})
 
+        # clientMutationId avoids the union-selection error on ProjectV2Field return types.
         m = """mutation($fieldId:ID!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){
                  updateProjectV2Field(input:{
                    fieldId:$fieldId, singleSelectOptions:$options
-                 }){ projectV2Field{ id } }
+                 }){ clientMutationId }
                }"""
         result = self._graphql(m, {"fieldId": meta["status_field_id"],
                                     "options": options})

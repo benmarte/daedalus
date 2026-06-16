@@ -744,6 +744,8 @@ def test_summary_events():
           "pr-ready" in disp._summary_events({"advance_prs": [7]}))
     check("reconciled adds pr-ready",
           "pr-ready" in disp._summary_events({"reconciled": [(7, "In review")]}))
+    check("blocked adds security-escalation",
+          "security-escalation" in disp._summary_events({"blocked": [42]}))
 
 
 def test_notify_project_summary_fans_out():
