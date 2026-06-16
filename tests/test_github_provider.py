@@ -151,17 +151,17 @@ def test_post_delivery_marker(provider):
 # ── GraphQL board ─────────────────────────────────────────────────────────────
 
 BOARD_GQL = {
-    "repositoryOwner": {"projectsV2": {"nodes": [
+    "repository": {"projectsV2": {"nodes": [
         {"id": "PVT_1", "number": 1, "title": "Roadmap"}]}}}
 
 FIELDS_GQL = {
-    "repositoryOwner": {"projectV2": {"fields": {"nodes": [
+    "repository": {"projectV2": {"fields": {"nodes": [
         {"id": "F_title", "name": "Title"},
         {"id": "F_status", "name": "Status",
          "options": [{"id": "o1", "name": "Ready"}, {"id": "o2", "name": "Done"}]}]}}}}
 
 ITEMS_GQL = {
-    "repositoryOwner": {"projectV2": {"items": {
+    "repository": {"projectV2": {"items": {
         "pageInfo": {"hasNextPage": False, "endCursor": None},
         "nodes": [
             {"id": "I_1", "content": {"number": 7},

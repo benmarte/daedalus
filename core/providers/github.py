@@ -206,12 +206,11 @@ class GitHubProvider(VCSProvider):
         return data.get("data")
 
     def list_boards(self) -> List[BoardSummary]:
-        q = """query($owner:String!){ repositoryOwner(login:$owner){
-                 ... on ProjectV2Owner { projectsV2(first:20){
-                   nodes{ id number title } } } } }"""
-        data = self._graphql(q, {"owner": self.owner})
-        nodes = ((((data or {}).get("repositoryOwner") or {}).get("projectsV2") or {})
-                 .get("nodes") or [])
+        q = """query($owner:String!,$name:String!){ repository(owner:$owner, name:$name){
+                 projectsV2(first:20){
+                   nodes{ id number title } } } }"""
+        data = self._graphql(q, {"owner": self.owner, "name": self.repo.split("/", 1)[1]})
+        nodes = (((data or {}).get("repository") or {}).get("projectsV2") or {}).get("nodes") or []
         return [BoardSummary(id=n.get("id") or "", number=n.get("number") or 0,
                              title=n.get("title") or "") for n in nodes if n]
 
@@ -275,21 +274,21 @@ class GitHubProvider(VCSProvider):
     def _items(self) -> List[Dict[str, Any]]:
         if self._board_items is not None:
             return self._board_items
-        q = """query($owner:String!,$number:Int!,$cursor:String){ repositoryOwner(login:$owner){
-                 ... on ProjectV2Owner { projectV2(number:$number){
+        q = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){ repository(owner:$owner, name:$name){
+                 projectV2(number:$number){
                    items(first:100, after:$cursor){
                      pageInfo{ hasNextPage endCursor }
                      nodes{ id
                        content{ ... on Issue { number } }
                        fieldValueByName(name:"Status"){
-                         ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } } }"""
+                         ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }"""
         items: List[Dict[str, Any]] = []
         cursor = None
         for _ in range(5):  # ≤500 items, parity with the old --limit 200
             data = self._graphql(q, {"owner": self.owner,
+                                     "name": self.repo.split("/", 1)[1],
                                      "number": int(self._board_number or 0), "cursor": cursor})
-            block = ((((data or {}).get("repositoryOwner") or {}).get("projectV2") or {})
-                     .get("items") or {})
+            block = (((data or {}).get("repository") or {}).get("projectV2") or {}).get("items") or {}
             for n in block.get("nodes") or []:
                 items.append({
                     "id": n.get("id"),
