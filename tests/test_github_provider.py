@@ -50,16 +50,21 @@ def test_close_issue_false_on_error(provider):
 
 # ── PRs ───────────────────────────────────────────────────────────────────────
 
-def _pr(number, state="open", merged_at=None, head="x", body=""):
+def _pr(number, state="open", merged_at=None, head="x", body="", base="dev"):
     return {"number": number, "state": state, "merged_at": merged_at,
-            "head": {"ref": head, "sha": "abc"}, "body": body, "html_url": "u"}
+            "head": {"ref": head, "sha": "abc"}, "base": {"ref": base},
+            "body": body, "html_url": "u"}
 
 
 def test_list_prs_maps_merged(provider):
     provider._http.get_json.return_value = [
         _pr(1, "open"), _pr(2, "closed", merged_at="2026-01-01"), _pr(3, "closed")]
-    states = {p.number: p.state for p in provider.list_prs()}
+    prs = provider.list_prs()
+    states = {p.number: p.state for p in prs}
     assert states == {1: "open", 2: "merged", 3: "closed"}
+    # base_branch must be populated so the dispatcher can gate Done on the target branch
+    assert prs[0].base_branch == "dev"
+    assert prs[1].base_branch == "dev"
 
 
 def test_pr_state_for_issue_prefers_merged(provider):

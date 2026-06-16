@@ -762,10 +762,27 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # kanban card. Issues the daedalus never dispatched (incl. everything not
         # in "Ready") are left untouched, so a tick never surprises non-Ready issues.
         if n in existing:
-            pr = provider.pr_state_for_issue(n)
+            merged_pr = None
+            open_pr_obj = None
+            _linked_pr = provider._pr_for_issue(n)
+            if _linked_pr:
+                if _linked_pr.state == "merged":
+                    # Only treat as merged when the PR targeted the configured branch.
+                    # A merge to main/some-other-branch before the project target
+                    # branch must not prematurely close the issue.
+                    if not base_branch or not _linked_pr.base_branch or _linked_pr.base_branch == base_branch:
+                        merged_pr = _linked_pr
+                    else:
+                        logger.info(
+                            "dispatch: #%s PR #%s merged to '%s' (not target '%s') — skipping Done",
+                            n, _linked_pr.number, _linked_pr.base_branch, base_branch,
+                        )
+                elif _linked_pr.state == "open":
+                    open_pr_obj = _linked_pr
+            pr = "merged" if merged_pr else ("open" if open_pr_obj else None)
             if pr == "merged":
-                # Merged into dev = work complete. GitHub does NOT auto-close issues
-                # on a non-default-branch merge, so we do it: card -> Done + close.
+                # Merged into target branch = work complete. GitHub does NOT
+                # auto-close issues on a non-default-branch merge, so we do it.
                 if dry_run:
                     logger.info("[dry-run] would set #%s -> Done + close issue (PR merged)", n)
                     completed.append(n)
@@ -781,26 +798,25 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                 # Safety net: if the PR body lacks a closing keyword, inject one
                 # now so GitHub auto-closes the issue on merge even if the agent
                 # forgot to include it.
-                open_pr = provider._pr_for_issue(n)
-                if open_pr and open_pr.number:
-                    patched_body = ensure_closing_keyword(open_pr.body or "", n)
-                    if patched_body != (open_pr.body or ""):
+                if open_pr_obj and open_pr_obj.number:
+                    patched_body = ensure_closing_keyword(open_pr_obj.body or "", n)
+                    if patched_body != (open_pr_obj.body or ""):
                         if dry_run:
                             logger.info(
                                 "[dry-run] PR #%s body missing 'Closes #%s' — would patch",
-                                open_pr.number, n,
+                                open_pr_obj.number, n,
                             )
                         else:
-                            if provider.update_pr_body(open_pr.number, patched_body):
+                            if provider.update_pr_body(open_pr_obj.number, patched_body):
                                 logger.info(
                                     "dispatch: injected 'Closes #%s' into PR #%s body",
-                                    n, open_pr.number,
+                                    n, open_pr_obj.number,
                                 )
                             else:
                                 logger.warning(
                                     "dispatch: could not patch PR #%s body — "
                                     "issue #%s may not auto-close on merge",
-                                    open_pr.number, n,
+                                    open_pr_obj.number, n,
                                 )
                 if dry_run:
                     logger.info("[dry-run] would set #%s -> %s (PR open)", n, in_review_name)

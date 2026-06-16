@@ -85,6 +85,7 @@ class PRSummary:
     number: int
     state: str = "open"          # open | merged | closed
     head_branch: str = ""
+    base_branch: str = ""        # target branch the PR merges INTO
     title: str = ""
     body: str = ""
     url: str = ""
