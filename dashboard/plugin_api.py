@@ -145,40 +145,41 @@ def _strip_secrets(obj: Any) -> Any:
 
 
 
-def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
-    """Return notification channels grouped by method from `hermes send --list`.
+def _channel_target(platform_name: str, channel: dict) -> str:
+    """Build the hermes send -t target string from a JSON channel object.
 
-    The command output groups targets under method headers like::
-
-        Slack:
-          slack:tasks (private)
-          slack:#engineering
-
-    Returns a dict mapping method name (e.g. 'Slack', 'Discord') to a list
-    of ``{value, label}`` objects. For Slack targets, labels are resolved
-    to human-readable names via the Slack Web API (cached). For non-Slack
-    methods, the label is the raw target string.
-
-    Degrades gracefully to an empty dict if the command fails or the output
-    is unparseable.
+    Mirrors Hermes's internal _channel_target_name logic:
+      - Discord:  discord:#{name}
+      - Slack:    slack:{name}  (name-based; Slack API also accepts names)
+      - Others:   {platform}:{name}
+    Returns '' when the channel has no usable name.
     """
-    try:
-        result = subprocess.run(
-            ["hermes", "send", "--list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return {}
-        raw_methods = _parse_send_list_output(result.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return {}
+    name = (channel.get("name") or "").strip()
+    ch_id = (channel.get("id") or "").strip()
+    if platform_name == "discord":
+        return f"discord:#{name}" if name else ""
+    if platform_name == "slack":
+        return f"slack:{name}" if name else (f"slack:{ch_id}" if ch_id else "")
+    return f"{platform_name}:{name}" if name else ""
 
-    # hermes send --list (text) only shows platforms with discovered channels.
-    # Platforms that are configured but have no channels yet (e.g. Teams) are
-    # silently absent. Query the JSON output to find those and add them with
-    # the bare platform name as the target ("teams" sends to the home channel).
+
+def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
+    """Return notification channels grouped by platform from ``hermes send --list --json``.
+
+    Uses the JSON output as the primary source so every configured platform is
+    included regardless of whether it has channels (e.g. Teams with no channels
+    still appears). Falls back to the text parser for older Hermes versions that
+    do not support ``--json``.
+
+    Returns a dict mapping display name (e.g. 'Slack', 'Discord') to a list of
+    ``{value, label}`` dicts. Slack labels are resolved to human-readable names
+    via the Slack Web API (cached); all other platforms use the raw target.
+
+    Degrades gracefully to an empty dict on any error.
+    """
+    raw_methods: dict[str, list[str]] = {}
+    json_ok = False
+
     try:
         json_result = subprocess.run(
             ["hermes", "send", "--list", "--json"],
@@ -186,15 +187,39 @@ def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
         )
         if json_result.returncode == 0:
             json_data = json.loads(json_result.stdout or "{}")
-            known = {k.lower() for k in raw_methods}
-            for plat, channels in (json_data.get("platforms") or {}).items():
-                if not channels and plat.lower() not in known:
-                    # Configured platform with no channels — bare name is valid target.
-                    raw_methods[plat.capitalize()] = [plat]
+            platforms = json_data.get("platforms") or {}
+            if platforms:
+                json_ok = True
+                for plat, channels in platforms.items():
+                    display = plat.capitalize()
+                    if not channels:
+                        # Configured platform with no channels — bare name routes to home channel.
+                        raw_methods[display] = [plat]
+                    else:
+                        seen: set[str] = set()
+                        deduped: list[str] = []
+                        for ch in (channels or []):
+                            t = _channel_target(plat, ch)
+                            if t and t not in seen:
+                                seen.add(t)
+                                deduped.append(t)
+                        raw_methods[display] = deduped
     except Exception:
         pass
 
-    # Resolve Slack labels
+    # Fallback: text parser for Hermes versions without --json support.
+    if not json_ok:
+        try:
+            result = subprocess.run(
+                ["hermes", "send", "--list"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                raw_methods = _parse_send_list_output(result.stdout)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return {}
+
+    # Resolve Slack labels via API
     slack_ids: list[str] = []
     for method, targets in raw_methods.items():
         if method.lower() == "slack":
