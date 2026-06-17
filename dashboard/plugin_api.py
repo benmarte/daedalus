@@ -175,6 +175,25 @@ def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return {}
 
+    # hermes send --list (text) only shows platforms with discovered channels.
+    # Platforms that are configured but have no channels yet (e.g. Teams) are
+    # silently absent. Query the JSON output to find those and add them with
+    # the bare platform name as the target ("teams" sends to the home channel).
+    try:
+        json_result = subprocess.run(
+            ["hermes", "send", "--list", "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if json_result.returncode == 0:
+            json_data = json.loads(json_result.stdout or "{}")
+            known = {k.lower() for k in raw_methods}
+            for plat, channels in (json_data.get("platforms") or {}).items():
+                if not channels and plat.lower() not in known:
+                    # Configured platform with no channels — bare name is valid target.
+                    raw_methods[plat.capitalize()] = [plat]
+    except Exception:
+        pass
+
     # Resolve Slack labels
     slack_ids: list[str] = []
     for method, targets in raw_methods.items():
