@@ -39,6 +39,31 @@ def test_https_only():
         HTTPClient("http://api.example.com", {})
 
 
+def test_verify_ssl_default_true():
+    c = HTTPClient("https://api.example.com", {})
+    assert c._verify_ssl is True
+
+
+def test_verify_ssl_false_sets_verify_false(no_sleep):
+    resp = FakeResponse(200, json_data={"ok": True})
+    with mock.patch("core.providers.http.httpx.request", return_value=resp) as req:
+        c = HTTPClient("https://api.example.com", {}, verify_ssl=False)
+        c.get_json("/thing")
+    assert req.call_count == 1
+    # Verify was passed as False to httpx
+    _, kwargs = req.call_args
+    assert kwargs["verify"] is False
+
+
+def test_verify_ssl_true_passes_verify_true(no_sleep):
+    resp = FakeResponse(200, json_data={"ok": True})
+    with mock.patch("core.providers.http.httpx.request", return_value=resp) as req:
+        c = HTTPClient("https://api.example.com", {}, verify_ssl=True)
+        c.get_json("/thing")
+    _, kwargs = req.call_args
+    assert kwargs["verify"] is True
+
+
 def test_retry_on_429_honours_retry_after(no_sleep):
     responses = [FakeResponse(429, headers={"Retry-After": "2"}),
                  FakeResponse(200, json_data={"ok": True})]

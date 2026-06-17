@@ -50,7 +50,8 @@ class AzureDevOpsProvider(VCSProvider):
         else:
             self._log.warning("no Azure DevOps PAT in env "
                               "(vcs.token_env/AZURE_DEVOPS_PAT) — API calls will fail")
-        self._http = HTTPClient(f"https://dev.azure.com/{quote(org)}", headers, token=token)
+        self._http = HTTPClient(f"https://dev.azure.com/{quote(org)}", headers, token=token,
+                                 verify_ssl=vcs.get("verify_ssl", True))
         self._pproj = f"/{quote(project)}"
         self._prepo = f"{self._pproj}/_apis/git/repositories/{quote(repo)}"
 

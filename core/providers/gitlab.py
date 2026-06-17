@@ -46,7 +46,8 @@ class GitLabProvider(VCSProvider):
         if not token:
             self._log.warning("no GitLab token in env (vcs.token_env/GITLAB_TOKEN) — "
                               "API calls limited to public, unauthenticated access")
-        self._http = HTTPClient(f"{base_url}/api/v4", headers, token=token)
+        self._http = HTTPClient(f"{base_url}/api/v4", headers, token=token,
+                                 verify_ssl=vcs.get("verify_ssl", True))
         self.supports_boards = bool((self._cfg.get("tracking") or {}).get("label_board"))
         # Stored for URL building — populated only when project_path (not numeric ID) is known.
         self._web_base = base_url

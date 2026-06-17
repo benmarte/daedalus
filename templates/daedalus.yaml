@@ -39,6 +39,9 @@ vcs:
   # token_env: "GITHUB_TOKEN"           # Override the env var holding the API token.
   #                                     # Defaults: GITHUB_TOKEN/GH_TOKEN (github),
   #                                     # GITLAB_TOKEN (gitlab), AZURE_DEVOPS_PAT (azuredevops)
+  # verify_ssl: true                    # Set to false to disable SSL certificate verification.
+  #                                     # Useful for self-hosted instances with self-signed certs.
+  #                                     # Defaults to true.
 
   # GitLab only (provider: gitlab) — defaults to top-level `repo` as the path:
   # base_url: "https://gitlab.com"      # Self-hosted GitLab URL
@@ -88,3 +91,44 @@ cron:
   #   - platform: "Discord"
   #     target: "discord:#daedalus"
   #     events: ["dispatch-summary", "pr-ready"]
+
+# ── Execution tunables ────────────────────────────────────────────────────────
+execution:
+  # How many issues the dispatcher spawns per tick (default: unlimited).
+  # max_dispatch: 5
+
+  # Iterations per agent (how many back-and-forth steps each agent gets).
+  # iterations: 5
+
+  # Hours before an in-progress issue with no PR triggers a staleness warning
+  # comment on the issue. Set to 0 to disable. (default: 48)
+  # staleness_hours: 48
+
+  # Maximum total changed lines allowed in a PR before a human-review warning
+  # comment is posted. Set to 0 to disable. (default: disabled)
+  # max_pr_lines: 500
+
+  # File-name patterns that trigger a human-review warning when present in a PR.
+  # Glob syntax. Defaults cover common secret / credential files.
+  # forbidden_files:
+  #   - ".env"
+  #   - "*.pem"
+  #   - "*.key"
+  #   - "*.p12"
+  #   - "*.pfx"
+  #   - ".env.*"
+  #   - "*.secrets"
+  #   - "secrets.*"
+
+  # Per-label agent roster overrides — adjust which roles are activated for
+  # issues carrying a specific label.  Keys are exact label names.
+  #
+  # Supported flags:
+  #   skip_developer: true   — omit the developer agent (e.g. for pure-docs tasks)
+  #   security_first: true   — run security analyst before developer
+  #
+  # label_overrides:
+  #   documentation:
+  #     skip_developer: true
+  #   security:
+  #     security_first: true

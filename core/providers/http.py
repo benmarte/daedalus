@@ -3,7 +3,8 @@
 Thin synchronous wrapper over httpx (a core Hermes dependency) with:
 retry/backoff on 429/5xx honouring Retry-After, per-style pagination
 (GitHub Link header, GitLab X-Next-Page, Azure continuation token),
-HTTPS-only enforcement, and token redaction in every error message.
+HTTPS-only enforcement, optional SSL certificate verification bypass,
+and token redaction in every error message.
 
 Provider methods catch :class:`ProviderError` and degrade gracefully —
 nothing in this module ever logs or embeds a credential.
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+import warnings
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -37,13 +39,18 @@ class HTTPClient:
     token redacted; callers (provider methods) catch and return safe defaults."""
 
     def __init__(self, base_url: str, headers: Dict[str, str],
-                 token: str = "", timeout: float = DEFAULT_TIMEOUT):
+                 token: str = "", timeout: float = DEFAULT_TIMEOUT,
+                 verify_ssl: bool = True):
         if not base_url.startswith("https://"):
             raise ProviderError(f"refusing non-HTTPS base URL: {base_url}")
         self._base = base_url.rstrip("/")
         self._headers = dict(headers)
         self._token = token or ""
         self._timeout = timeout
+        self._verify_ssl = verify_ssl
+        if not verify_ssl:
+            warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+            logger.warning("SSL certificate verification disabled (base_url=%s)", base_url)
 
     # ── core ─────────────────────────────────────────────────────────────────
     def _redact(self, text: str) -> str:
@@ -66,7 +73,8 @@ class HTTPClient:
         for attempt in range(MAX_RETRIES + 1):
             try:
                 resp = httpx.request(method, url, params=params, json=json_body,
-                                     headers=hdrs, timeout=self._timeout)
+                                     headers=hdrs, timeout=self._timeout,
+                                     verify=self._verify_ssl)
             except httpx.HTTPError as e:
                 last_exc = ProviderError(f"{method} {path}: {self._redact(str(e))}")
                 if attempt < MAX_RETRIES:

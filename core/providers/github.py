@@ -41,7 +41,8 @@ class GitHubProvider(VCSProvider):
         else:
             self._log.warning("no GitHub token in env (vcs.token_env/GITHUB_TOKEN/GH_TOKEN) — "
                               "API calls limited to public, unauthenticated access")
-        self._http = HTTPClient(API_URL, headers, token=token)
+        self._http = HTTPClient(API_URL, headers, token=token,
+                                 verify_ssl=(self._cfg.get("vcs") or {}).get("verify_ssl", True))
         self._board_number = (self._cfg.get("tracking") or {}).get("github_project_number")
         self._board_meta: Optional[Dict[str, Any]] = None   # project_id/status_field_id/options
         self._board_items: Optional[List[Dict[str, Any]]] = None
@@ -192,6 +193,70 @@ class GitHubProvider(VCSProvider):
             self._log.warning("update_pr_body PR #%s failed: %s", pr_number, e)
             return False
         self._log.info("update_pr_body: patched #%s with closing keyword", pr_number)
+        return True
+
+    def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
+        """Changed files in a PR via GET /pulls/{n}/files (paginated)."""
+        try:
+            data = self._http.get_paginated(
+                f"/repos/{self.repo}/pulls/{pr_number}/files",
+                style="link_header", per_page=100, max_pages=5,
+            )
+        except ProviderError as e:
+            self._log.warning("get_pr_files PR #%s failed: %s", pr_number, e)
+            return []
+        return [{"filename": f.get("filename") or "",
+                 "additions": f.get("additions") or 0,
+                 "deletions": f.get("deletions") or 0,
+                 "changes": f.get("changes") or 0,
+                 "status": f.get("status") or ""} for f in data or []]
+
+    def post_issue_comment(self, issue_number: int, body: str) -> bool:
+        try:
+            self._http.post_json(f"/repos/{self.repo}/issues/{issue_number}/comments",
+                                 {"body": body})
+        except ProviderError as e:
+            self._log.warning("post_issue_comment #%s failed: %s", issue_number, e)
+            return False
+        return True
+
+    def append_changelog(self, base_branch: str, entry: str) -> bool:
+        """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the Contents API.
+
+        Creates the file if absent. Skips silently when no write token is available.
+        """
+        path = "CHANGELOG.md"
+        url = f"/repos/{self.repo}/contents/{path}"
+        try:
+            existing = self._http.get_json(url, params={"ref": base_branch})
+        except ProviderError:
+            existing = None
+        import base64 as _b64
+        old_content = ""
+        sha = None
+        if existing and isinstance(existing, dict):
+            sha = existing.get("sha")
+            try:
+                old_content = _b64.b64decode(existing.get("content") or "").decode("utf-8", errors="replace")
+            except Exception:
+                old_content = ""
+        new_content = entry.rstrip("\n") + "\n\n" + old_content
+        payload: Dict[str, Any] = {
+            "message": f"docs: update CHANGELOG.md [skip ci]",
+            "content": _b64.b64encode(new_content.encode()).decode(),
+            "branch": base_branch,
+        }
+        if sha:
+            payload["sha"] = sha
+        try:
+            if sha:
+                self._http.put_json(url, payload)
+            else:
+                self._http.post_json(url, payload)
+        except ProviderError as e:
+            self._log.warning("append_changelog failed: %s", e)
+            return False
+        self._log.info("append_changelog: prepended entry to CHANGELOG.md on %s", base_branch)
         return True
 
     # ── GraphQL (Projects v2) ────────────────────────────────────────────────
