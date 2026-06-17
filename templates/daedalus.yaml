@@ -132,3 +132,18 @@ execution:
   #     skip_developer: true
   #   security:
   #     security_first: true
+
+# ── Webhook receiver ─────────────────────────────────────────────────────────
+# Receive GitHub webhook events (issues, issue_comment, etc.) directly instead
+# of relying solely on cron polling. Requires a shared secret configured in
+# your GitHub webhook settings — NEVER put the secret in this file; set it
+# via the DASHBOARD (/project/{name}/config) or the environment.
+#
+# The endpoint verifies HMAC-SHA256 signatures on every request. Error
+# responses are intentionally generic to prevent payload leakage.
+#
+# URL: POST /api/plugins/daedalus/webhook/github
+# webhook:
+#   enabled: true
+#   # secret: "" — set this via the dashboard config API or environment variable;
+#   #              it is stored in .hermes/daedalus.yaml but never exposed via GET

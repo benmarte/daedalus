@@ -14,6 +14,8 @@ Endpoints:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -93,6 +95,7 @@ except ImportError:
 projects_router = APIRouter(prefix="/projects", tags=["daedalus-projects"])
 project_config_router = APIRouter(prefix="/project", tags=["daedalus-project-config"])
 meta_router = APIRouter(prefix="/meta", tags=["daedalus-meta"])
+webhook_router = APIRouter(prefix="/webhook", tags=["daedalus-webhooks"])
 
 
 def _bootstrap_provider_env() -> None:
@@ -195,26 +198,37 @@ def _channel_target_and_label(platform_name: str, channel: dict) -> tuple[str, s
 
 
 def _hermes_status_configured_platforms() -> set[str]:
-    """Parse ``hermes status`` to find platforms marked '✓ configured'.
+    """Return lowercase names of configured messaging platforms.
 
-    Returns a set of lowercase platform names (e.g. ``{'discord', 'slack'}``).
-    Degrades gracefully to an empty set on any error.
+    Combines two sources:
+    1. ``hermes status`` — bot/polling platforms (Slack, Discord, Telegram…)
+    2. ``~/.hermes/.env`` — webhook platforms (Teams) that report via
+       ``<PLATFORM>_HOME_CHANNEL`` env vars but don't appear in hermes status.
     """
-    rc, out = _hermes_cli(["status"], timeout=10)
-    if rc != 0:
-        return set()
     configured: set[str] = set()
-    in_messaging = False
-    for line in out.splitlines():
-        if "Messaging Platforms" in line:
-            in_messaging = True
-            continue
-        if in_messaging:
-            if line.strip().startswith("◆"):
-                break
-            if "✓" in line:
-                name = line.strip().split()[0].lower()
-                configured.add(name)
+
+    # Source 1: hermes status messaging section
+    rc, out = _hermes_cli(["status"], timeout=10)
+    if rc == 0:
+        in_messaging = False
+        for line in out.splitlines():
+            if "Messaging Platforms" in line:
+                in_messaging = True
+                continue
+            if in_messaging:
+                if line.strip().startswith("◆"):
+                    break
+                if "✓" in line:
+                    name = line.strip().split()[0].lower()
+                    configured.add(name)
+
+    # Source 2: .env HOME_CHANNEL vars (covers webhook platforms like Teams)
+    env_vars = _parse_env_file(Path.home() / ".hermes" / ".env")
+    for k, v in env_vars.items():
+        if k.endswith("_HOME_CHANNEL") and v:
+            platform = k[: -len("_HOME_CHANNEL")].lower()
+            configured.add(platform)
+
     return configured
 
 
@@ -1090,6 +1104,38 @@ async def delete_project(name: str) -> dict[str, Any]:
     return {"ok": True, "removed": removed, "skipped": skipped}
 
 
+@project_config_router.post("/{name}/run")
+async def run_dispatch_dry_run(name: str) -> dict[str, Any]:
+    """Trigger a dry-run dispatch tick for a project.
+
+    Runs ``daedalus_dispatch.py`` with ``--dry-run`` in a subprocess and returns
+    the captured output so the UI can show what *would* happen without any
+    side-effects.  Returns ``{"ok": bool, "output": str, "error": str|None}``.
+    """
+    import sys
+    workdir = _resolve_project_path(name)
+    dispatch_script = Path(__file__).resolve().parent.parent / "scripts" / "daedalus_dispatch.py"
+    if not dispatch_script.exists():
+        raise HTTPException(status_code=500, detail="dispatch script not found")
+    try:
+        cfg = ConfigLoader().resolve_repo_config(str(workdir))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"project config not found: {exc}")
+    env = {**__import__("os").environ}
+    try:
+        result = subprocess.run(
+            [sys.executable, str(dispatch_script), str(workdir), "--dry-run"],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        combined = result.stdout + (("\n" + result.stderr) if result.stderr.strip() else "")
+        return {"ok": result.returncode == 0, "output": combined.strip(),
+                "error": result.stderr.strip() or None}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": "", "error": "dispatch timed out after 120s"}
+    except Exception as exc:
+        return {"ok": False, "output": "", "error": str(exc)}
+
+
 # ── Meta endpoints ───────────────────────────────────────────────────────────
 
 
@@ -1097,11 +1143,7 @@ async def delete_project(name: str) -> dict[str, Any]:
 async def get_notifications(request: Request) -> dict[str, list[dict[str, str]]]:
     """Return notification methods and their deliverable targets.
 
-    Calls ``hermes send --list`` and parses the output into a dict mapping
-    method names (e.g. 'Slack', 'Discord') to lists of ``{value, label}``
-    objects. Slack labels are resolved to human-readable names via the
-    Slack Web API (cached); non-Slack methods use the raw target as label.
-
+    Uses ``hermes send --list --json`` as the primary source.
     Degrades gracefully to an empty dict if the command is unavailable.
     """
     return _list_notification_methods()
@@ -1684,9 +1726,143 @@ async def post_uninstall() -> dict[str, Any]:
     return {"ok": True, "removed": removed, "skipped": skipped}
 
 
+# ── Webhook endpoint ────────────────────────────────────────────────────────
+
+
+def _verify_github_signature(secret: str, body: bytes, signature_header: str) -> bool:
+    """Verify GitHub webhook HMAC-SHA256 signature.
+
+    Returns True when the signature is valid. Never raises — malformed input
+    returns False. Uses hmac.compare_digest for timing-safe comparison to
+    prevent timing attacks.
+    """
+    if not secret or not body or not signature_header:
+        return False
+    # GitHub sends: "sha256=<hex>"
+    if not signature_header.startswith("sha256="):
+        return False
+    provided = signature_header[7:]  # strip "sha256="
+    try:
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+    except Exception:
+        return False
+    return hmac.compare_digest(expected, provided)
+
+
+def _find_webhook_projects() -> list[tuple[str, dict[str, Any], str]]:
+    """Return (repo_path, resolved_config, webhook_secret) for all projects with webhooks enabled."""
+    results: list[tuple[str, dict[str, Any], str]] = []
+    if registry is None:
+        return results
+    try:
+        project_paths = registry.list_projects()
+    except Exception:
+        return results
+    loader = ConfigLoader()
+    for path_str in project_paths:
+        try:
+            resolved = loader.resolve_repo_config(path_str)
+        except Exception:
+            continue
+        webhook_cfg = (resolved.get("webhook") or {})
+        if not webhook_cfg.get("enabled"):
+            continue
+        secret = webhook_cfg.get("secret", "")
+        if not secret:
+            continue
+        results.append((path_str, resolved, secret))
+    return results
+
+
+@webhook_router.post("/github")
+async def receive_github_webhook(request: Request) -> dict[str, Any]:
+    """Receive GitHub webhook events, verify signature, return minimal response.
+
+    SECURITY: This endpoint NEVER includes the webhook payload or any part of
+    it in error responses. All failures return generic messages to prevent
+    information leakage to unauthenticated callers. Server-side logging
+    captures details for debugging.
+
+    The endpoint:
+    1. Reads the raw body from the request
+    2. Checks for the X-Hub-Signature-256 header (required)
+    3. Attempts to verify the signature against each project's webhook secret
+    4. On success, returns a minimal response with event type and action
+    5. On failure, returns a generic error without exposing payload data
+    """
+    # Read raw body
+    body: bytes = await request.body()
+
+    # Check required signature header
+    signature_header = request.headers.get("X-Hub-Signature-256", "")
+    if not signature_header:
+        # No signature header — reject without revealing what we expected
+        raise HTTPException(status_code=401, detail="Missing signature header")
+
+    # GitHub event type
+    event_type = request.headers.get("X-GitHub-Event", "unknown")
+
+    # Find projects with webhooks enabled
+    webhook_projects = _find_webhook_projects()
+    if not webhook_projects:
+        # Don't reveal whether projects exist or not
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # Try to match signature against each project's webhook secret
+    matched_project = None
+    matched_resolved = None
+    for repo_path, resolved, secret in webhook_projects:
+        if _verify_github_signature(secret, body, signature_header):
+            matched_project = (repo_path, resolved)
+            break
+
+    if not matched_project:
+        # Invalid signature — reject without revealing which secret failed
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    repo_path, resolved = matched_project
+
+    # Parse payload server-side (never expose in response)
+    try:
+        payload = json.loads(body)
+    except Exception:
+        # Malformed JSON — reject without showing what we received
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    # Extract minimal metadata for the response (event type + action only)
+    action = payload.get("action", "none")
+
+    # Log the event for debugging (server-side only, never returned to caller)
+    import logging
+    logger = logging.getLogger("daedalus.webhook")
+    logger.info(
+        "Received webhook event=%s action=%s for project=%s",
+        event_type, action, resolved.get("name", "unknown"),
+    )
+
+    # TODO: Dispatch to appropriate handler based on event_type/action
+    # For now, acknowledge receipt without processing
+    # Future work: route issues.opened to kanban, issue_comment.created to notifications, etc.
+
+    # Return minimal response — event type and action only, no payload data
+    return {
+        "ok": True,
+        "event": event_type,
+        "action": action,
+    }
+
+
 # ── Top-level router (defined at end so sub-routers are already populated) ───
 
 router = APIRouter(tags=["daedalus"])
 router.include_router(projects_router)
 router.include_router(project_config_router)
 router.include_router(meta_router)
+router.include_router(webhook_router)

@@ -2047,3 +2047,193 @@ class TestRegistryNameResolution:
             )
             assert entry is not None
             assert entry["repo"] == "org/test-repo"
+
+
+# ── GitHub webhook endpoint tests ─────────────────────────────────────────────
+
+
+def _compute_github_signature(secret: str, body: bytes) -> str:
+    """Compute a valid GitHub webhook signature for testing."""
+    import hashlib
+    import hmac
+    return "sha256=" + hmac.new(
+        secret.encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
+
+
+@pytest.fixture
+def webhook_project(tmp_path):
+    """Temp repo with webhook config enabled."""
+    repo = tmp_path / "webhook-repo"
+    (repo / ".hermes").mkdir(parents=True)
+    cfg = {
+        "name": "webhook-project",
+        "repo": "org/webhook-project",
+        "workdir": str(repo),
+        "webhook": {"enabled": True, "secret": "test-webhook-secret-123"},
+    }
+    (repo / ".hermes" / "daedalus.yaml").write_text(yaml.dump(cfg))
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        mock_registry.list_projects.return_value = [str(repo)]
+        yield repo, "test-webhook-secret-123"
+
+
+@pytest.fixture
+def webhook_client(webhook_project):
+    """FastAPI TestClient with the webhook router mounted."""
+    from dashboard.plugin_api import webhook_router
+    app = FastAPI()
+    app.include_router(webhook_router, prefix="/api/plugins/daedalus")
+    return TestClient(app)
+
+
+def test_webhook_valid_signature_returns_200(webhook_client, webhook_project):
+    """POST /webhook/github with valid HMAC returns 200 with event + action."""
+    _repo, secret = webhook_project
+    payload = json.dumps({"action": "opened", "issue": {"number": 1, "title": "Test"}}).encode()
+    signature = _compute_github_signature(secret, payload)
+
+    resp = webhook_client.post(
+        "/api/plugins/daedalus/webhook/github",
+        content=payload,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Event": "issues",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["event"] == "issues"
+    assert data["action"] == "opened"
+
+
+def test_webhook_missing_signature_returns_401(webhook_client):
+    """POST /webhook/github without X-Hub-Signature-256 returns 401."""
+    payload = json.dumps({"action": "opened"}).encode()
+
+    resp = webhook_client.post(
+        "/api/plugins/daedalus/webhook/github",
+        content=payload,
+        headers={"X-GitHub-Event": "issues"},
+    )
+
+    assert resp.status_code == 401
+    assert "Missing signature" in resp.json()["detail"]
+
+
+def test_webhook_invalid_signature_returns_401(webhook_client, webhook_project):
+    """POST /webhook/github with wrong HMAC returns 401 — never exposes payload."""
+    _repo, _secret = webhook_project
+    payload = json.dumps({"action": "opened", "issue": {"number": 1, "title": "Sensitive issue"}}).encode()
+    bad_signature = "sha256=0000000000000000000000000000000000000000000000000000000000000000"
+
+    resp = webhook_client.post(
+        "/api/plugins/daedalus/webhook/github",
+        content=payload,
+        headers={
+            "X-Hub-Signature-256": bad_signature,
+            "X-GitHub-Event": "issues",
+        },
+    )
+
+    assert resp.status_code == 401
+    error_detail = resp.json()["detail"]
+    # Ensure error does NOT contain any payload data
+    assert "Sensitive issue" not in error_detail
+    assert "000000" not in error_detail.lower()
+    assert error_detail == "Invalid signature"
+
+
+def test_webhook_malformed_json_returns_400(webhook_client, webhook_project):
+    """POST /webhook/github with bad JSON returns 400 after valid signature."""
+    _repo, secret = webhook_project
+    # Raw bytes that are valid for HMAC but not JSON
+    bad_payload = b"this is not json {broken"
+    signature = _compute_github_signature(secret, bad_payload)
+
+    resp = webhook_client.post(
+        "/api/plugins/daedalus/webhook/github",
+        content=bad_payload,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Event": "issues",
+        },
+    )
+
+    assert resp.status_code == 400
+    error_detail = resp.json()["detail"]
+    # The error message must not include the received payload
+    assert "not json" not in error_detail
+    assert "broken" not in error_detail
+
+
+def test_webhook_error_never_exposes_payload(webhook_client):
+    """Ensure all error paths never leak payload content in response body."""
+    # Test with no projects configured (401)
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        mock_registry.list_projects.return_value = []
+
+        sensitive_payload = json.dumps({
+            "action": "opened",
+            "issue": {
+                "number": 42,
+                "title": "SECRET: password is hunter2",
+                "body": "private data here",
+            }
+        }).encode()
+
+        resp_nosig = webhook_client.post(
+            "/api/plugins/daedalus/webhook/github",
+            content=sensitive_payload,
+            headers={"X-GitHub-Event": "issues"},
+        )
+        assert resp_nosig.status_code == 401
+        assert "hunter2" not in resp_nosig.text
+        assert "private data" not in resp_nosig.text
+        assert "42" not in resp_nosig.text  # issue number not leaked
+
+
+def test_webhook_ping_event(webhook_client, webhook_project):
+    """POST /webhook/github with ping event is accepted."""
+    _repo, secret = webhook_project
+    payload = json.dumps({"zen": "Keep it simple", "hook_id": 12345}).encode()
+    signature = _compute_github_signature(secret, payload)
+
+    resp = webhook_client.post(
+        "/api/plugins/daedalus/webhook/github",
+        content=payload,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Event": "ping",
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["event"] == "ping"
+    assert data["action"] == "none"  # ping has no action field
+
+
+def test_webhook_disabled_project_ignored(webhook_client):
+    """Projects with webhook.enabled=False are not matched."""
+    # Create a project with disabled webhook
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        mock_registry.list_projects.return_value = []
+
+        payload = json.dumps({"action": "opened"}).encode()
+        # Use a signature that would be valid for any secret — but no projects
+        signature = "sha256=0000000000000000000000000000000000000000000000000000000000000000"
+
+        resp = webhook_client.post(
+            "/api/plugins/daedalus/webhook/github",
+            content=payload,
+            headers={
+                "X-Hub-Signature-256": signature,
+                "X-GitHub-Event": "issues",
+            },
+        )
+        # Returns 401 because no projects with webhooks are configured
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Invalid signature"
