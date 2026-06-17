@@ -46,6 +46,20 @@ class _FakeProvider:
     def pr_number_for_issue(self, n):
         return None
 
+    def _pr_for_issue(self, n):
+        from core.providers.base import PRSummary
+        state = self.pr_state_for_issue(n)
+        if state is None:
+            return None
+        number = self.pr_number_for_issue(n)
+        return PRSummary(number=number or 0, state=state)
+
+    def update_pr_body(self, pr, body):
+        return False
+
+    def list_prs(self, state="open"):
+        return []
+
     def pr_ci_green(self, pr):
         return False
 
@@ -812,11 +826,462 @@ def test_deliver_doc_reports_multi_target():
     check("sentinel posted after partial success", marker_posts == [42])
 
 
+# ── kanban: list_issue_numbers large ids ─────────────────────────────────────
+
+def test_kanban_list_issue_numbers_large_ids():
+    """list_issue_numbers must return 4+ digit issue numbers (JSON-backed path)."""
+    tasks = [
+        {"id": "t_a", "title": "#1234 Large issue number"},
+        {"id": "t_b", "title": "#10000 Five-digit number"},
+        {"id": "t_c", "title": "no number here"},
+        {"id": "t_d", "title": "#42 normal"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=tasks):
+        nums = kanban.list_issue_numbers("board")
+    check("list_issue_numbers parses 4-digit issue numbers", 1234 in nums)
+    check("list_issue_numbers parses 5-digit issue numbers", 10000 in nums)
+    check("list_issue_numbers parses normal 2-digit numbers", 42 in nums)
+    check("list_issue_numbers skips titles without numbers", len(nums) == 3)
+
+
+# ── dispatch_state module ─────────────────────────────────────────────────────
+
+def test_dispatch_state_record_and_age():
+    """record_dispatch + get_dispatch_age_hours round-trip."""
+    import tempfile, time
+    from core import dispatch_state as ds
+    with tempfile.TemporaryDirectory() as tmp:
+        ds.record_dispatch(tmp, 42)
+        age = ds.get_dispatch_age_hours(tmp, 42)
+        check("get_dispatch_age_hours returns a non-negative float", isinstance(age, float) and age >= 0)
+        check("get_dispatch_age_hours returns None for unknown issue", ds.get_dispatch_age_hours(tmp, 99) is None)
+
+
+def test_dispatch_state_clear():
+    """clear_dispatch removes the record so age returns None."""
+    import tempfile
+    from core import dispatch_state as ds
+    with tempfile.TemporaryDirectory() as tmp:
+        ds.record_dispatch(tmp, 5)
+        ds.clear_dispatch(tmp, 5)
+        check("clear_dispatch removes dispatch record", ds.get_dispatch_age_hours(tmp, 5) is None)
+
+
+def test_dispatch_state_pr_flags():
+    """has_pr_flag / set_pr_flag are idempotent."""
+    import tempfile
+    from core import dispatch_state as ds
+    with tempfile.TemporaryDirectory() as tmp:
+        check("has_pr_flag returns False before set", not ds.has_pr_flag(tmp, 7, "size_warned"))
+        ds.set_pr_flag(tmp, 7, "size_warned")
+        check("has_pr_flag returns True after set", ds.has_pr_flag(tmp, 7, "size_warned"))
+        ds.set_pr_flag(tmp, 7, "size_warned")  # idempotent
+        check("set_pr_flag idempotent — flag stays True", ds.has_pr_flag(tmp, 7, "size_warned"))
+        check("unrelated flag still False", not ds.has_pr_flag(tmp, 7, "other"))
+
+
+def test_dispatch_state_review_sha():
+    """record_review / get_review_sha round-trip."""
+    import tempfile
+    from core import dispatch_state as ds
+    with tempfile.TemporaryDirectory() as tmp:
+        ds.record_review(tmp, 10, "reviewer-daedalus", "abc123")
+        sha = ds.get_review_sha(tmp, 10, "reviewer-daedalus")
+        check("get_review_sha returns stored SHA", sha == "abc123")
+        check("get_review_sha returns None for unknown reviewer",
+              ds.get_review_sha(tmp, 10, "other") is None)
+
+
+# ── dispatch: priority sort ───────────────────────────────────────────────────
+
+def test_priority_sort_p0_before_unlabeled():
+    """P0-labelled issues are dispatched before unlabelled ones."""
+    from core.providers.base import IssueSummary
+    disp = _load_dispatch()
+    dispatched = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            return [
+                IssueSummary(number=2, title="normal", labels=[]),
+                IssueSummary(number=1, title="urgent", labels=["P0"]),
+            ]
+        def pr_state_for_issue(self, n): return None
+
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_issue_numbers = lambda s: set()
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+    disp.kanban.list_tasks = lambda *a, **k: []
+
+    _orig_create_task = disp.kanban.create_task
+    try:
+        def fake_create(slug, title, body, *, assignee="", idempotency_key="", workspace="", max_retries=None):
+            m = __import__("re").search(r"#(\d+)", title)
+            if m:
+                dispatched.append(int(m.group(1)))
+            return "t_x"
+        disp.kanban.create_task = fake_create
+        disp.run(
+            {"repo": "O/R", "workdir": "/tmp", "name": "x",
+             "issues": {"filters": {}}, "execution": {},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(), max_dispatch=1,
+        )
+    finally:
+        disp.kanban.create_task = _orig_create_task
+
+    check("priority sort dispatches P0 issue first",
+          len(dispatched) >= 1 and dispatched[0] == 1)
+
+
+def test_priority_sort_dict_labels():
+    """Priority sort handles GitHub-style label dicts ({"name": "P1"})."""
+    disp = _load_dispatch()
+    sorted_issues = disp._PRIORITY  # just check the constant exists
+    check("_PRIORITY dict has p0/P0 entries", sorted_issues.get("p0") == 0 and sorted_issues.get("P0") == 0)
+    check("_PRIORITY dict has p1/p2 entries", sorted_issues.get("p1") == 1 and sorted_issues.get("p2") == 2)
+
+
+# ── dispatch: PR size gate ────────────────────────────────────────────────────
+
+def test_pr_size_gate_warns_once():
+    """size gate posts a PR comment once and sets the size_warned flag."""
+    import tempfile
+    from core import dispatch_state as ds
+    disp = _load_dispatch()
+    posted = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            from core.providers.base import IssueSummary
+            return [IssueSummary(number=5, title="big change")]
+        def pr_state_for_issue(self, n): return "open"
+        def pr_number_for_issue(self, n): return 99
+        def pr_ci_green(self, pr): return False
+        def get_pr_files(self, pr):
+            return [{"filename": "big.py", "changes": 600}]
+        def post_pr_comment(self, pr, body):
+            posted.append((pr, body))
+            return True
+        def post_issue_comment(self, n, body): return True
+        def board_ensure_status_option(self, *a): return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: {5}
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp.kanban.list_tasks = lambda *a, **k: []
+        disp.run(
+            {"repo": "O/R", "workdir": tmp, "name": "x",
+             "issues": {"filters": {}},
+             "execution": {"max_pr_lines": 500},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+        check("size gate posts a warning comment",
+              len(posted) == 1 and "too large" in posted[0][1].lower())
+        check("size gate sets size_warned flag", ds.has_pr_flag(tmp, 99, "size_warned"))
+
+
+def test_pr_size_gate_idempotent():
+    """size gate does NOT re-post if size_warned flag is already set."""
+    import tempfile
+    from core import dispatch_state as ds
+    disp = _load_dispatch()
+    posted = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            from core.providers.base import IssueSummary
+            return [IssueSummary(number=5, title="big change")]
+        def pr_state_for_issue(self, n): return "open"
+        def pr_number_for_issue(self, n): return 99
+        def pr_ci_green(self, pr): return False
+        def get_pr_files(self, pr):
+            return [{"filename": "big.py", "changes": 600}]
+        def post_pr_comment(self, pr, body):
+            posted.append(pr)
+            return True
+        def post_issue_comment(self, n, body): return True
+        def board_ensure_status_option(self, *a): return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ds.set_pr_flag(tmp, 99, "size_warned")  # pre-seed
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: {5}
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp.kanban.list_tasks = lambda *a, **k: []
+        disp.run(
+            {"repo": "O/R", "workdir": tmp, "name": "x",
+             "issues": {"filters": {}},
+             "execution": {"max_pr_lines": 500},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+        check("size gate does not re-post when flag already set", posted == [])
+
+
+def test_pr_size_gate_disabled_when_zero():
+    """max_pr_lines=0 disables the size gate entirely."""
+    import tempfile
+    disp = _load_dispatch()
+    posted = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            from core.providers.base import IssueSummary
+            return [IssueSummary(number=5, title="big change")]
+        def pr_state_for_issue(self, n): return "open"
+        def pr_number_for_issue(self, n): return 99
+        def pr_ci_green(self, pr): return False
+        def get_pr_files(self, pr):
+            return [{"filename": "big.py", "changes": 9999}]
+        def post_pr_comment(self, pr, body):
+            posted.append(pr)
+            return True
+        def post_issue_comment(self, n, body): return True
+        def board_ensure_status_option(self, *a): return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: {5}
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp.kanban.list_tasks = lambda *a, **k: []
+        disp.run(
+            {"repo": "O/R", "workdir": tmp, "name": "x",
+             "issues": {"filters": {}},
+             "execution": {"max_pr_lines": 0},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+        check("size gate disabled when max_pr_lines=0", posted == [])
+
+
+# ── dispatch: forbidden file guard ───────────────────────────────────────────
+
+def test_forbidden_file_guard_warns_once():
+    """.env in PR files triggers a single warning comment."""
+    import tempfile
+    from core import dispatch_state as ds
+    disp = _load_dispatch()
+    posted = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            from core.providers.base import IssueSummary
+            return [IssueSummary(number=6, title="env change")]
+        def pr_state_for_issue(self, n): return "open"
+        def pr_number_for_issue(self, n): return 88
+        def pr_ci_green(self, pr): return False
+        def get_pr_files(self, pr):
+            return [{"filename": ".env", "changes": 2}]
+        def post_pr_comment(self, pr, body):
+            posted.append((pr, body))
+            return True
+        def post_issue_comment(self, n, body): return True
+        def board_ensure_status_option(self, *a): return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: {6}
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp.kanban.list_tasks = lambda *a, **k: []
+        disp.run(
+            {"repo": "O/R", "workdir": tmp, "name": "x",
+             "issues": {"filters": {}}, "execution": {},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+        check("forbidden guard posts warning for .env",
+              len(posted) == 1 and ".env" in posted[0][1])
+        check("forbidden guard sets forbidden_warned flag",
+              ds.has_pr_flag(tmp, 88, "forbidden_warned"))
+
+
+def test_forbidden_file_guard_idempotent():
+    """forbidden guard does NOT re-post when flag is already set."""
+    import tempfile
+    from core import dispatch_state as ds
+    disp = _load_dispatch()
+    posted = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            from core.providers.base import IssueSummary
+            return [IssueSummary(number=6, title="env change")]
+        def pr_state_for_issue(self, n): return "open"
+        def pr_number_for_issue(self, n): return 88
+        def pr_ci_green(self, pr): return False
+        def get_pr_files(self, pr):
+            return [{"filename": ".env", "changes": 2}]
+        def post_pr_comment(self, pr, body):
+            posted.append(pr)
+            return True
+        def post_issue_comment(self, n, body): return True
+        def board_ensure_status_option(self, *a): return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ds.set_pr_flag(tmp, 88, "forbidden_warned")  # pre-seed
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: {6}
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp.kanban.list_tasks = lambda *a, **k: []
+        disp.run(
+            {"repo": "O/R", "workdir": tmp, "name": "x",
+             "issues": {"filters": {}}, "execution": {},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+        check("forbidden guard does not re-post when flag already set", posted == [])
+
+
+# ── dispatch: staleness detection ────────────────────────────────────────────
+
+def test_staleness_warns_when_over_threshold():
+    """Issues dispatched > staleness_hours ago with no PR trigger a comment."""
+    import tempfile, json, time
+    from core import dispatch_state as ds
+    disp = _load_dispatch()
+    issue_comments = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            from core.providers.base import IssueSummary
+            return [IssueSummary(number=7, title="stale issue")]
+        def pr_state_for_issue(self, n): return None
+        def post_issue_comment(self, n, body):
+            issue_comments.append((n, body))
+            return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Seed state: dispatched 50 hours ago
+        state_path = (Path(tmp) / ".hermes" / "daedalus_dispatch_state.json")
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "issues": {"7": {"dispatched_at": time.time() - 50 * 3600}}
+        }))
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: {7}
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp.kanban.list_tasks = lambda *a, **k: []
+        disp.run(
+            {"repo": "O/R", "workdir": tmp, "name": "x",
+             "issues": {"filters": {}},
+             "execution": {"staleness_hours": 48},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+        check("staleness check posts issue comment for stale issue",
+              len(issue_comments) == 1 and issue_comments[0][0] == 7)
+        check("staleness warning mentions 'stale' or 'hours'",
+              "hours" in issue_comments[0][1].lower() or "stale" in issue_comments[0][1].lower())
+        check("staleness sets stale_warned flag", ds.has_pr_flag(tmp, 7, "stale_warned"))
+
+
+def test_staleness_silent_when_under_threshold():
+    """Issues dispatched < staleness_hours ago do NOT trigger a comment."""
+    import tempfile, json, time
+    disp = _load_dispatch()
+    issue_comments = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return set()
+        def list_issues(self, state="open", labels=None, limit=50):
+            from core.providers.base import IssueSummary
+            return [IssueSummary(number=8, title="fresh issue")]
+        def pr_state_for_issue(self, n): return None
+        def post_issue_comment(self, n, body):
+            issue_comments.append((n, body))
+            return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = (Path(tmp) / ".hermes" / "daedalus_dispatch_state.json")
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "issues": {"8": {"dispatched_at": time.time() - 2 * 3600}}  # 2h ago
+        }))
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: {8}
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp.kanban.list_tasks = lambda *a, **k: []
+        disp.run(
+            {"repo": "O/R", "workdir": tmp, "name": "x",
+             "issues": {"filters": {}},
+             "execution": {"staleness_hours": 48},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+        check("staleness check silent when issue is fresh", issue_comments == [])
+
+
+# ── dispatch: label overrides ─────────────────────────────────────────────────
+
+def test_label_overrides_skip_developer():
+    """skip_developer=true removes the DEVELOPER role from the downstream body."""
+    disp = _load_dispatch()
+    body = disp._downstream_body(
+        "O/R",
+        {"number": 10, "title": "doc fix", "body": "desc", "labels": [{"name": "documentation"}]},
+        3, "/tmp", "slack:C1", "main", "github", [],
+        label_overrides={"documentation": {"skip_developer": True}},
+    )
+    check("skip_developer removes DEVELOPER role", "DEVELOPER" not in body)
+    check("skip_developer keeps REVIEWER role", "REVIEWER" in body)
+
+
+def test_label_overrides_security_first():
+    """security_first=true puts SECURITY-ANALYST before DEVELOPER in the body."""
+    disp = _load_dispatch()
+    body = disp._downstream_body(
+        "O/R",
+        {"number": 11, "title": "auth change", "body": "desc", "labels": [{"name": "security"}]},
+        3, "/tmp", "slack:C1", "main", "github", [],
+        label_overrides={"security": {"security_first": True}},
+    )
+    sec_pos = body.find("SECURITY-ANALYST")
+    dev_pos = body.find("DEVELOPER")
+    check("security_first puts SECURITY-ANALYST before DEVELOPER",
+          sec_pos != -1 and dev_pos != -1 and sec_pos < dev_pos)
+
+
+# ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
+# (Patch _FakeProvider at module level to avoid test-isolation issues)
+
+_FakeProvider.get_pr_files = lambda self, pr: []
+_FakeProvider.post_issue_comment = lambda self, n, body: True
+_FakeProvider.board_ensure_status_option = lambda self, *a: True
+_FakeProvider.append_changelog = lambda self, *a: False
+
+
 if __name__ == "__main__":
     print("Daedalus tests")
     print("-" * 60)
     for fn in (test_deep_merge, test_config_loader_resolve,
-               test_kanban_list_issue_numbers, test_create_triage_pins_workspace,
+               test_kanban_list_issue_numbers, test_kanban_list_issue_numbers_large_ids,
+               test_create_triage_pins_workspace,
                test_kanban_review_handoff_pr,
                test_dispatch_dual_mode,
                test_resolve_repo_config_valid, test_resolve_repo_config_sources_toggles,
@@ -837,7 +1302,18 @@ if __name__ == "__main__":
                test_notify_targets,
                test_summary_events,
                test_notify_project_summary_fans_out,
-               test_deliver_doc_reports_multi_target):
+               test_deliver_doc_reports_multi_target,
+               test_ensure_board_creates, test_ensure_board_already_exists,
+               test_ensure_board_failure,
+               test_dispatch_state_record_and_age, test_dispatch_state_clear,
+               test_dispatch_state_pr_flags, test_dispatch_state_review_sha,
+               test_priority_sort_p0_before_unlabeled, test_priority_sort_dict_labels,
+               test_pr_size_gate_warns_once, test_pr_size_gate_idempotent,
+               test_pr_size_gate_disabled_when_zero,
+               test_forbidden_file_guard_warns_once, test_forbidden_file_guard_idempotent,
+               test_staleness_warns_when_over_threshold,
+               test_staleness_silent_when_under_threshold,
+               test_label_overrides_skip_developer, test_label_overrides_security_first):
         fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")

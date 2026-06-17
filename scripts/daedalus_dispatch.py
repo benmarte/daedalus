@@ -19,6 +19,7 @@ import logging
 import re
 import subprocess
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +39,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
 from config import ConfigLoader  # noqa: E402
+from core import dispatch_state  # noqa: E402
 from core import iterate  # noqa: E402
 from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
@@ -53,6 +55,13 @@ _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-S
 
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready", "security-escalation")
+
+# Priority label ordering — P0 dispatched before P1 before P2 before unlabeled.
+_PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
+
+# Default forbidden-file patterns (agents may never touch these without human review).
+_DEFAULT_FORBIDDEN = [".env", "*.pem", "*.key", "*.p12", "*.pfx", ".env.*",
+                      "*.secrets", "secrets.*"]
 
 
 def _notify_targets(resolved: Dict[str, Any], event: str) -> List[str]:
@@ -257,8 +266,10 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"validator block before development may begin.\n"
         f"   If the validator card is CONFIRMED, implement the fix/feature. "
         f"Follow the agent-skills lifecycle ({_LIFECYCLE}). "
-        f"Branch fix/issue-{n}-<slug>, write code + tests, iterate up to {iterations}x "
-        f"if review fails. "
+        f"BRANCH SETUP (mandatory): `git checkout {base_branch} && git pull && "
+        f"git checkout -b fix/issue-{n}-<slug>` — always branch off `{base_branch}`, "
+        f"never off main or any other branch. "
+        f"Write code + tests, iterate up to {iterations}x if review fails. "
         f"Before pushing, run the project's configured lint and format tools (ship gate — "
         f"use whatever is present, skip gracefully if nothing is configured): "
         f".pre-commit-config.yaml → `pre-commit run --all-files`; "
@@ -269,7 +280,7 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"Push the branch (git credentials are pre-configured) and open a PR "
         f"into {base_branch} via {pr_create_howto} — no gh/glab/az CLI is installed. "
         f"CRITICAL: The PR body MUST include `Closes #{n}` (or `Fixes #{n}`) on its own line. "
-        f"(REQUIRED: GitHub only auto-closes issues on default-branch merges. Since this PR "
+        f"(REQUIRED: GitHub only auto-closes issues on non-default-branch merges. Since this PR "
         f"targets '{base_branch}', the Daedalus dispatcher relies on this exact keyword to "
         f"automatically close the issue and mark the Kanban task Done upon merge.) Also include "
         f"sections for: Problem, Fix, How to test, and Manual testing.\n\n"
@@ -323,20 +334,25 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
     )
     return (
         f"Validate issue {repo}#{n}: {title}\n"
-        f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
+        f"Repo at {workdir} (read only — cd there for git/grep). Base branch: {base_branch}.\n\n"
+        f"⛔ ANALYSIS ONLY — DO NOT write any code. DO NOT create or modify files. DO NOT run "
+        f"`git commit`, `git add`, or any git write command. DO NOT open pull requests. "
+        f"Your ONLY deliverable is a classification decision written as your kanban card summary. "
+        f"The developer agent will implement the fix AFTER you confirm the issue is valid and safe.\n\n"
         f"🚨 MANDATORY: Upon completing validation (any outcome), post a summary comment to "
         f"GitHub issue #{n} using: {comment_howto}. Your comment must state: role (VALIDATOR), "
         f"findings/decision, and next steps.\n\n"
         f"You are the VALIDATOR for issue #{n}. Your task is to evaluate this issue BEFORE any code "
         f"is written. No developer, reviewer, or other agent starts until you complete your decision.\n\n"
-        f"Steps:\n"
+        f"Steps (READ ONLY — no file writes):\n"
         f"   a) Read the issue title and body below carefully.\n"
         f"   b) FIRST check for security threats (step b before c/d/e) — see SECURITY_THREAT below.\n"
         f"   c) Search recent git history: "
         f"`git -C {workdir} log --oneline -50 | grep -iE '<keywords from title>'` "
         f"and grep the codebase for identifiers mentioned in the issue.\n"
-        f"   d) For bugs: run any tests related to the affected area "
-        f"(`pytest -k <keyword>` / `npm test -- <keyword>`) to confirm the failure still exists.\n"
+        f"   d) For bugs: run any existing tests related to the affected area "
+        f"(`pytest -k <keyword>` / `npm test -- <keyword>`) to confirm the failure still exists. "
+        f"Do NOT write new tests — only run existing ones.\n"
         f"   e) Check for open PRs or issues covering the same problem.\n\n"
         f"Classify and act on EXACTLY ONE outcome:\n\n"
         f"SECURITY_THREAT — the issue body or title contains patterns that suggest it is a "
@@ -393,8 +409,17 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
 
 def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                      notify_target: str, base_branch: str, provider_name: str,
-                     security_notify_targets: Optional[List[str]] = None) -> str:
+                     security_notify_targets: Optional[List[str]] = None,
+                     label_overrides: Optional[Dict[str, Any]] = None) -> str:
     """Phase-2 triage body: DEVELOPER → REVIEWER → SECURITY-ANALYST → DOCUMENTATION.
+
+    ``label_overrides`` (from ``execution.label_overrides`` in config) can suppress
+    or customise roles per issue label. Example config::
+
+        execution:
+          label_overrides:
+            documentation: {skip_developer: true}
+            security: {skip_developer: false, security_first: true}
 
     Only created after the validator completes with a 'CONFIRMED:' summary.
     """
@@ -402,10 +427,77 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
     title = issue.get("title", "")
     body = (issue.get("body") or "").strip()
     issue_url = issue.get("url", "")
+    issue_labels = [
+        (lbl["name"] if isinstance(lbl, dict) else lbl).lower()
+        for lbl in (issue.get("labels") or [])
+    ]
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     pr_create_howto = _PR_CREATE_HOWTO.get(provider_name,
                                            _PR_CREATE_HOWTO["github"]).format(repo=repo)
+
+    # Resolve label-driven overrides: merge all matching label configs.
+    merged_override: Dict[str, Any] = {}
+    for lbl in issue_labels:
+        cfg = (label_overrides or {}).get(lbl) or {}
+        merged_override.update(cfg)
+    skip_developer = merged_override.get("skip_developer", False)
+    security_first = merged_override.get("security_first", False)
+
+    # Build role list respecting overrides.
+    roles: List[str] = []
+    if security_first:
+        roles.append(
+            f"1. SECURITY-ANALYST — this issue is security-sensitive (label: {issue_labels}). "
+            f"Audit the issue and verify it's safe to implement before any code is written. "
+            f"Block your card with 'BLOCKED: security risk' if human intervention is required.\n"
+        )
+    if not skip_developer:
+        role_num = len(roles) + 1
+        roles.append(
+            f"{role_num}. DEVELOPER — implement the fix/feature. Follow the agent-skills lifecycle "
+            f"({_LIFECYCLE}). "
+            f"BRANCH SETUP (mandatory): `git checkout {base_branch} && git pull && "
+            f"git checkout -b fix/issue-{n}-<slug>` — always branch off `{base_branch}`, "
+            f"never off main or any other branch. "
+            f"Write code + tests, iterate up to {iterations}x if review fails. "
+            f"Before pushing, run the project's configured lint and format tools (ship gate — "
+            f"use whatever is present, skip gracefully if nothing is configured): "
+            f".pre-commit-config.yaml → `pre-commit run --all-files`; "
+            f"package.json lint/format scripts → `npm run lint && npm run format`; "
+            f"pyproject.toml ruff config → `ruff check --fix && ruff format`; "
+            f"Makefile lint target → `make lint`. "
+            f"Commit any auto-fixes before pushing. "
+            f"Push the branch (git credentials are pre-configured) and open a PR "
+            f"into {base_branch} via {pr_create_howto} — no gh/glab/az CLI is installed. "
+            f"CRITICAL: The PR body MUST include `Closes #{n}` (or `Fixes #{n}`) on its own line. "
+            f"(REQUIRED: GitHub only auto-closes issues on default-branch merges. Since this PR "
+            f"targets '{base_branch}', the Daedalus dispatcher relies on this exact keyword to "
+            f"automatically close the issue and mark the Kanban task Done upon merge.) Also include "
+            f"sections for: Problem, Fix, How to test, and Manual testing.\n"
+        )
+    roles.append(
+        f"{len(roles) + 1}. REVIEWER — review the developer's PR for correctness, quality, and performance; "
+        f"request changes or approve.\n"
+    )
+    if not security_first:
+        roles.append(
+            f"{len(roles) + 1}. SECURITY-ANALYST — audit the PR diff for vulnerabilities (authz, secrets, injection, "
+            f"input validation); flag findings or sign off.\n"
+        )
+    roles_text = "".join(roles)
+
+    doc_num = len(roles) + 1
+    doc_role = (
+        f"{doc_num}. DOCUMENTATION — after the PR is open and reviewed, write a detailed completion report "
+        f"and post it as a comment on the PR ({comment_howto}). "
+        f"Use the PR number from the chain above (developer/reviewer cards carry it). "
+        f"The comment MUST follow this exact structure:\n\n"
+        f"```\n{notify_templates.DOC_COMMENT_TEMPLATE.replace('<issue_number>', str(n)).replace('<issue_url>', issue_url)}\n```\n\n"
+        f"Replace every <placeholder> with the real value. "
+        f"NOTE: messaging-platform delivery is handled automatically by the dispatcher — do NOT "
+        f"attempt to send the report yourself.\n"
+    )
     return (
         f"Implement issue {repo}#{n}: {title}\n"
         f"The VALIDATOR has confirmed this issue is real and safe to proceed. "
@@ -418,36 +510,9 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"actually CONFIRMED (summary doesn't start with 'CONFIRMED:'), mark your card Complete "
         f"immediately with summary 'Skipped: validator outcome not confirmed' and exit.\n\n"
         f"Decompose this into the following role tasks IN ORDER — each depends on the previous:\n\n"
-        f"1. DEVELOPER — implement the fix/feature. Follow the agent-skills lifecycle "
-        f"({_LIFECYCLE}). Branch fix/issue-{n}-<slug>, write code + tests, iterate up to {iterations}x "
-        f"if review fails. "
-        f"Before pushing, run the project's configured lint and format tools (ship gate — "
-        f"use whatever is present, skip gracefully if nothing is configured): "
-        f".pre-commit-config.yaml → `pre-commit run --all-files`; "
-        f"package.json lint/format scripts → `npm run lint && npm run format`; "
-        f"pyproject.toml ruff config → `ruff check --fix && ruff format`; "
-        f"Makefile lint target → `make lint`. "
-        f"Commit any auto-fixes before pushing. "
-        f"Push the branch (git credentials are pre-configured) and open a PR "
-        f"into {base_branch} via {pr_create_howto} — no gh/glab/az CLI is installed. "
-        f"CRITICAL: The PR body MUST include `Closes #{n}` (or `Fixes #{n}`) on its own line. "
-        f"(REQUIRED: GitHub only auto-closes issues on default-branch merges. Since this PR "
-        f"targets '{base_branch}', the Daedalus dispatcher relies on this exact keyword to "
-        f"automatically close the issue and mark the Kanban task Done upon merge.) Also include "
-        f"sections for: Problem, Fix, How to test, and Manual testing.\n\n"
-        f"2. REVIEWER — review the developer's PR for correctness, quality, and performance; "
-        f"request changes or approve.\n"
-        f"3. SECURITY-ANALYST — audit the PR diff for vulnerabilities (authz, secrets, injection, "
-        f"input validation); flag findings or sign off.\n"
-        f"4. DOCUMENTATION — after the PR is open and reviewed, write a detailed completion report "
-        f"and post it as a comment on the PR ({comment_howto}). "
-        f"Use the PR number from the chain above (developer/reviewer cards carry it). "
-        f"The comment MUST follow this exact structure:\n\n"
-        f"```\n{notify_templates.DOC_COMMENT_TEMPLATE.replace('<issue_number>', str(n)).replace('<issue_url>', issue_url)}\n```\n\n"
-        f"Replace every <placeholder> with the real value. "
-        f"NOTE: messaging-platform delivery is handled automatically by the dispatcher — do NOT "
-        f"attempt to send the report yourself.\n\n"
-        f"--- Issue #{n} ---\n{body}\n"
+        f"{roles_text}"
+        f"{doc_role}"
+        f"\n--- Issue #{n} ---\n{body}\n"
     )
 
 
@@ -511,6 +576,7 @@ def _check_confirmed_validators(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
     provider_name: str, security_notify_targets: Optional[List[str]] = None,
+    label_overrides: Optional[Dict[str, Any]] = None,
     *, dry_run: bool = False,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
@@ -543,7 +609,7 @@ def _check_confirmed_validators(
         tid = kanban.create_triage(
             slug, n, issue.get("title", ""),
             _downstream_body(repo, issue, iterations, workdir, notify_target, base_branch,
-                             provider_name, security_notify_targets),
+                             provider_name, security_notify_targets, label_overrides),
             idempotency_key=f"issue-{n}",
             workspace=f"dir:{workdir}" if workdir else None,
         )
@@ -735,6 +801,13 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     existing = kanban.list_issue_numbers(slug)
     issues = _fetch_issues(provider, filters)
 
+    # Priority queue: dispatch P0 → P1 → P2 → unlabeled in that order.
+    issues.sort(key=lambda i: min(
+        (_PRIORITY.get((lbl["name"] if isinstance(lbl, dict) else lbl), 99)
+         for lbl in (i.get("labels") or [])),
+        default=99,
+    ))
+
     # Enforce validator blocks: set 'Blocked' column on VCS board and cancel
     # downstream tasks for any issue whose validator card is currently blocked.
     # Runs each tick so issues blocked mid-cycle are caught immediately.
@@ -747,6 +820,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     confirmed_triggered = _check_confirmed_validators(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _notify_targets(resolved, "security-escalation"),
+        label_overrides=(execution or {}).get("label_overrides", {}),
         dry_run=dry_run,
     )
     if confirmed_triggered and not dry_run:
@@ -788,7 +862,18 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                     # Archive kanban tasks immediately so the orphan cleanup path
                     # on the next tick doesn't re-report this issue as completed.
                     kanban.close_issue_tasks(slug, n)
+                    dispatch_state.clear_dispatch(workdir, n)
                     completed.append(n)
+                    # CHANGELOG auto-update: prepend a brief entry using the PR title.
+                    if merged_pr and merged_pr.number and base_branch:
+                        cl_entry = (
+                            f"## [{issue.get('title', f'Issue #{n}')}]"
+                            f"({provider.issue_url(n)}) — "
+                            f"[PR #{merged_pr.number}]({provider.pr_url(merged_pr.number)})\n"
+                        )
+                        if not provider.append_changelog(base_branch, cl_entry):
+                            logger.debug("dispatch: CHANGELOG update skipped for #%s "
+                                         "(provider doesn't support it or no write token)", n)
             elif pr == "open":
                 # PR open and awaiting review -> In review.
                 # Safety net: if the PR body lacks a closing keyword, inject one
@@ -814,6 +899,53 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                                     "issue #%s may not auto-close on merge",
                                     open_pr_obj.number, n,
                                 )
+                    # ── PR size gate + forbidden file guard ──────────────────
+                    pr_files = provider.get_pr_files(open_pr_obj.number)
+                    if pr_files and workdir:
+                        max_pr_lines = int((execution or {}).get("max_pr_lines", 0))
+                        if max_pr_lines:
+                            total_lines = sum(f.get("changes", 0) for f in pr_files)
+                            if total_lines > max_pr_lines and not dispatch_state.has_pr_flag(
+                                workdir, open_pr_obj.number, "size_warned"
+                            ):
+                                warn = (
+                                    f"⚠️ **PR too large**: This PR changes **{total_lines} lines** "
+                                    f"(project limit: {max_pr_lines}).\n\n"
+                                    "Please split into smaller, focused PRs before this is reviewed. "
+                                    "Large PRs are harder to review and more likely to introduce bugs."
+                                )
+                                if dry_run:
+                                    logger.info("[dry-run] PR #%s too large (%d lines) — would warn",
+                                                open_pr_obj.number, total_lines)
+                                else:
+                                    provider.post_pr_comment(open_pr_obj.number, warn)
+                                    dispatch_state.set_pr_flag(workdir, open_pr_obj.number, "size_warned")
+                                    logger.info("dispatch: PR #%s size warning posted (%d lines > %d)",
+                                                open_pr_obj.number, total_lines, max_pr_lines)
+                        forbidden_patterns = (execution or {}).get(
+                            "forbidden_files", _DEFAULT_FORBIDDEN
+                        )
+                        blocked_files = [
+                            f["filename"] for f in pr_files
+                            if any(fnmatch(f.get("filename", ""), pat) for pat in forbidden_patterns)
+                        ]
+                        if blocked_files and not dispatch_state.has_pr_flag(
+                            workdir, open_pr_obj.number, "forbidden_warned"
+                        ):
+                            warn = (
+                                "🚨 **Forbidden file(s) detected**: This PR touches files that "
+                                "require explicit human review before merge:\n\n"
+                                + "".join(f"- `{fn}`\n" for fn in blocked_files)
+                                + "\n**Do not merge this PR until a human has reviewed these files.**"
+                            )
+                            if dry_run:
+                                logger.info("[dry-run] PR #%s touches forbidden files — would warn: %s",
+                                            open_pr_obj.number, blocked_files)
+                            else:
+                                provider.post_pr_comment(open_pr_obj.number, warn)
+                                dispatch_state.set_pr_flag(workdir, open_pr_obj.number, "forbidden_warned")
+                                logger.warning("dispatch: PR #%s touches forbidden files: %s",
+                                               open_pr_obj.number, blocked_files)
                 if dry_run:
                     logger.info("[dry-run] would set #%s -> %s (PR open)", n, in_review_name)
                     reconciled.append((n, in_review_name))
@@ -856,9 +988,55 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         if vid:
             created.append(n)
             existing.add(n)
+            dispatch_state.record_dispatch(workdir, n)
 
     if created and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)  # nudge (gateway also auto-dispatches)
+
+    # ── bidirectional sync: VCS board Done → archive Hermes kanban tasks ────────
+    # If a human manually moved a managed issue to "Done" on the VCS board
+    # (without a PR merge), the Hermes kanban still shows tasks as In progress.
+    # Detect this and archive the kanban tasks so both boards stay in sync.
+    if board_mode:
+        board_done_nums = provider.board_numbers_with_statuses([provider.status_name("done")])
+        already_completed = set(completed)
+        for n in sorted((board_done_nums & existing) - already_completed):
+            if dry_run:
+                logger.info("[dry-run] #%s is Done on VCS board → would archive kanban tasks", n)
+                completed.append(n)
+            else:
+                closed_tasks = kanban.close_issue_tasks(slug, n)
+                if closed_tasks:
+                    logger.info(
+                        "dispatch: #%s moved to Done on VCS board → archived %d kanban task(s)",
+                        n, len(closed_tasks),
+                    )
+                    completed.append(n)
+
+    # ── staleness check: managed issues stuck in-progress without a PR ──────────
+    # If an issue has been dispatched for more than staleness_hours and still has
+    # no PR, the assigned agent may be stuck. Post a one-shot warning comment on
+    # the issue and log it — humans can decide whether to re-queue.
+    staleness_hours = float((execution or {}).get("staleness_hours", 48))
+    if board_mode and staleness_hours > 0 and workdir:
+        reconciled_nums = {num for num, _ in reconciled}
+        already_done = set(completed)
+        for n in sorted(existing):
+            if n in reconciled_nums or n in already_done:
+                continue  # has a PR or just completed
+            age = dispatch_state.get_dispatch_age_hours(workdir, n)
+            if age is None or age <= staleness_hours:
+                continue
+            logger.warning("dispatch: #%s in-progress for %.1fh without a PR — possible stale agent", n, age)
+            if not dry_run and not dispatch_state.has_pr_flag(workdir, n, "stale_warned"):
+                provider.post_issue_comment(
+                    n,
+                    f"⚠️ **Daedalus staleness alert** — Issue #{n} has been in progress "
+                    f"for **{age:.0f} hours** without a linked PR.\n\n"
+                    "The assigned agent may be stuck. If work is ongoing, add a progress comment. "
+                    "If the agent is not making progress, close this issue to re-queue it on the next tick.",
+                )
+                dispatch_state.set_pr_flag(workdir, n, "stale_warned")
 
     # ── cleanup: archive kanban tasks for issues closed directly on VCS ───────
     # Issues closed without a merged PR (won't-fix, duplicate, manual close)

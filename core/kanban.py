@@ -49,12 +49,27 @@ def ensure_board(slug: str) -> bool:
     return False
 
 
+_ISSUE_RE = re.compile(r"#(\d+)")
+
+
 def list_issue_numbers(slug: str) -> Set[int]:
-    """Issue numbers that already have a task on the board (parsed from titles)."""
-    rc, out, _ = _hk(["--board", slug, "ls"])
-    if rc != 0:
+    """Issue numbers that already have a task on the board (parsed from titles).
+
+    Uses the structured JSON list (``hermes kanban list --json``) so that task
+    title truncation in the human-readable ``ls`` table never causes an issue
+    number — regardless of how many digits — to be missed.
+    """
+    tasks = list_tasks(slug)
+    if not tasks:
         return set()
-    return {int(n) for n in re.findall(r"#(\d+)", out or "")}
+    nums: Set[int] = set()
+    for task in tasks:
+        title = task.get("title") or ""
+        if not title:
+            continue
+        for m in _ISSUE_RE.finditer(title):
+            nums.add(int(m.group(1)))
+    return nums
 
 
 def create_triage(slug: str, issue_number: Optional[int], title: str, body: str,

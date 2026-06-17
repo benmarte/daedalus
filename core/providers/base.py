@@ -241,6 +241,20 @@ class VCSProvider(abc.ABC):
         """Overwrite the PR body. Returns True on success, False if unsupported/failed."""
         return False
 
+    def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
+        """Changed files in a PR. Returns [{filename, additions, deletions, changes, status}].
+        Providers that support it override; defaults to [] (safe no-op)."""
+        return []
+
+    def post_issue_comment(self, issue_number: int, body: str) -> bool:
+        """Post a comment on an issue (distinct from PR comments). Returns True on success."""
+        return False
+
+    def append_changelog(self, base_branch: str, entry: str) -> bool:
+        """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the VCS API.
+        Returns True on success; defaults to False (providers that support it override)."""
+        return False
+
     # ── URL builders (for rich notification links) ───────────────────────────
     def issue_url(self, issue_number: int) -> str:
         """Canonical web URL for an issue/work-item. Returns '' if not known."""

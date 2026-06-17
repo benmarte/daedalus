@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1041,6 +1042,32 @@ async def post_project_config(request: Request, name: str) -> dict[str, Any]:
     cron_result = _reconcile_cron(name, cron_cfg)
 
     return {"status": "saved", "path": str(cfg_path), "cron": cron_result}
+
+
+@project_config_router.post("/{name}/run")
+async def run_dispatch_dry_run(name: str) -> dict[str, Any]:
+    """Trigger a dry-run dispatch tick for a project and return the log output."""
+    workdir = _resolve_project_path(name)
+    dispatch_script = Path(__file__).resolve().parent.parent / "scripts" / "daedalus_dispatch.py"
+    if not dispatch_script.exists():
+        raise HTTPException(status_code=500, detail="dispatch script not found")
+    try:
+        cfg = ConfigLoader().resolve_repo_config(str(workdir))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"project config not found: {exc}")
+    _ = cfg  # validated; workdir is the run target
+    try:
+        result = subprocess.run(
+            [sys.executable, str(dispatch_script), str(workdir), "--dry-run"],
+            capture_output=True, text=True, timeout=120, env={**os.environ},
+        )
+        combined = result.stdout + (("\n" + result.stderr) if result.stderr.strip() else "")
+        return {"ok": result.returncode == 0, "output": combined.strip(),
+                "error": result.stderr.strip() or None}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": "", "error": "dispatch timed out after 120s"}
+    except Exception as exc:
+        return {"ok": False, "output": "", "error": str(exc)}
 
 
 @project_config_router.delete("/{name}")
