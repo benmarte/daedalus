@@ -335,8 +335,9 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
     return (
         f"Validate issue {repo}#{n}: {title}\n"
         f"Repo at {workdir} (read only — cd there for git/grep). Base branch: {base_branch}.\n\n"
-        f"⛔ ANALYSIS ONLY — DO NOT write any code. DO NOT create or modify files. DO NOT run "
-        f"`git commit`, `git add`, or any git write command. DO NOT open pull requests. "
+        f"⛔ READ-ONLY — You may run existing tests to verify bug reproduction but MUST NOT write, "
+        f"modify, or commit any code. DO NOT create or modify files. DO NOT run `git commit`, "
+        f"`git add`, or any git write command. DO NOT open pull requests. "
         f"Your ONLY deliverable is a classification decision written as your kanban card summary. "
         f"The developer agent will implement the fix AFTER you confirm the issue is valid and safe.\n\n"
         f"🚨 MANDATORY: Upon completing validation (any outcome), post a summary comment to "
@@ -391,7 +392,14 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
         f"CONFIRMED — issue is real, unaddressed, and safe to proceed with normal development.\n"
         f"     → Complete your card with summary starting 'CONFIRMED: ' followed by a 1–2 sentence "
         f"reproduction note (e.g., 'CONFIRMED: reproduced on main at commit abc1234, test_login fails'). "
-        f"The dispatcher detects this EXACT prefix to trigger the developer phase.\n\n"
+        f"The dispatcher detects this EXACT prefix to trigger the PM phase.\n\n"
+        f"CANNOT_REPRODUCE — the bug or issue cannot be verified from the current codebase "
+        f"(tests pass, no evidence of the problem, or insufficient reproduction steps).\n"
+        f"   When CANNOT_REPRODUCE:\n"
+        f"     → Post a comment on issue #{n} via {comment_howto} explaining what was tested "
+        f"and why it could not be reproduced.\n"
+        f"     → Close the issue: {close_howto_wontfix}\n"
+        f"     → Complete your card with summary starting 'STOP: cannot reproduce — ' + one-line description.\n\n"
         f"ALREADY_FIXED — git history or code shows the problem is gone.\n"
         f"     → Post a comment on issue #{n} via {comment_howto} naming the commit/PR that fixed it.\n"
         f"     → Close the issue: {close_howto_completed}\n"
@@ -407,11 +415,44 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
     )
 
 
+def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: str,
+             base_branch: str, provider_name: str) -> str:
+    """Phase-2 task body: PM writes spec + acceptance criteria before team starts."""
+    n = issue.get("number")
+    title = issue.get("title", "")
+    body = (issue.get("body") or "").strip()
+    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
+                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
+    return (
+        f"You are the PRODUCT MANAGER for issue {repo}#{n}: {title}\n"
+        f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
+        f"The VALIDATOR has confirmed this issue is real, safe, and ready to implement.\n"
+        f"Validator findings: {validator_summary}\n\n"
+        f"⛔ DO NOT write code. Your role is to write the spec and acceptance criteria "
+        f"that the development team will implement.\n\n"
+        f"Steps:\n"
+        f"   a) Read the issue below carefully along with the validator's findings.\n"
+        f"   b) Write a clear spec that includes:\n"
+        f"      - Problem statement (what exactly is broken or missing)\n"
+        f"      - Acceptance criteria (numbered list — what 'done' looks like)\n"
+        f"      - Implementation approach (high-level, not code)\n"
+        f"      - Edge cases to handle\n"
+        f"      - Files likely to be affected (based on your codebase reading)\n"
+        f"   c) Post the spec as a comment on issue #{n} via: {comment_howto}\n"
+        f"   d) Complete your card with summary starting 'SPEC: ' followed by a 1–2 sentence "
+        f"summary of what will be built. The dispatcher detects this EXACT prefix to hand off "
+        f"to the development team.\n\n"
+        f"If the developer hits a blocker during implementation, they may comment on this issue "
+        f"to request your clarification. Monitor for such requests.\n\n"
+        f"--- Issue #{n} ---\n{body}\n"
+    )
+
+
 def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                      notify_target: str, base_branch: str, provider_name: str,
                      security_notify_targets: Optional[List[str]] = None,
                      label_overrides: Optional[Dict[str, Any]] = None) -> str:
-    """Phase-2 triage body: DEVELOPER → REVIEWER → SECURITY-ANALYST → DOCUMENTATION.
+    """Phase-3 triage body: DEVELOPER → REVIEWER → SECURITY-ANALYST → DOCUMENTATION.
 
     ``label_overrides`` (from ``execution.label_overrides`` in config) can suppress
     or customise roles per issue label. Example config::
@@ -500,7 +541,8 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
     )
     return (
         f"Implement issue {repo}#{n}: {title}\n"
-        f"The VALIDATOR has confirmed this issue is real and safe to proceed. "
+        f"The VALIDATOR confirmed this issue is real and safe. The PM has written the spec — "
+        f"read it on GitHub issue #{n} before starting. "
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
         f"🚨 MANDATORY FOR ALL ROLES: Upon completing your assigned step (whether finishing, "
         f"requesting changes, or blocking), you MUST post a summary comment to GitHub issue #{n} "
@@ -509,6 +551,10 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"⛔ HARD STOP FOR ALL ROLES: If you discover the validator card for issue #{n} was NOT "
         f"actually CONFIRMED (summary doesn't start with 'CONFIRMED:'), mark your card Complete "
         f"immediately with summary 'Skipped: validator outcome not confirmed' and exit.\n\n"
+        f"⚠️ TEAM BLOCKER: If the developer hits a technical blocker they cannot resolve alone, "
+        f"post a comment on GitHub issue #{n} describing the blocker clearly. The PM monitors "
+        f"this issue and will respond with clarification. Only escalate to human review if the "
+        f"blocker is a genuine security risk or fundamentally unsolvable without product-level decisions.\n\n"
         f"Decompose this into the following role tasks IN ORDER — each depends on the previous:\n\n"
         f"{roles_text}"
         f"{doc_role}"
@@ -558,17 +604,28 @@ def _mark_notified_block(slug: str, issue_number: int) -> None:
 
 
 def _has_downstream_tasks(slug: str, issue_number: int) -> bool:
-    """Return True if any non-validator kanban task exists for issue_number.
+    """Return True if any non-validator, non-PM kanban task exists for issue_number.
 
-    Used by _check_confirmed_validators to avoid creating duplicate downstream
-    triage cards when the validator confirms an issue.
+    Used by _check_completed_pm to avoid creating duplicate team triage cards.
     """
     pattern = f"#{issue_number}"
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
-        if (t.get("assignee") or "").strip() != "validator-daedalus":
+        assignee = (t.get("assignee") or "").strip()
+        if assignee not in ("validator-daedalus", "pm-daedalus"):
             return True  # triage card or downstream role task (developer/reviewer/etc.)
+    return False
+
+
+def _has_pm_tasks(slug: str, issue_number: int) -> bool:
+    """Return True if a PM task already exists for issue_number."""
+    pattern = f"#{issue_number}"
+    for t in kanban.list_tasks(slug):
+        if pattern not in (t.get("title") or ""):
+            continue
+        if (t.get("assignee") or "").strip() == "pm-daedalus":
+            return True
     return False
 
 
@@ -580,30 +637,78 @@ def _check_confirmed_validators(
     *, dry_run: bool = False,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
-    create the downstream triage card and decompose it across the roster.
+    create a PM task to write the spec + acceptance criteria.
 
-    Runs each tick so the developer phase starts as soon as the validator completes.
-    The idempotency_key='issue-{n}' on the triage prevents duplicate cards.
+    Runs each tick so the PM phase starts as soon as the validator completes.
+    Idempotency via 'pm-{n}' key prevents duplicate PM cards.
     """
     triggered: List[int] = []
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != "validator-daedalus":
             continue
-        summary = (task.get("summary") or task.get("last_summary") or "").lower().strip()
+        summary_raw = (task.get("summary") or task.get("last_summary") or "").strip()
+        summary = summary_raw.lower()
         if not summary.startswith("confirmed"):
             continue  # BLOCKED/ESCALATED/STOP/empty — not confirmed
         m = re.search(r"#(\d+)", task.get("title") or "")
         if not m:
             continue
         n = int(m.group(1))
-        if _has_downstream_tasks(slug, n):
-            continue  # downstream triage already exists
+        if _has_pm_tasks(slug, n):
+            continue  # PM task already exists
         issue = issues_map.get(n)
         if not issue:
             logger.debug("dispatch: validator confirmed #%s but issue not in current scope", n)
             continue
         if dry_run:
-            logger.info("[dry-run] validator CONFIRMED #%s — would create downstream tasks", n)
+            logger.info("[dry-run] validator CONFIRMED #%s — would create PM task", n)
+            triggered.append(n)
+            continue
+        vid = kanban.create_task(
+            slug, f"#{n} {issue.get('title', '')}",
+            _pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name),
+            assignee="pm-daedalus",
+            idempotency_key=f"pm-{n}",
+            workspace=f"dir:{workdir}" if workdir else "",
+        )
+        if vid:
+            logger.info("dispatch: validator CONFIRMED #%s — PM task %s created", n, vid)
+            triggered.append(n)
+    return triggered
+
+
+def _check_completed_pm(
+    slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
+    iterations: int, workdir: str, notify_target: str, base_branch: str,
+    provider_name: str, security_notify_targets: Optional[List[str]] = None,
+    label_overrides: Optional[Dict[str, Any]] = None,
+    *, dry_run: bool = False,
+) -> List[int]:
+    """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
+    create the downstream triage (Developer + Reviewer + Security + Docs).
+
+    Runs each tick so the team starts as soon as the PM finishes the spec.
+    Idempotency via 'issue-{n}' key prevents duplicate triage cards.
+    """
+    triggered: List[int] = []
+    for task in kanban.list_tasks(slug, status="done"):
+        if (task.get("assignee") or "").strip() != "pm-daedalus":
+            continue
+        summary = (task.get("summary") or task.get("last_summary") or "").lower().strip()
+        if not summary.startswith("spec:"):
+            continue
+        m = re.search(r"#(\d+)", task.get("title") or "")
+        if not m:
+            continue
+        n = int(m.group(1))
+        if _has_downstream_tasks(slug, n):
+            continue  # team triage already exists
+        issue = issues_map.get(n)
+        if not issue:
+            logger.debug("dispatch: PM completed #%s but issue not in current scope", n)
+            continue
+        if dry_run:
+            logger.info("[dry-run] PM SPEC #%s — would create downstream team triage", n)
             triggered.append(n)
             continue
         tid = kanban.create_triage(
@@ -615,7 +720,7 @@ def _check_confirmed_validators(
         )
         if tid:
             kanban.decompose(slug, tid)
-            logger.info("dispatch: validator CONFIRMED #%s — downstream triage %s created + decomposed", n, tid)
+            logger.info("dispatch: PM SPEC #%s — team triage %s created + decomposed", n, tid)
             triggered.append(n)
     return triggered
 
