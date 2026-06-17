@@ -19,9 +19,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
-import urllib.request
-import urllib.error
 from pathlib import Path
 from typing import Any, Optional
 
@@ -44,6 +41,37 @@ except ImportError:
     from config import validate_vcs  # type: ignore[no-redef]
 
 # Core helpers (degrade gracefully — never raise on missing data).
+try:
+    from core.cli import hermes_cli as _hermes_cli
+except ImportError:
+    def _hermes_cli(args, timeout=30):  # type: ignore[misc]
+        try:
+            r = subprocess.run(["hermes"] + list(args), capture_output=True,
+                               text=True, timeout=timeout)
+            return r.returncode, (r.stdout + r.stderr).strip()
+        except Exception as exc:
+            return -1, str(exc)
+
+try:
+    from core.util import board_slug as _board_slug, parse_env_file as _parse_env_file
+except ImportError:
+    def _board_slug(repo, name=""):  # type: ignore[misc]
+        slug = repo.replace("/", "-") if repo else name
+        return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
+
+    def _parse_env_file(path):  # type: ignore[misc]
+        try:
+            result = {}
+            for line in Path(path).read_text().split("\n"):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                result[k.strip()] = v.strip().strip('"').strip("'")
+            return result
+        except OSError:
+            return {}
+
 try:
     from core import registry
 except ImportError:
@@ -81,29 +109,16 @@ def _bootstrap_provider_env() -> None:
         "GITLAB_TOKEN", "AZURE_DEVOPS_PAT",
         "BITBUCKET_TOKEN",
     }
-    try:
-        # Use a temporary Path object; _real_home() is defined below, so read
-        # the env file using the same logic inline.
-        import pathlib as _pl
-        _home = _pl.Path.home()
-        _parts = _home.parts
-        if ".hermes" in _parts and "profiles" in _parts:
-            _idx = _parts.index(".hermes")
-            _home = _pl.Path(*_parts[:_idx])
-        _env_path = _home / ".hermes" / ".env"
-        if not _env_path.exists():
-            return
-        for _line in _env_path.read_text().split("\n"):
-            _line = _line.strip()
-            if not _line or _line.startswith("#") or "=" not in _line:
-                continue
-            _k, _v = _line.split("=", 1)
-            _k = _k.strip()
-            _v = _v.strip().strip('"').strip("'")
-            if _k in _TOKEN_KEYS and _v:
-                os.environ.setdefault(_k, _v)
-    except OSError:
-        pass
+    import pathlib as _pl
+    _home = _pl.Path.home()
+    _parts = _home.parts
+    if ".hermes" in _parts and "profiles" in _parts:
+        _idx = _parts.index(".hermes")
+        _home = _pl.Path(*_parts[:_idx])
+    _env_path = _home / ".hermes" / ".env"
+    for k, v in _parse_env_file(_env_path).items():
+        if k in _TOKEN_KEYS and v:
+            os.environ.setdefault(k, v)
 
 
 _bootstrap_provider_env()
@@ -145,142 +160,109 @@ def _strip_secrets(obj: Any) -> Any:
 
 
 
-def _channel_target(platform_name: str, channel: dict) -> str:
-    """Build the hermes send -t target string from a JSON channel object.
+def _channel_target_and_label(platform_name: str, channel: dict) -> tuple[str, str]:
+    """Build ``(target, label)`` from a JSON channel object.
 
-    Mirrors Hermes's internal _channel_target_name logic:
-      - Discord:  discord:#{name}
-      - Slack:    slack:{name}  (name-based; Slack API also accepts names)
-      - Others:   {platform}:{name}
-    Returns '' when the channel has no usable name.
+    ``target`` is the ``hermes send -t`` string; ``label`` is the human-readable
+    display name shown in the picker. Returns ``('', '')`` when the channel
+    should be skipped (e.g. Slack thread entries).
+
+    Mirrors Hermes's internal ``_channel_target_name`` logic so all platforms are
+    handled generically — no platform-specific API calls are needed because the
+    JSON already carries channel names.
     """
+    # Skip Slack per-thread entries — they have a thread_id field
+    if channel.get("thread_id"):
+        return "", ""
+
     name = (channel.get("name") or "").strip()
     ch_id = (channel.get("id") or "").strip()
+    guild = (channel.get("guild") or "").strip()
+
     if platform_name == "discord":
-        return f"discord:#{name}" if name else ""
+        if not name:
+            return "", ""
+        label = f"#{name}" + (f" ({guild})" if guild else "")
+        return f"discord:#{name}", label
+
     if platform_name == "slack":
-        return f"slack:{name}" if name else (f"slack:{ch_id}" if ch_id else "")
-    return f"{platform_name}:{name}" if name else ""
+        target = f"slack:{name}" if name else (f"slack:{ch_id}" if ch_id else "")
+        return target, (name or ch_id)
+
+    if not name:
+        return "", ""
+    return f"{platform_name}:{name}", name
 
 
 def _hermes_status_configured_platforms() -> set[str]:
     """Parse ``hermes status`` to find platforms marked '✓ configured'.
 
-    Returns a set of lowercase platform names (e.g. {'discord', 'slack'}).
+    Returns a set of lowercase platform names (e.g. ``{'discord', 'slack'}``).
     Degrades gracefully to an empty set on any error.
     """
-    try:
-        result = subprocess.run(
-            ["hermes", "status"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return set()
-        configured: set[str] = set()
-        in_messaging = False
-        for line in result.stdout.splitlines():
-            if "Messaging Platforms" in line:
-                in_messaging = True
-                continue
-            if in_messaging:
-                if line.strip().startswith("◆"):
-                    break  # end of Messaging Platforms section
-                if "✓" in line:
-                    # e.g. "  Discord       ✓ configured (home: #General)"
-                    name = line.strip().split()[0].lower()
-                    configured.add(name)
-        return configured
-    except Exception:
+    rc, out = _hermes_cli(["status"], timeout=10)
+    if rc != 0:
         return set()
+    configured: set[str] = set()
+    in_messaging = False
+    for line in out.splitlines():
+        if "Messaging Platforms" in line:
+            in_messaging = True
+            continue
+        if in_messaging:
+            if line.strip().startswith("◆"):
+                break
+            if "✓" in line:
+                name = line.strip().split()[0].lower()
+                configured.add(name)
+    return configured
 
 
 def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
     """Return notification channels grouped by platform.
 
-    Strategy:
-    1. Use ``hermes send --list --json`` to get channels for all platforms.
-    2. Only include platforms that have channels OR are confirmed configured via
-       ``hermes status`` (prevents flooding the picker with all 25+ supported-but-
-       unconfigured platforms that appear in the JSON as empty arrays).
-    3. Fall back to the text parser (``hermes send --list``) for older Hermes
-       versions that don't support ``--json``.
+    Uses ``hermes send --list --json`` as the primary source — channel names
+    come directly from Hermes's platform adapters, so no platform-specific API
+    calls are needed. Platforms with no channels are only included when
+    ``hermes status`` confirms they are configured (prevents flooding the picker
+    with all ~25 supported-but-unconfigured platforms). Falls back to the text
+    parser for older Hermes versions that don't support ``--json``.
 
-    Returns a dict mapping display name (e.g. 'Slack', 'Discord') to a list of
-    ``{value, label}`` dicts. Slack labels are resolved to human-readable names
-    via the Slack Web API (cached); all other platforms use the raw target.
-
-    Degrades gracefully to an empty dict on any error.
+    Returns ``{display_name: [{value, label}, ...]}``.
     """
-    raw_methods: dict[str, list[str]] = {}
-    json_ok = False
-
-    try:
-        json_result = subprocess.run(
-            ["hermes", "send", "--list", "--json"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if json_result.returncode == 0:
-            json_data = json.loads(json_result.stdout or "{}")
-            platforms = json_data.get("platforms") or {}
-            if platforms:
-                json_ok = True
-                # Ask hermes status which platforms are actually configured.
-                # We only add no-channel platforms if status confirms they're set up,
-                # so we don't flood the picker with all ~25 unsupported platforms.
-                confirmed = _hermes_status_configured_platforms()
-
-                for plat, channels in platforms.items():
-                    if not channels:
-                        # Only add if hermes status says it's configured.
-                        if plat.lower() in confirmed:
-                            raw_methods[plat.capitalize()] = [plat]
-                        continue
-                    # Platform has channels — always include them.
-                    display = plat.capitalize()
-                    seen: set[str] = set()
-                    deduped: list[str] = []
-                    for ch in channels:
-                        t = _channel_target(plat, ch)
-                        if t and t not in seen:
-                            seen.add(t)
-                            deduped.append(t)
-                    if deduped:
-                        raw_methods[display] = deduped
-    except Exception:
-        pass
-
-    # Fallback: text parser for Hermes versions without --json support.
-    if not json_ok:
-        try:
-            result = subprocess.run(
-                ["hermes", "send", "--list"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                raw_methods = _parse_send_list_output(result.stdout)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return {}
-
-    # Resolve Slack labels via API
-    slack_ids: list[str] = []
-    for method, targets in raw_methods.items():
-        if method.lower() == "slack":
-            slack_ids = targets
-            break
-
-    slack_labels: dict[str, str] = {}
-    if slack_ids:
-        slack_labels = _resolve_slack_labels(slack_ids)
-
-    # Build the final shape: {value, label} per target
     result_dict: dict[str, list[dict[str, str]]] = {}
-    for method, targets in raw_methods.items():
-        entries: list[dict[str, str]] = []
-        for t in targets:
-            label = slack_labels.get(t, t) if method.lower() == "slack" else t
-            entries.append({"value": t, "label": label})
-        result_dict[method] = entries
 
+    rc, out = _hermes_cli(["send", "--list", "--json"], timeout=10)
+    if rc == 0:
+        try:
+            platforms = json.loads(out or "{}").get("platforms") or {}
+        except Exception:
+            platforms = {}
+
+        if platforms:
+            confirmed = _hermes_status_configured_platforms()
+            for plat, channels in platforms.items():
+                display = plat.capitalize()
+                if not channels:
+                    if plat.lower() in confirmed:
+                        result_dict[display] = [{"value": plat, "label": f"{display} (home channel)"}]
+                    continue
+                entries: list[dict[str, str]] = []
+                seen: set[str] = set()
+                for ch in channels:
+                    target, label = _channel_target_and_label(plat, ch)
+                    if target and target not in seen:
+                        seen.add(target)
+                        entries.append({"value": target, "label": label or target})
+                if entries:
+                    result_dict[display] = entries
+            return result_dict
+
+    # Fallback: text parser for older Hermes versions without --json support.
+    rc2, out2 = _hermes_cli(["send", "--list"], timeout=10)
+    if rc2 == 0:
+        for method, targets in _parse_send_list_output(out2).items():
+            result_dict[method] = [{"value": t, "label": t} for t in targets]
     return result_dict
 
 
@@ -345,159 +327,8 @@ def _parse_send_list_output(output: str) -> dict[str, list[str]]:
     return methods
 
 
-# ── Slack channel name resolution ──────────────────────────────────────────
-
-_SLACK_CACHE_DIR = _real_home() / ".hermes" / "daedalus"
-_SLACK_CACHE_PATH = _SLACK_CACHE_DIR / "slack-channels.json"
-_SLACK_CACHE_TTL = 3600  # 1 hour
-
-
-def _load_slack_token() -> str | None:
-    """Read SLACK_BOT_TOKEN from ~/.hermes/.env. Never logs the token."""
-    env_path = _real_home() / ".hermes" / ".env"
-    if not env_path.exists():
-        return None
-    try:
-        for line in env_path.read_text().split("\n"):
-            line = line.strip()
-            if line.startswith("SLACK_BOT_TOKEN="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except OSError:
-        return None
-    return None
-
-
-def _load_slack_cache() -> dict[str, dict[str, Any]]:
-    """Load the id→label cache from disk. Returns {} on any failure."""
-    if not _SLACK_CACHE_PATH.exists():
-        return {}
-    try:
-        data = json.loads(_SLACK_CACHE_PATH.read_text())
-        if isinstance(data, dict):
-            return data
-    except (json.JSONDecodeError, OSError):
-        pass
-    return {}
-
-
-def _save_slack_cache(cache: dict[str, dict[str, Any]]) -> None:
-    """Persist the id→label cache to disk. Never raises."""
-    try:
-        _SLACK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _SLACK_CACHE_PATH.write_text(json.dumps(cache, indent=2))
-    except OSError:
-        pass  # non-fatal — cache is best-effort
-
-
-def _resolve_slack_labels(channel_ids: list[str]) -> dict[str, str]:
-    """Resolve Slack channel IDs → human-readable labels via Slack Web API.
-
-    Uses SLACK_BOT_TOKEN from ~/.hermes/.env. Caches results in
-    ~/.hermes/daedalus/slack-channels.json with a 1-hour TTL.
-
-    Resolution rules:
-        - channel.name set → label ``#<name>``
-        - channel.is_im (DM) → resolve user → label ``DM: <real_name>``
-        - is_mpim / group with no name → label ``Group: <id>``
-        - Any failure (no token, non-200, ok:false, timeout, network error)
-          → graceful fallback to the raw ``slack:<id>`` label.
-
-    Never logs the token. Never raises.
-    """
-    token = _load_slack_token()
-    cache = _load_slack_cache()
-    now = time.time()
-    labels: dict[str, str] = {}
-
-    for cid in channel_ids:
-        # Strip "slack:" prefix to get bare channel ID for API calls
-        bare_id = cid
-        if cid.startswith("slack:"):
-            bare_id = cid.split(":", 1)[1]
-
-        # Check cache
-        cached = cache.get(bare_id)
-        if cached and isinstance(cached, dict) and (now - cached.get("ts", 0)) < _SLACK_CACHE_TTL:
-            labels[cid] = cached.get("label", f"slack:{bare_id}")
-            continue
-
-        if not token:
-            labels[cid] = f"slack:{bare_id}"
-            continue
-
-        # Resolve via Slack API
-        label = _resolve_one_slack_channel(bare_id, token)
-        labels[cid] = label
-
-        # Update cache
-        cache[bare_id] = {"label": label, "ts": now}
-
-    _save_slack_cache(cache)
-    return labels
-
-
-def _resolve_one_slack_channel(channel_id: str, token: str) -> str:
-    """Resolve a single Slack channel ID to a human-readable label.
-
-    Returns the label string. Never raises — falls back to ``slack:<id>``.
-    """
-    try:
-        # conversations.info
-        url = f"https://slack.com/api/conversations.info?channel={channel_id}"
-        req = urllib.request.Request(url)
-        req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = json.loads(resp.read().decode())
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, TimeoutError):
-        return f"slack:{channel_id}"
-
-    if not body.get("ok"):
-        return f"slack:{channel_id}"
-
-    channel = body.get("channel", {})
-
-    # Channel with a name → #<name>
-    if channel.get("name"):
-        return f"#{channel['name']}"
-
-    # DM → resolve user
-    if channel.get("is_im") and channel.get("user"):
-        user_label = _resolve_slack_user(channel["user"], token)
-        return f"DM: {user_label}"
-
-    # MPIM / group with no name
-    if channel.get("is_mpim") or channel.get("is_group"):
-        return f"Group: {channel_id}"
-
-    return f"slack:{channel_id}"
-
-
-def _resolve_slack_user(user_id: str, token: str) -> str:
-    """Resolve a Slack user ID to a display name. Never raises."""
-    try:
-        url = f"https://slack.com/api/users.info?user={user_id}"
-        req = urllib.request.Request(url)
-        req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = json.loads(resp.read().decode())
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, TimeoutError):
-        return f"@{user_id}"
-
-    if not body.get("ok"):
-        return f"@{user_id}"
-
-    user = body.get("user", {})
-    return user.get("real_name") or user.get("display_name") or f"@{user_id}"
-
-
-# ── Board slug derivation (mirrors _board_slug in daedalus_dispatch.py) ─
-
-def _board_slug(repo: str, name: str = "") -> str:
-    """Derive kanban board slug from repo path (org/repo -> org-repo)."""
-    slug = repo.replace("/", "-") if repo else name
-    return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
+# ── Board slug derivation ─────────────────────────────────────────────────────
+# Imported from core.util above; this alias keeps internal call sites unchanged.
 
 
 # ── Kanban helpers (degrade gracefully) ─────────────────────────────────────
@@ -828,73 +659,58 @@ def _validate_notifications(value: Any) -> list[str]:
     return errors
 
 
-def _parse_cron_list_blocks(output: str) -> list[dict[str, str]]:
-    """Parse ``hermes cron list --all`` output into job blocks.
+def _parse_cron_jobs(output: str) -> list[dict[str, Any]]:
+    """Parse ``hermes cron list --all`` output into a list of job dicts.
 
-    A new block starts at a line matching ``^\\s*[0-9a-fA-F]{6,}\\s+\\[``
-    (e.g. ``  99f7d116a95b [active]``).  Inside each block, capture the
-    ``Name:`` value.  Box-drawing header/footer lines and warning lines are
-    skipped.
-
-    Returns a list of dicts with keys ``job_id`` and ``name``.
+    Each dict has keys: ``job_id``, ``name``, ``state``, ``schedule``,
+    ``last_run``, ``last_status``. Used by both the reconcile and health helpers
+    so the parsing logic lives in exactly one place.
     """
-    blocks: list[dict[str, str]] = []
-    current: dict[str, str] | None = None
+    _HEADER_RE = re.compile(r"^\s*([0-9a-fA-F]{6,})\s+\[(\w+)\]")
+    _SKIP_CHARS = ("┌", "└", "│", "⚠")
+    jobs: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
 
-    for raw_line in output.split("\n"):
-        line = raw_line.strip()
-        if not line:
+    def _flush(c: dict[str, Any] | None) -> None:
+        if c and c.get("job_id") and c.get("name"):
+            jobs.append(c)
+
+    for line in output.split("\n"):
+        s = line.strip()
+        if not s or any(s.startswith(ch) for ch in _SKIP_CHARS):
             continue
-
-        # Skip box-drawing header/footer and warning lines
-        if (
-            line.startswith("┌")
-            or line.startswith("└")
-            or line.startswith("│")
-            or line.startswith("⚠")
-        ):
+        m = _HEADER_RE.match(line)
+        if m:
+            _flush(current)
+            current = {"job_id": m.group(1), "state": m.group(2), "name": "",
+                       "schedule": None, "last_run": None, "last_status": None, "script": None}
             continue
-
-        # Block header: hex_id [status]
-        if re.match(r"^[0-9a-fA-F]{6,}\s+\[", line):
-            # Flush previous block
-            if current is not None and current.get("job_id") and current.get("name"):
-                blocks.append(current)
-            # Start new block — extract job_id from header
-            job_id = line.split()[0]
-            current = {"job_id": job_id, "name": ""}
+        if current is None:
             continue
-
-        # Inside a block: capture Name:
-        if current is not None:
-            m = re.match(r"^Name:\s+(.*)", line)
-            if m:
-                current["name"] = m.group(1).strip()
-
-    # Flush final block
-    if current is not None and current.get("job_id") and current.get("name"):
-        blocks.append(current)
-
-    return blocks
+        if not current["name"]:
+            nm = re.match(r"^\s*Name:\s+(.+)$", line)
+            if nm:
+                current["name"] = nm.group(1).strip()
+        if not current["schedule"]:
+            sm = re.match(r"^\s*Schedule:\s+(.+)$", line)
+            if sm:
+                current["schedule"] = sm.group(1).strip()
+        if not current["last_run"]:
+            lm = re.match(r"^\s*Last run:\s+(\S+)\s+(\S+)", line)
+            if lm:
+                current["last_run"] = lm.group(1)
+                current["last_status"] = lm.group(2)
+        if not current["script"]:
+            scm = re.match(r"^\s*Script:\s+(.+)$", line)
+            if scm:
+                current["script"] = scm.group(1).strip()
+    _flush(current)
+    return jobs
 
 
 def _cron_cli(args: list[str]) -> tuple[int, str]:
-    """Run a ``hermes cron`` subcommand. Returns (returncode, combined output).
-
-    Never raises — CLI absence/timeouts return (-1, <error text>).
-    """
-    try:
-        proc = subprocess.run(
-            ["hermes", "cron"] + args,
-            capture_output=True, text=True, timeout=10,
-        )
-        return proc.returncode, (proc.stdout + proc.stderr)
-    except FileNotFoundError:
-        return -1, "hermes CLI not found"
-    except subprocess.TimeoutExpired:
-        return -1, f"hermes cron {args[0]} timed out after 10s"
-    except OSError as exc:
-        return -1, f"hermes cron {args[0]} failed: {exc}"
+    """Run a ``hermes cron`` subcommand via the shared CLI wrapper."""
+    return _hermes_cli(["cron"] + args, timeout=10)
 
 
 def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
@@ -941,8 +757,7 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     matching_ids: list[str] = []
     rc, out = _cron_cli(["list", "--all"])
     if rc == 0:
-        blocks = _parse_cron_list_blocks(out)
-        matching_ids = [b["job_id"] for b in blocks if b.get("name") == cron_name]
+        matching_ids = [j["job_id"] for j in _parse_cron_jobs(out) if j.get("name") == cron_name]
 
     # 2. Empty schedule → remove all matches.
     if not schedule:
@@ -1498,126 +1313,23 @@ async def get_meta_statuses(
 
 
 def _cron_health_all() -> dict[str, dict[str, Any]]:
-    """Run ``hermes cron list --all`` once and return a map of {cron_name: health}.
-
-    Called once per GET /projects tick so N projects share a single subprocess
-    call instead of each spawning their own.
-    """
-    try:
-        proc = subprocess.run(
-            ["hermes", "cron", "list", "--all"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if proc.returncode != 0:
-            return {}
-        output = proc.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    """Run ``hermes cron list --all`` once and return a map of {cron_name: health}."""
+    rc, out = _cron_cli(["list", "--all"])
+    if rc != 0:
         return {}
-
-    header_re = re.compile(r"^\s*[0-9a-fA-F]{6,}\s+\[(\w+)\]")
-    blocks: list[str] = []
-    current: list[str] = []
-    for line in output.split("\n"):
-        if header_re.match(line):
-            if current:
-                blocks.append("\n".join(current))
-            current = [line]
-        elif current:
-            current.append(line)
-    if current:
-        blocks.append("\n".join(current))
-
-    result: dict[str, dict[str, Any]] = {}
-    for block in blocks:
-        header_line = block.split("\n")[0]
-        m = header_re.match(header_line)
-        state = m.group(1) if m else ""
-        name_match = re.search(r"^\s*Name:\s*(.+)$", block, re.MULTILINE)
-        if not name_match:
-            continue
-        name = name_match.group(1).strip()
-        entry: dict[str, Any] = {"name": name, "found": True, "state": state,
-                                  "last_run": None, "last_status": None}
-        sched_match = re.search(r"^\s*Schedule:\s+(.+)$", block, re.MULTILINE)
-        if sched_match:
-            entry["schedule"] = sched_match.group(1).strip()
-        last_match = re.search(r"^\s*Last run:\s+(\S+)\s+(\S+)", block, re.MULTILINE)
-        if last_match:
-            entry["last_run"] = last_match.group(1)
-            entry["last_status"] = last_match.group(2)
-        result[name] = entry
-    return result
+    return {j["name"]: {**j, "found": True} for j in _parse_cron_jobs(out) if j.get("name")}
 
 
 def _cron_health(cron_name: str) -> dict[str, Any]:
-    """Check cron job health by parsing ``hermes cron list --all`` output.
-
-    Returns a dict with:
-        name: str
-        found: bool
-        state: "active" | "paused" | None
-        last_run: iso str or None
-        last_status: "ok" | ... | None
-
-    Degrades gracefully to found=False on any error.
-    """
-    result: dict[str, Any] = {
-        "name": cron_name,
-        "found": False,
-        "state": None,
-        "last_run": None,
-        "last_status": None,
-    }
-    try:
-        proc = subprocess.run(
-            ["hermes", "cron", "list", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if proc.returncode != 0:
-            return result
-        output = proc.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    """Return health dict for a single cron job. Degrades gracefully to found=False on error."""
+    result: dict[str, Any] = {"name": cron_name, "found": False, "state": None,
+                               "last_run": None, "last_status": None}
+    rc, out = _cron_cli(["list", "--all"])
+    if rc != 0:
         return result
-
-    # Split into blocks: each block starts with a header line like "job_id [state]"
-    blocks: list[str] = []
-    current: list[str] = []
-    header_re = re.compile(r"^\s*[0-9a-fA-F]{6,}\s+\[(\w+)\]")
-    for line in output.split("\n"):
-        if header_re.match(line):
-            if current:
-                blocks.append("\n".join(current))
-            current = [line]
-        elif current:
-            current.append(line)
-    if current:
-        blocks.append("\n".join(current))
-
-    for block in blocks:
-        # Extract the header line
-        header_line = block.split("\n")[0]
-        m = header_re.match(header_line)
-        state = m.group(1) if m else ""
-        # Extract Name: field
-        name_match = re.search(r"^\s*Name:\s*(.+)$", block, re.MULTILINE)
-        if not name_match or name_match.group(1).strip() != cron_name:
-            continue
-        # Found it
-        result["found"] = True
-        result["state"] = state
-        # Extract Schedule: line (e.g. "Schedule:  every 60m")
-        sched_match = re.search(r"^\s*Schedule:\s+(.+)$", block, re.MULTILINE)
-        if sched_match:
-            result["schedule"] = sched_match.group(1).strip()
-        # Extract Last run: line -> "iso_time  status"
-        last_match = re.search(r"^\s*Last run:\s+(\S+)\s+(\S+)", block, re.MULTILINE)
-        if last_match:
-            result["last_run"] = last_match.group(1)
-            result["last_status"] = last_match.group(2)
-        break
-
+    job = next((j for j in _parse_cron_jobs(out) if j.get("name") == cron_name), None)
+    if job:
+        result.update({**job, "found": True})
     return result
 
 
@@ -1675,7 +1387,7 @@ async def get_meta_pick_directory(request: Request) -> dict[str, Any]:
 
 # ── Roster provisioning ──────────────────────────────────────────────────────
 
-_ROSTER_PROFILES = [
+_ALL_DAEDALUS_PROFILES = [
     "validator-daedalus",
     "project-manager-daedalus", "planner-daedalus", "developer-daedalus",
     "reviewer-daedalus", "security-analyst-daedalus", "documentation-daedalus",
@@ -1692,7 +1404,7 @@ async def get_roster_status(request: Request) -> dict[str, Any]:
     profiles_dir = _real_home() / ".hermes" / "profiles"
     status: dict[str, bool] = {}
     all_ok = True
-    for profile in _ROSTER_PROFILES:
+    for profile in _ALL_DAEDALUS_PROFILES:
         exists = (profiles_dir / profile).is_dir()
         status[profile] = exists
         if not exists:
@@ -1716,19 +1428,8 @@ async def post_provision_roster(request: Request) -> dict[str, Any]:
             "error": f"provision_roster.sh not found at {_PROVISION_SCRIPT}",
         }
 
-    # Build an env that includes tokens from ~/.hermes/.env so profiles get
-    # push auth automatically.
-    env = dict(os.environ)
-    env_path = _real_home() / ".hermes" / ".env"
-    if env_path.exists():
-        try:
-            for line in env_path.read_text().split("\n"):
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    env.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-        except OSError:
-            pass
+    env = {**os.environ,
+           **_parse_env_file(_real_home() / ".hermes" / ".env")}
 
     try:
         result = subprocess.run(
@@ -1752,21 +1453,10 @@ async def post_provision_roster(request: Request) -> dict[str, Any]:
         return {"ok": False, "output": "", "error": str(exc)[:500]}
 
 
-_DAEDALUS_PROFILES = [
-    "validator-daedalus",
-    "developer-daedalus", "reviewer-daedalus", "security-analyst-daedalus",
-    "documentation-daedalus", "planner-daedalus", "project-manager-daedalus",
-]
-
 def _hermes_cmd(*args: str, timeout: int = 30) -> tuple[bool, str]:
-    """Run a hermes CLI command. Returns (success, combined_output)."""
-    try:
-        r = subprocess.run(
-            ["hermes", *args], capture_output=True, text=True, timeout=timeout
-        )
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
-    except Exception as exc:
-        return False, str(exc)
+    """Thin wrapper returning (success, output). Delegates to the shared _hermes_cli."""
+    rc, out = _hermes_cli(list(args), timeout=timeout)
+    return rc == 0, out
 
 
 @meta_router.get("/version")
@@ -1840,47 +1530,25 @@ async def post_update_plugin() -> dict[str, Any]:
     validator-daedalus added in beta.7) are installed without a separate
     "Install Agents" click.
     """
-    try:
-        proc = subprocess.run(
-            ["hermes", "plugins", "update", "daedalus"],
-            capture_output=True, text=True, timeout=120,
-        )
-        ok = proc.returncode == 0
-        output = (proc.stdout or "") + (proc.stderr or "")
-        if not ok:
-            return {"ok": False, "output": output.strip()}
+    rc, output = _hermes_cli(["plugins", "update", "daedalus"], timeout=120)
+    if rc != 0:
+        return {"ok": False, "output": output}
 
-        # Re-run the provisioner so any newly added profiles are installed.
-        provision_out = ""
-        if _PROVISION_SCRIPT.exists():
-            env = dict(os.environ)
-            env_path = _real_home() / ".hermes" / ".env"
-            if env_path.exists():
-                try:
-                    for line in env_path.read_text().split("\n"):
-                        line = line.strip()
-                        if "=" in line and not line.startswith("#"):
-                            k, v = line.split("=", 1)
-                            env.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-                except OSError:
-                    pass
-            try:
-                pr = subprocess.run(
-                    ["bash", str(_PROVISION_SCRIPT)],
-                    capture_output=True, text=True, timeout=180, env=env,
-                )
-                provision_out = (pr.stdout + pr.stderr).strip()
-            except Exception as exc:
-                provision_out = f"[provisioner error: {exc}]"
+    # Re-run the provisioner so any newly added profiles are installed.
+    provision_out = ""
+    if _PROVISION_SCRIPT.exists():
+        env = {**os.environ, **_parse_env_file(_real_home() / ".hermes" / ".env")}
+        try:
+            pr = subprocess.run(
+                ["bash", str(_PROVISION_SCRIPT)],
+                capture_output=True, text=True, timeout=180, env=env,
+            )
+            provision_out = (pr.stdout + pr.stderr).strip()
+        except Exception as exc:
+            provision_out = f"[provisioner error: {exc}]"
 
-        combined = (output.strip() + ("\n" + provision_out if provision_out else "")).strip()
-        return {"ok": True, "output": combined[:4000]}
-    except FileNotFoundError:
-        return {"ok": False, "output": "hermes CLI not found"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "output": "Update timed out after 120s"}
-    except Exception as exc:
-        return {"ok": False, "output": str(exc)}
+    combined = (output + ("\n" + provision_out if provision_out else "")).strip()
+    return {"ok": True, "output": combined[:4000]}
 
 
 @meta_router.get("/restart")
@@ -1921,31 +1589,16 @@ async def post_uninstall() -> dict[str, Any]:
     hermes_home = _real_home() / ".hermes"
 
     # ── 1. Cron jobs ────────────────────────────────────────────────────────
-    ok, cron_out = _hermes_cmd("cron", "list", "--all")
-    if ok and cron_out:
-        # Extract job names: lines like "  abc123 [active]\n  Name: foo-daedalus"
-        job_names: list[str] = []
-        current_name = ""
-        current_script = ""
-        in_block = False
-        for line in cron_out.splitlines():
-            if re.match(r"^\s*[0-9a-fA-F]{6,}\s+\[", line):
-                if in_block and current_name:
-                    if current_name.endswith("-daedalus") or re.search(r"daedalus-[^/]*\.sh$", current_script):
-                        job_names.append(current_name)
-                in_block = True
-                current_name = current_script = ""
-            elif in_block:
-                m = re.match(r"^\s*Name:\s+(\S+)", line)
-                if m:
-                    current_name = m.group(1)
-                m2 = re.match(r"^\s*Script:\s+(\S+)", line)
-                if m2:
-                    current_script = m2.group(1)
-        if in_block and current_name:
-            if current_name.endswith("-daedalus") or re.search(r"daedalus-[^/]*\.sh$", current_script):
-                job_names.append(current_name)
-        for job in sorted(set(job_names)):
+    rc_cron, cron_out = _cron_cli(["list", "--all"])
+    if rc_cron == 0 and cron_out:
+        daedalus_jobs = [
+            j["name"] for j in _parse_cron_jobs(cron_out)
+            if j.get("name") and (
+                j["name"].endswith("-daedalus") or
+                re.search(r"daedalus-[^/]*\.sh$", j.get("script") or "")
+            )
+        ]
+        for job in sorted(set(daedalus_jobs)):
             ok2, _ = _hermes_cmd("cron", "remove", job)
             if ok2:
                 removed.append(f"cron job: {job}")
@@ -1955,7 +1608,7 @@ async def post_uninstall() -> dict[str, Any]:
     # ── 2. Profiles ─────────────────────────────────────────────────────────
     ok, prof_out = _hermes_cmd("profile", "list")
     existing_profiles = prof_out if ok else ""
-    for role in _DAEDALUS_PROFILES:
+    for role in _ALL_DAEDALUS_PROFILES:
         if role in existing_profiles:
             ok2, _ = _hermes_cmd("profile", "delete", role, "-y")
             if ok2:

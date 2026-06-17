@@ -1043,17 +1043,17 @@ class TestReconcileCron:
     # ── _parse_cron_list_blocks unit tests ───────────────────────────────
 
     def test_parse_cron_list_blocks_one_job(self):
-        from dashboard.plugin_api import _parse_cron_list_blocks
+        from dashboard.plugin_api import _parse_cron_jobs
 
-        blocks = _parse_cron_list_blocks(_CRON_LIST_ONE_MATCH)
+        blocks = _parse_cron_jobs(_CRON_LIST_ONE_MATCH)
         assert len(blocks) == 1
         assert blocks[0]["job_id"] == "99f7d116a95b"
         assert blocks[0]["name"] == "test-project-daedalus"
 
     def test_parse_cron_list_blocks_two_jobs(self):
-        from dashboard.plugin_api import _parse_cron_list_blocks
+        from dashboard.plugin_api import _parse_cron_jobs
 
-        blocks = _parse_cron_list_blocks(_CRON_LIST_TWO_MATCHES)
+        blocks = _parse_cron_jobs(_CRON_LIST_TWO_MATCHES)
         assert len(blocks) == 2
         assert blocks[0]["job_id"] == "a1b2c3d4e5f6"
         assert blocks[0]["name"] == "test-project-daedalus"
@@ -1061,17 +1061,17 @@ class TestReconcileCron:
         assert blocks[1]["name"] == "test-project-daedalus"
 
     def test_parse_cron_list_blocks_empty(self):
-        from dashboard.plugin_api import _parse_cron_list_blocks
+        from dashboard.plugin_api import _parse_cron_jobs
 
-        blocks = _parse_cron_list_blocks("")
+        blocks = _parse_cron_jobs("")
         assert blocks == []
 
     def test_parse_cron_list_blocks_skips_warning(self):
-        from dashboard.plugin_api import _parse_cron_list_blocks
+        from dashboard.plugin_api import _parse_cron_jobs
 
         # Warning-only output (no jobs)
         warning_only = "  ⚠  Gateway is not running — jobs won't fire automatically.\n"
-        blocks = _parse_cron_list_blocks(warning_only)
+        blocks = _parse_cron_jobs(warning_only)
         assert blocks == []
 
 
@@ -1297,18 +1297,23 @@ class TestNotificationMethods:
     def test_returns_parsed_dict_on_success(self):
         from dashboard.plugin_api import _list_notification_methods
 
-        output = "Slack:\n  slack:tasks\nDiscord:\n  discord:#general"
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=0, stdout=output, stderr=""
-            )
-            with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-                mock_resolve.return_value = {"slack:tasks": "slack:tasks"}
-                result = _list_notification_methods()
-                assert result == {
-                    "Slack": [{"value": "slack:tasks", "label": "slack:tasks"}],
-                    "Discord": [{"value": "discord:#general", "label": "discord:#general"}],
-                }
+        json_out = json.dumps({"platforms": {
+            "slack": [{"id": "tasks", "name": "tasks"}],
+            "discord": [{"id": "general", "name": "general"}],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli):
+            result = _list_notification_methods()
+
+        assert result == {
+            "Slack": [{"value": "slack:tasks", "label": "tasks"}],
+            "Discord": [{"value": "discord:#general", "label": "#general"}],
+        }
 
     def test_returns_empty_dict_on_nonzero_returncode(self):
         from dashboard.plugin_api import _list_notification_methods
@@ -1364,20 +1369,24 @@ class TestMetaNotificationsEndpoint:
         return TestClient(app)
 
     def test_get_notifications_success(self, meta_client):
-        output = "Slack:\n  slack:tasks\nDiscord:\n  discord:#general"
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=0, stdout=output, stderr=""
-            )
-            with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-                mock_resolve.return_value = {"slack:tasks": "slack:tasks"}
-                resp = meta_client.get("/api/plugins/daedalus/meta/notifications")
-                assert resp.status_code == 200, resp.text
-                data = resp.json()
-                assert data == {
-                    "Slack": [{"value": "slack:tasks", "label": "slack:tasks"}],
-                    "Discord": [{"value": "discord:#general", "label": "discord:#general"}],
-                }
+        json_out = json.dumps({"platforms": {
+            "slack": [{"id": "tasks", "name": "tasks"}],
+            "discord": [{"id": "general", "name": "general"}],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli):
+            resp = meta_client.get("/api/plugins/daedalus/meta/notifications")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data == {
+            "Slack": [{"value": "slack:tasks", "label": "tasks"}],
+            "Discord": [{"value": "discord:#general", "label": "#general"}],
+        }
 
     def test_get_notifications_empty_on_failure(self, meta_client):
         with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
@@ -1390,25 +1399,28 @@ class TestMetaNotificationsEndpoint:
             assert data == {}
 
     def test_get_notifications_with_annotations_stripped(self, meta_client):
-        output = "Slack:\n  slack:tasks (private)\n  slack:#engineering (channel)"
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=0, stdout=output, stderr=""
-            )
-            with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-                mock_resolve.return_value = {
-                    "slack:tasks": "slack:tasks",
-                    "slack:#engineering": "slack:#engineering",
-                }
-                resp = meta_client.get("/api/plugins/daedalus/meta/notifications")
-                assert resp.status_code == 200, resp.text
-                data = resp.json()
-                assert data == {
-                    "Slack": [
-                        {"value": "slack:tasks", "label": "slack:tasks"},
-                        {"value": "slack:#engineering", "label": "slack:#engineering"},
-                    ],
-                }
+        json_out = json.dumps({"platforms": {
+            "slack": [
+                {"id": "tasks", "name": "tasks"},
+                {"id": "engineering", "name": "engineering"},
+            ],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli):
+            resp = meta_client.get("/api/plugins/daedalus/meta/notifications")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data == {
+            "Slack": [
+                {"value": "slack:tasks", "label": "tasks"},
+                {"value": "slack:engineering", "label": "engineering"},
+            ],
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1635,27 +1647,28 @@ def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
         assert "vcs" in proj_data
 
     # ── /meta/notifications (GET) ────────────────────────────────────────
-    mock_output = "Slack:\n  slack:tasks\n  slack:#engineering"
-    with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-        mock_run.return_value = mock.Mock(
-            returncode=0, stdout=mock_output, stderr=""
-        )
-        with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-            mock_resolve.return_value = {
-                "slack:tasks": "slack:tasks",
-                "slack:#engineering": "slack:#engineering",
-            }
-            resp = client.get("/api/plugins/daedalus/meta/notifications")
-            assert resp.status_code == 200, (
-                f"GET /meta/notifications: {resp.status_code} {resp.text}"
-            )
-            notif_data = resp.json()
-            assert isinstance(notif_data, dict)
-            assert "Slack" in notif_data
-            assert notif_data["Slack"] == [
-                {"value": "slack:tasks", "label": "slack:tasks"},
-                {"value": "slack:#engineering", "label": "slack:#engineering"},
-            ]
+    json_out = json.dumps({"platforms": {"slack": [
+        {"id": "tasks", "name": "tasks"},
+        {"id": "engineering", "name": "engineering"},
+    ]}})
+
+    def fake_cli_notif(args, timeout=30):
+        if args[:3] == ["send", "--list", "--json"]:
+            return 0, json_out
+        return -1, ""
+
+    with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli_notif):
+        resp = client.get("/api/plugins/daedalus/meta/notifications")
+    assert resp.status_code == 200, (
+        f"GET /meta/notifications: {resp.status_code} {resp.text}"
+    )
+    notif_data = resp.json()
+    assert isinstance(notif_data, dict)
+    assert "Slack" in notif_data
+    assert notif_data["Slack"] == [
+        {"value": "slack:tasks", "label": "tasks"},
+        {"value": "slack:engineering", "label": "engineering"},
+    ]
 
 
 def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
@@ -1731,21 +1744,25 @@ def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
         )
 
     # ── /meta/notifications (GET) ────────────────────────────────────────
-    mock_output = "Slack:\n  slack:tasks\nDiscord:\n  discord:#general"
-    with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-        mock_run.return_value = mock.Mock(
-            returncode=0, stdout=mock_output, stderr=""
-        )
-        with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-            mock_resolve.return_value = {"slack:tasks": "slack:tasks"}
-            resp = client.get("/api/plugins/daedalus/meta/notifications")
-            assert resp.status_code == 200, (
-                f"/meta/notifications: {resp.status_code} {resp.text}"
-            )
-            data = resp.json()
-            assert isinstance(data, dict)
-            assert "Slack" in data
-            assert "Discord" in data
+    json_out2 = json.dumps({"platforms": {
+        "slack": [{"id": "tasks", "name": "tasks"}],
+        "discord": [{"id": "general", "name": "general"}],
+    }})
+
+    def fake_cli_notif2(args, timeout=30):
+        if args[:3] == ["send", "--list", "--json"]:
+            return 0, json_out2
+        return -1, ""
+
+    with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli_notif2):
+        resp = client.get("/api/plugins/daedalus/meta/notifications")
+    assert resp.status_code == 200, (
+        f"/meta/notifications: {resp.status_code} {resp.text}"
+    )
+    data = resp.json()
+    assert isinstance(data, dict)
+    assert "Slack" in data
+    assert "Discord" in data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1811,212 +1828,49 @@ class TestParseSendListThreadedFormat:
         assert result["Discord"] == ["discord:#general", "discord:#alerts"]
 
 
-class TestSlackLabelResolution:
-    """Tests for _resolve_slack_labels with mocked Slack API."""
-
-    def test_resolves_channel_name_to_hash_label(self):
-        """channel.name → #<name>."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = "xoxb-test-token"
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                mock_cache.return_value = {}
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    with mock.patch("dashboard.plugin_api.urllib.request.urlopen") as mock_urlopen:
-                        mock_resp = mock.Mock()
-                        mock_resp.read.return_value = json.dumps({
-                            "ok": True,
-                            "channel": {"id": "C0B3P2Q39LN", "name": "tasks"},
-                        }).encode()
-                        mock_urlopen.return_value.__enter__.return_value = mock_resp
-
-                        labels = _resolve_slack_labels(["C0B3P2Q39LN"])
-
-        assert labels["C0B3P2Q39LN"] == "#tasks"
-
-    def test_resolves_dm_to_user_label(self):
-        """DM channel → DM: <real_name>."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = "xoxb-test-token"
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                mock_cache.return_value = {}
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    with mock.patch("dashboard.plugin_api.urllib.request.urlopen") as mock_urlopen:
-                        # First call: conversations.info
-                        conv_resp = mock.Mock()
-                        conv_resp.read.return_value = json.dumps({
-                            "ok": True,
-                            "channel": {"id": "D0B4J9MMJ3A", "is_im": True, "user": "U12345"},
-                        }).encode()
-                        # Second call: users.info
-                        user_resp = mock.Mock()
-                        user_resp.read.return_value = json.dumps({
-                            "ok": True,
-                            "user": {"real_name": "Ben Marte", "display_name": "ben"},
-                        }).encode()
-                        mock_urlopen.return_value.__enter__.side_effect = [conv_resp, user_resp]
-
-                        labels = _resolve_slack_labels(["D0B4J9MMJ3A"])
-
-        assert labels["D0B4J9MMJ3A"] == "DM: Ben Marte"
-
-    def test_fallback_to_raw_id_when_no_token(self):
-        """No SLACK_BOT_TOKEN → raw slack:<id> label."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = None
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                mock_cache.return_value = {}
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    labels = _resolve_slack_labels(["C0B3P2Q39LN"])
-
-        assert labels["C0B3P2Q39LN"] == "slack:C0B3P2Q39LN"
-
-    def test_fallback_on_api_error(self):
-        """Slack API returns ok:false → fallback to raw id."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = "xoxb-test-token"
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                mock_cache.return_value = {}
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    with mock.patch("dashboard.plugin_api.urllib.request.urlopen") as mock_urlopen:
-                        mock_resp = mock.Mock()
-                        mock_resp.read.return_value = json.dumps({
-                            "ok": False, "error": "channel_not_found",
-                        }).encode()
-                        mock_urlopen.return_value.__enter__.return_value = mock_resp
-
-                        labels = _resolve_slack_labels(["C0B3P2Q39LN"])
-
-        assert labels["C0B3P2Q39LN"] == "slack:C0B3P2Q39LN"
-
-    def test_fallback_on_network_error(self):
-        """URLError → fallback to raw id."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = "xoxb-test-token"
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                mock_cache.return_value = {}
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    with mock.patch("dashboard.plugin_api.urllib.request.urlopen") as mock_urlopen:
-                        mock_urlopen.side_effect = urllib.error.URLError("connection refused")
-
-                        labels = _resolve_slack_labels(["C0B3P2Q39LN"])
-
-        assert labels["C0B3P2Q39LN"] == "slack:C0B3P2Q39LN"
-
-    def test_cache_used_on_second_call(self):
-        """Second call uses cache, no API hit."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = "xoxb-test-token"
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                # Pre-populated cache with fresh timestamp
-                mock_cache.return_value = {
-                    "C0B3P2Q39LN": {"label": "#tasks", "ts": time.time()},
-                }
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    with mock.patch("dashboard.plugin_api.urllib.request.urlopen") as mock_urlopen:
-                        labels = _resolve_slack_labels(["C0B3P2Q39LN"])
-
-                        # urlopen should NOT have been called
-                        mock_urlopen.assert_not_called()
-
-        assert labels["C0B3P2Q39LN"] == "#tasks"
-
-    def test_stale_cache_refreshes(self):
-        """Cache older than TTL → API is called again."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = "xoxb-test-token"
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                # Stale cache (2 hours old)
-                mock_cache.return_value = {
-                    "C0B3P2Q39LN": {"label": "#old-name", "ts": time.time() - 7200},
-                }
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    with mock.patch("dashboard.plugin_api.urllib.request.urlopen") as mock_urlopen:
-                        mock_resp = mock.Mock()
-                        mock_resp.read.return_value = json.dumps({
-                            "ok": True,
-                            "channel": {"id": "C0B3P2Q39LN", "name": "new-name"},
-                        }).encode()
-                        mock_urlopen.return_value.__enter__.return_value = mock_resp
-
-                        labels = _resolve_slack_labels(["C0B3P2Q39LN"])
-
-                        # urlopen SHOULD have been called (cache was stale)
-                        mock_urlopen.assert_called_once()
-
-        assert labels["C0B3P2Q39LN"] == "#new-name"
-
-    def test_group_with_no_name_fallback(self):
-        """MPIM/group with no name → Group: <id>."""
-        from dashboard.plugin_api import _resolve_slack_labels
-
-        with mock.patch("dashboard.plugin_api._load_slack_token") as mock_token:
-            mock_token.return_value = "xoxb-test-token"
-            with mock.patch("dashboard.plugin_api._load_slack_cache") as mock_cache:
-                mock_cache.return_value = {}
-                with mock.patch("dashboard.plugin_api._save_slack_cache"):
-                    with mock.patch("dashboard.plugin_api.urllib.request.urlopen") as mock_urlopen:
-                        mock_resp = mock.Mock()
-                        mock_resp.read.return_value = json.dumps({
-                            "ok": True,
-                            "channel": {"id": "G12345", "is_group": True},
-                        }).encode()
-                        mock_urlopen.return_value.__enter__.return_value = mock_resp
-
-                        labels = _resolve_slack_labels(["G12345"])
-
-        assert labels["G12345"] == "Group: G12345"
 
 
 class TestListNotificationMethodsNewShape:
     """Tests for _list_notification_methods returning {value, label} shape."""
 
     def test_returns_value_label_pairs(self):
-        """New shape: each entry is {value, label}."""
+        """JSON path: each entry uses name as label, target as value."""
         from dashboard.plugin_api import _list_notification_methods
 
-        output = "Slack:\n  slack:C0B3P2Q39LN\nDiscord:\n  discord:#general"
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=0, stdout=output, stderr=""
-            )
-            with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-                mock_resolve.return_value = {"slack:C0B3P2Q39LN": "#tasks"}
-                result = _list_notification_methods()
+        json_out = json.dumps({"platforms": {
+            "slack": [{"id": "C0B3P2Q39LN", "name": "tasks"}],
+            "discord": [{"id": "general", "name": "general"}],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli):
+            result = _list_notification_methods()
 
         assert "Slack" in result
         assert "Discord" in result
         slack_entries = result["Slack"]
         assert len(slack_entries) == 1
-        assert slack_entries[0] == {"value": "slack:C0B3P2Q39LN", "label": "#tasks"}
+        assert slack_entries[0] == {"value": "slack:tasks", "label": "tasks"}
         discord_entries = result["Discord"]
-        assert discord_entries[0] == {"value": "discord:#general", "label": "discord:#general"}
+        assert discord_entries[0] == {"value": "discord:#general", "label": "#general"}
 
     def test_slack_fallback_labels_when_no_resolution(self):
-        """When Slack resolution returns nothing, labels are raw ids."""
+        """Text-parser fallback: labels are raw target strings."""
         from dashboard.plugin_api import _list_notification_methods
 
-        output = "Slack:\n  slack:C0B3P2Q39LN"
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=0, stdout=output, stderr=""
-            )
-            with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-                mock_resolve.return_value = {}  # no labels resolved
-                result = _list_notification_methods()
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return -1, ""  # JSON path fails
+            if args[:3] == ["send", "--list"]:
+                return 0, "Slack:\n  slack:C0B3P2Q39LN"
+            return -1, ""
+
+        with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli):
+            result = _list_notification_methods()
 
         assert result["Slack"][0] == {
             "value": "slack:C0B3P2Q39LN",
@@ -2035,24 +1889,27 @@ class TestMetaNotificationsNewShapeEndpoint:
         return TestClient(app)
 
     def test_endpoint_returns_value_label_shape(self, meta_client):
-        """GET /meta/notifications returns {value, label} entries."""
-        output = "Slack:\n  slack:C0B3P2Q39LN\nDiscord:\n  discord:#general"
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=0, stdout=output, stderr=""
-            )
-            with mock.patch("dashboard.plugin_api._resolve_slack_labels") as mock_resolve:
-                mock_resolve.return_value = {"slack:C0B3P2Q39LN": "#tasks"}
-                resp = meta_client.get("/api/plugins/daedalus/meta/notifications")
-                assert resp.status_code == 200, resp.text
-                data = resp.json()
+        """GET /meta/notifications returns {value, label} entries from JSON path."""
+        json_out = json.dumps({"platforms": {
+            "slack": [{"id": "C0B3P2Q39LN", "name": "tasks"}],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        with mock.patch("dashboard.plugin_api._hermes_cli", side_effect=fake_cli):
+            resp = meta_client.get("/api/plugins/daedalus/meta/notifications")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
 
         assert isinstance(data, dict)
         slack_entries = data["Slack"]
         assert isinstance(slack_entries, list)
         assert len(slack_entries) == 1
-        assert slack_entries[0]["value"] == "slack:C0B3P2Q39LN"
-        assert slack_entries[0]["label"] == "#tasks"
+        assert slack_entries[0]["value"] == "slack:tasks"
+        assert slack_entries[0]["label"] == "tasks"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

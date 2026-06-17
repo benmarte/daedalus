@@ -45,6 +45,7 @@ from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core.providers.base import ensure_closing_keyword  # noqa: E402
+from core.util import board_slug as _board_slug  # noqa: E402
 
 logger = logging.getLogger("daedalus.dispatch")
 
@@ -80,11 +81,6 @@ def _notify_targets(resolved: Dict[str, Any], event: str) -> List[str]:
     deliver = (cron.get("deliver") or "").strip()
     return [deliver] if deliver else []
 
-
-def _board_slug(repo: str, name: str = "") -> str:
-    import re
-    slug = repo.replace("/", "-") if repo else name
-    return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
 
 
 def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
