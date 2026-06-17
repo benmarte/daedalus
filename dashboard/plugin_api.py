@@ -163,13 +163,47 @@ def _channel_target(platform_name: str, channel: dict) -> str:
     return f"{platform_name}:{name}" if name else ""
 
 
-def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
-    """Return notification channels grouped by platform from ``hermes send --list --json``.
+def _hermes_status_configured_platforms() -> set[str]:
+    """Parse ``hermes status`` to find platforms marked '✓ configured'.
 
-    Uses the JSON output as the primary source so every configured platform is
-    included regardless of whether it has channels (e.g. Teams with no channels
-    still appears). Falls back to the text parser for older Hermes versions that
-    do not support ``--json``.
+    Returns a set of lowercase platform names (e.g. {'discord', 'slack'}).
+    Degrades gracefully to an empty set on any error.
+    """
+    try:
+        result = subprocess.run(
+            ["hermes", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return set()
+        configured: set[str] = set()
+        in_messaging = False
+        for line in result.stdout.splitlines():
+            if "Messaging Platforms" in line:
+                in_messaging = True
+                continue
+            if in_messaging:
+                if line.strip().startswith("◆"):
+                    break  # end of Messaging Platforms section
+                if "✓" in line:
+                    # e.g. "  Discord       ✓ configured (home: #General)"
+                    name = line.strip().split()[0].lower()
+                    configured.add(name)
+        return configured
+    except Exception:
+        return set()
+
+
+def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
+    """Return notification channels grouped by platform.
+
+    Strategy:
+    1. Use ``hermes send --list --json`` to get channels for all platforms.
+    2. Only include platforms that have channels OR are confirmed configured via
+       ``hermes status`` (prevents flooding the picker with all 25+ supported-but-
+       unconfigured platforms that appear in the JSON as empty arrays).
+    3. Fall back to the text parser (``hermes send --list``) for older Hermes
+       versions that don't support ``--json``.
 
     Returns a dict mapping display name (e.g. 'Slack', 'Discord') to a list of
     ``{value, label}`` dicts. Slack labels are resolved to human-readable names
@@ -190,19 +224,27 @@ def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
             platforms = json_data.get("platforms") or {}
             if platforms:
                 json_ok = True
+                # Ask hermes status which platforms are actually configured.
+                # We only add no-channel platforms if status confirms they're set up,
+                # so we don't flood the picker with all ~25 unsupported platforms.
+                confirmed = _hermes_status_configured_platforms()
+
                 for plat, channels in platforms.items():
-                    display = plat.capitalize()
                     if not channels:
-                        # Configured platform with no channels — bare name routes to home channel.
-                        raw_methods[display] = [plat]
-                    else:
-                        seen: set[str] = set()
-                        deduped: list[str] = []
-                        for ch in (channels or []):
-                            t = _channel_target(plat, ch)
-                            if t and t not in seen:
-                                seen.add(t)
-                                deduped.append(t)
+                        # Only add if hermes status says it's configured.
+                        if plat.lower() in confirmed:
+                            raw_methods[plat.capitalize()] = [plat]
+                        continue
+                    # Platform has channels — always include them.
+                    display = plat.capitalize()
+                    seen: set[str] = set()
+                    deduped: list[str] = []
+                    for ch in channels:
+                        t = _channel_target(plat, ch)
+                        if t and t not in seen:
+                            seen.add(t)
+                            deduped.append(t)
+                    if deduped:
                         raw_methods[display] = deduped
     except Exception:
         pass
