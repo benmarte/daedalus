@@ -294,39 +294,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     chipDot: { width: "8px", height: "8px", borderRadius: "50%", flexShrink: 0 },
     chipLabel: { whiteSpace: "nowrap" },
     chipRemove: { padding: "0 5px", border: "none", background: "transparent", color: "#999", cursor: "pointer", fontSize: "14px", fontWeight: 700, lineHeight: "1", borderRadius: "50%" },
-    chipEmptyHint: { fontSize: "12px", color: "#666", fontStyle: "italic", padding: "4px 0" },
-    // Welcome banner
-    welcomeBanner: {
-      border: "1px solid #3b3063",
-      borderRadius: "10px",
-      padding: "20px 24px",
-      marginBottom: "20px",
-      background: "linear-gradient(135deg, rgba(99,70,215,0.12) 0%, rgba(59,130,246,0.08) 100%)",
-      position: "relative",
-      display: "flex",
-      gap: "16px",
-      alignItems: "flex-start"
-    },
-    welcomeIcon: { fontSize: "32px", lineHeight: "1", flexShrink: 0 },
-    welcomeBody: { flex: "1 1 auto", minWidth: 0 },
-    welcomeTitle: { fontSize: "16px", fontWeight: 600, color: "#e2ddf8", margin: "0 0 6px" },
-    welcomeDesc: { fontSize: "13px", color: "#a09cb8", lineHeight: "1.6", margin: "0 0 12px" },
-    welcomeTips: { display: "flex", gap: "16px", flexWrap: "wrap", fontSize: "12px", color: "#8882a8" },
-    welcomeTip: { display: "flex", alignItems: "center", gap: "5px" },
-    welcomeTipDot: { width: "5px", height: "5px", borderRadius: "50%", background: "#6366f1", flexShrink: 0 },
-    welcomeDismiss: {
-      position: "absolute",
-      top: "12px",
-      right: "12px",
-      border: "none",
-      background: "transparent",
-      color: "#8882a8",
-      cursor: "pointer",
-      fontSize: "18px",
-      lineHeight: "1",
-      padding: "4px",
-      borderRadius: "4px"
-    }
+    chipEmptyHint: { fontSize: "12px", color: "#666", fontStyle: "italic", padding: "4px 0" }
   };
   function Button(props) {
     if (SdkButton) {
@@ -1213,8 +1181,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var branches = br[0], setBranches = br[1];
     var la = useState([]);
     var labels = la[0], setLabels = la[1];
-    var ll = useState(false);
-    var labelsLoaded = ll[0], setLabelsLoaded = ll[1];
     var st = useState([]);
     var statuses = st[0], setStatuses = st[1];
     var gp = useState([]);
@@ -1259,13 +1225,10 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       });
     }, [name]);
     useEffect(function() {
-      setLabelsLoaded(false);
       fetchJSON(apiMetaUrl(name, "labels")).then(function(data) {
         setLabels(data && data.labels ? data.labels : []);
-        setLabelsLoaded(true);
       }).catch(function() {
         setLabels([]);
-        setLabelsLoaded(true);
       });
     }, [name]);
     useEffect(function() {
@@ -1637,8 +1600,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               onChange: function(arr) {
                 updateField("issues.filters.labels", arr);
               },
-              placeholder: !labelsLoaded ? "\u2014 loading labels\u2026 \u2014" : labels.length === 0 ? "\u2014 no labels found \u2014" : "\u2514 select a label to filter",
-              emptyHint: "No labels found \u2014 check that your VCS token has the correct scopes and the project path is set"
+              placeholder: labels.length === 0 ? "\u2014 loading labels\u2026 \u2014" : "\u2514 select a label to filter",
+              emptyHint: "Requires 'repo' scope on your GITHUB_TOKEN to load labels"
             })
           ),
           // Throughput caps
@@ -2094,69 +2057,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       )
     );
   }
-  function WelcomeBanner(props) {
-    var dismissed = useState(function() {
-      try {
-        return localStorage.getItem("daedalus-welcome-dismissed") === "1";
-      } catch (e) {
-        return false;
-      }
-    });
-    var isDismissed = dismissed[0], setDismissed = dismissed[1];
-    if (isDismissed) return null;
-    function handleDismiss(e) {
-      e.stopPropagation();
-      try {
-        localStorage.setItem("daedalus-welcome-dismissed", "1");
-      } catch (e2) {
-      }
-      setDismissed(true);
-    }
-    return React.createElement(
-      "div",
-      { style: S.welcomeBanner },
-      React.createElement("div", { style: S.welcomeIcon }, "\u{1F3DB}"),
-      React.createElement(
-        "div",
-        { style: S.welcomeBody },
-        React.createElement("h2", { style: S.welcomeTitle }, "Welcome to Daedalus"),
-        React.createElement(
-          "p",
-          { style: S.welcomeDesc },
-          "Daedalus orchestrates multi-agent workflows across your projects. ",
-          "Track issues, manage pull requests, schedule automated tasks, and coordinate specialist agents \u2014 all from one dashboard."
-        ),
-        React.createElement(
-          "div",
-          { style: S.welcomeTips },
-          React.createElement(
-            "span",
-            { style: S.welcomeTip },
-            React.createElement("span", { style: S.welcomeTipDot }),
-            "Add a project to get started"
-          ),
-          React.createElement(
-            "span",
-            { style: S.welcomeTip },
-            React.createElement("span", { style: S.welcomeTipDot }),
-            "Configure tracking, VCS, and cron per project"
-          ),
-          React.createElement(
-            "span",
-            { style: S.welcomeTip },
-            React.createElement("span", { style: S.welcomeTipDot }),
-            "Install specialist agents for automated dispatch"
-          )
-        )
-      ),
-      React.createElement("button", {
-        style: S.welcomeDismiss,
-        onClick: handleDismiss,
-        title: "Dismiss",
-        type: "button"
-      }, "\xD7")
-    );
-  }
   function App() {
     var s = useState(null);
     var data = s[0], setData = s[1];
@@ -2229,13 +2129,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setUpdating(false);
         var result = r || { ok: false, output: "no response" };
         setUpdateResult(result);
-        if (result.ok) {
-          setHasUpdate(false);
-          fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function(d) {
-            setRosterStatus(d || null);
-          }).catch(function() {
-          });
-        }
+        if (result.ok) setHasUpdate(false);
       }).catch(function(err) {
         setUpdating(false);
         setUpdateResult({ ok: false, output: String(err && err.message || err) });
@@ -2244,7 +2138,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     function restartHermes() {
       setRestarting(true);
       setRestartResult(null);
-      fetchJSON("/api/plugins/daedalus/meta/restart").then(function() {
+      fetchJSON("/api/plugins/daedalus/meta/restart", { method: "POST" }).then(function() {
         setRestarting(false);
         setRestartResult({ ok: true });
       }).catch(function() {
@@ -2305,7 +2199,6 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     return React.createElement(
       "div",
       { style: S.wrap },
-      React.createElement(WelcomeBanner, null),
       React.createElement(
         "div",
         { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" } },
@@ -2323,7 +2216,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           }
         })
       ),
-      // Roster provisioning banner — shown when any of the 7 profiles are missing
+      // Roster provisioning banner — shown when any of the 6 profiles are missing
       rosterStatus && !rosterStatus.all_provisioned ? React.createElement(
         "div",
         {

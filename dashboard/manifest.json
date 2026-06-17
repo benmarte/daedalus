@@ -1,15 +1,7 @@
 {
   "name": "daedalus",
   "label": "Daedalus",
-  "description": "Autonomous development lifecycle — issue to reviewed PR with kanban dispatch and multi-platform notifications.",
-  "icon": "GitBranch",
-  "version": "1.0.0-beta.13",
-  "entry": "dist/index-CCS6NBJC.js",
+  "entry": "dist/index-YUI2ESWU.js",
   "api": "plugin_api.py",
-  "tab": {
-    "path": "/daedalus",
-    "position": "after:kanban"
-  },
-  "slots": [],
-  "has_api": true
+  "tab": "/daedalus"
 }
