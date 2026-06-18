@@ -222,15 +222,54 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 # API-based instructions only — no gh/glab/az CLIs are installed for workers.
 _PR_COMMENT_HOWTO = {
-    "github": "the GitHub API with your GITHUB_TOKEN env var: "
-              "POST https://api.github.com/repos/{repo}/issues/<pr>/comments "
-              "with JSON body {{\"body\": \"<report markdown>\"}} and header "
-              "'Authorization: Bearer $GITHUB_TOKEN' (curl works)",
-    "gitlab": "the GitLab API with your GITLAB_TOKEN env var: "
-              "POST /api/v4/projects/<project-id>/merge_requests/<mr>/notes "
-              "with header 'PRIVATE-TOKEN: $GITLAB_TOKEN'",
-    "azuredevops": "the Azure DevOps PR threads API with your AZURE_DEVOPS_PAT "
-                   "env var (Basic auth, base64 of ':' + PAT)",
+    "github": (
+        "your GITHUB_TOKEN env var. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal for this, "
+        "as markdown content with backticks and quotes breaks shell escaping. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "body = '''<your full report markdown here>'''\n"
+        "req = urllib.request.Request(\n"
+        "    'https://api.github.com/repos/{repo}/issues/<number>/comments',\n"
+        "    data=json.dumps({{'body': body}}).encode(),\n"
+        "    headers={{'Authorization': f'Bearer {{os.environ[\"GITHUB_TOKEN\"]}}',\n"
+        "             'Accept': 'application/vnd.github+json'}}, method='POST')\n"
+        "print(urllib.request.urlopen(req).read())\n"
+        "```"
+    ),
+    "gitlab": (
+        "your GITLAB_TOKEN env var. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "body = '''<your full report markdown here>'''\n"
+        "req = urllib.request.Request(\n"
+        "    'https://gitlab.com/api/v4/projects/<project-id>/issues/<number>/notes',\n"
+        "    data=json.dumps({{'body': body}}).encode(),\n"
+        "    headers={{'PRIVATE-TOKEN': os.environ['GITLAB_TOKEN'],\n"
+        "             'Content-Type': 'application/json'}}, method='POST')\n"
+        "print(urllib.request.urlopen(req).read())\n"
+        "```"
+    ),
+    "azuredevops": (
+        "your AZURE_DEVOPS_PAT env var. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json, base64\n"
+        "pat = os.environ['AZURE_DEVOPS_PAT']\n"
+        "auth = base64.b64encode(f':{pat}'.encode()).decode()\n"
+        "body = '''<your full report markdown here>'''\n"
+        "payload = {{'comments': [{{'parentCommentId': 0, 'content': body, 'commentType': 1}}], 'status': 1}}\n"
+        "req = urllib.request.Request(\n"
+        "    'https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullRequests/<pr>/threads?api-version=7.1',\n"
+        "    data=json.dumps(payload).encode(),\n"
+        "    headers={{'Authorization': f'Basic {{auth}}', 'Content-Type': 'application/json'}}, method='POST')\n"
+        "print(urllib.request.urlopen(req).read())\n"
+        "```"
+    ),
 }
 
 _CLOSE_ISSUE_HOWTO = {
@@ -253,24 +292,71 @@ _CLOSE_ISSUE_HOWTO = {
 
 _PR_CREATE_HOWTO = {
     "github": (
-        "the GitHub API: "
-        "POST https://api.github.com/repos/{repo}/pulls "
-        "-H 'Authorization: Bearer $GITHUB_TOKEN' "
-        "-d '{{\"title\":\"<title>\",\"head\":\"<branch>\",\"base\":\"<base>\","
-        "\"body\":\"Closes #<issue_number>\\n\\n<rest of description>\"}}' "
-        "— the body field MUST begin with 'Closes #<issue_number>' on its own line"
+        "the GitHub API. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal for this, "
+        "as PR body markdown breaks shell escaping. "
+        "WARNING: pr_body below is PLAIN MARKDOWN TEXT — do NOT set it to JSON or a dict. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "# pr_body is PLAIN MARKDOWN — not JSON, not a dict, just text\n"
+        "pr_body = 'Closes #<issue_number>\\n\\n## Problem\\n<describe>\\n\\n## Fix\\n<what changed>\\n\\n## How to test\\n<steps>'\n"
+        "payload = {{'title': '<title>', 'head': '<branch>', 'base': '<base>', 'body': pr_body}}\n"
+        "req = urllib.request.Request(\n"
+        "    'https://api.github.com/repos/{repo}/pulls',\n"
+        "    data=json.dumps(payload).encode(),\n"
+        "    headers={{'Authorization': f'Bearer {{os.environ[\"GITHUB_TOKEN\"]}}',\n"
+        "             'Accept': 'application/vnd.github+json'}}, method='POST')\n"
+        "resp = json.loads(urllib.request.urlopen(req).read())\n"
+        "print('PR URL:', resp['html_url'], 'PR number:', resp['number'])\n"
+        "```\n"
+        "— pr_body MUST be a plain markdown string starting with 'Closes #<issue_number>' on its own line; "
+        "NEVER set pr_body to json.dumps(...) or a dict"
     ),
     "gitlab": (
-        "the GitLab API: "
-        "POST /api/v4/projects/<project-id>/merge_requests "
-        "-H 'PRIVATE-TOKEN: $GITLAB_TOKEN' "
-        "-d '{{\"source_branch\":\"<branch>\",\"target_branch\":\"<base>\","
-        "\"title\":\"<title>\",\"description\":\"Closes #<issue_number>\\n\\n<rest>\"}}' "
-        "— the description field MUST begin with 'Closes #<issue_number>' on its own line"
+        "the GitLab API. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "WARNING: description below is PLAIN MARKDOWN TEXT — do NOT set it to JSON or a dict. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "# description is PLAIN MARKDOWN — not JSON, not a dict, just text\n"
+        "description = 'Closes #<issue_number>\\n\\n## Problem\\n<describe>\\n\\n## Fix\\n<what changed>\\n\\n## How to test\\n<steps>'\n"
+        "payload = {{'source_branch': '<branch>', 'target_branch': '<base>',\n"
+        "            'title': '<title>', 'description': description}}\n"
+        "req = urllib.request.Request(\n"
+        "    'https://gitlab.com/api/v4/projects/<project-id>/merge_requests',\n"
+        "    data=json.dumps(payload).encode(),\n"
+        "    headers={{'PRIVATE-TOKEN': os.environ['GITLAB_TOKEN'],\n"
+        "             'Content-Type': 'application/json'}}, method='POST')\n"
+        "resp = json.loads(urllib.request.urlopen(req).read())\n"
+        "print('MR URL:', resp['web_url'], 'MR number:', resp['iid'])\n"
+        "```\n"
+        "— description MUST be a plain markdown string starting with 'Closes #<issue_number>' on its own line; "
+        "NEVER set description to json.dumps(...) or a dict"
     ),
     "azuredevops": (
-        "the Azure DevOps API (POST .../pullrequests, Basic auth with $AZURE_DEVOPS_PAT) "
-        "— include 'Fixes #<issue_number>' in the description field"
+        "the Azure DevOps API. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "WARNING: description below is PLAIN MARKDOWN TEXT — do NOT set it to JSON or a dict. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json, base64\n"
+        "pat = os.environ['AZURE_DEVOPS_PAT']\n"
+        "auth = base64.b64encode(f':{pat}'.encode()).decode()\n"
+        "# description is PLAIN MARKDOWN — not JSON, not a dict, just text\n"
+        "description = 'Fixes #<issue_number>\\n\\n## Problem\\n<describe>\\n\\n## Fix\\n<what changed>\\n\\n## How to test\\n<steps>'\n"
+        "payload = {{'title': '<title>', 'sourceRefName': 'refs/heads/<branch>',\n"
+        "            'targetRefName': 'refs/heads/<base>', 'description': description}}\n"
+        "req = urllib.request.Request(\n"
+        "    'https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullrequests?api-version=7.1',\n"
+        "    data=json.dumps(payload).encode(),\n"
+        "    headers={{'Authorization': f'Basic {{auth}}', 'Content-Type': 'application/json'}}, method='POST')\n"
+        "resp = json.loads(urllib.request.urlopen(req).read())\n"
+        "print('PR URL:', resp.get('url'), 'PR ID:', resp.get('pullRequestId'))\n"
+        "```\n"
+        "— description MUST be a plain markdown string starting with 'Fixes #<issue_number>' on its own line; "
+        "NEVER set description to json.dumps(...) or a dict"
     ),
 }
 
@@ -541,6 +627,7 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
     body = (issue.get("body") or "").strip()
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
+    spec_path = f"{workdir}/.hermes/specs/issue-{n}.md"
     return (
         f"You are the PRODUCT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
@@ -556,10 +643,15 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"      - Implementation approach (high-level, not code)\n"
         f"      - Edge cases to handle\n"
         f"      - Files likely to be affected (based on your codebase reading)\n"
-        f"   c) Post the spec as a comment on issue #{n} via: {comment_howto}\n"
-        f"   d) Complete your card with summary starting 'SPEC: ' followed by a 1–2 sentence "
-        f"summary of what will be built. The dispatcher detects this EXACT prefix to hand off "
-        f"to the development team.\n\n"
+        f"   b2) Save the spec to `{spec_path}` using the Write tool. "
+        f"IMPORTANT: always save to this path — NEVER use /tmp or any other location. "
+        f"The .hermes/specs/ directory already exists; create it with `mkdir -p {workdir}/.hermes/specs` if needed.\n"
+        f"   c) 🚨 COMPLETE YOUR KANBAN CARD FIRST — before posting to GitHub. "
+        f"Call kanban_complete with summary starting 'SPEC: ' followed by a 1–2 sentence "
+        f"summary of what will be built. The dispatcher detects this EXACT prefix to unblock "
+        f"the development team. Do this BEFORE step d — even if GitHub posting later fails, "
+        f"the pipeline must advance.\n"
+        f"   d) After completing the card, post the spec as a comment on issue #{n} via: {comment_howto}\n\n"
         f"If the developer hits a blocker during implementation, they may comment on this issue "
         f"to request your clarification. Monitor for such requests.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
@@ -741,21 +833,57 @@ def _has_downstream_tasks(slug: str, issue_number: int, *,
     return False
 
 
-def _has_pm_tasks(slug: str, issue_number: int,
-                  pm_profile: str = "project-manager-daedalus") -> bool:
-    """Return True if a PM spec task already exists for issue_number."""
+def _pm_task_state(slug: str, issue_number: int,
+                   pm_profile: str = "project-manager-daedalus") -> tuple:
+    """Return (state, stale_count) for PM spec tasks for issue_number.
+
+    state values:
+      'none'     — no PM spec task found
+      'running'  — at least one PM spec task is not yet done
+      'complete' — a done PM spec task has a valid SPEC: summary
+      'stale'    — all done PM spec tasks lack SPEC: (hermes premature-completion bug)
+
+    stale_count is the number of done PM tasks without SPEC:, used to generate
+    unique retry idempotency keys (pm-{n}-r{stale_count}).
+    """
     pattern = f"#{issue_number}"
+    has_running = False
+    has_complete = False
+    stale_count = 0
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
-        assignee = (t.get("assignee") or "").strip()
-        if assignee != pm_profile:
+        if (t.get("assignee") or "").strip() != pm_profile:
             continue
-        # Distinguish spec tasks from consultation tasks by title prefix
-        title = (t.get("title") or "").lower()
-        if not title.startswith("consult:"):
-            return True
-    return False
+        if (t.get("title") or "").lower().startswith("consult:"):
+            continue
+        status = (t.get("status") or "").lower()
+        if status not in ("done", "complete", "completed"):
+            has_running = True
+            continue
+        tid = (t.get("id") or t.get("task_id") or "").strip()
+        summary_raw = (t.get("summary") or t.get("last_summary") or "").strip()
+        if not summary_raw and tid:
+            card = kanban.show_card(slug, tid) or {}
+            summary_raw = (card.get("latest_summary") or "").strip()
+        if summary_raw.lower().startswith("spec:"):
+            has_complete = True
+        else:
+            stale_count += 1
+    if has_running:
+        return ("running", stale_count)
+    if has_complete:
+        return ("complete", stale_count)
+    if stale_count:
+        return ("stale", stale_count)
+    return ("none", 0)
+
+
+def _has_pm_tasks(slug: str, issue_number: int,
+                  pm_profile: str = "project-manager-daedalus") -> bool:
+    """Shim for backward compatibility — returns True if a non-stale PM spec task exists."""
+    state, _ = _pm_task_state(slug, issue_number, pm_profile)
+    return state in ("running", "complete")
 
 
 def _has_active_pm_consultation(slug: str, issue_number: int,
@@ -816,8 +944,24 @@ def _check_confirmed_validators(
         if not m:
             continue
         n = int(m.group(1))
-        if _has_pm_tasks(slug, n, p["pm"]):
-            continue  # PM task already exists
+        pm_state, stale_count = _pm_task_state(slug, n, p["pm"])
+        if pm_state in ("running", "complete"):
+            continue  # PM task active or properly done
+        if pm_state == "stale":
+            _MAX_PM_RETRIES = 3
+            if stale_count >= _MAX_PM_RETRIES:
+                logger.error(
+                    "dispatch: PM for #%s has %d stale premature completions — "
+                    "manual intervention required (hermes kanban edit + SPEC: summary)",
+                    n, stale_count,
+                )
+                continue
+            logger.warning(
+                "dispatch: PM task for #%s prematurely completed without SPEC: "
+                "(attempt %d/%d) — re-creating with retry key",
+                n, stale_count + 1, _MAX_PM_RETRIES,
+            )
+        ikey = f"pm-{n}" if pm_state == "none" else f"pm-{n}-r{stale_count}"
         issue = issues_map.get(n)
         if not issue:
             logger.debug("dispatch: validator confirmed #%s but issue not in current scope", n)
@@ -830,7 +974,7 @@ def _check_confirmed_validators(
             slug, f"#{n} {issue.get('title', '')}",
             body=_pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name),
             assignee=p["pm"],
-            idempotency_key=f"pm-{n}",
+            idempotency_key=ikey,
             workspace=f"dir:{workdir}" if workdir else "",
             skills=rs.get("pm") or None,
         )
@@ -847,7 +991,7 @@ def _check_completed_pm(
     label_overrides: Optional[Dict[str, Any]] = None,
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
-    *, dry_run: bool = False,
+    *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
     create the downstream triage (Developer + Reviewer + Security + Docs).
@@ -881,8 +1025,19 @@ def _check_completed_pm(
         if _has_downstream_tasks(slug, n, validator_profile=p["validator"], pm_profile=p["pm"]):
             continue  # team triage already exists
         issue = issues_map.get(n)
+        if not issue and provider is not None:
+            fetched = provider.get_issue(n)
+            if fetched:
+                issue = fetched.as_dict()
+                logger.info(
+                    "dispatch: PM completed #%s — not in issues_map window, "
+                    "fetched directly from provider", n,
+                )
         if not issue:
-            logger.debug("dispatch: PM completed #%s but issue not in current scope", n)
+            logger.warning(
+                "dispatch: PM completed #%s but issue not in scope and direct fetch failed "
+                "— skipping team triage creation", n,
+            )
             continue
         if dry_run:
             logger.info("[dry-run] PM SPEC #%s — would create downstream team triage", n)
@@ -1215,7 +1370,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     pm_triggered = _check_completed_pm(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
-        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run, provider=provider,
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

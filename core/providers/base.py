@@ -190,6 +190,14 @@ class VCSProvider(abc.ABC):
         """Return 'open', 'closed', or None if unknown/error. Providers override for efficiency."""
         return None
 
+    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+        """Fetch a single issue by number. Returns None if not found or on error.
+
+        Providers override for direct single-issue fetch; default scans list_issues
+        which may be expensive or miss issues outside the default window.
+        """
+        return None
+
     # ── pull/merge requests ──────────────────────────────────────────────────
     @abc.abstractmethod
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]: ...

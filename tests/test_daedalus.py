@@ -1738,6 +1738,328 @@ def test_has_pm_tasks_true_for_spec_task():
           disp._has_pm_tasks("slug", 5) is True)
 
 
+def test_pm_task_state_none():
+    """_pm_task_state returns ('none', 0) when no PM spec task exists."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: []
+    state, stale = disp._pm_task_state("slug", 5)
+    check("no tasks → state is none", state == "none")
+    check("no tasks → stale_count is 0", stale == 0)
+
+
+def test_pm_task_state_running():
+    """_pm_task_state returns ('running', 0) for an in-progress PM task."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus", "status": "in_progress"},
+    ]
+    state, stale = disp._pm_task_state("slug", 5)
+    check("in-progress PM → state is running", state == "running")
+    check("in-progress PM → stale_count is 0", stale == 0)
+
+
+def test_pm_task_state_complete():
+    """_pm_task_state returns ('complete', 0) for a done PM task with SPEC: summary."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus",
+         "status": "done", "summary": "SPEC: Add auth middleware"},
+    ]
+    state, stale = disp._pm_task_state("slug", 5)
+    check("done+SPEC PM → state is complete", state == "complete")
+    check("done+SPEC PM → stale_count is 0", stale == 0)
+
+
+def test_pm_task_state_stale():
+    """_pm_task_state returns ('stale', 1) for a done PM task with no SPEC: summary (premature completion)."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus",
+         "id": "t_stale", "status": "done", "summary": ""},
+    ]
+    disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+    state, stale = disp._pm_task_state("slug", 5)
+    check("done+no-SPEC PM → state is stale", state == "stale")
+    check("done+no-SPEC PM → stale_count is 1", stale == 1)
+
+
+def test_check_confirmed_validators_retries_stale_pm():
+    """_check_confirmed_validators re-creates PM task with retry key when existing task is stale."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            # Validator confirmed AND a stale PM task (no SPEC:) exist
+            return [
+                {"title": "#9 crash bug", "assignee": "validator-daedalus",
+                 "summary": "CONFIRMED: verified", "status": "done", "id": "t_v"},
+                {"title": "#9 crash bug", "assignee": "project-manager-daedalus",
+                 "summary": "", "status": "done", "id": "t_stale"},
+            ]
+        # Non-filtered list call used by _pm_task_state
+        return [
+            {"title": "#9 crash bug", "assignee": "project-manager-daedalus",
+             "summary": "", "status": "done", "id": "t_stale"},
+        ]
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            created_keys.append(idempotency_key) or "t_new"
+        )
+        disp._check_confirmed_validators(
+            "slug", "O/R",
+            {9: {"number": 9, "title": "crash bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+
+    check("retry key used instead of pm-9", any("pm-9-r" in k for k in created_keys))
+    check("original pm-9 key not reused", "pm-9" not in created_keys)
+
+
+# ── _check_completed_pm ───────────────────────────────────────────────────────
+
+def _completed_pm_tasks(issue_number, summary="SPEC: build the thing", title=None):
+    """Minimal done PM task fixture for _check_completed_pm tests."""
+    return [{
+        "id": f"t_pm_{issue_number}",
+        "assignee": "project-manager-daedalus",
+        "status": "done",
+        "title": title or f"#{issue_number} some feature",
+        "summary": summary,
+    }]
+
+
+def test_check_completed_pm_creates_team_tasks():
+    """Normal path: PM done with SPEC: in issues_map → create_triage called."""
+    disp = _load_dispatch()
+    created = []
+    orig_create_triage = disp.kanban.create_triage
+    orig_decompose = disp.kanban.decompose
+    orig_list_tasks = disp.kanban.list_tasks
+    try:
+        disp.kanban.list_tasks = lambda slug, status=None: (
+            _completed_pm_tasks(5) if status == "done" else []
+        )
+        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
+            created.append(n) or "t_triage"
+        )
+        disp.kanban.decompose = lambda slug, tid: None
+        result = disp._check_completed_pm(
+            "slug", "O/R",
+            {5: {"number": 5, "title": "feature", "body": ""}},
+            3, "/tmp", "", "main", "github",
+        )
+    finally:
+        disp.kanban.list_tasks = orig_list_tasks
+        disp.kanban.create_triage = orig_create_triage
+        disp.kanban.decompose = orig_decompose
+
+    check("check_completed_pm returns triggered list", result == [5])
+    check("check_completed_pm called create_triage for issue", 5 in created)
+
+
+def test_check_completed_pm_provider_fallback():
+    """Issue not in issues_map → provider.get_issue() called and team tasks created."""
+    from core.providers.base import IssueSummary
+    disp = _load_dispatch()
+    created = []
+    fetched = []
+    orig_create_triage = disp.kanban.create_triage
+    orig_decompose = disp.kanban.decompose
+    orig_list_tasks = disp.kanban.list_tasks
+
+    class _Provider:
+        def get_issue(self, n):
+            fetched.append(n)
+            return IssueSummary(number=n, title="feature from provider", body="")
+
+    try:
+        disp.kanban.list_tasks = lambda slug, status=None: (
+            _completed_pm_tasks(6) if status == "done" else []
+        )
+        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
+            created.append(n) or "t_triage"
+        )
+        disp.kanban.decompose = lambda slug, tid: None
+        result = disp._check_completed_pm(
+            "slug", "O/R",
+            {},  # empty issues_map — forces fallback
+            3, "/tmp", "", "main", "github",
+            provider=_Provider(),
+        )
+    finally:
+        disp.kanban.list_tasks = orig_list_tasks
+        disp.kanban.create_triage = orig_create_triage
+        disp.kanban.decompose = orig_decompose
+
+    check("provider fallback: get_issue called", fetched == [6])
+    check("provider fallback: team tasks created", result == [6])
+    check("provider fallback: create_triage called", 6 in created)
+
+
+def test_check_completed_pm_no_issue_found():
+    """Issue not in issues_map AND provider returns None → skipped, no create_triage."""
+    disp = _load_dispatch()
+    created = []
+    orig_create_triage = disp.kanban.create_triage
+    orig_list_tasks = disp.kanban.list_tasks
+
+    class _Provider:
+        def get_issue(self, n):
+            return None
+
+    try:
+        disp.kanban.list_tasks = lambda slug, status=None: (
+            _completed_pm_tasks(7) if status == "done" else []
+        )
+        disp.kanban.create_triage = lambda slug, n, title, body, **kw: (
+            created.append(n) or "t_triage"
+        )
+        result = disp._check_completed_pm(
+            "slug", "O/R", {},
+            3, "/tmp", "", "main", "github",
+            provider=_Provider(),
+        )
+    finally:
+        disp.kanban.list_tasks = orig_list_tasks
+        disp.kanban.create_triage = orig_create_triage
+
+    check("no issue: nothing triggered", result == [])
+    check("no issue: create_triage never called", created == [])
+
+
+def test_check_completed_pm_idempotent():
+    """Downstream tasks already exist → create_triage not called again."""
+    disp = _load_dispatch()
+    created = []
+    orig_create_triage = disp.kanban.create_triage
+    orig_list_tasks = disp.kanban.list_tasks
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return _completed_pm_tasks(8)
+        # Simulate existing developer task (downstream) for #8
+        return [{"title": "#8 feature", "assignee": "developer-daedalus", "status": "running"}]
+
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.create_triage = lambda slug, n, title, body, **kw: (
+            created.append(n) or "t_triage"
+        )
+        result = disp._check_completed_pm(
+            "slug", "O/R",
+            {8: {"number": 8, "title": "feature", "body": ""}},
+            3, "/tmp", "", "main", "github",
+        )
+    finally:
+        disp.kanban.list_tasks = orig_list_tasks
+        disp.kanban.create_triage = orig_create_triage
+
+    check("idempotent: already has downstream, nothing triggered", result == [])
+    check("idempotent: create_triage never called", created == [])
+
+
+def test_check_completed_pm_skips_consultation():
+    """PM task with title starting 'consult:' must not trigger team tasks."""
+    disp = _load_dispatch()
+    created = []
+    orig_create_triage = disp.kanban.create_triage
+    orig_list_tasks = disp.kanban.list_tasks
+    try:
+        disp.kanban.list_tasks = lambda slug, status=None: (
+            _completed_pm_tasks(9, title="consult: #9 blocker question") if status == "done" else []
+        )
+        disp.kanban.create_triage = lambda slug, n, title, body, **kw: (
+            created.append(n) or "t_triage"
+        )
+        result = disp._check_completed_pm(
+            "slug", "O/R",
+            {9: {"number": 9, "title": "feature", "body": ""}},
+            3, "/tmp", "", "main", "github",
+        )
+    finally:
+        disp.kanban.list_tasks = orig_list_tasks
+        disp.kanban.create_triage = orig_create_triage
+
+    check("consultation skipped: nothing triggered", result == [])
+    check("consultation skipped: create_triage never called", created == [])
+
+
+def test_pipeline_chain_confirmed_to_team_tasks():
+    """Integration: validator CONFIRMED → PM SPEC: done → team triage created.
+
+    Chains _check_confirmed_validators and _check_completed_pm the way the
+    dispatcher does each cron tick, proving the hand-off works end-to-end.
+    """
+    disp = _load_dispatch()
+    pm_created = []
+    triage_created = []
+    orig_list_tasks = disp.kanban.list_tasks
+    orig_show = disp.kanban.show_card
+    orig_create_task = disp.kanban.create_task
+    orig_create_triage = disp.kanban.create_triage
+    orig_decompose = disp.kanban.decompose
+
+    # Tick 1: validator is done, no PM task yet
+    tick1_tasks = [
+        {"title": "#10 login bug", "assignee": "validator-daedalus",
+         "status": "done", "summary": "CONFIRMED: reproduced", "id": "t_v10"},
+    ]
+    # Tick 2: validator still done, PM task now done with SPEC:
+    tick2_tasks = tick1_tasks + [
+        {"title": "#10 login bug", "assignee": "project-manager-daedalus",
+         "status": "done", "summary": "SPEC: fix auth flow", "id": "t_pm10"},
+    ]
+
+    try:
+        # ── Tick 1: create PM task ────────────────────────────────────────────
+        disp.kanban.list_tasks = lambda slug, status=None: (
+            tick1_tasks if status == "done" else []
+        )
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            pm_created.append(idempotency_key) or "t_pm10"
+        )
+        disp._check_confirmed_validators(
+            "slug", "O/R",
+            {10: {"number": 10, "title": "login bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+        )
+
+        # ── Tick 2: PM done with SPEC: → create team triage ──────────────────
+        disp.kanban.list_tasks = lambda slug, status=None: (
+            tick2_tasks if status == "done" else []
+        )
+        disp.kanban.show_card = lambda slug, tid: {"latest_summary": "SPEC: fix auth flow"}
+        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
+            triage_created.append(n) or "t_triage10"
+        )
+        disp.kanban.decompose = lambda slug, tid: None
+        result = disp._check_completed_pm(
+            "slug", "O/R",
+            {10: {"number": 10, "title": "login bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+        )
+    finally:
+        disp.kanban.list_tasks = orig_list_tasks
+        disp.kanban.show_card = orig_show
+        disp.kanban.create_task = orig_create_task
+        disp.kanban.create_triage = orig_create_triage
+        disp.kanban.decompose = orig_decompose
+
+    check("pipeline chain: PM task created on tick 1", any("pm-10" in k for k in pm_created))
+    check("pipeline chain: team triage created on tick 2", triage_created == [10])
+    check("pipeline chain: _check_completed_pm returns issue", result == [10])
+
+
+
 # ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
 # (Patch _FakeProvider at module level to avoid test-isolation issues)
 
@@ -1806,7 +2128,18 @@ if __name__ == "__main__":
                test_check_team_blockers_skips_validator_cards,
                test_pm_consultation_body_content,
                test_has_pm_tasks_excludes_consultations,
-               test_has_pm_tasks_true_for_spec_task):
+               test_has_pm_tasks_true_for_spec_task,
+               test_pm_task_state_none,
+               test_pm_task_state_running,
+               test_pm_task_state_complete,
+               test_pm_task_state_stale,
+               test_check_confirmed_validators_retries_stale_pm,
+               test_check_completed_pm_creates_team_tasks,
+               test_check_completed_pm_provider_fallback,
+               test_check_completed_pm_no_issue_found,
+               test_check_completed_pm_idempotent,
+               test_check_completed_pm_skips_consultation,
+               test_pipeline_chain_confirmed_to_team_tasks):
         fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")

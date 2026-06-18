@@ -226,6 +226,17 @@ def test_board_set_status(provider):
     assert provider.board_set_status(7, "Done") is True
 
 
+def test_board_set_status_already_at_target(provider):
+    """board_set_status returns False (no mutation) when status is already the target."""
+    _gql_mock(provider)
+    # Item #8 is already at "Done" in ITEMS_GQL
+    assert provider.board_set_status(8, "Done") is False
+    # No updateProjectV2ItemFieldValue mutation should have fired
+    calls = [c for c in provider._http.post_json.call_args_list
+             if "updateProjectV2ItemFieldValue" in (c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")]
+    assert calls == [], "mutation fired even though status was already correct"
+
+
 def test_board_set_status_unknown_option(provider):
     """board_set_status auto-creates a missing option via board_ensure_status_option,
     then sets the status — the stateful mock simulates GitHub returning the new option."""
@@ -283,3 +294,31 @@ def test_meta_safe_on_error(provider):
     provider._http.get_paginated.side_effect = ProviderError("401", status_code=401)
     assert provider.list_branches() == []
     assert provider.list_labels() == []
+
+
+# ── get_issue ─────────────────────────────────────────────────────────────────
+
+def test_get_issue_returns_summary(provider):
+    provider._http.get_json.return_value = {
+        "number": 42, "title": "Fix crash", "body": "details",
+        "labels": [{"name": "bug"}], "state": "open", "html_url": "https://github.com/octo/repo/issues/42",
+    }
+    iss = provider.get_issue(42)
+    assert iss is not None
+    assert iss.number == 42
+    assert iss.title == "Fix crash"
+    assert iss.labels == ["bug"]
+    assert iss.state == "open"
+
+
+def test_get_issue_returns_none_on_error(provider):
+    provider._http.get_json.side_effect = ProviderError("404", status_code=404)
+    assert provider.get_issue(99) is None
+
+
+def test_get_issue_ignores_pull_requests(provider):
+    provider._http.get_json.return_value = {
+        "number": 5, "title": "PR", "pull_request": {"url": "x"},
+        "labels": [], "state": "open", "html_url": "u",
+    }
+    assert provider.get_issue(5) is None

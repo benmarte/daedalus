@@ -94,6 +94,24 @@ class GitHubProvider(VCSProvider):
                 return "closed"  # deleted or transferred issue — treat as closed
             return None
 
+    def get_issue(self, issue_number: int) -> Optional["IssueSummary"]:
+        try:
+            data = self._http.get_json(f"/repos/{self.repo}/issues/{issue_number}")
+        except ProviderError as e:
+            self._log.warning("get_issue #%s failed: %s", issue_number, e)
+            return None
+        if not data or "pull_request" in data:
+            return None
+        from .base import IssueSummary  # local import avoids circular at module level
+        return IssueSummary(
+            number=data.get("number", issue_number),
+            title=data.get("title") or "",
+            body=data.get("body") or "",
+            labels=[l.get("name", "") for l in data.get("labels") or []],
+            state=(data.get("state") or "open").lower(),
+            url=data.get("html_url") or "",
+        )
+
     # ── pull requests ────────────────────────────────────────────────────────
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
         rest_state = "all" if state == "merged" else state
@@ -437,12 +455,16 @@ class GitHubProvider(VCSProvider):
             self._log.warning("board: status '%s' not an option on #%s",
                               status_name, self._board_number)
             return False
-        item_id = next((it["id"] for it in self._items()
-                        if it.get("number") == issue_number), None)
-        if not item_id:
+        current_item = next((it for it in self._items()
+                             if it.get("number") == issue_number), None)
+        if not current_item:
             self._log.warning("board: issue #%s not on project #%s",
                               issue_number, self._board_number)
             return False
+        if (current_item.get("status") or "").lower() == (status_name or "").lower():
+            self._log.debug("board: #%s already at '%s' — skipping", issue_number, status_name)
+            return False
+        item_id = current_item["id"]
         m = """mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){
                  updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,
                    fieldId:$field,value:{singleSelectOptionId:$option}}){
