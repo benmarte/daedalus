@@ -944,7 +944,7 @@ def test_priority_sort_p0_before_unlabeled():
 
     _orig_create_task = disp.kanban.create_task
     try:
-        def fake_create(slug, title, body, *, assignee="", idempotency_key="", workspace="", max_retries=None):
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
             m = __import__("re").search(r"#(\d+)", title)
             if m:
                 dispatched.append(int(m.group(1)))
@@ -1359,7 +1359,7 @@ def test_custom_validator_profile_used_in_dispatch():
     _orig_exists = disp._hermes_profile_exists
     try:
         disp._hermes_profile_exists = lambda name: True
-        def fake_create(slug, title, body, *, assignee="", idempotency_key="", workspace="", max_retries=None):
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
             assigned.append(assignee)
             return "t1"
         disp.kanban.create_task = fake_create
@@ -1397,7 +1397,7 @@ def test_custom_pm_profile_used_after_validator_confirms():
     _orig = disp.kanban.create_task
     try:
         disp.kanban.list_tasks = fake_list_tasks
-        def fake_create(slug, title, body, *, assignee="", idempotency_key="", workspace="", max_retries=None):
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
             assigned.append(assignee)
             return "t2"
         disp.kanban.create_task = fake_create
@@ -1602,7 +1602,7 @@ def test_check_team_blockers_creates_pm_consultation():
     _orig = disp.kanban.create_task
     try:
         disp.kanban.list_tasks = fake_list_tasks
-        def fake_create(slug, title, body, *, assignee="", idempotency_key="", workspace="", max_retries=None):
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
             created_titles.append(title)
             assigned_to.append(assignee)
             return "consult_t1"

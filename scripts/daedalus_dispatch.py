@@ -78,13 +78,48 @@ _DEFAULT_PROFILES: Dict[str, str] = {
 def _resolve_profiles(execution: Dict[str, Any]) -> Dict[str, str]:
     """Return effective profile map: defaults merged with any user overrides.
 
-    Only recognised role keys (those in _DEFAULT_PROFILES) are accepted from the
-    user config — unknown keys are silently ignored to prevent typos from
-    creating orphaned tasks.
+    Each entry in ``execution.profiles`` may be a plain string (profile name
+    override) or a dict with optional ``profile`` and ``skills`` keys:
+
+        profiles:
+          developer: my-senior-dev          # string: profile override only
+          reviewer:
+            profile: my-reviewer            # dict: explicit profile override
+            skills: [strict-review]         # dict: skills attached to every task
+          security:
+            skills: [owasp-top10]           # dict: keep default profile, add skills
+
+    Unknown role keys are silently ignored to prevent typos from creating
+    orphaned tasks.
     """
-    user = {k: v for k, v in ((execution or {}).get("profiles") or {}).items()
-            if k in _DEFAULT_PROFILES and isinstance(v, str) and v.strip()}
+    user: Dict[str, str] = {}
+    for k, v in ((execution or {}).get("profiles") or {}).items():
+        if k not in _DEFAULT_PROFILES:
+            continue
+        if isinstance(v, str) and v.strip():
+            user[k] = v.strip()
+        elif isinstance(v, dict):
+            name = (v.get("profile") or "").strip()
+            if name:
+                user[k] = name
     return {**_DEFAULT_PROFILES, **user}
+
+
+def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Return per-role skill lists from ``execution.profiles``.
+
+    Only the ``skills`` key inside a dict-form profile entry is used.
+    String-form entries contribute no skills (they only override the profile name).
+    """
+    result: Dict[str, List[str]] = {}
+    for k, v in ((execution or {}).get("profiles") or {}).items():
+        if k not in _DEFAULT_PROFILES:
+            continue
+        if isinstance(v, dict):
+            skills = [s for s in (v.get("skills") or []) if isinstance(s, str) and s.strip()]
+            if skills:
+                result[k] = skills
+    return result
 
 
 def _hermes_profile_exists(name: str) -> bool:
@@ -751,6 +786,7 @@ def _check_confirmed_validators(
     provider_name: str, security_notify_targets: Optional[List[str]] = None,
     label_overrides: Optional[Dict[str, Any]] = None,
     profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
     *, dry_run: bool = False,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
@@ -760,6 +796,7 @@ def _check_confirmed_validators(
     Idempotency via 'pm-{n}' key prevents duplicate PM cards.
     """
     p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
     triggered: List[int] = []
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p["validator"]:
@@ -795,6 +832,7 @@ def _check_confirmed_validators(
             assignee=p["pm"],
             idempotency_key=f"pm-{n}",
             workspace=f"dir:{workdir}" if workdir else "",
+            skills=rs.get("pm") or None,
         )
         if vid:
             logger.info("dispatch: validator CONFIRMED #%s — PM task %s created", n, vid)
@@ -808,6 +846,7 @@ def _check_completed_pm(
     provider_name: str, security_notify_targets: Optional[List[str]] = None,
     label_overrides: Optional[Dict[str, Any]] = None,
     profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
     *, dry_run: bool = False,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
@@ -817,6 +856,7 @@ def _check_completed_pm(
     Idempotency via 'issue-{n}' key prevents duplicate triage cards.
     """
     p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
     triggered: List[int] = []
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p["pm"]:
@@ -895,6 +935,7 @@ def _check_team_blockers(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     workdir: str, base_branch: str, provider_name: str,
     profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
     *, dry_run: bool = False,
 ) -> List[int]:
     """PM re-activation trigger: for every blocked team triage card, create a PM
@@ -907,6 +948,7 @@ def _check_team_blockers(
     Returns issue numbers for which a PM consultation was created this tick.
     """
     p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
     pipeline_profiles = {p["validator"], p["pm"]}
     blocked = kanban.list_blocked(slug)
     if not blocked:
@@ -940,6 +982,7 @@ def _check_team_blockers(
             body=_pm_consultation_body(repo, issue, blocker_raw, workdir, provider_name),
             assignee=p["pm"],
             workspace=f"dir:{workdir}" if workdir else "",
+            skills=rs.get("pm") or None,
         )
         if cid:
             logger.info("dispatch: team blocked #%s — PM consultation task %s created", n, cid)
@@ -1020,6 +1063,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     execution = resolved.get("execution") or {}
     iterations = int(execution.get("max_lifecycle_iterations", 3))   # self-improving loop cap (configurable)
     profiles = _resolve_profiles(execution)
+    role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
     # Validate that every configured profile exists in Hermes (once per tick).
     # Missing profiles either fall back to built-in defaults or are dropped,
     # depending on execution.profile_fallback_behavior.  Logs a warning per
@@ -1159,7 +1203,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     confirmed_triggered = _check_confirmed_validators(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
-        profiles=profiles, dry_run=dry_run,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
     )
     if confirmed_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -1167,14 +1211,14 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     pm_triggered = _check_completed_pm(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
-        profiles=profiles, dry_run=dry_run,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     blocker_triggered = _check_team_blockers(
         slug, repo, issues_map, workdir, base_branch, provider.name,
-        profiles=profiles, dry_run=dry_run,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
     )
     if blocker_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -1337,6 +1381,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             assignee=profiles["validator"],
             idempotency_key=f"validator-{n}",
             workspace=f"dir:{workdir}" if workdir else "",
+            skills=role_skills.get("validator") or None,
         )
         if vid:
             created.append(n)

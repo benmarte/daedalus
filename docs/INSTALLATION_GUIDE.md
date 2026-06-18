@@ -16,13 +16,15 @@ This guide walks you through every step: installing the plugin, provisioning the
 6. [Dashboard Overview](#6-dashboard-overview)
 7. [How the Kanban Board Works](#7-how-the-kanban-board-works)
 8. [How the Cron Job Works](#8-how-the-cron-job-works)
-9. [Add Your VCS Token](#9-add-your-vcs-token)
-10. [Triggering Work](#10-triggering-work)
-11. [Update the Plugin](#11-update-the-plugin)
-12. [Remove a Project](#12-remove-a-project)
-13. [Uninstall Daedalus](#13-uninstall-daedalus)
-14. [Troubleshooting](#14-troubleshooting)
-15. [What's Next](#15-whats-next)
+9. [Customizing Agents](#9-customizing-agents)
+10. [Autonomous Pipeline Advancement](#10-autonomous-pipeline-advancement)
+11. [Add Your VCS Token](#11-add-your-vcs-token)
+12. [Triggering Work](#12-triggering-work)
+13. [Update the Plugin](#13-update-the-plugin)
+14. [Remove a Project](#14-remove-a-project)
+15. [Uninstall Daedalus](#15-uninstall-daedalus)
+16. [Troubleshooting](#16-troubleshooting)
+17. [What's Next](#17-whats-next)
 
 ---
 
@@ -224,7 +226,117 @@ Each project gets its own cron job named `<project-name>-daedalus`. You can paus
 
 ---
 
-## 9. Add Your VCS Token
+## 9. Customizing Agents
+
+Every pipeline role can be overridden per project in `.hermes/daedalus.yaml` under `execution.profiles`. You can swap a role to your own Hermes profile, attach extra skills, or both.
+
+### Custom Profiles
+
+Use the simple form to route a role to a different Hermes agent profile:
+
+```yaml
+execution:
+  profiles:
+    developer: my-senior-dev-profile
+    reviewer:  my-code-reviewer-profile
+```
+
+Only the keys you specify are overridden. Any role you omit continues to use the built-in default profile.
+
+**Built-in defaults:**
+
+| Role | Default Profile |
+|---|---|
+| `validator` | `validator-daedalus` |
+| `pm` | `project-manager-daedalus` |
+| `developer` | `developer-daedalus` |
+| `reviewer` | `reviewer-daedalus` |
+| `security` | `security-analyst-daedalus` |
+| `documentation` | `documentation-daedalus` |
+
+### Skills per Agent
+
+Attach extra Hermes skills to any agent without replacing its profile. Skills are passed to the worker at task-creation time, so the agent has them pre-loaded:
+
+```yaml
+execution:
+  profiles:
+    validator:
+      profile: validator-daedalus   # omit to keep the default
+      skills:
+        - security-and-hardening
+        - my-custom-threat-model
+    developer:
+      profile: my-senior-dev-profile
+      skills:
+        - incremental-implementation
+        - my-project-conventions
+```
+
+The built-in skills installed by `postinstall.py` are always present — `skills:` here adds on top of them.
+
+You can mix simple (name-only) and dict forms in the same block:
+
+```yaml
+execution:
+  profiles:
+    reviewer: my-reviewer            # simple — just swap the profile
+    developer:                       # dict — profile + skills
+      profile: my-senior-dev-profile
+      skills:
+        - incremental-implementation
+```
+
+### Profile Fallback Behavior
+
+When a configured profile does not exist in Hermes, daedalus defaults to logging a warning and falling back to the built-in profile for that role. To change this:
+
+```yaml
+execution:
+  profile_fallback_behavior: "fallback"   # default: warn + use built-in
+  # profile_fallback_behavior: "skip"     # warn + skip role entirely
+```
+
+| Value | Behavior |
+|---|---|
+| `fallback` | Warn and use the built-in default. Dispatching continues normally. |
+| `skip` | Warn and drop the role — no tasks are created until the profile exists. |
+
+---
+
+## 10. Autonomous Pipeline Advancement
+
+Daedalus advances the pipeline in two ways:
+
+**1. Completion triggers (primary):** Every agent's system prompt includes an instruction to run the daedalus dispatcher script immediately after completing its kanban task:
+
+```bash
+bash ~/.hermes/scripts/daedalus-cron.sh
+```
+
+This means each phase transition happens within seconds of completion — the pipeline does not wait for the next cron tick.
+
+**2. Cron job (safety net):** The scheduled cron job (default: every 60 minutes) catches any missed advancement — for example, if an agent crashed before reaching its final step.
+
+Together these make the pipeline fully autonomous: once an issue is marked Ready, the entire chain runs end-to-end without any manual intervention between phases.
+
+```
+issue marked Ready
+      │
+      ▼
+validator runs → CONFIRMED: <note>
+      │   (agent runs daedalus-cron.sh immediately on completion)
+      ▼
+PM / project-manager decomposes work
+      │   (agent runs daedalus-cron.sh immediately on completion)
+      ▼
+developer → reviewer → security-analyst → documentation
+            (each agent runs daedalus-cron.sh when done)
+```
+
+---
+
+## 11. Add Your VCS Token
 
 Daedalus needs a personal access token (PAT) to poll your issues and open PRs. Tokens are **never stored in config files** — they live only in environment variables.
 
@@ -280,7 +392,7 @@ hermes gateway restart
 
 ---
 
-## 10. Triggering Work
+## 12. Triggering Work
 
 Daedalus picks up work from three sources (all enabled by default):
 
@@ -307,7 +419,7 @@ hermes kanban create --triage --workspace dir:$PWD --body "$(cat spec.md)"
 
 ---
 
-## 11. Update the Plugin
+## 13. Update the Plugin
 
 When a new version is available, the dashboard footer shows an **Update Plugin** button:
 
@@ -325,7 +437,7 @@ Then reload the browser tab.
 
 ---
 
-## 12. Remove a Project
+## 14. Remove a Project
 
 To stop Daedalus from managing a project without uninstalling the plugin:
 
@@ -339,7 +451,7 @@ The project's `.hermes/daedalus.yaml` config file is intentionally **left on dis
 
 ---
 
-## 13. Uninstall Daedalus
+## 15. Uninstall Daedalus
 
 **Option A — Dashboard button (recommended):**
 
@@ -371,7 +483,7 @@ bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh -y
 
 ---
 
-## 14. Troubleshooting
+## 16. Troubleshooting
 
 ### "Plugin not active — restart the Hermes gateway" in the dashboard
 
@@ -420,7 +532,7 @@ git config --global credential.helper ""
 
 ---
 
-## 15. What's Next
+## 17. What's Next
 
 - **Multi-user team setup:** See [SETUP.md](../SETUP.md) for sharing configuration across teammates without sharing tokens, and for how each person provisions their own roster from the same repo.
 
