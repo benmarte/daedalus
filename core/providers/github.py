@@ -437,12 +437,16 @@ class GitHubProvider(VCSProvider):
             self._log.warning("board: status '%s' not an option on #%s",
                               status_name, self._board_number)
             return False
-        item_id = next((it["id"] for it in self._items()
-                        if it.get("number") == issue_number), None)
-        if not item_id:
+        current_item = next((it for it in self._items()
+                             if it.get("number") == issue_number), None)
+        if not current_item:
             self._log.warning("board: issue #%s not on project #%s",
                               issue_number, self._board_number)
             return False
+        if (current_item.get("status") or "").lower() == (status_name or "").lower():
+            self._log.debug("board: #%s already at '%s' — skipping", issue_number, status_name)
+            return False
+        item_id = current_item["id"]
         m = """mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){
                  updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,
                    fieldId:$field,value:{singleSelectOptionId:$option}}){

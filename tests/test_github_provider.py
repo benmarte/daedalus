@@ -226,6 +226,17 @@ def test_board_set_status(provider):
     assert provider.board_set_status(7, "Done") is True
 
 
+def test_board_set_status_already_at_target(provider):
+    """board_set_status returns False (no mutation) when status is already the target."""
+    _gql_mock(provider)
+    # Item #8 is already at "Done" in ITEMS_GQL
+    assert provider.board_set_status(8, "Done") is False
+    # No updateProjectV2ItemFieldValue mutation should have fired
+    calls = [c for c in provider._http.post_json.call_args_list
+             if "updateProjectV2ItemFieldValue" in (c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")]
+    assert calls == [], "mutation fired even though status was already correct"
+
+
 def test_board_set_status_unknown_option(provider):
     """board_set_status auto-creates a missing option via board_ensure_status_option,
     then sets the status — the stateful mock simulates GitHub returning the new option."""
