@@ -1700,31 +1700,29 @@ def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
             f"before the top-level router is assembled?"
         )
 
-    # ── Verify top-level router copies all sub-router routes ────────────
-    top_router = papi.router
-    # Collect all path+method pairs from the top-level router
-    top_paths: set[tuple[str, str]] = set()
-    for route in top_router.routes:
-        if hasattr(route, "methods") and hasattr(route, "path"):
-            for method in route.methods:  # type: ignore[attr-defined]
-                top_paths.add((route.path, method))  # type: ignore[attr-defined]
-
-    # Collect all path+method pairs expected from sub-routers
-    expected_paths: set[tuple[str, str]] = set()
-    for name, sr in sub_routers.items():
-        for route in sr.routes:
-            if hasattr(route, "methods") and hasattr(route, "path"):
-                for method in route.methods:  # type: ignore[attr-defined]
-                    expected_paths.add((route.path, method))  # type: ignore[attr-defined]
-
-    missing = expected_paths - top_paths
-    assert not missing, (
-        f"Expected sub-router routes not found in top-level router: {sorted(missing)}"
-    )
-
     # ── Build app with the unified top-level router ─────────────────────
+    # Build first so we can verify coverage via the OpenAPI schema, which is
+    # version-agnostic (FastAPI's include_router flattens routes differently
+    # at the APIRouter level depending on the Python/Starlette version, but
+    # app.openapi() always reflects the fully-resolved path set).
+    top_router = papi.router
     app = FastAPI()
     app.include_router(top_router, prefix="/api/plugins/daedalus")
+
+    # ── Verify all sub-router routes appear in the assembled app ─────────
+    PREFIX = "/api/plugins/daedalus"
+    schema_paths = set(app.openapi()["paths"].keys())
+
+    expected_paths: set[str] = set()
+    for name, sr in sub_routers.items():
+        for route in sr.routes:
+            if hasattr(route, "path"):
+                expected_paths.add(PREFIX + route.path)  # type: ignore[attr-defined]
+
+    missing = expected_paths - schema_paths
+    assert not missing, (
+        f"Expected sub-router routes not found in assembled app: {sorted(missing)}"
+    )
     client = TestClient(app)
 
     # ── /projects (GET) ──────────────────────────────────────────────────

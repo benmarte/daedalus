@@ -7,25 +7,34 @@ full board/issue tracking, and zero babysitting. A single Daedalus deployment
 drives **many repos**, each with its own provider, kanban board, cron job, and
 notification channels (Slack, Discord, Telegram, Signal, WhatsApp, …).
 
-```
-issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
-      │  (cron tick — deterministic, code)
-      ▼
- Phase 1: validator task created (ONLY the validator — no other agent starts)
-      │                 │
-      │           SECURITY_THREAT → post issue comment + security-escalation
-      │           BLOCK_FOR_REVIEW → post comment listing missing details, block
-      │           ALREADY_FIXED / DUPLICATE → close issue, pipeline ends
-      │           NEEDS_MORE_INFO → block, comment asking reporter, pipeline waits
-      │           CONFIRMED: <note>  ← exact prefix triggers Phase 2
-      ▼
- Phase 2: triage card ──decompose──► developer ─► reviewer ─► security ─► documentation
-      │                                  │            │           │            │
-   board: In progress               opens PR      approves    audits     posts report
-                                  (lint/format                           to PR + your
-                                   ship gate)                            chat channels
-      ▼
-   PR green → you merge → issue auto-closed, card → Done
+```mermaid
+flowchart TD
+    A([🏁 Issue marked Ready\nGitHub · GitLab · Azure]) -->|cron tick or\ncompletion trigger| B[Dispatcher\ndaedalus_dispatch.py]
+
+    B --> C["⚡ Phase 1\nValidator task created\n— only agent active —"]
+    C --> V{Validator\nOutcome}
+
+    V -->|"CONFIRMED: &lt;note&gt;"| E["📋 Phase 2\nPM decomposes work\nacross team roster"]
+    V -->|"ALREADY_FIXED\nor DUPLICATE"| AF(["✅ Issue closed\nPipeline ends"])
+    V -->|NEEDS_MORE_INFO| NI(["⏸ Card blocked\nComment posted\nAwaits reporter response"])
+    V -->|"SECURITY_THREAT\nor BLOCK_FOR_REVIEW"| ST(["🔒 Card blocked\nIssue comment posted\nsecurity-escalation fired"])
+
+    E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
+    Dev --> CI{CI}
+    CI -->|green| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
+    Fix --> CI
+    Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
+    Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Doc --> Merge(["🔀 You merge the PR"])
+    Merge --> Done(["✅ Issue closed\nCard → Done"])
+
+    style A fill:#1976D2,color:#fff,stroke:#0D47A1
+    style AF fill:#757575,color:#fff,stroke:#424242
+    style NI fill:#F57C00,color:#fff,stroke:#E65100
+    style ST fill:#C62828,color:#fff,stroke:#B71C1C
+    style Merge fill:#388E3C,color:#fff,stroke:#1B5E20
+    style Done fill:#2E7D32,color:#fff,stroke:#1B5E20
 ```
 
 ![Daedalus dashboard — one card per managed project, showing kanban counts, open PRs with CI status, and cron schedule](docs/screenshots/guide/09-dashboard-with-project.png)
@@ -37,6 +46,12 @@ issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
 - [Why this exists](#why-this-exists-read-this-part)
 - [How it works](#how-it-works)
 - [Agent roster](#agent-roster)
+- [Customizing agents](#customizing-agents)
+  - [Custom profiles](#custom-profiles)
+  - [Skills per agent](#skills-per-agent)
+  - [Profile fallback behavior](#profile-fallback-behavior)
+  - [Comment attribution template](#comment-attribution-template)
+- [Autonomous pipeline advancement](#autonomous-pipeline-advancement)
 - [Self-healing loop](#self-healing-loop)
 - [Design decisions](#design-decisions)
 - [Multi-repo: one Daedalus, many repos](#multi-repo-one-daedalus-many-repos)
@@ -225,6 +240,178 @@ makes the pipeline repeatable rather than demo-quality.
 | `source-driven-development` | Verifies documentation accuracy against the actual code |
 | `context-engineering` | Loads only the relevant merged changes into context |
 | `using-agent-skills` | Meta-skill |
+
+---
+
+## Customizing agents
+
+Every aspect of the agent roster is configurable per project in `.hermes/daedalus.yaml`
+under `execution.profiles`. You can swap any role to your own Hermes profile, add extra
+skills to any agent, or mix both. Only the keys you specify are overridden — unspecified
+roles continue to use the built-in defaults.
+
+### Custom profiles
+
+Point any pipeline role at your own Hermes agent profile with the simple (name-only) form:
+
+```yaml
+execution:
+  profiles:
+    developer: my-senior-dev-profile
+    reviewer:  my-code-reviewer-profile
+```
+
+Or use the dict form when you also want to add skills:
+
+```yaml
+execution:
+  profiles:
+    developer:
+      profile: my-senior-dev-profile
+    reviewer:
+      profile: my-code-reviewer-profile
+```
+
+Both forms accept any role key: `validator`, `pm`, `developer`, `reviewer`, `security`,
+`documentation`.
+
+Built-in defaults (used for any unspecified role):
+
+| Role | Default profile |
+|---|---|
+| `validator` | `validator-daedalus` |
+| `pm` | `project-manager-daedalus` |
+| `developer` | `developer-daedalus` |
+| `reviewer` | `reviewer-daedalus` |
+| `security` | `security-analyst-daedalus` |
+| `documentation` | `documentation-daedalus` |
+
+### Skills per agent
+
+Attach extra Hermes skills to any agent without replacing its profile. Skills are passed
+to the worker at task-creation time via `hermes kanban create --skill <name>`, so the
+agent has them pre-loaded without needing to call `skill_view()` itself:
+
+```yaml
+execution:
+  profiles:
+    validator:
+      profile: validator-daedalus   # can also omit to keep the default profile
+      skills:
+        - security-and-hardening
+        - my-custom-threat-model
+    developer:
+      profile: my-senior-dev-profile
+      skills:
+        - incremental-implementation
+        - my-project-conventions
+```
+
+You can mix simple (name-only) and dict forms in the same `profiles` block:
+
+```yaml
+execution:
+  profiles:
+    reviewer: my-reviewer            # simple form — just swap the profile
+    developer:                       # dict form — profile + extra skills
+      profile: my-senior-dev-profile
+      skills:
+        - incremental-implementation
+```
+
+The built-in profile skills installed by `postinstall.py` are always present.
+`skills:` in the config adds **on top of** those — it never removes the built-in set.
+
+### Profile fallback behavior
+
+When a configured profile does not exist in Hermes (checked via
+`~/.hermes/profiles/<name>/` directory or `<name>.yaml` file), daedalus can either
+fall back or skip:
+
+```yaml
+execution:
+  profile_fallback_behavior: "fallback"   # default
+  # profile_fallback_behavior: "skip"
+```
+
+| Value | Behavior |
+|---|---|
+| `fallback` | (default) Log a warning, use the built-in default profile for that role. Dispatching continues normally. |
+| `skip` | Log a warning and drop the role entirely — no tasks are created for that role until the profile exists. |
+
+### Comment attribution template
+
+Every comment any agent or the dispatcher posts to a VCS issue or PR begins with a one-line attribution header so it's always clear which pipeline role wrote it:
+
+```
+**Agent: developer**
+```
+
+You can change the format project-wide in `.hermes/daedalus.yaml`:
+
+```yaml
+execution:
+  comment_header_template: "**Agent: {role}**"   # default
+```
+
+**Available placeholders:**
+
+| Placeholder | Value |
+|---|---|
+| `{role}` | Pipeline role name — `validator`, `project-manager`, `developer`, `reviewer`, `security-analyst`, `documentation`, `daedalus` |
+| `{profile}` | Hermes profile name for the role (empty if using the built-in default) |
+| `{issue}` | Issue reference, e.g. `#42` (empty when not applicable) |
+| `{pr}` | PR reference, e.g. `#7` (empty when not applicable) |
+
+**Examples:**
+
+```yaml
+# Include the profile name alongside the role
+comment_header_template: "**Agent: {role}** | {profile}"
+
+# Emoji style
+comment_header_template: "🤖 _{role} agent_"
+
+# Plain text (no markdown bold)
+comment_header_template: "Agent: {role}"
+```
+
+The template is applied to all dispatcher-posted comments (PR size warnings, forbidden-file alerts, staleness notices) and is embedded in each agent's task instructions so agent-authored comments follow the same pattern. The default `**Agent: {role}**` is consistent with the `**Agent: documentation**` sentinel the dispatcher uses internally to detect doc reports.
+
+---
+
+## Autonomous pipeline advancement
+
+Each phase transition is triggered by a **completion hook** in every agent's SOUL.md,
+not just by the hourly cron tick. When an agent marks its kanban task done, it
+immediately runs:
+
+```bash
+bash ~/.hermes/scripts/daedalus-cron.sh
+```
+
+This causes the next pipeline phase to start within seconds rather than waiting up to
+60 minutes for the next scheduled tick. The cron job is still there as a safety net
+(in case an agent crashes before reaching its final step), but it is no longer the
+primary advancement mechanism.
+
+The result is a fully autonomous pipeline: once an issue is marked Ready, the entire
+validator → PM → developer → reviewer → security-analyst → documentation chain runs
+end-to-end without any human or scheduler intervention between phases.
+
+```
+issue marked Ready
+      │
+      ▼
+validator runs → CONFIRMED: <note>
+      │   └─ agent runs daedalus-cron.sh on completion
+      ▼
+PM / project-manager runs → decompose → team roster
+      │   └─ agent runs daedalus-cron.sh on completion
+      ▼
+developer → reviewer → security-analyst → documentation
+            (each agent runs daedalus-cron.sh when done)
+```
 
 ---
 

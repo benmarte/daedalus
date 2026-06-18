@@ -119,6 +119,48 @@ Expected result: <what should happen after following the steps>
 """
 
 
+# ── agent comment header ─────────────────────────────────────────────────────
+
+# Consistent with the ``**Agent: documentation**`` sentinel the dispatcher
+# already inspects.  Override via ``execution.comment_header_template`` in
+# daedalus.yaml.  Supported placeholders: {role}, {profile}, {issue}, {pr}.
+DEFAULT_COMMENT_HEADER_TEMPLATE = "**Agent: {role}**"
+
+_ROLE_LABELS: Dict[str, str] = {
+    "validator": "validator",
+    "pm": "project-manager",
+    "developer": "developer",
+    "reviewer": "reviewer",
+    "security": "security-analyst",
+    "documentation": "documentation",
+    "daedalus": "daedalus",
+}
+
+
+def render_agent_header(
+    role: str,
+    *,
+    profile: str = "",
+    issue: Optional[int] = None,
+    pr: Optional[int] = None,
+    template: str = DEFAULT_COMMENT_HEADER_TEMPLATE,
+) -> str:
+    """Return a one-line attribution header for an agent comment.
+
+    Prepend this to every comment posted to a VCS issue or PR so it is
+    always clear which pipeline role wrote it.  Missing placeholder values
+    substitute to empty strings so the template never raises ``KeyError``.
+    """
+    label = _ROLE_LABELS.get(role, role)
+    ctx = {
+        "role": label,
+        "profile": profile or "",
+        "issue": f"#{issue}" if issue else "",
+        "pr": f"#{pr}" if pr else "",
+    }
+    return template.format_map(ctx)
+
+
 # ── dispatch summary ──────────────────────────────────────────────────────────
 
 def render_dispatch_summary(

@@ -220,13 +220,18 @@ def create_task(
     workspace: str = "",
     idempotency_key: str = "",
     parents: Optional[List[str]] = None,
+    skills: Optional[List[str]] = None,
     goal: bool = False,
     goal_max_turns: Optional[int] = None,
+    max_retries: Optional[int] = None,
 ) -> Optional[str]:
     """Create a regular (non-triage) task. Returns task id or None.
 
+    ``skills`` attaches named Hermes skills to the task so the worker has them
+    pre-loaded without needing to call skill_view() themselves.
     ``goal`` spawns the worker in goal mode (multi-turn with adjudication).
     ``goal_max_turns`` sets the turn budget (only meaningful when goal=True).
+    ``max_retries`` overrides the default failure-before-block retry cap.
     """
     args = ["--board", slug, "create", title]
     if body:
@@ -240,6 +245,11 @@ def create_task(
     if parents:
         for p in parents:
             args += ["--parent", p]
+    if skills:
+        for s in skills:
+            args += ["--skill", s]
+    if max_retries is not None:
+        args += ["--max-retries", str(max_retries)]
     if goal:
         args += ["--goal"]
         if goal_max_turns is not None:

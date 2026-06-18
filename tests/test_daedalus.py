@@ -15,6 +15,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import ConfigLoader, deep_merge  # noqa: E402
 from core import kanban  # noqa: E402
 
+# Save original kanban function references before any test can monkey-patch them.
+# Used by test_ensure_board_* to restore the real functions when prior tests
+# have replaced them with lambdas (cross-test contamination guard).
+_ORIG_KANBAN = {
+    "ensure_board": kanban.ensure_board,
+    "_hk": kanban._hk,
+    "list_blocked": getattr(kanban, "list_blocked", None),
+    "list_issue_numbers": kanban.list_issue_numbers,
+    "decompose_all_triage": getattr(kanban, "decompose_all_triage", None),
+    "create_triage": kanban.create_triage,
+    "decompose": kanban.decompose,
+    "dispatch": kanban.dispatch,
+    "create_task": kanban.create_task,
+    "list_tasks": kanban.list_tasks,
+}
+
 
 class _FakeProvider:
     """Stands in for a core.providers.VCSProvider in dispatcher tests."""
@@ -140,7 +156,8 @@ def test_config_loader_resolve():
 
 # ── kanban: ls parsing ───────────────────────────────────────────────────────
 def test_kanban_list_issue_numbers():
-    with mock.patch.object(kanban, "_hk", return_value=(0, "#329 foo\n#42 bar\nno-number\n", "")):
+    tasks = [{"title": "#329 foo"}, {"title": "#42 bar"}, {"title": "no-number"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=tasks):
         nums = kanban.list_issue_numbers("board")
     check("list_issue_numbers parses #n from board output", nums == {329, 42})
 
@@ -178,6 +195,8 @@ def test_kanban_review_handoff_pr():
 
 def test_ensure_board_creates():
     """ensure_board runs 'hermes kanban boards create <slug>' and succeeds on rc=0."""
+    # Restore the original ensure_board in case a prior test monkey-patched it.
+    kanban.ensure_board = _ORIG_KANBAN["ensure_board"]
     captured = {}
 
     def fake_hk(args, timeout=60):
@@ -193,6 +212,7 @@ def test_ensure_board_creates():
 
 def test_ensure_board_already_exists():
     """ensure_board treats 'already exists' stderr as success (idempotent)."""
+    kanban.ensure_board = _ORIG_KANBAN["ensure_board"]
     captured = {}
 
     def fake_hk(args, timeout=60):
@@ -206,6 +226,7 @@ def test_ensure_board_already_exists():
 
 def test_ensure_board_failure():
     """ensure_board returns False + warns on genuine failure."""
+    kanban.ensure_board = _ORIG_KANBAN["ensure_board"]
     with mock.patch.object(kanban, "_hk", return_value=(1, "", "permission denied")):
         with mock.patch.object(kanban.logger, "warning") as mw:
             ok = kanban.ensure_board("my-board")
@@ -303,20 +324,25 @@ def test_resolve_repo_config_missing_file():
 def test_dispatch_dual_mode():
     disp = _load_dispatch()
     calls = {"decompose_all": 0, "create_triage": 0, "create_task": 0, "fetch_issues": 0}
-    disp.kanban.ensure_board = lambda s: None
-    disp.kanban.list_blocked = lambda s: []
-    disp.kanban.list_issue_numbers = lambda s: set()
-    disp.kanban.decompose_all_triage = lambda s: calls.__setitem__("decompose_all", calls["decompose_all"] + 1) or True
-    disp.kanban.create_triage = lambda *a, **k: calls.__setitem__("create_triage", calls["create_triage"] + 1) or "t_x"
-    disp.kanban.decompose = lambda *a, **k: True
-    disp.kanban.dispatch = lambda s, max_spawns=5: True
-    disp._fetch_issues = lambda r, f: (calls.__setitem__("fetch_issues", calls["fetch_issues"] + 1) or [{"number": 1, "title": "t"}])
-    base = {"repo": "O/R", "workdir": "/tmp", "name": "x", "issues": {"filters": {}}, "execution": {}}
-
-    # Save and restore create_task + list_tasks to avoid cross-file test isolation issues
-    _orig_create_task = disp.kanban.create_task
-    _orig_list_tasks = disp.kanban.list_tasks
+    # Save originals for every kanban function we monkey-patch so cross-test
+    # contamination (e.g. test_ensure_board_creates) cannot occur.
+    _saved = {
+        k: getattr(disp.kanban, k)
+        for k in ("ensure_board", "list_blocked", "list_issue_numbers",
+                  "decompose_all_triage", "create_triage", "decompose",
+                  "dispatch", "create_task", "list_tasks")
+    }
     try:
+        disp.kanban.ensure_board = lambda s: None
+        disp.kanban.list_blocked = lambda s: []
+        disp.kanban.list_issue_numbers = lambda s: set()
+        disp.kanban.decompose_all_triage = lambda s: calls.__setitem__("decompose_all", calls["decompose_all"] + 1) or True
+        disp.kanban.create_triage = lambda *a, **k: calls.__setitem__("create_triage", calls["create_triage"] + 1) or "t_x"
+        disp.kanban.decompose = lambda *a, **k: True
+        disp.kanban.dispatch = lambda s, max_spawns=5: True
+        disp._fetch_issues = lambda r, f: (calls.__setitem__("fetch_issues", calls["fetch_issues"] + 1) or [{"number": 1, "title": "t"}])
+        base = {"repo": "O/R", "workdir": "/tmp", "name": "x", "issues": {"filters": {}}, "execution": {}}
+
         disp.kanban.list_tasks = lambda *a, **k: []  # no confirmed validators yet
         disp.kanban.create_task = lambda *a, **k: calls.__setitem__("create_task", calls["create_task"] + 1) or "t_v"
 
@@ -335,8 +361,8 @@ def test_dispatch_dual_mode():
         check("github mode does NOT use decompose --all", calls["decompose_all"] == 1)
         check("board mode reports provider name", s2.get("mode") == "github")
     finally:
-        disp.kanban.create_task = _orig_create_task
-        disp.kanban.list_tasks = _orig_list_tasks
+        for k, v in _saved.items():
+            setattr(disp.kanban, k, v)
 
 
 # ── main(): registry sweep ──────────────────────────────────────────────────
@@ -902,7 +928,7 @@ def test_priority_sort_p0_before_unlabeled():
 
     class FP(_FakeProvider):
         def board_configured(self): return True
-        def board_numbers_with_statuses(self, names): return set()
+        def board_numbers_with_statuses(self, names): return {1, 2}
         def list_issues(self, state="open", labels=None, limit=50):
             return [
                 IssueSummary(number=2, title="normal", labels=[]),
@@ -918,7 +944,7 @@ def test_priority_sort_p0_before_unlabeled():
 
     _orig_create_task = disp.kanban.create_task
     try:
-        def fake_create(slug, title, body, *, assignee="", idempotency_key="", workspace="", max_retries=None):
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
             m = __import__("re").search(r"#(\d+)", title)
             if m:
                 dispatched.append(int(m.group(1)))
@@ -1267,6 +1293,451 @@ def test_label_overrides_security_first():
           sec_pos != -1 and dev_pos != -1 and sec_pos < dev_pos)
 
 
+# ── custom profiles ───────────────────────────────────────────────────────────
+
+def test_resolve_profiles_defaults():
+    """_resolve_profiles returns all defaults when no overrides supplied."""
+    disp = _load_dispatch()
+    p = disp._resolve_profiles({})
+    check("defaults include validator", p["validator"] == "validator-daedalus")
+    check("defaults include pm", p["pm"] == "project-manager-daedalus")
+    check("defaults include developer", p["developer"] == "developer-daedalus")
+    check("defaults include reviewer", p["reviewer"] == "reviewer-daedalus")
+    check("defaults include security", p["security"] == "security-analyst-daedalus")
+    check("defaults include documentation", p["documentation"] == "documentation-daedalus")
+
+
+def test_resolve_profiles_user_overrides():
+    """User-specified profiles override defaults; unspecified roles keep defaults."""
+    disp = _load_dispatch()
+    p = disp._resolve_profiles({"profiles": {"developer": "my-dev", "pm": "my-pm"}})
+    check("user developer profile applied", p["developer"] == "my-dev")
+    check("user pm profile applied", p["pm"] == "my-pm")
+    check("unspecified validator keeps default", p["validator"] == "validator-daedalus")
+    check("unspecified reviewer keeps default", p["reviewer"] == "reviewer-daedalus")
+
+
+def test_resolve_profiles_ignores_unknown_keys():
+    """Unknown role keys in execution.profiles are silently ignored."""
+    disp = _load_dispatch()
+    p = disp._resolve_profiles({"profiles": {"developer": "my-dev", "nonexistent_role": "x"}})
+    check("known key applied", p["developer"] == "my-dev")
+    check("unknown key not in result", "nonexistent_role" not in p)
+
+
+def test_resolve_profiles_ignores_empty_strings():
+    """Empty-string profile values are ignored (would create tasks with no assignee)."""
+    disp = _load_dispatch()
+    p = disp._resolve_profiles({"profiles": {"validator": "", "pm": "my-pm"}})
+    check("empty string falls back to default", p["validator"] == "validator-daedalus")
+    check("non-empty override applied", p["pm"] == "my-pm")
+
+
+def test_custom_validator_profile_used_in_dispatch():
+    """Validator task is created with the custom profile from execution.profiles."""
+    from core.providers.base import IssueSummary
+    disp = _load_dispatch()
+    assigned = []
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return {42}
+        def list_issues(self, state="open", labels=None, limit=50):
+            return [IssueSummary(number=42, title="bug", labels=[])]
+        def pr_state_for_issue(self, n): return None
+        def get_issue_state(self, n): return "open"
+
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_issue_numbers = lambda s: set()
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+    disp.kanban.list_tasks = lambda *a, **k: []
+
+    _orig = disp.kanban.create_task
+    # Pretend every configured profile exists so _validate_profiles doesn't
+    # override the custom name with the built-in default.
+    _orig_exists = disp._hermes_profile_exists
+    try:
+        disp._hermes_profile_exists = lambda name: True
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
+            assigned.append(assignee)
+            return "t1"
+        disp.kanban.create_task = fake_create
+        disp.run(
+            {"repo": "O/R", "workdir": "/tmp", "name": "x",
+             "issues": {"filters": {}},
+             "execution": {"profiles": {"validator": "my-validator"}},
+             "tracking": {"github_project_number": 1}},
+            provider=FP(),
+        )
+    finally:
+        disp.kanban.create_task = _orig
+        disp._hermes_profile_exists = _orig_exists
+
+    check("custom validator profile used for task creation",
+          "my-validator" in assigned)
+
+
+def test_custom_pm_profile_used_after_validator_confirms():
+    """PM task is created with the custom pm profile when validator confirms."""
+    disp = _load_dispatch()
+    assigned = []
+
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+
+    # Validator is done and confirmed; no PM task yet
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return [{"title": "#7 some issue", "assignee": "validator-daedalus",
+                     "summary": "CONFIRMED: reproduced at main", "status": "done"}]
+        return []
+
+    _orig = disp.kanban.create_task
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
+            assigned.append(assignee)
+            return "t2"
+        disp.kanban.create_task = fake_create
+        disp._check_confirmed_validators(
+            "slug", "O/R",
+            {7: {"number": 7, "title": "some issue", "body": ""}},
+            3, "/tmp", "", "main", "github",
+            profiles={"validator": "validator-daedalus", "pm": "my-pm",
+                      "developer": "developer-daedalus", "reviewer": "reviewer-daedalus",
+                      "security": "security-analyst-daedalus", "documentation": "documentation-daedalus"},
+        )
+    finally:
+        disp.kanban.create_task = _orig
+
+    check("custom pm profile used for PM task creation", "my-pm" in assigned)
+
+
+# ── profile validation (issue #16) ────────────────────────────────────────────
+
+def test_hermes_profile_exists_directory():
+    """_hermes_profile_exists returns True for a directory-based profile."""
+    from pathlib import Path
+    import tempfile
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        profile_dir = Path(tmpdir) / ".hermes" / "profiles" / "my-profile"
+        profile_dir.mkdir(parents=True)
+        with mock.patch.object(disp.Path, "home", return_value=Path(tmpdir)):
+            check("directory profile exists", disp._hermes_profile_exists("my-profile") is True)
+            check("non-existent profile returns False", disp._hermes_profile_exists("no-such") is False)
+
+
+def test_hermes_profile_exists_yaml():
+    """_hermes_profile_exists returns True for a single-file YAML profile."""
+    from pathlib import Path
+    import tempfile
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        profiles_dir = Path(tmpdir) / ".hermes" / "profiles"
+        profiles_dir.mkdir(parents=True)
+        (profiles_dir / "yaml-profile.yaml").write_text("name: yaml-profile\n")
+        with mock.patch.object(disp.Path, "home", return_value=Path(tmpdir)):
+            check("yaml profile exists", disp._hermes_profile_exists("yaml-profile") is True)
+
+
+def test_validate_profiles_all_present_no_warning():
+    """When every profile exists, _validate_profiles returns the input unchanged and logs nothing."""
+    import logging
+    disp = _load_dispatch()
+    profiles = {
+        "validator": "validator-daedalus",
+        "pm": "project-manager-daedalus",
+        "developer": "developer-daedalus",
+        "reviewer": "reviewer-daedalus",
+        "security": "security-analyst-daedalus",
+        "documentation": "documentation-daedalus",
+    }
+    with mock.patch.object(disp, "_hermes_profile_exists", return_value=True):
+        with mock.patch.object(disp.logger, "warning") as warn:
+            result = disp._validate_profiles(profiles)
+    check("all-present returns original map", result == profiles)
+    check("no warning logged when all profiles exist", warn.call_count == 0)
+
+
+def test_validate_profiles_missing_warns_with_role_and_name():
+    """A missing profile logs a warning naming the role AND the missing profile name."""
+    disp = _load_dispatch()
+    profiles = {"validator": "validator-daedalus", "developer": "does-not-exist"}
+    # validator exists, developer does not
+    def exists(name):
+        return name != "does-not-exist"
+    with mock.patch.object(disp, "_hermes_profile_exists", side_effect=exists):
+        with mock.patch.object(disp.logger, "warning") as warn:
+            result = disp._validate_profiles(profiles)
+    # Warning should mention both the role ('developer') and the profile name ('does-not-exist')
+    calls_as_text = " ".join(str(c) for c in warn.call_args_list)
+    check("warning mentions the missing profile name", "'does-not-exist'" in calls_as_text or "does-not-exist" in calls_as_text)
+    check("warning mentions the role", "'developer'" in calls_as_text or "developer" in calls_as_text)
+    # Fallback behavior: developer should be replaced with the built-in default
+    check("missing profile falls back to default",
+          result["developer"] == disp._DEFAULT_PROFILES["developer"])
+    # Existing profiles are untouched
+    check("existing profile unchanged", result["validator"] == "validator-daedalus")
+
+
+def test_validate_profiles_skip_behavior_drops_missing():
+    """With fallback_behavior='skip', missing profiles are dropped from the map."""
+    disp = _load_dispatch()
+    profiles = {"validator": "validator-daedalus", "developer": "does-not-exist"}
+    def exists(name):
+        return name != "does-not-exist"
+    with mock.patch.object(disp, "_hermes_profile_exists", side_effect=exists):
+        with mock.patch.object(disp.logger, "warning") as warn:
+            result = disp._validate_profiles(profiles, fallback_behavior="skip")
+    check("skip behavior drops missing role", "developer" not in result)
+    check("skip behavior keeps existing role", result["validator"] == "validator-daedalus")
+    check("skip warning mentions skipping", "skipping" in str(warn.call_args_list).lower() or "Skipping" in str(warn.call_args_list))
+
+
+def test_validate_profiles_fallback_explicit():
+    """With fallback_behavior='fallback' (default), missing roles fall back to built-ins."""
+    disp = _load_dispatch()
+    profiles = {"validator": "bad-name", "pm": "project-manager-daedalus"}
+    def exists(name):
+        return name != "bad-name"
+    with mock.patch.object(disp, "_hermes_profile_exists", side_effect=exists):
+        result = disp._validate_profiles(profiles, fallback_behavior="fallback")
+    check("explicit fallback replaces with default",
+          result["validator"] == disp._DEFAULT_PROFILES["validator"])
+    check("non-missing profile kept as-is", result["pm"] == "project-manager-daedalus")
+
+
+def test_profile_validation_runs_once_per_dispatch_tick():
+    """_validate_profiles is called exactly once per run() invocation (not per issue)."""
+    from core.providers.base import IssueSummary
+    disp = _load_dispatch()
+
+    call_count = {"n": 0}
+    orig_validate = disp._validate_profiles
+
+    def counting_validate(profiles, **kw):
+        call_count["n"] += 1
+        return orig_validate(profiles, **kw)
+
+    class FP(_FakeProvider):
+        def board_configured(self): return True
+        def board_numbers_with_statuses(self, names): return {1, 2, 3}
+        def list_issues(self, state="open", labels=None, limit=50):
+            return [
+                IssueSummary(number=n, title=f"issue {n}", labels=[])
+                for n in (1, 2, 3)
+            ]
+        def pr_state_for_issue(self, n): return None
+        def get_issue_state(self, n): return "open"
+
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_issue_numbers = lambda s: set()
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+    disp.kanban.list_tasks = lambda *a, **k: []
+    disp._fetch_issues = lambda r, f: [{"number": n, "title": f"issue {n}"} for n in (1, 2, 3)]
+    _orig_create = disp.kanban.create_task
+    try:
+        disp.kanban.create_task = lambda *a, **k: "t_x"
+        disp._validate_profiles = counting_validate
+        disp.run({
+            "repo": "O/R", "workdir": "/tmp", "name": "x",
+            "tracking": {"github_project_number": 1},
+            "issues": {"filters": {}},
+            "execution": {},
+        }, provider=FP())
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp._validate_profiles = orig_validate
+
+    check("validate_profiles called exactly once per tick", call_count["n"] == 1)
+
+
+# ── PM consultation (team blocker re-activation) ──────────────────────────────
+
+def test_has_active_pm_consultation_true():
+    """_has_active_pm_consultation returns True when an open consult task exists."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "consult: #5 login bug", "assignee": "project-manager-daedalus", "status": "in_progress"},
+    ]
+    check("active consult detected", disp._has_active_pm_consultation("slug", 5) is True)
+
+
+def test_has_active_pm_consultation_false_when_done():
+    """_has_active_pm_consultation returns False when the consult task is done."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "consult: #5 login bug", "assignee": "pm-daedalus", "status": "done"},
+    ]
+    check("done consult not counted as active", disp._has_active_pm_consultation("slug", 5) is False)
+
+
+def test_has_active_pm_consultation_false_for_spec_task():
+    """_has_active_pm_consultation ignores regular PM spec tasks."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "pm-daedalus", "status": "in_progress"},
+    ]
+    check("spec task not counted as consult", disp._has_active_pm_consultation("slug", 5) is False)
+
+
+def test_check_team_blockers_creates_pm_consultation():
+    """_check_team_blockers creates a PM consultation for a blocked team card."""
+    disp = _load_dispatch()
+    created_titles = []
+    assigned_to = []
+
+    disp.kanban.list_blocked = lambda s: [
+        {"title": "#9 feature", "assignee": "developer-daedalus",
+         "summary": "BLOCKED: cannot resolve import path"},
+    ]
+
+    def fake_list_tasks(s):
+        return []  # no active consultation
+
+    _orig = disp.kanban.create_task
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        def fake_create(slug, title, body="", *, assignee="", idempotency_key="", workspace="", max_retries=None, skills=None, goal=False, goal_max_turns=None, parents=None):
+            created_titles.append(title)
+            assigned_to.append(assignee)
+            return "consult_t1"
+        disp.kanban.create_task = fake_create
+        triggered = disp._check_team_blockers(
+            "slug", "O/R",
+            {9: {"number": 9, "title": "feature", "body": "desc"}},
+            "/tmp", "main", "github",
+        )
+    finally:
+        disp.kanban.create_task = _orig
+
+    check("blocker triggers PM consultation", 9 in triggered)
+    check("consultation task title starts with consult:",
+          any(t.lower().startswith("consult:") for t in created_titles))
+    check("consultation assigned to default pm profile", assigned_to and assigned_to[0] in ("pm-daedalus", "project-manager-daedalus"))
+
+
+def test_check_team_blockers_skips_when_consult_active():
+    """_check_team_blockers skips creation if an active consultation already exists."""
+    disp = _load_dispatch()
+    created = []
+
+    disp.kanban.list_blocked = lambda s: [
+        {"title": "#9 feature", "assignee": "developer-daedalus",
+         "summary": "BLOCKED: still stuck"},
+    ]
+    # Active consultation already open
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "consult: #9 feature", "assignee": "project-manager-daedalus", "status": "in_progress"},
+    ]
+
+    _orig = disp.kanban.create_task
+    try:
+        disp.kanban.create_task = lambda *a, **k: (created.append(1) or "t")
+        triggered = disp._check_team_blockers(
+            "slug", "O/R",
+            {9: {"number": 9, "title": "feature", "body": "desc"}},
+            "/tmp", "main", "github",
+        )
+    finally:
+        disp.kanban.create_task = _orig
+
+    check("no duplicate consultation when one is active", triggered == [])
+    check("no task created", created == [])
+
+
+def test_check_team_blockers_skips_escalation():
+    """_check_team_blockers ignores cards with ESCALATE: summaries (security blocks)."""
+    disp = _load_dispatch()
+    created = []
+
+    disp.kanban.list_blocked = lambda s: [
+        {"title": "#9 feature", "assignee": "developer-daedalus",
+         "summary": "ESCALATE: security threat detected"},
+    ]
+    disp.kanban.list_tasks = lambda s: []
+
+    _orig = disp.kanban.create_task
+    try:
+        disp.kanban.create_task = lambda *a, **k: (created.append(1) or "t")
+        triggered = disp._check_team_blockers(
+            "slug", "O/R",
+            {9: {"number": 9, "title": "feature", "body": "desc"}},
+            "/tmp", "main", "github",
+        )
+    finally:
+        disp.kanban.create_task = _orig
+
+    check("ESCALATE: blocks not treated as PM blockers", triggered == [])
+    check("no consultation created for security escalation", created == [])
+
+
+def test_check_team_blockers_skips_validator_cards():
+    """_check_team_blockers ignores cards assigned to validator or PM profiles."""
+    disp = _load_dispatch()
+    created = []
+
+    disp.kanban.list_blocked = lambda s: [
+        {"title": "#3 issue", "assignee": "validator-daedalus",
+         "summary": "BLOCKED: needs more info"},
+        {"title": "#3 issue", "assignee": "project-manager-daedalus",
+         "summary": "BLOCKED: unclear scope"},
+    ]
+    disp.kanban.list_tasks = lambda s: []
+
+    _orig = disp.kanban.create_task
+    try:
+        disp.kanban.create_task = lambda *a, **k: (created.append(1) or "t")
+        triggered = disp._check_team_blockers(
+            "slug", "O/R",
+            {3: {"number": 3, "title": "issue", "body": ""}},
+            "/tmp", "main", "github",
+        )
+    finally:
+        disp.kanban.create_task = _orig
+
+    check("validator blocks not treated as PM blockers", triggered == [])
+    check("PM blocks not treated as PM blockers (already PM)", created == [])
+
+
+def test_pm_consultation_body_content():
+    """_pm_consultation_body includes blocker info and CLARIFIED: instructions."""
+    disp = _load_dispatch()
+    body = disp._pm_consultation_body(
+        "O/R", {"number": 12, "title": "login bug"}, "BLOCKED: can't find auth middleware",
+        "/tmp", "github",
+    )
+    check("consultation body mentions TEAM BLOCKER", "TEAM BLOCKER" in body)
+    check("consultation body includes the blocker summary",
+          "can't find auth middleware" in body)
+    check("consultation body requires CLARIFIED: prefix", "CLARIFIED: " in body)
+    check("consultation body forbids writing code", "DO NOT write code" in body)
+
+
+def test_has_pm_tasks_excludes_consultations():
+    """_has_pm_tasks returns False for consultation tasks (title starts with consult:)."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "consult: #5 login bug", "assignee": "pm-daedalus", "status": "in_progress"},
+    ]
+    check("consultation task not counted as PM spec task",
+          disp._has_pm_tasks("slug", 5) is False)
+
+
+def test_has_pm_tasks_true_for_spec_task():
+    """_has_pm_tasks returns True for a PM spec task (no consult: prefix)."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus", "status": "in_progress"},
+    ]
+    check("spec task correctly detected as PM task",
+          disp._has_pm_tasks("slug", 5) is True)
+
+
 # ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
 # (Patch _FakeProvider at module level to avoid test-isolation issues)
 
@@ -1313,7 +1784,29 @@ if __name__ == "__main__":
                test_forbidden_file_guard_warns_once, test_forbidden_file_guard_idempotent,
                test_staleness_warns_when_over_threshold,
                test_staleness_silent_when_under_threshold,
-               test_label_overrides_skip_developer, test_label_overrides_security_first):
+               test_label_overrides_skip_developer, test_label_overrides_security_first,
+               test_resolve_profiles_defaults, test_resolve_profiles_user_overrides,
+               test_resolve_profiles_ignores_unknown_keys,
+               test_resolve_profiles_ignores_empty_strings,
+               test_custom_validator_profile_used_in_dispatch,
+               test_custom_pm_profile_used_after_validator_confirms,
+               test_hermes_profile_exists_directory,
+               test_hermes_profile_exists_yaml,
+               test_validate_profiles_all_present_no_warning,
+               test_validate_profiles_missing_warns_with_role_and_name,
+               test_validate_profiles_skip_behavior_drops_missing,
+               test_validate_profiles_fallback_explicit,
+               test_profile_validation_runs_once_per_dispatch_tick,
+               test_has_active_pm_consultation_true,
+               test_has_active_pm_consultation_false_when_done,
+               test_has_active_pm_consultation_false_for_spec_task,
+               test_check_team_blockers_creates_pm_consultation,
+               test_check_team_blockers_skips_when_consult_active,
+               test_check_team_blockers_skips_escalation,
+               test_check_team_blockers_skips_validator_cards,
+               test_pm_consultation_body_content,
+               test_has_pm_tasks_excludes_consultations,
+               test_has_pm_tasks_true_for_spec_task):
         fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")

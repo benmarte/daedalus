@@ -63,6 +63,124 @@ _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
 _DEFAULT_FORBIDDEN = [".env", "*.pem", "*.key", "*.p12", "*.pfx", ".env.*",
                       "*.secrets", "secrets.*"]
 
+# Default Hermes profile names for each pipeline role.  Users can override any
+# of these via ``execution.profiles`` in daedalus.yaml.
+_DEFAULT_PROFILES: Dict[str, str] = {
+    "validator": "validator-daedalus",
+    "pm": "project-manager-daedalus",
+    "developer": "developer-daedalus",
+    "reviewer": "reviewer-daedalus",
+    "security": "security-analyst-daedalus",
+    "documentation": "documentation-daedalus",
+}
+
+
+def _resolve_profiles(execution: Dict[str, Any]) -> Dict[str, str]:
+    """Return effective profile map: defaults merged with any user overrides.
+
+    Each entry in ``execution.profiles`` may be a plain string (profile name
+    override) or a dict with optional ``profile`` and ``skills`` keys:
+
+        profiles:
+          developer: my-senior-dev          # string: profile override only
+          reviewer:
+            profile: my-reviewer            # dict: explicit profile override
+            skills: [strict-review]         # dict: skills attached to every task
+          security:
+            skills: [owasp-top10]           # dict: keep default profile, add skills
+
+    Unknown role keys are silently ignored to prevent typos from creating
+    orphaned tasks.
+    """
+    user: Dict[str, str] = {}
+    for k, v in ((execution or {}).get("profiles") or {}).items():
+        if k not in _DEFAULT_PROFILES:
+            continue
+        if isinstance(v, str) and v.strip():
+            user[k] = v.strip()
+        elif isinstance(v, dict):
+            name = (v.get("profile") or "").strip()
+            if name:
+                user[k] = name
+    return {**_DEFAULT_PROFILES, **user}
+
+
+def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Return per-role skill lists from ``execution.profiles``.
+
+    Only the ``skills`` key inside a dict-form profile entry is used.
+    String-form entries contribute no skills (they only override the profile name).
+    """
+    result: Dict[str, List[str]] = {}
+    for k, v in ((execution or {}).get("profiles") or {}).items():
+        if k not in _DEFAULT_PROFILES:
+            continue
+        if isinstance(v, dict):
+            skills = [s for s in (v.get("skills") or []) if isinstance(s, str) and s.strip()]
+            if skills:
+                result[k] = skills
+    return result
+
+
+def _hermes_profile_exists(name: str) -> bool:
+    """Check whether a Hermes profile exists via filesystem (fast, no subprocess).
+
+    Hermes stores profiles as directories (``~/.hermes/profiles/<name>/``) or
+    single-file YAML (``~/.hermes/profiles/<name>.yaml``).
+    """
+    profiles_dir = Path.home() / ".hermes" / "profiles"
+    return (profiles_dir / name).is_dir() or (profiles_dir / f"{name}.yaml").is_file()
+
+
+def _validate_profiles(
+    profiles: Dict[str, str],
+    *,
+    fallback_behavior: str = "fallback",
+) -> Dict[str, str]:
+    """Validate that every resolved profile name exists in Hermes.
+
+    For each missing profile, logs a warning naming the role and the missing
+    profile so the user knows exactly what to fix.  Behavior depends on
+    ``fallback_behavior``:
+
+    * ``"fallback"`` (default) — replace the missing profile with the built-in
+      default for that role, so dispatching continues with a known-good assignee.
+    * ``"skip"`` — drop the role entirely so no tasks are created for it until
+      the profile is configured.
+
+    The check is a plain filesystem lookup — no subprocess calls, no external
+    I/O — so it is safe in the hot path but only invoked once per dispatch tick.
+    """
+    missing: Dict[str, str] = {}
+    for role, name in profiles.items():
+        if not _hermes_profile_exists(name):
+            missing[role] = name
+
+    if not missing:
+        return profiles
+
+    for role, name in missing.items():
+        default_name = _DEFAULT_PROFILES.get(role, "?")
+        logger.warning(
+            "Hermes profile %r for role %r does not exist "
+            "(checked ~/.hermes/profiles/%s/ and ~/.hermes/profiles/%s.yaml). "
+            "Create it with `hermes profile create %s` or remove the override. "
+            "%s",
+            name, role, name, name, name,
+            (f"Falling back to default profile {default_name!r}."
+             if fallback_behavior != "skip"
+             else f"Skipping dispatch for role {role!r} until the profile exists."),
+        )
+
+    if fallback_behavior == "skip":
+        return {k: v for k, v in profiles.items() if k not in missing}
+
+    return {
+        role: (profiles[role] if role not in missing
+               else _DEFAULT_PROFILES.get(role, profiles[role]))
+        for role in profiles
+    }
+
 
 def _notify_targets(resolved: Dict[str, Any], event: str) -> List[str]:
     """Delivery targets for a notification event.
@@ -565,7 +683,8 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
 _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
 
 
-def _has_notified_block(slug: str, issue_number: int) -> bool:
+def _has_notified_block(slug: str, issue_number: int,
+                        validator_profile: str = "validator-daedalus") -> bool:
     """Return True if we already sent a block-escalation notification for this issue.
 
     Uses the validator kanban task's comments as a persistent, zero-overhead
@@ -575,7 +694,7 @@ def _has_notified_block(slug: str, issue_number: int) -> bool:
     for task in kanban.list_tasks(slug):
         if pattern not in (task.get("title") or ""):
             continue
-        if (task.get("assignee") or "") != "validator-daedalus":
+        if (task.get("assignee") or "") != validator_profile:
             continue
         tid = str(task.get("id") or task.get("task_id") or "")
         if not tid:
@@ -589,13 +708,14 @@ def _has_notified_block(slug: str, issue_number: int) -> bool:
     return False
 
 
-def _mark_notified_block(slug: str, issue_number: int) -> None:
+def _mark_notified_block(slug: str, issue_number: int,
+                         validator_profile: str = "validator-daedalus") -> None:
     """Stamp the validator task so future ticks skip re-sending the escalation."""
     pattern = f"#{issue_number}"
     for task in kanban.list_tasks(slug):
         if pattern not in (task.get("title") or ""):
             continue
-        if (task.get("assignee") or "") != "validator-daedalus":
+        if (task.get("assignee") or "") != validator_profile:
             continue
         tid = str(task.get("id") or task.get("task_id") or "")
         if tid:
@@ -603,28 +723,59 @@ def _mark_notified_block(slug: str, issue_number: int) -> None:
             return
 
 
-def _has_downstream_tasks(slug: str, issue_number: int) -> bool:
+def _has_downstream_tasks(slug: str, issue_number: int, *,
+                          validator_profile: str = "validator-daedalus",
+                          pm_profile: str = "project-manager-daedalus") -> bool:
     """Return True if any non-validator, non-PM kanban task exists for issue_number.
 
     Used by _check_completed_pm to avoid creating duplicate team triage cards.
     """
     pattern = f"#{issue_number}"
+    pipeline_profiles = {validator_profile, pm_profile}
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
         assignee = (t.get("assignee") or "").strip()
-        if assignee not in ("validator-daedalus", "pm-daedalus"):
+        if assignee not in pipeline_profiles:
             return True  # triage card or downstream role task (developer/reviewer/etc.)
     return False
 
 
-def _has_pm_tasks(slug: str, issue_number: int) -> bool:
-    """Return True if a PM task already exists for issue_number."""
+def _has_pm_tasks(slug: str, issue_number: int,
+                  pm_profile: str = "project-manager-daedalus") -> bool:
+    """Return True if a PM spec task already exists for issue_number."""
     pattern = f"#{issue_number}"
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
-        if (t.get("assignee") or "").strip() == "pm-daedalus":
+        assignee = (t.get("assignee") or "").strip()
+        if assignee != pm_profile:
+            continue
+        # Distinguish spec tasks from consultation tasks by title prefix
+        title = (t.get("title") or "").lower()
+        if not title.startswith("consult:"):
+            return True
+    return False
+
+
+def _has_active_pm_consultation(slug: str, issue_number: int,
+                                pm_profile: str = "project-manager-daedalus") -> bool:
+    """Return True if there is a non-done PM consultation task for issue_number.
+
+    Used to prevent creating duplicate consultation tasks when a team blocker
+    is still awaiting PM response.
+    """
+    pattern = f"#{issue_number}"
+    for t in kanban.list_tasks(slug):
+        title = (t.get("title") or "")
+        if pattern not in title:
+            continue
+        if (t.get("assignee") or "").strip() != pm_profile:
+            continue
+        if not title.lower().startswith("consult:"):
+            continue
+        status = (t.get("status") or "").lower()
+        if status != "done":
             return True
     return False
 
@@ -634,6 +785,8 @@ def _check_confirmed_validators(
     iterations: int, workdir: str, notify_target: str, base_branch: str,
     provider_name: str, security_notify_targets: Optional[List[str]] = None,
     label_overrides: Optional[Dict[str, Any]] = None,
+    profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
     *, dry_run: bool = False,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
@@ -642,11 +795,20 @@ def _check_confirmed_validators(
     Runs each tick so the PM phase starts as soon as the validator completes.
     Idempotency via 'pm-{n}' key prevents duplicate PM cards.
     """
+    p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
     triggered: List[int] = []
     for task in kanban.list_tasks(slug, status="done"):
-        if (task.get("assignee") or "").strip() != "validator-daedalus":
+        if (task.get("assignee") or "").strip() != p["validator"]:
             continue
+        # `hermes kanban list --json` omits the summary; fetch it from show.
+        # Fall back to inline fields so unit-test mocks that stub list_tasks
+        # with summary pre-populated still work without calling show_card.
+        tid = (task.get("id") or task.get("task_id") or "").strip()
         summary_raw = (task.get("summary") or task.get("last_summary") or "").strip()
+        if not summary_raw and tid:
+            card = kanban.show_card(slug, tid) or {}
+            summary_raw = (card.get("latest_summary") or "").strip()
         summary = summary_raw.lower()
         if not summary.startswith("confirmed"):
             continue  # BLOCKED/ESCALATED/STOP/empty — not confirmed
@@ -654,7 +816,7 @@ def _check_confirmed_validators(
         if not m:
             continue
         n = int(m.group(1))
-        if _has_pm_tasks(slug, n):
+        if _has_pm_tasks(slug, n, p["pm"]):
             continue  # PM task already exists
         issue = issues_map.get(n)
         if not issue:
@@ -666,10 +828,11 @@ def _check_confirmed_validators(
             continue
         vid = kanban.create_task(
             slug, f"#{n} {issue.get('title', '')}",
-            _pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name),
-            assignee="pm-daedalus",
+            body=_pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name),
+            assignee=p["pm"],
             idempotency_key=f"pm-{n}",
             workspace=f"dir:{workdir}" if workdir else "",
+            skills=rs.get("pm") or None,
         )
         if vid:
             logger.info("dispatch: validator CONFIRMED #%s — PM task %s created", n, vid)
@@ -682,6 +845,8 @@ def _check_completed_pm(
     iterations: int, workdir: str, notify_target: str, base_branch: str,
     provider_name: str, security_notify_targets: Optional[List[str]] = None,
     label_overrides: Optional[Dict[str, Any]] = None,
+    profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
     *, dry_run: bool = False,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
@@ -690,18 +855,30 @@ def _check_completed_pm(
     Runs each tick so the team starts as soon as the PM finishes the spec.
     Idempotency via 'issue-{n}' key prevents duplicate triage cards.
     """
+    p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
     triggered: List[int] = []
     for task in kanban.list_tasks(slug, status="done"):
-        if (task.get("assignee") or "").strip() != "pm-daedalus":
+        if (task.get("assignee") or "").strip() != p["pm"]:
             continue
-        summary = (task.get("summary") or task.get("last_summary") or "").lower().strip()
+        # `hermes kanban list --json` omits the summary; fetch it from show.
+        tid = (task.get("id") or task.get("task_id") or "").strip()
+        summary_raw = (task.get("summary") or task.get("last_summary") or "").strip()
+        if not summary_raw and tid:
+            card = kanban.show_card(slug, tid) or {}
+            summary_raw = (card.get("latest_summary") or "").strip()
+        summary = summary_raw.lower()
         if not summary.startswith("spec:"):
+            continue
+        # Skip consultation tasks (title starts with "consult:") — only spec tasks trigger team
+        title = (task.get("title") or "").lower()
+        if title.startswith("consult:"):
             continue
         m = re.search(r"#(\d+)", task.get("title") or "")
         if not m:
             continue
         n = int(m.group(1))
-        if _has_downstream_tasks(slug, n):
+        if _has_downstream_tasks(slug, n, validator_profile=p["validator"], pm_profile=p["pm"]):
             continue  # team triage already exists
         issue = issues_map.get(n)
         if not issue:
@@ -725,8 +902,97 @@ def _check_completed_pm(
     return triggered
 
 
+def _pm_consultation_body(repo: str, issue: Dict[str, Any], blocker_summary: str,
+                          workdir: str, provider_name: str) -> str:
+    """Task body for a PM consultation when a team member hits a technical blocker."""
+    n = issue.get("number")
+    title = issue.get("title", "")
+    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
+                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
+    return (
+        f"You are the PRODUCT MANAGER responding to a TEAM BLOCKER on issue {repo}#{n}: {title}\n"
+        f"Work in the existing git repo at {workdir}.\n\n"
+        f"A team member has been blocked and cannot proceed without PM clarification.\n"
+        f"Blocker reported: {blocker_summary}\n\n"
+        f"⛔ DO NOT write code. Your role is to unblock the team with product/design decisions.\n\n"
+        f"Steps:\n"
+        f"   a) Read the blocker summary and the original issue #{n} carefully.\n"
+        f"   b) Post a clarification comment on issue #{n} via: {comment_howto}\n"
+        f"      Your comment must:\n"
+        f"      - Address the specific blocker described above\n"
+        f"      - Make a concrete product decision (not 'it depends')\n"
+        f"      - Reference acceptance criteria from the spec if applicable\n"
+        f"   c) If the blocker reveals a product-level ambiguity: update the spec comment "
+        f"on issue #{n} with the new decision.\n"
+        f"   d) Complete your card with summary starting 'CLARIFIED: ' followed by a "
+        f"1-sentence description of the decision made.\n\n"
+        f"If this blocker cannot be resolved without human input (requires legal, compliance, "
+        f"or C-level sign-off), complete your card with 'ESCALATED: ' and explain why.\n"
+    )
+
+
+def _check_team_blockers(
+    slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
+    workdir: str, base_branch: str, provider_name: str,
+    profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
+    *, dry_run: bool = False,
+) -> List[int]:
+    """PM re-activation trigger: for every blocked team triage card, create a PM
+    consultation task if no active one already exists.
+
+    A 'team blocker' is any blocked card assigned to a non-validator, non-PM profile
+    whose summary does NOT start with 'ESCALATE:' (those are security escalations,
+    handled separately by _enforce_validator_blocks).
+
+    Returns issue numbers for which a PM consultation was created this tick.
+    """
+    p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
+    pipeline_profiles = {p["validator"], p["pm"]}
+    blocked = kanban.list_blocked(slug)
+    if not blocked:
+        return []
+
+    triggered: List[int] = []
+    for card in blocked:
+        assignee = (card.get("assignee") or "").strip()
+        if assignee in pipeline_profiles:
+            continue  # validator/PM blocks handled elsewhere
+        summary = (card.get("summary") or card.get("last_summary") or "").lower()
+        if summary.startswith("escalate:"):
+            continue  # security escalation — not a PM blocker
+        m = re.search(r"#(\d+)", card.get("title") or "")
+        if not m:
+            continue
+        n = int(m.group(1))
+        if _has_active_pm_consultation(slug, n, p["pm"]):
+            continue  # PM consultation already open for this issue
+        issue = issues_map.get(n)
+        if not issue:
+            logger.debug("dispatch: team blocked #%s but issue not in current scope", n)
+            continue
+        blocker_raw = card.get("summary") or card.get("last_summary") or "no details provided"
+        if dry_run:
+            logger.info("[dry-run] team blocked #%s — would create PM consultation task", n)
+            triggered.append(n)
+            continue
+        cid = kanban.create_task(
+            slug, f"consult: #{n} {issue.get('title', '')}",
+            body=_pm_consultation_body(repo, issue, blocker_raw, workdir, provider_name),
+            assignee=p["pm"],
+            workspace=f"dir:{workdir}" if workdir else "",
+            skills=rs.get("pm") or None,
+        )
+        if cid:
+            logger.info("dispatch: team blocked #%s — PM consultation task %s created", n, cid)
+            triggered.append(n)
+    return triggered
+
+
 def _enforce_validator_blocks(
-    slug: str, provider, existing: set, *, dry_run: bool = False
+    slug: str, provider, existing: set,
+    *, validator_profile: str = "validator-daedalus", dry_run: bool = False,
 ) -> List[int]:
     """For every blocked kanban card that is a validator card for a managed issue:
     set the VCS board status to 'Blocked' (auto-creating the column if needed),
@@ -747,7 +1013,7 @@ def _enforce_validator_blocks(
         summary = (card.get("summary") or card.get("last_summary") or "").lower()
         # Identify validator cards by profile name OR by the block-summary prefix
         is_validator = (
-            assignee_card == "validator-daedalus"
+            assignee_card == validator_profile
             or summary.startswith("blocked:")
             or summary.startswith("escalate:")
         )
@@ -775,9 +1041,9 @@ def _enforce_validator_blocks(
             )
         # Only include in the returned list (which triggers notifications) once —
         # subsequent ticks still enforce board/kanban state but stay silent.
-        if not _has_notified_block(slug, n):
+        if not _has_notified_block(slug, n, validator_profile=validator_profile):
             enforced.append(n)
-            _mark_notified_block(slug, n)
+            _mark_notified_block(slug, n, validator_profile=validator_profile)
     return enforced
 
 
@@ -796,8 +1062,18 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     filters = (resolved.get("issues") or {}).get("filters", {})
     execution = resolved.get("execution") or {}
     iterations = int(execution.get("max_lifecycle_iterations", 3))   # self-improving loop cap (configurable)
-    # Worker assignment is handled by decompose() routing on profile descriptions,
-    # so no single worker_profile is pinned here.
+    profiles = _resolve_profiles(execution)
+    role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
+    _comment_header_tpl: str = (
+        execution.get("comment_header_template")
+        or notify_templates.DEFAULT_COMMENT_HEADER_TEMPLATE
+    )
+    # Validate that every configured profile exists in Hermes (once per tick).
+    # Missing profiles either fall back to built-in defaults or are dropped,
+    # depending on execution.profile_fallback_behavior.  Logs a warning per
+    # missing role so the user knows exactly what to fix.
+    fallback_behavior = (execution.get("profile_fallback_behavior") or "fallback").strip()
+    profiles = _validate_profiles(profiles, fallback_behavior=fallback_behavior)
     workdir = resolved.get("workdir", "")
     # Messaging target the documentation agent's completion report is sent to.
     notify_target = (resolved.get("cron") or {}).get("deliver", "")
@@ -916,19 +1192,39 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     # Enforce validator blocks: set 'Blocked' column on VCS board and cancel
     # downstream tasks for any issue whose validator card is currently blocked.
     # Runs each tick so issues blocked mid-cycle are caught immediately.
-    blocked_issues = _enforce_validator_blocks(slug, provider, existing, dry_run=dry_run)
+    blocked_issues = _enforce_validator_blocks(slug, provider, existing,
+                                               validator_profile=profiles["validator"],
+                                               dry_run=dry_run)
 
-    # Phase-2 trigger: for validator-confirmed issues, create the downstream
-    # triage+decompose so developer/reviewer/security/documentation can start.
-    # Idempotent — 'issue-{n}' key prevents duplicate triage cards.
+    # Phase-2 trigger: validator CONFIRMED → PM spec task.
+    # Phase-3 trigger: PM SPEC done → team triage (developer/reviewer/security/docs).
+    # Phase-3b: team BLOCKED → PM consultation task (re-activation).
+    # All three run every tick for immediate response to phase transitions.
     issues_map: Dict[int, Dict[str, Any]] = {i["number"]: i for i in issues}
+    _sec_targets = _notify_targets(resolved, "security-escalation")
+    _label_ovr = (execution or {}).get("label_overrides", {})
+
     confirmed_triggered = _check_confirmed_validators(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
-        provider.name, _notify_targets(resolved, "security-escalation"),
-        label_overrides=(execution or {}).get("label_overrides", {}),
-        dry_run=dry_run,
+        provider.name, _sec_targets, label_overrides=_label_ovr,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
     )
     if confirmed_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    pm_triggered = _check_completed_pm(
+        slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
+        provider.name, _sec_targets, label_overrides=_label_ovr,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
+    )
+    if pm_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    blocker_triggered = _check_team_blockers(
+        slug, repo, issues_map, workdir, base_branch, provider.name,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
+    )
+    if blocker_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     for issue in issues:
@@ -1014,6 +1310,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                                 workdir, open_pr_obj.number, "size_warned"
                             ):
                                 warn = (
+                                    notify_templates.render_agent_header("daedalus", template=_comment_header_tpl) + "\n\n"
                                     f"⚠️ **PR too large**: This PR changes **{total_lines} lines** "
                                     f"(project limit: {max_pr_lines}).\n\n"
                                     "Please split into smaller, focused PRs before this is reviewed. "
@@ -1038,6 +1335,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                             workdir, open_pr_obj.number, "forbidden_warned"
                         ):
                             warn = (
+                                notify_templates.render_agent_header("daedalus", template=_comment_header_tpl) + "\n\n"
                                 "🚨 **Forbidden file(s) detected**: This PR touches files that "
                                 "require explicit human review before merge:\n\n"
                                 + "".join(f"- `{fn}`\n" for fn in blocked_files)
@@ -1086,9 +1384,10 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             slug, f"#{n} {issue.get('title', '')}",
             body=_validator_body(repo, issue, workdir, base_branch, provider.name,
                                  _notify_targets(resolved, "security-escalation")),
-            assignee="validator-daedalus",
+            assignee=profiles["validator"],
             idempotency_key=f"validator-{n}",
             workspace=f"dir:{workdir}" if workdir else "",
+            skills=role_skills.get("validator") or None,
         )
         if vid:
             created.append(n)
@@ -1136,6 +1435,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             if not dry_run and not dispatch_state.has_pr_flag(workdir, n, "stale_warned"):
                 provider.post_issue_comment(
                     n,
+                    notify_templates.render_agent_header("daedalus", template=_comment_header_tpl) + "\n\n"
                     f"⚠️ **Daedalus staleness alert** — Issue #{n} has been in progress "
                     f"for **{age:.0f} hours** without a linked PR.\n\n"
                     "The assigned agent may be stuck. If work is ongoing, add a progress comment. "
@@ -1171,7 +1471,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),
                "spec_created": spec_created, "slack_delivered": slack_delivered,
-               "blocked": blocked_issues}
+               "blocked": blocked_issues,
+               "pm_triggered": pm_triggered, "blocker_triggered": blocker_triggered}
     logger.info("dispatch summary: %s", summary)
     return summary
 

@@ -120,6 +120,61 @@ execution:
   #   - "*.secrets"
   #   - "secrets.*"
 
+  # Custom Hermes profile names and skills per pipeline role.
+  # Override any role to route tasks to your own agent profiles instead of the
+  # built-in daedalus profiles.  Only the keys you specify are overridden;
+  # unspecified roles continue to use the built-in defaults.
+  #
+  # Built-in defaults (shown for reference):
+  #   validator: validator-daedalus
+  #   pm:        project-manager-daedalus
+  #   developer: developer-daedalus
+  #   reviewer:  reviewer-daedalus
+  #   security:  security-analyst-daedalus
+  #   documentation: documentation-daedalus
+  #
+  # Simple form — just a profile name:
+  # profiles:
+  #   developer: my-senior-dev-profile
+  #   reviewer:  my-code-reviewer-profile
+  #
+  # Dict form — profile name + extra skills to attach to that agent:
+  # profiles:
+  #   developer:
+  #     profile: my-senior-dev-profile
+  #     skills:
+  #       - my-custom-skill
+  #       - another-skill
+  #   validator:
+  #     profile: validator-daedalus
+  #     skills:
+  #       - security-and-hardening
+  #
+  # Skills listed under a role are passed to the agent via --skill when the task
+  # is created, so the agent has them pre-loaded without calling skill_view()
+  # itself.  The built-in profile skills are always installed; this adds extras
+  # on top.  You can mix simple and dict forms in the same profiles block.
+  #
+  # Behavior when a configured profile does not exist in Hermes (checked via
+  # ~/.hermes/profiles/<name>/ directory or <name>.yaml file):
+  #   fallback  — (default) log a warning and fall back to the built-in default
+  #               profile for that role. Dispatching continues normally.
+  #   skip      — log a warning and drop the role entirely. No tasks are created
+  #               for that role until the profile is configured.
+  # profile_fallback_behavior: "fallback"
+
+  # Comment attribution header — prepended to every VCS comment the dispatcher
+  # posts (PR warnings, staleness alerts).  Agents also embed this pattern in
+  # their own comments so all pipeline activity is clearly identified.
+  #
+  # Supported placeholders: {role}, {profile}, {issue}, {pr}.
+  # Defaults to "**Agent: {role}**" if omitted.
+  #
+  # Examples:
+  #   comment_header_template: "**Agent: {role}** | {profile}"
+  #   comment_header_template: "🤖 _{role} agent_"
+  # comment_header_template: "**Agent: {role}**"
+
   # Per-label agent roster overrides — adjust which roles are activated for
   # issues carrying a specific label.  Keys are exact label names.
   #
