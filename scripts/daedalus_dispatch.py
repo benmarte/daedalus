@@ -1064,6 +1064,10 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     iterations = int(execution.get("max_lifecycle_iterations", 3))   # self-improving loop cap (configurable)
     profiles = _resolve_profiles(execution)
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
+    _comment_header_tpl: str = (
+        execution.get("comment_header_template")
+        or notify_templates.DEFAULT_COMMENT_HEADER_TEMPLATE
+    )
     # Validate that every configured profile exists in Hermes (once per tick).
     # Missing profiles either fall back to built-in defaults or are dropped,
     # depending on execution.profile_fallback_behavior.  Logs a warning per
@@ -1306,6 +1310,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                                 workdir, open_pr_obj.number, "size_warned"
                             ):
                                 warn = (
+                                    notify_templates.render_agent_header("daedalus", template=_comment_header_tpl) + "\n\n"
                                     f"⚠️ **PR too large**: This PR changes **{total_lines} lines** "
                                     f"(project limit: {max_pr_lines}).\n\n"
                                     "Please split into smaller, focused PRs before this is reviewed. "
@@ -1330,6 +1335,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                             workdir, open_pr_obj.number, "forbidden_warned"
                         ):
                             warn = (
+                                notify_templates.render_agent_header("daedalus", template=_comment_header_tpl) + "\n\n"
                                 "🚨 **Forbidden file(s) detected**: This PR touches files that "
                                 "require explicit human review before merge:\n\n"
                                 + "".join(f"- `{fn}`\n" for fn in blocked_files)
@@ -1429,6 +1435,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             if not dry_run and not dispatch_state.has_pr_flag(workdir, n, "stale_warned"):
                 provider.post_issue_comment(
                     n,
+                    notify_templates.render_agent_header("daedalus", template=_comment_header_tpl) + "\n\n"
                     f"⚠️ **Daedalus staleness alert** — Issue #{n} has been in progress "
                     f"for **{age:.0f} hours** without a linked PR.\n\n"
                     "The assigned agent may be stuck. If work is ongoing, add a progress comment. "

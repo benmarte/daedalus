@@ -163,6 +163,18 @@ execution:
   #               for that role until the profile is configured.
   # profile_fallback_behavior: "fallback"
 
+  # Comment attribution header — prepended to every VCS comment the dispatcher
+  # posts (PR warnings, staleness alerts).  Agents also embed this pattern in
+  # their own comments so all pipeline activity is clearly identified.
+  #
+  # Supported placeholders: {role}, {profile}, {issue}, {pr}.
+  # Defaults to "**Agent: {role}**" if omitted.
+  #
+  # Examples:
+  #   comment_header_template: "**Agent: {role}** | {profile}"
+  #   comment_header_template: "🤖 _{role} agent_"
+  # comment_header_template: "**Agent: {role}**"
+
   # Per-label agent roster overrides — adjust which roles are activated for
   # issues carrying a specific label.  Keys are exact label names.
   #
