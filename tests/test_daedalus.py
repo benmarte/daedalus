@@ -2059,6 +2059,7 @@ def test_pipeline_chain_confirmed_to_team_tasks():
     check("pipeline chain: _check_completed_pm returns issue", result == [10])
 
 
+
 # ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
 # (Patch _FakeProvider at module level to avoid test-isolation issues)
 
