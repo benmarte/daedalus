@@ -7,25 +7,34 @@ full board/issue tracking, and zero babysitting. A single Daedalus deployment
 drives **many repos**, each with its own provider, kanban board, cron job, and
 notification channels (Slack, Discord, Telegram, Signal, WhatsApp, …).
 
-```
-issue → "Ready"  (GitHub Project / GitLab board label / Azure work-item state)
-      │  (cron tick — deterministic, code)
-      ▼
- Phase 1: validator task created (ONLY the validator — no other agent starts)
-      │                 │
-      │           SECURITY_THREAT → post issue comment + security-escalation
-      │           BLOCK_FOR_REVIEW → post comment listing missing details, block
-      │           ALREADY_FIXED / DUPLICATE → close issue, pipeline ends
-      │           NEEDS_MORE_INFO → block, comment asking reporter, pipeline waits
-      │           CONFIRMED: <note>  ← exact prefix triggers Phase 2
-      ▼
- Phase 2: triage card ──decompose──► developer ─► reviewer ─► security ─► documentation
-      │                                  │            │           │            │
-   board: In progress               opens PR      approves    audits     posts report
-                                  (lint/format                           to PR + your
-                                   ship gate)                            chat channels
-      ▼
-   PR green → you merge → issue auto-closed, card → Done
+```mermaid
+flowchart TD
+    A([🏁 Issue marked Ready\nGitHub · GitLab · Azure]) -->|cron tick or\ncompletion trigger| B[Dispatcher\ndaedalus_dispatch.py]
+
+    B --> C["⚡ Phase 1\nValidator task created\n— only agent active —"]
+    C --> V{Validator\nOutcome}
+
+    V -->|"CONFIRMED: &lt;note&gt;"| E["📋 Phase 2\nPM decomposes work\nacross team roster"]
+    V -->|"ALREADY_FIXED\nor DUPLICATE"| AF(["✅ Issue closed\nPipeline ends"])
+    V -->|NEEDS_MORE_INFO| NI(["⏸ Card blocked\nComment posted\nAwaits reporter response"])
+    V -->|"SECURITY_THREAT\nor BLOCK_FOR_REVIEW"| ST(["🔒 Card blocked\nIssue comment posted\nsecurity-escalation fired"])
+
+    E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
+    Dev --> CI{CI}
+    CI -->|green| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
+    Fix --> CI
+    Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
+    Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Doc --> Merge(["🔀 You merge the PR"])
+    Merge --> Done(["✅ Issue closed\nCard → Done"])
+
+    style A fill:#1976D2,color:#fff,stroke:#0D47A1
+    style AF fill:#757575,color:#fff,stroke:#424242
+    style NI fill:#F57C00,color:#fff,stroke:#E65100
+    style ST fill:#C62828,color:#fff,stroke:#B71C1C
+    style Merge fill:#388E3C,color:#fff,stroke:#1B5E20
+    style Done fill:#2E7D32,color:#fff,stroke:#1B5E20
 ```
 
 ![Daedalus dashboard — one card per managed project, showing kanban counts, open PRs with CI status, and cron schedule](docs/screenshots/guide/09-dashboard-with-project.png)
