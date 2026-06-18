@@ -222,10 +222,22 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 # API-based instructions only — no gh/glab/az CLIs are installed for workers.
 _PR_COMMENT_HOWTO = {
-    "github": "the GitHub API with your GITHUB_TOKEN env var: "
-              "POST https://api.github.com/repos/{repo}/issues/<pr>/comments "
-              "with JSON body {{\"body\": \"<report markdown>\"}} and header "
-              "'Authorization: Bearer $GITHUB_TOKEN' (curl works)",
+    "github": (
+        "your GITHUB_TOKEN env var. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal for this, "
+        "as markdown content with backticks and quotes breaks shell escaping. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "body = '''<your full report markdown here>'''\n"
+        "req = urllib.request.Request(\n"
+        "    'https://api.github.com/repos/{repo}/issues/<number>/comments',\n"
+        "    data=json.dumps({{'body': body}}).encode(),\n"
+        "    headers={{'Authorization': f'Bearer {{os.environ[\"GITHUB_TOKEN\"]}}',\n"
+        "             'Accept': 'application/vnd.github+json'}}, method='POST')\n"
+        "print(urllib.request.urlopen(req).read())\n"
+        "```"
+    ),
     "gitlab": "the GitLab API with your GITLAB_TOKEN env var: "
               "POST /api/v4/projects/<project-id>/merge_requests/<mr>/notes "
               "with header 'PRIVATE-TOKEN: $GITLAB_TOKEN'",
@@ -253,11 +265,21 @@ _CLOSE_ISSUE_HOWTO = {
 
 _PR_CREATE_HOWTO = {
     "github": (
-        "the GitHub API: "
-        "POST https://api.github.com/repos/{repo}/pulls "
-        "-H 'Authorization: Bearer $GITHUB_TOKEN' "
-        "-d '{{\"title\":\"<title>\",\"head\":\"<branch>\",\"base\":\"<base>\","
-        "\"body\":\"Closes #<issue_number>\\n\\n<rest of description>\"}}' "
+        "the GitHub API. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal for this, "
+        "as PR body markdown breaks shell escaping. Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "pr_body = '''Closes #<issue_number>\n\n<rest of description>'''\n"
+        "req = urllib.request.Request(\n"
+        "    'https://api.github.com/repos/{repo}/pulls',\n"
+        "    data=json.dumps({{'title': '<title>', 'head': '<branch>', 'base': '<base>',\n"
+        "                      'body': pr_body}}).encode(),\n"
+        "    headers={{'Authorization': f'Bearer {{os.environ[\"GITHUB_TOKEN\"]}}',\n"
+        "             'Accept': 'application/vnd.github+json'}}, method='POST')\n"
+        "resp = json.loads(urllib.request.urlopen(req).read())\n"
+        "print('PR URL:', resp['html_url'], 'PR number:', resp['number'])\n"
+        "```\n"
         "— the body field MUST begin with 'Closes #<issue_number>' on its own line"
     ),
     "gitlab": (
@@ -556,10 +578,12 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"      - Implementation approach (high-level, not code)\n"
         f"      - Edge cases to handle\n"
         f"      - Files likely to be affected (based on your codebase reading)\n"
-        f"   c) Post the spec as a comment on issue #{n} via: {comment_howto}\n"
-        f"   d) Complete your card with summary starting 'SPEC: ' followed by a 1–2 sentence "
-        f"summary of what will be built. The dispatcher detects this EXACT prefix to hand off "
-        f"to the development team.\n\n"
+        f"   c) 🚨 COMPLETE YOUR KANBAN CARD FIRST — before posting to GitHub. "
+        f"Call kanban_complete with summary starting 'SPEC: ' followed by a 1–2 sentence "
+        f"summary of what will be built. The dispatcher detects this EXACT prefix to unblock "
+        f"the development team. Do this BEFORE step d — even if GitHub posting later fails, "
+        f"the pipeline must advance.\n"
+        f"   d) After completing the card, post the spec as a comment on issue #{n} via: {comment_howto}\n\n"
         f"If the developer hits a blocker during implementation, they may comment on this issue "
         f"to request your clarification. Monitor for such requests.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
