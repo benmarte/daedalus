@@ -829,21 +829,57 @@ def _has_downstream_tasks(slug: str, issue_number: int, *,
     return False
 
 
-def _has_pm_tasks(slug: str, issue_number: int,
-                  pm_profile: str = "project-manager-daedalus") -> bool:
-    """Return True if a PM spec task already exists for issue_number."""
+def _pm_task_state(slug: str, issue_number: int,
+                   pm_profile: str = "project-manager-daedalus") -> tuple:
+    """Return (state, stale_count) for PM spec tasks for issue_number.
+
+    state values:
+      'none'     — no PM spec task found
+      'running'  — at least one PM spec task is not yet done
+      'complete' — a done PM spec task has a valid SPEC: summary
+      'stale'    — all done PM spec tasks lack SPEC: (hermes premature-completion bug)
+
+    stale_count is the number of done PM tasks without SPEC:, used to generate
+    unique retry idempotency keys (pm-{n}-r{stale_count}).
+    """
     pattern = f"#{issue_number}"
+    has_running = False
+    has_complete = False
+    stale_count = 0
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
-        assignee = (t.get("assignee") or "").strip()
-        if assignee != pm_profile:
+        if (t.get("assignee") or "").strip() != pm_profile:
             continue
-        # Distinguish spec tasks from consultation tasks by title prefix
-        title = (t.get("title") or "").lower()
-        if not title.startswith("consult:"):
-            return True
-    return False
+        if (t.get("title") or "").lower().startswith("consult:"):
+            continue
+        status = (t.get("status") or "").lower()
+        if status not in ("done", "complete", "completed"):
+            has_running = True
+            continue
+        tid = (t.get("id") or t.get("task_id") or "").strip()
+        summary_raw = (t.get("summary") or t.get("last_summary") or "").strip()
+        if not summary_raw and tid:
+            card = kanban.show_card(slug, tid) or {}
+            summary_raw = (card.get("latest_summary") or "").strip()
+        if summary_raw.lower().startswith("spec:"):
+            has_complete = True
+        else:
+            stale_count += 1
+    if has_running:
+        return ("running", stale_count)
+    if has_complete:
+        return ("complete", stale_count)
+    if stale_count:
+        return ("stale", stale_count)
+    return ("none", 0)
+
+
+def _has_pm_tasks(slug: str, issue_number: int,
+                  pm_profile: str = "project-manager-daedalus") -> bool:
+    """Shim for backward compatibility — returns True if a non-stale PM spec task exists."""
+    state, _ = _pm_task_state(slug, issue_number, pm_profile)
+    return state in ("running", "complete")
 
 
 def _has_active_pm_consultation(slug: str, issue_number: int,
@@ -904,8 +940,24 @@ def _check_confirmed_validators(
         if not m:
             continue
         n = int(m.group(1))
-        if _has_pm_tasks(slug, n, p["pm"]):
-            continue  # PM task already exists
+        pm_state, stale_count = _pm_task_state(slug, n, p["pm"])
+        if pm_state in ("running", "complete"):
+            continue  # PM task active or properly done
+        if pm_state == "stale":
+            _MAX_PM_RETRIES = 3
+            if stale_count >= _MAX_PM_RETRIES:
+                logger.error(
+                    "dispatch: PM for #%s has %d stale premature completions — "
+                    "manual intervention required (hermes kanban edit + SPEC: summary)",
+                    n, stale_count,
+                )
+                continue
+            logger.warning(
+                "dispatch: PM task for #%s prematurely completed without SPEC: "
+                "(attempt %d/%d) — re-creating with retry key",
+                n, stale_count + 1, _MAX_PM_RETRIES,
+            )
+        ikey = f"pm-{n}" if pm_state == "none" else f"pm-{n}-r{stale_count}"
         issue = issues_map.get(n)
         if not issue:
             logger.debug("dispatch: validator confirmed #%s but issue not in current scope", n)
@@ -918,7 +970,7 @@ def _check_confirmed_validators(
             slug, f"#{n} {issue.get('title', '')}",
             body=_pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name),
             assignee=p["pm"],
-            idempotency_key=f"pm-{n}",
+            idempotency_key=ikey,
             workspace=f"dir:{workdir}" if workdir else "",
             skills=rs.get("pm") or None,
         )
@@ -935,7 +987,7 @@ def _check_completed_pm(
     label_overrides: Optional[Dict[str, Any]] = None,
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
-    *, dry_run: bool = False,
+    *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
     create the downstream triage (Developer + Reviewer + Security + Docs).
@@ -969,8 +1021,19 @@ def _check_completed_pm(
         if _has_downstream_tasks(slug, n, validator_profile=p["validator"], pm_profile=p["pm"]):
             continue  # team triage already exists
         issue = issues_map.get(n)
+        if not issue and provider is not None:
+            fetched = provider.get_issue(n)
+            if fetched:
+                issue = fetched.as_dict()
+                logger.info(
+                    "dispatch: PM completed #%s — not in issues_map window, "
+                    "fetched directly from provider", n,
+                )
         if not issue:
-            logger.debug("dispatch: PM completed #%s but issue not in current scope", n)
+            logger.warning(
+                "dispatch: PM completed #%s but issue not in scope and direct fetch failed "
+                "— skipping team triage creation", n,
+            )
             continue
         if dry_run:
             logger.info("[dry-run] PM SPEC #%s — would create downstream team triage", n)
@@ -1303,7 +1366,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     pm_triggered = _check_completed_pm(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
-        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run, provider=provider,
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

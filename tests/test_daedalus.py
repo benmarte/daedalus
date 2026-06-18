@@ -1738,6 +1738,92 @@ def test_has_pm_tasks_true_for_spec_task():
           disp._has_pm_tasks("slug", 5) is True)
 
 
+def test_pm_task_state_none():
+    """_pm_task_state returns ('none', 0) when no PM spec task exists."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: []
+    state, stale = disp._pm_task_state("slug", 5)
+    check("no tasks → state is none", state == "none")
+    check("no tasks → stale_count is 0", stale == 0)
+
+
+def test_pm_task_state_running():
+    """_pm_task_state returns ('running', 0) for an in-progress PM task."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus", "status": "in_progress"},
+    ]
+    state, stale = disp._pm_task_state("slug", 5)
+    check("in-progress PM → state is running", state == "running")
+    check("in-progress PM → stale_count is 0", stale == 0)
+
+
+def test_pm_task_state_complete():
+    """_pm_task_state returns ('complete', 0) for a done PM task with SPEC: summary."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus",
+         "status": "done", "summary": "SPEC: Add auth middleware"},
+    ]
+    state, stale = disp._pm_task_state("slug", 5)
+    check("done+SPEC PM → state is complete", state == "complete")
+    check("done+SPEC PM → stale_count is 0", stale == 0)
+
+
+def test_pm_task_state_stale():
+    """_pm_task_state returns ('stale', 1) for a done PM task with no SPEC: summary (premature completion)."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus",
+         "id": "t_stale", "status": "done", "summary": ""},
+    ]
+    disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+    state, stale = disp._pm_task_state("slug", 5)
+    check("done+no-SPEC PM → state is stale", state == "stale")
+    check("done+no-SPEC PM → stale_count is 1", stale == 1)
+
+
+def test_check_confirmed_validators_retries_stale_pm():
+    """_check_confirmed_validators re-creates PM task with retry key when existing task is stale."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            # Validator confirmed AND a stale PM task (no SPEC:) exist
+            return [
+                {"title": "#9 crash bug", "assignee": "validator-daedalus",
+                 "summary": "CONFIRMED: verified", "status": "done", "id": "t_v"},
+                {"title": "#9 crash bug", "assignee": "project-manager-daedalus",
+                 "summary": "", "status": "done", "id": "t_stale"},
+            ]
+        # Non-filtered list call used by _pm_task_state
+        return [
+            {"title": "#9 crash bug", "assignee": "project-manager-daedalus",
+             "summary": "", "status": "done", "id": "t_stale"},
+        ]
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            created_keys.append(idempotency_key) or "t_new"
+        )
+        disp._check_confirmed_validators(
+            "slug", "O/R",
+            {9: {"number": 9, "title": "crash bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+
+    check("retry key used instead of pm-9", any("pm-9-r" in k for k in created_keys))
+    check("original pm-9 key not reused", "pm-9" not in created_keys)
+
+
 # ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
 # (Patch _FakeProvider at module level to avoid test-isolation issues)
 
@@ -1806,7 +1892,12 @@ if __name__ == "__main__":
                test_check_team_blockers_skips_validator_cards,
                test_pm_consultation_body_content,
                test_has_pm_tasks_excludes_consultations,
-               test_has_pm_tasks_true_for_spec_task):
+               test_has_pm_tasks_true_for_spec_task,
+               test_pm_task_state_none,
+               test_pm_task_state_running,
+               test_pm_task_state_complete,
+               test_pm_task_state_stale,
+               test_check_confirmed_validators_retries_stale_pm):
         fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")

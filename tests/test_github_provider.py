@@ -294,3 +294,31 @@ def test_meta_safe_on_error(provider):
     provider._http.get_paginated.side_effect = ProviderError("401", status_code=401)
     assert provider.list_branches() == []
     assert provider.list_labels() == []
+
+
+# ── get_issue ─────────────────────────────────────────────────────────────────
+
+def test_get_issue_returns_summary(provider):
+    provider._http.get_json.return_value = {
+        "number": 42, "title": "Fix crash", "body": "details",
+        "labels": [{"name": "bug"}], "state": "open", "html_url": "https://github.com/octo/repo/issues/42",
+    }
+    iss = provider.get_issue(42)
+    assert iss is not None
+    assert iss.number == 42
+    assert iss.title == "Fix crash"
+    assert iss.labels == ["bug"]
+    assert iss.state == "open"
+
+
+def test_get_issue_returns_none_on_error(provider):
+    provider._http.get_json.side_effect = ProviderError("404", status_code=404)
+    assert provider.get_issue(99) is None
+
+
+def test_get_issue_ignores_pull_requests(provider):
+    provider._http.get_json.return_value = {
+        "number": 5, "title": "PR", "pull_request": {"url": "x"},
+        "labels": [], "state": "open", "html_url": "u",
+    }
+    assert provider.get_issue(5) is None
