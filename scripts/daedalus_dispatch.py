@@ -238,11 +238,38 @@ _PR_COMMENT_HOWTO = {
         "print(urllib.request.urlopen(req).read())\n"
         "```"
     ),
-    "gitlab": "the GitLab API with your GITLAB_TOKEN env var: "
-              "POST /api/v4/projects/<project-id>/merge_requests/<mr>/notes "
-              "with header 'PRIVATE-TOKEN: $GITLAB_TOKEN'",
-    "azuredevops": "the Azure DevOps PR threads API with your AZURE_DEVOPS_PAT "
-                   "env var (Basic auth, base64 of ':' + PAT)",
+    "gitlab": (
+        "your GITLAB_TOKEN env var. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "body = '''<your full report markdown here>'''\n"
+        "req = urllib.request.Request(\n"
+        "    'https://gitlab.com/api/v4/projects/<project-id>/issues/<number>/notes',\n"
+        "    data=json.dumps({{'body': body}}).encode(),\n"
+        "    headers={{'PRIVATE-TOKEN': os.environ['GITLAB_TOKEN'],\n"
+        "             'Content-Type': 'application/json'}}, method='POST')\n"
+        "print(urllib.request.urlopen(req).read())\n"
+        "```"
+    ),
+    "azuredevops": (
+        "your AZURE_DEVOPS_PAT env var. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json, base64\n"
+        "pat = os.environ['AZURE_DEVOPS_PAT']\n"
+        "auth = base64.b64encode(f':{pat}'.encode()).decode()\n"
+        "body = '''<your full report markdown here>'''\n"
+        "payload = {{'comments': [{{'parentCommentId': 0, 'content': body, 'commentType': 1}}], 'status': 1}}\n"
+        "req = urllib.request.Request(\n"
+        "    'https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullRequests/<pr>/threads?api-version=7.1',\n"
+        "    data=json.dumps(payload).encode(),\n"
+        "    headers={{'Authorization': f'Basic {{auth}}', 'Content-Type': 'application/json'}}, method='POST')\n"
+        "print(urllib.request.urlopen(req).read())\n"
+        "```"
+    ),
 }
 
 _CLOSE_ISSUE_HOWTO = {
@@ -283,16 +310,42 @@ _PR_CREATE_HOWTO = {
         "— the body field MUST begin with 'Closes #<issue_number>' on its own line"
     ),
     "gitlab": (
-        "the GitLab API: "
-        "POST /api/v4/projects/<project-id>/merge_requests "
-        "-H 'PRIVATE-TOKEN: $GITLAB_TOKEN' "
-        "-d '{{\"source_branch\":\"<branch>\",\"target_branch\":\"<base>\","
-        "\"title\":\"<title>\",\"description\":\"Closes #<issue_number>\\n\\n<rest>\"}}' "
+        "the GitLab API. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json\n"
+        "pr_body = '''Closes #<issue_number>\n\n<rest of description>'''\n"
+        "req = urllib.request.Request(\n"
+        "    'https://gitlab.com/api/v4/projects/<project-id>/merge_requests',\n"
+        "    data=json.dumps({{'source_branch': '<branch>', 'target_branch': '<base>',\n"
+        "                      'title': '<title>', 'description': pr_body}}).encode(),\n"
+        "    headers={{'PRIVATE-TOKEN': os.environ['GITLAB_TOKEN'],\n"
+        "             'Content-Type': 'application/json'}}, method='POST')\n"
+        "resp = json.loads(urllib.request.urlopen(req).read())\n"
+        "print('MR URL:', resp['web_url'], 'MR number:', resp['iid'])\n"
+        "```\n"
         "— the description field MUST begin with 'Closes #<issue_number>' on its own line"
     ),
     "azuredevops": (
-        "the Azure DevOps API (POST .../pullrequests, Basic auth with $AZURE_DEVOPS_PAT) "
-        "— include 'Fixes #<issue_number>' in the description field"
+        "the Azure DevOps API. "
+        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
+        "Python example:\n"
+        "```python\n"
+        "import os, urllib.request, json, base64\n"
+        "pat = os.environ['AZURE_DEVOPS_PAT']\n"
+        "auth = base64.b64encode(f':{pat}'.encode()).decode()\n"
+        "pr_body = '''Fixes #<issue_number>\n\n<rest of description>'''\n"
+        "payload = {{'title': '<title>', 'sourceRefName': 'refs/heads/<branch>',\n"
+        "            'targetRefName': 'refs/heads/<base>', 'description': pr_body}}\n"
+        "req = urllib.request.Request(\n"
+        "    'https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullrequests?api-version=7.1',\n"
+        "    data=json.dumps(payload).encode(),\n"
+        "    headers={{'Authorization': f'Basic {{auth}}', 'Content-Type': 'application/json'}}, method='POST')\n"
+        "resp = json.loads(urllib.request.urlopen(req).read())\n"
+        "print('PR URL:', resp.get('url'), 'PR ID:', resp.get('pullRequestId'))\n"
+        "```\n"
+        "— the description field MUST begin with 'Fixes #<issue_number>' on its own line"
     ),
 }
 
