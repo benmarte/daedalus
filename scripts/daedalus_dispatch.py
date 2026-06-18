@@ -627,6 +627,7 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
     body = (issue.get("body") or "").strip()
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
+    spec_path = f"{workdir}/.hermes/specs/issue-{n}.md"
     return (
         f"You are the PRODUCT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
@@ -642,6 +643,9 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"      - Implementation approach (high-level, not code)\n"
         f"      - Edge cases to handle\n"
         f"      - Files likely to be affected (based on your codebase reading)\n"
+        f"   b2) Save the spec to `{spec_path}` using the Write tool. "
+        f"IMPORTANT: always save to this path — NEVER use /tmp or any other location. "
+        f"The .hermes/specs/ directory already exists; create it with `mkdir -p {workdir}/.hermes/specs` if needed.\n"
         f"   c) 🚨 COMPLETE YOUR KANBAN CARD FIRST — before posting to GitHub. "
         f"Call kanban_complete with summary starting 'SPEC: ' followed by a 1–2 sentence "
         f"summary of what will be built. The dispatcher detects this EXACT prefix to unblock "
