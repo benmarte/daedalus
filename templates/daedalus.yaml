@@ -120,6 +120,32 @@ execution:
   #   - "*.secrets"
   #   - "secrets.*"
 
+  # Custom Hermes profile names for each pipeline role.
+  # Override any role to route tasks to your own agent profiles instead of the
+  # built-in daedalus profiles.  Only the keys you specify are overridden;
+  # unspecified roles continue to use the built-in defaults.
+  #
+  # Built-in defaults (shown for reference):
+  #   validator: validator-daedalus
+  #   pm:        project-manager-daedalus
+  #   developer: developer-daedalus
+  #   reviewer:  reviewer-daedalus
+  #   security:  security-analyst-daedalus
+  #   documentation: documentation-daedalus
+  #
+  # Example: route the developer role to a custom Claude Code profile:
+  # profiles:
+  #   developer: my-senior-dev-profile
+  #   reviewer:  my-code-reviewer-profile
+  #
+  # Behavior when a configured profile does not exist in Hermes (checked via
+  # ~/.hermes/profiles/<name>/ directory or <name>.yaml file):
+  #   fallback  — (default) log a warning and fall back to the built-in default
+  #               profile for that role. Dispatching continues normally.
+  #   skip      — log a warning and drop the role entirely. No tasks are created
+  #               for that role until the profile is configured.
+  # profile_fallback_behavior: "fallback"
+
   # Per-label agent roster overrides — adjust which roles are activated for
   # issues carrying a specific label.  Keys are exact label names.
   #
