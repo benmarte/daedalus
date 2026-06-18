@@ -50,6 +50,7 @@ flowchart TD
   - [Custom profiles](#custom-profiles)
   - [Skills per agent](#skills-per-agent)
   - [Profile fallback behavior](#profile-fallback-behavior)
+  - [Comment attribution template](#comment-attribution-template)
 - [Autonomous pipeline advancement](#autonomous-pipeline-advancement)
 - [Self-healing loop](#self-healing-loop)
 - [Design decisions](#design-decisions)
@@ -337,6 +338,45 @@ execution:
 |---|---|
 | `fallback` | (default) Log a warning, use the built-in default profile for that role. Dispatching continues normally. |
 | `skip` | Log a warning and drop the role entirely — no tasks are created for that role until the profile exists. |
+
+### Comment attribution template
+
+Every comment any agent or the dispatcher posts to a VCS issue or PR begins with a one-line attribution header so it's always clear which pipeline role wrote it:
+
+```
+**Agent: developer**
+```
+
+You can change the format project-wide in `.hermes/daedalus.yaml`:
+
+```yaml
+execution:
+  comment_header_template: "**Agent: {role}**"   # default
+```
+
+**Available placeholders:**
+
+| Placeholder | Value |
+|---|---|
+| `{role}` | Pipeline role name — `validator`, `project-manager`, `developer`, `reviewer`, `security-analyst`, `documentation`, `daedalus` |
+| `{profile}` | Hermes profile name for the role (empty if using the built-in default) |
+| `{issue}` | Issue reference, e.g. `#42` (empty when not applicable) |
+| `{pr}` | PR reference, e.g. `#7` (empty when not applicable) |
+
+**Examples:**
+
+```yaml
+# Include the profile name alongside the role
+comment_header_template: "**Agent: {role}** | {profile}"
+
+# Emoji style
+comment_header_template: "🤖 _{role} agent_"
+
+# Plain text (no markdown bold)
+comment_header_template: "Agent: {role}"
+```
+
+The template is applied to all dispatcher-posted comments (PR size warnings, forbidden-file alerts, staleness notices) and is embedded in each agent's task instructions so agent-authored comments follow the same pattern. The default `**Agent: {role}**` is consistent with the `**Agent: documentation**` sentinel the dispatcher uses internally to detect doc reports.
 
 ---
 

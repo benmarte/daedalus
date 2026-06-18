@@ -302,6 +302,45 @@ execution:
 | `fallback` | Warn and use the built-in default. Dispatching continues normally. |
 | `skip` | Warn and drop the role — no tasks are created until the profile exists. |
 
+### Comment Attribution Template
+
+Every comment posted to a VCS issue or PR — whether by an agent or by the dispatcher — begins with a one-line attribution header:
+
+```
+**Agent: developer**
+```
+
+This makes it immediately clear which pipeline role wrote each comment. The format is controlled by `execution.comment_header_template` in your `.hermes/daedalus.yaml`:
+
+```yaml
+execution:
+  comment_header_template: "**Agent: {role}**"   # this is the default
+```
+
+**Available placeholders:**
+
+| Placeholder | Value |
+|---|---|
+| `{role}` | Role name: `validator`, `project-manager`, `developer`, `reviewer`, `security-analyst`, `documentation`, or `daedalus` (for dispatcher-posted notices) |
+| `{profile}` | Hermes profile name for the role (empty if using the built-in default) |
+| `{issue}` | Issue reference such as `#42` (empty when not applicable) |
+| `{pr}` | PR reference such as `#7` (empty when not applicable) |
+
+**Example customizations:**
+
+```yaml
+# Show the profile name next to the role
+comment_header_template: "**Agent: {role}** | {profile}"
+
+# Emoji style
+comment_header_template: "🤖 _{role} agent_"
+
+# Plain text without Markdown bold
+comment_header_template: "Agent: {role}"
+```
+
+The template applies to all dispatcher warnings (PR too large, forbidden files, staleness alerts) and is also embedded in each agent's task instructions via SOUL.md, so agent-authored comments follow the same pattern automatically. Omit this key to use the default (`**Agent: {role}**`).
+
 ---
 
 ## 10. Autonomous Pipeline Advancement
