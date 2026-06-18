@@ -347,15 +347,20 @@ The template applies to all dispatcher warnings (PR too large, forbidden files, 
 
 Daedalus advances the pipeline in two ways:
 
-**1. Completion triggers (primary):** Every agent's system prompt includes an instruction to run the daedalus dispatcher script immediately after completing its kanban task:
+**1. Terminal-state triggers (primary):** Every agent's system prompt includes an instruction to run the daedalus dispatcher script immediately after reaching any terminal state — whether that's marking a task **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state:
 
 ```bash
 bash ~/.hermes/scripts/daedalus-cron.sh
 ```
 
-This means each phase transition happens within seconds of completion — the pipeline does not wait for the next cron tick.
+This means each phase transition happens within seconds. For example:
+- Developer blocks with `review-required` → dispatcher fires → detects CI green → reviewer task starts (seconds, not 60 minutes)
+- Reviewer blocks with `awaiting-fix` → dispatcher fires → developer fix card created
+- Any agent marks done → dispatcher fires → next phase begins
 
-**2. Cron job (safety net):** The scheduled cron job (default: every 60 minutes) catches any missed advancement — for example, if an agent crashed before reaching its final step.
+**Error recovery:** If the state-transition call returns "already terminal" (a known Hermes platform behavior where tasks are sometimes marked done prematurely), agents are instructed to run the dispatcher anyway. The pipeline recovers immediately instead of stalling.
+
+**2. Cron job (last-resort safety net):** The scheduled cron job (default: every 60 minutes) catches anything the terminal-state trigger misses — for example, if an agent crashed before its final step. When the dispatcher runs on a cron tick, it also detects PM tasks that completed without a `SPEC:` summary (premature completion) and re-creates them with a new retry key — up to 3 attempts.
 
 Together these make the pipeline fully autonomous: once an issue is marked Ready, the entire chain runs end-to-end without any manual intervention between phases.
 
@@ -363,14 +368,19 @@ Together these make the pipeline fully autonomous: once an issue is marked Ready
 issue marked Ready
       │
       ▼
-validator runs → CONFIRMED: <note>
-      │   (agent runs daedalus-cron.sh immediately on completion)
+validator → CONFIRMED: <note>
+      │   (agent fires dispatcher immediately on any terminal state)
       ▼
-PM / project-manager decomposes work
-      │   (agent runs daedalus-cron.sh immediately on completion)
+PM → SPEC: <note>
+      │   (agent fires dispatcher immediately on any terminal state)
       ▼
-developer → reviewer → security-analyst → documentation
-            (each agent runs daedalus-cron.sh when done)
+developer → review-required → CI green → reviewer starts (within seconds)
+      ▼
+reviewer → approved → security-analyst starts (within seconds)
+      ▼
+security-analyst → cleared → documentation starts (within seconds)
+      ▼
+documentation → done → report posted to PR + channels
 ```
 
 ---
@@ -560,6 +570,16 @@ The label picker calls your VCS provider's API. If it shows empty:
 1. Refresh the browser tab.
 2. Restart the gateway if you just installed the plugin.
 3. Confirm the working directory path exists and is an absolute path.
+
+### Pipeline stalled — validator or PM task completed with no `SPEC:` or `CONFIRMED:`
+
+This means Hermes completed the task prematurely before the agent finished (a known platform behavior). The dispatcher automatically detects this on the next cron tick and re-creates the task with a new retry key (up to 3 attempts). To recover immediately:
+
+```bash
+bash ~/.hermes/scripts/daedalus-cron.sh
+```
+
+If after 3 retries the pipeline is still stalled, the kanban board will show a warning log entry. Check the Hermes session logs for the agent's last run to understand what it was doing when the task was prematurely completed.
 
 ### macOS "Keychain Not Found" prompt during install
 

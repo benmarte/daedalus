@@ -382,18 +382,27 @@ The template is applied to all dispatcher-posted comments (PR size warnings, for
 
 ## Autonomous pipeline advancement
 
-Each phase transition is triggered by a **completion hook** in every agent's SOUL.md,
-not just by the hourly cron tick. When an agent marks its kanban task done, it
+Each phase transition is triggered by a **completion hook** in every agent's SOUL.md.
+When an agent reaches any terminal state — marking its task **done**, blocking with
+**review-required**, blocking with **awaiting-fix**, or any other blocked state — it
 immediately runs:
 
 ```bash
 bash ~/.hermes/scripts/daedalus-cron.sh
 ```
 
-This causes the next pipeline phase to start within seconds rather than waiting up to
-60 minutes for the next scheduled tick. The cron job is still there as a safety net
-(in case an agent crashes before reaching its final step), but it is no longer the
-primary advancement mechanism.
+This means each phase transition starts within seconds rather than waiting for the
+hourly cron tick. For example, as soon as the developer blocks with `review-required`,
+the dispatcher fires, detects CI green, and promotes the reviewer task — all within
+seconds.
+
+**Error recovery:** If the state-transition call itself fails ("already terminal" —
+a known platform bug where Hermes marks tasks done prematurely), agents are instructed
+to run the dispatcher anyway. The pipeline never waits for a human to manually trigger
+recovery.
+
+The cron job is still present as a last-resort safety net (in case an agent crashes
+before reaching its final step), but it is no longer the primary advancement mechanism.
 
 The result is a fully autonomous pipeline: once an issue is marked Ready, the entire
 validator → PM → developer → reviewer → security-analyst → documentation chain runs
@@ -404,13 +413,21 @@ issue marked Ready
       │
       ▼
 validator runs → CONFIRMED: <note>
-      │   └─ agent runs daedalus-cron.sh on completion
+      │   └─ agent runs daedalus-cron.sh on any terminal state
       ▼
-PM / project-manager runs → decompose → team roster
-      │   └─ agent runs daedalus-cron.sh on completion
+PM / project-manager runs → SPEC: <note>
+      │   └─ agent runs daedalus-cron.sh on any terminal state
       ▼
-developer → reviewer → security-analyst → documentation
-            (each agent runs daedalus-cron.sh when done)
+developer → review-required
+      │   └─ agent runs daedalus-cron.sh → dispatcher detects CI green → reviewer starts
+      ▼
+reviewer → approved
+      │   └─ agent runs daedalus-cron.sh → security-analyst starts
+      ▼
+security-analyst → cleared
+      │   └─ agent runs daedalus-cron.sh → documentation starts
+      ▼
+documentation → done → report posted
 ```
 
 ---
@@ -420,6 +437,12 @@ developer → reviewer → security-analyst → documentation
 `core/iterate.py` runs on every cron tick after the main dispatch. It scans every
 blocked card and routes it to the agent that can clear it — the pipeline never
 stalls waiting for a human unless it has already retried 3 times.
+
+**PM stale-task recovery.** If the Hermes platform prematurely marks a PM task done
+before the agent finishes (a known platform-level bug), the task is left with no
+`SPEC:` summary. The dispatcher detects this "stale" state on the next tick and
+re-creates the PM task with a new idempotency key (`pm-{n}-r1`, `pm-{n}-r2`),
+capped at 3 retries. Previously this stalled the pipeline indefinitely.
 
 ```
 blocked card detected
