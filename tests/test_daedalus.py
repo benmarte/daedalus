@@ -156,7 +156,8 @@ def test_config_loader_resolve():
 
 # ── kanban: ls parsing ───────────────────────────────────────────────────────
 def test_kanban_list_issue_numbers():
-    with mock.patch.object(kanban, "_hk", return_value=(0, "#329 foo\n#42 bar\nno-number\n", "")):
+    tasks = [{"title": "#329 foo"}, {"title": "#42 bar"}, {"title": "no-number"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=tasks):
         nums = kanban.list_issue_numbers("board")
     check("list_issue_numbers parses #n from board output", nums == {329, 42})
 
@@ -927,7 +928,7 @@ def test_priority_sort_p0_before_unlabeled():
 
     class FP(_FakeProvider):
         def board_configured(self): return True
-        def board_numbers_with_statuses(self, names): return set()
+        def board_numbers_with_statuses(self, names): return {1, 2}
         def list_issues(self, state="open", labels=None, limit=50):
             return [
                 IssueSummary(number=2, title="normal", labels=[]),
@@ -1340,7 +1341,7 @@ def test_custom_validator_profile_used_in_dispatch():
 
     class FP(_FakeProvider):
         def board_configured(self): return True
-        def board_numbers_with_statuses(self, names): return set()
+        def board_numbers_with_statuses(self, names): return {42}
         def list_issues(self, state="open", labels=None, limit=50):
             return [IssueSummary(number=42, title="bug", labels=[])]
         def pr_state_for_issue(self, n): return None
@@ -1561,7 +1562,7 @@ def test_has_active_pm_consultation_true():
     """_has_active_pm_consultation returns True when an open consult task exists."""
     disp = _load_dispatch()
     disp.kanban.list_tasks = lambda s: [
-        {"title": "consult: #5 login bug", "assignee": "pm-daedalus", "status": "in_progress"},
+        {"title": "consult: #5 login bug", "assignee": "project-manager-daedalus", "status": "in_progress"},
     ]
     check("active consult detected", disp._has_active_pm_consultation("slug", 5) is True)
 
@@ -1631,7 +1632,7 @@ def test_check_team_blockers_skips_when_consult_active():
     ]
     # Active consultation already open
     disp.kanban.list_tasks = lambda s: [
-        {"title": "consult: #9 feature", "assignee": "pm-daedalus", "status": "in_progress"},
+        {"title": "consult: #9 feature", "assignee": "project-manager-daedalus", "status": "in_progress"},
     ]
 
     _orig = disp.kanban.create_task
@@ -1683,7 +1684,7 @@ def test_check_team_blockers_skips_validator_cards():
     disp.kanban.list_blocked = lambda s: [
         {"title": "#3 issue", "assignee": "validator-daedalus",
          "summary": "BLOCKED: needs more info"},
-        {"title": "#3 issue", "assignee": "pm-daedalus",
+        {"title": "#3 issue", "assignee": "project-manager-daedalus",
          "summary": "BLOCKED: unclear scope"},
     ]
     disp.kanban.list_tasks = lambda s: []
@@ -1731,7 +1732,7 @@ def test_has_pm_tasks_true_for_spec_task():
     """_has_pm_tasks returns True for a PM spec task (no consult: prefix)."""
     disp = _load_dispatch()
     disp.kanban.list_tasks = lambda s: [
-        {"title": "#5 login bug", "assignee": "pm-daedalus", "status": "in_progress"},
+        {"title": "#5 login bug", "assignee": "project-manager-daedalus", "status": "in_progress"},
     ]
     check("spec task correctly detected as PM task",
           disp._has_pm_tasks("slug", 5) is True)

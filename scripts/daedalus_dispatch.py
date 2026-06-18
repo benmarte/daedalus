@@ -690,7 +690,7 @@ def _mark_notified_block(slug: str, issue_number: int,
 
 def _has_downstream_tasks(slug: str, issue_number: int, *,
                           validator_profile: str = "validator-daedalus",
-                          pm_profile: str = "pm-daedalus") -> bool:
+                          pm_profile: str = "project-manager-daedalus") -> bool:
     """Return True if any non-validator, non-PM kanban task exists for issue_number.
 
     Used by _check_completed_pm to avoid creating duplicate team triage cards.
@@ -707,7 +707,7 @@ def _has_downstream_tasks(slug: str, issue_number: int, *,
 
 
 def _has_pm_tasks(slug: str, issue_number: int,
-                  pm_profile: str = "pm-daedalus") -> bool:
+                  pm_profile: str = "project-manager-daedalus") -> bool:
     """Return True if a PM spec task already exists for issue_number."""
     pattern = f"#{issue_number}"
     for t in kanban.list_tasks(slug):
@@ -724,7 +724,7 @@ def _has_pm_tasks(slug: str, issue_number: int,
 
 
 def _has_active_pm_consultation(slug: str, issue_number: int,
-                                pm_profile: str = "pm-daedalus") -> bool:
+                                pm_profile: str = "project-manager-daedalus") -> bool:
     """Return True if there is a non-done PM consultation task for issue_number.
 
     Used to prevent creating duplicate consultation tasks when a team blocker
