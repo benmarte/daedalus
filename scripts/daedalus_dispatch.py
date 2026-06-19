@@ -661,39 +661,34 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
 
 def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: str,
              base_branch: str, provider_name: str) -> str:
-    """Phase-2 task body: PM writes spec + acceptance criteria before team starts."""
+    """Phase-2 task body: PM reads spec, assigns tasks to full team."""
     n = issue.get("number")
     title = issue.get("title", "")
     body = (issue.get("body") or "").strip()
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    spec_path = f"{workdir}/.hermes/specs/issue-{n}.md"
     return (
-        f"You are the PRODUCT MANAGER for issue {repo}#{n}: {title}\n"
+        f"You are the PROJECT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
         f"The VALIDATOR has confirmed this issue is real, safe, and ready to implement.\n"
         f"Validator findings: {validator_summary}\n\n"
-        f"⛔ DO NOT write code. Your role is to write the spec and acceptance criteria "
-        f"that the development team will implement.\n\n"
-        f"Steps:\n"
-        f"   a) Read the issue below carefully along with the validator's findings.\n"
-        f"   b) Write a clear spec that includes:\n"
-        f"      - Problem statement (what exactly is broken or missing)\n"
-        f"      - Acceptance criteria (numbered list — what 'done' looks like)\n"
-        f"      - Implementation approach (high-level, not code)\n"
-        f"      - Edge cases to handle\n"
-        f"      - Files likely to be affected (based on your codebase reading)\n"
-        f"   b2) Save the spec to `{spec_path}` using the Write tool. "
-        f"IMPORTANT: always save to this path — NEVER use /tmp or any other location. "
-        f"The .hermes/specs/ directory already exists; create it with `mkdir -p {workdir}/.hermes/specs` if needed.\n"
-        f"   c) 🚨 COMPLETE YOUR KANBAN CARD FIRST — before posting to GitHub. "
-        f"Call kanban_complete with summary starting 'SPEC: ' followed by a 1–2 sentence "
-        f"summary of what will be built. The dispatcher detects this EXACT prefix to unblock "
-        f"the development team. Do this BEFORE step d — even if GitHub posting later fails, "
-        f"the pipeline must advance.\n"
-        f"   d) After completing the card, post the spec as a comment on issue #{n} via: {comment_howto}\n\n"
-        f"If the developer hits a blocker during implementation, they may comment on this issue "
-        f"to request your clarification. Monitor for such requests.\n\n"
+        f"⛔ DO NOT write code. Your role is to read the spec, write acceptance criteria, "
+        f"and assign tasks to the full team.\n\n"
+        f"Your SOUL.md has full instructions. Follow them exactly. Summary of steps:\n"
+        f"   1) Read the issue and validator findings below.\n"
+        f"   2) Post a spec comment to issue #{n} via: {comment_howto}\n"
+        f"   3) Create ALL team tasks with `hermes kanban create` in this order:\n"
+        f"      a) Developer task (starts immediately) — save task ID as DEV_TASK_ID\n"
+        f"      b) QA task (--parent <DEV_TASK_ID>) — save as QA_TASK_ID\n"
+        f"      c) Reviewer task (--parent <QA_TASK_ID>)\n"
+        f"      d) Security task (--parent <QA_TASK_ID>)\n"
+        f"      e) Docs task (--parent <DEV_TASK_ID> --parent <REVIEWER_TASK_ID> --parent <SECURITY_TASK_ID>)\n"
+        f"      Use idempotency keys: developer-{n}, qa-{n}, reviewer-{n}, security-{n}, docs-{n}\n"
+        f"      Use workspace: dir:{workdir}\n"
+        f"   4) 🚨 COMPLETE YOUR KANBAN CARD with summary starting EXACTLY:\n"
+        f"      'assigned: developer=<id>, qa=<id>, reviewer=<id>, security=<id>, docs=<id> for issue #{n}'\n"
+        f"      The dispatcher detects this EXACT prefix to confirm team assignment.\n"
+        f"   5) Run: bash ~/.hermes/scripts/daedalus-cron.sh\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
 
@@ -906,7 +901,8 @@ def _pm_task_state(slug: str, issue_number: int,
         if not summary_raw and tid:
             card = kanban.show_card(slug, tid) or {}
             summary_raw = (card.get("latest_summary") or "").strip()
-        if summary_raw.lower().startswith("spec:"):
+        s = summary_raw.lower()
+        if s.startswith("spec:") or s.startswith("assigned:"):
             has_complete = True
         else:
             stale_count += 1
@@ -1115,6 +1111,14 @@ def _check_completed_pm(
             card = kanban.show_card(slug, tid) or {}
             summary_raw = (card.get("latest_summary") or "").strip()
         summary = summary_raw.lower()
+        # Accept both old "SPEC:" and new "assigned:" PM completion signals.
+        # "assigned:" means PM already created all team tasks directly — skip triage creation.
+        if summary.startswith("assigned:"):
+            # PM created team tasks directly via SOUL.md. Log and skip — tasks already exist.
+            m2 = re.search(r"#(\d+)", task.get("title") or "")
+            if m2:
+                logger.info("dispatch: PM assigned #%s — team tasks created by PM directly, skipping triage", int(m2.group(1)))
+            continue
         if not summary.startswith("spec:"):
             continue
         # Skip consultation tasks (title starts with "consult:") — only spec tasks trigger team
