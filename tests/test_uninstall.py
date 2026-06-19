@@ -24,6 +24,20 @@ _script = (
 )
 
 
+def _strip_hermes_from_path(env: dict) -> str:
+    """Remove directories containing a 'hermes' binary from PATH.
+
+    This prevents the test harness from leaking the real `hermes` CLI into
+    the subprocess environment. When `hermes` is on PATH, uninstall.sh calls
+    `hermes plugins disable daedalus` which mutates config.yaml before the
+    awk-based strip step runs, breaking tests that expect a controlled
+    config.yaml.
+    """
+    paths = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    paths = [p for p in paths if not os.path.isfile(os.path.join(p, "hermes"))]
+    return os.pathsep.join(paths) or "/usr/bin:/bin"
+
+
 @pytest.fixture(scope="module")
 def script_path():
     """Ensure the script exists and is executable."""
@@ -35,6 +49,7 @@ def script_path():
 def _run(script_path: Path, *, hermes_home: str, extra_args: list[str] | None = None) -> subprocess.CompletedProcess:
     """Run uninstall.sh with the given HERMES_HOME and optional extra args."""
     env = {**os.environ, "HERMES_HOME": hermes_home}
+    env["PATH"] = _strip_hermes_from_path(env)
     return subprocess.run(
         ["bash", str(script_path)] + (extra_args or []),
         capture_output=True, text=True, timeout=30, env=env,
@@ -50,6 +65,7 @@ def _run_stdin(
 ) -> subprocess.CompletedProcess:
     """Run uninstall.sh with stdin piped (for confirmation prompts)."""
     env = {**os.environ, "HERMES_HOME": hermes_home}
+    env["PATH"] = _strip_hermes_from_path(env)
     return subprocess.run(
         ["bash", str(script_path)] + (extra_args or []),
         capture_output=True, text=True, timeout=30, env=env,
@@ -61,6 +77,7 @@ def _run_no_hermes_home(script_path: Path, *, home: str, extra_args: list[str] |
     """Run uninstall.sh WITHOUT HERMES_HOME set — it must default to HOME/.hermes."""
     env = {**os.environ, "HOME": home}
     env.pop("HERMES_HOME", None)
+    env["PATH"] = _strip_hermes_from_path(env)
     return subprocess.run(
         ["bash", str(script_path)] + (extra_args or []),
         capture_output=True, text=True, timeout=30, env=env,
@@ -86,6 +103,7 @@ class TestGuardRejects:
         env = {**os.environ}
         env.pop("HERMES_HOME", None)
         env.pop("HOME", None)
+        env["PATH"] = _strip_hermes_from_path(env)
         r = subprocess.run(
             ["bash", str(script_path)],
             capture_output=True, text=True, timeout=30, env=env,
