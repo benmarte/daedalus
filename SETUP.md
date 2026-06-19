@@ -5,8 +5,8 @@ This repo provisions a **lean roster of specialist Hermes agents** that take a
 ready-to-merge PR — using **native Hermes Kanban**
 (decompose → role profiles → dispatch → review).
 
-Roster: **validator · project-manager · planner · developer · reviewer · security-analyst · documentation**
-(each loads only its lifecycle agent-skills).
+Roster: **validator · project-manager · developer · qa · reviewer · security-analyst · accessibility · documentation**
+(each loads only its lifecycle agent-skills). `accessibility` is conditional — only invoked when the issue references UI/frontend work.
 
 The **validator** runs alone as Phase 1 on every issue — the dispatcher creates only the validator
 task initially. Developer, reviewer, security-analyst, and documentation tasks are not created until
@@ -67,9 +67,9 @@ GitHub issue after completing their step.
 ```bash
 git clone <this-repo> && cd daedalus
 bash scripts/provision_roster.sh        # idempotent — re-run any time to reset to spec
-hermes profile list                     # expect the 7 roles
+hermes profile list                     # expect the 9 roles
 ```
-What it does: creates the 7 profiles (cloning config/keys from `default`), seeds each with **only**
+What it does: creates the 9 profiles (cloning config/keys from `default`), seeds each with **only**
 its matrix agent-skills, writes a **per-profile git credential store** (`~/.git-credentials`,
 0600, keychain-free) so `git push` works inside each isolated HOME, and drops the provider
 tokens into each profile `.env` for API calls (open PR / comment via curl).
@@ -100,6 +100,21 @@ registers the repo, creates its kanban board + cron). From the terminal:
   worktree-pinned triage card → dispatcher decomposes → roster works it → PR.
 - **Automated (cron):** each project gets its own cron job (created by setup.sh /
   the dashboard); edits update the job in place.
+
+## Pipeline lifecycle
+
+```
+Validator → PM → Developer → QA → Reviewer + Security-Analyst + Accessibility (UI only) → Documentation
+```
+
+The PM agent creates all downstream tasks directly via `hermes kanban create` with idempotency keys (`developer-N`, `qa-N`, `reviewer-N`, `security-N`, `docs-N`). QA gates the reviewer/security/accessibility stages — those tasks are created with `--parent <QA_TASK_ID>` and only become ready after QA completes.
+
+**Validator None-summary recovery.** If a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. The dispatcher automatically:
+1. Scans the GitHub issue for a comment with `**Agent: validator**` attribution and looks for `CONFIRMED` in the body — if found, advances to PM without re-running the validator (github-comment fallback).
+2. If no confirming comment exists, retries the validator up to 2 times (`validator-retry-N-r1`, `validator-retry-N-r2`).
+3. After 2 retries with no CONFIRMED outcome, escalates to human review.
+
+The validator SOUL.md also instructs the agent to verify its summary was written after `kanban_complete` and retry if `latest_summary` is null.
 
 ## Known gotchas (captured the hard way)
 - git credentials must live **per-profile-HOME** (`~/.git-credentials` via the `store`

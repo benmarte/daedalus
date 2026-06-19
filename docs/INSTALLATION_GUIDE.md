@@ -585,15 +585,30 @@ The label picker calls your VCS provider's API. If it shows empty:
 2. Restart the gateway if you just installed the plugin.
 3. Confirm the working directory path exists and is an absolute path.
 
-### Pipeline stalled — validator or PM task completed with no `SPEC:` or `CONFIRMED:`
+### Pipeline stalled — validator task completed with `summary: None`
 
-This means Hermes completed the task prematurely before the agent finished (a known platform behavior). The dispatcher automatically detects this on the next cron tick and re-creates the task with a new retry key (up to 3 attempts). To recover immediately:
+When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery, all downstream agents hit a HARD STOP and ghost-complete instantly with no code written.
+
+The dispatcher handles this automatically in two stages:
+
+1. **GitHub-comment fallback** — scans the issue for a comment with `**Agent: validator**` and `CONFIRMED` in the body. If found, advances to PM without re-running the validator.
+2. **Validator retry** — if no confirming comment exists, retries the validator up to 2 times (`validator-retry-N-r1`, `validator-retry-N-r2`).
+
+To trigger recovery immediately instead of waiting for the next cron tick:
 
 ```bash
 bash ~/.hermes/scripts/daedalus-cron.sh
 ```
 
-If after 3 retries the pipeline is still stalled, the kanban board will show a warning log entry. Check the Hermes session logs for the agent's last run to understand what it was doing when the task was prematurely completed.
+If after 2 retries the pipeline is still stalled, the validator card will be escalated for human review in the kanban board.
+
+### Pipeline stalled — PM task completed with no `assigned:` summary
+
+The PM agent is expected to complete with a summary starting `assigned: developer=<id>, qa=<id>, ...`. If it completes without this (a known platform behavior where tasks are prematurely marked done), the dispatcher re-creates the PM task with a new retry key (`pm-{n}-r1`, `pm-{n}-r2`), capped at 3 retries. To recover immediately:
+
+```bash
+bash ~/.hermes/scripts/daedalus-cron.sh
+```
 
 ### macOS "Keychain Not Found" prompt during install
 
