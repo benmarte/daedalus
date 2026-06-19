@@ -302,3 +302,54 @@ class TestMain:
         assert hasattr(postinstall, "_check_default_profile")
         assert hasattr(postinstall, "_ensure_agent_skills")
         assert hasattr(postinstall, "_check_vcs_tokens")
+
+
+# ── webhook handler install tests ────────────────────────────────────────────
+
+
+class TestInstallWebhookHandler:
+    """_install_webhook_handler copies daedalus-ready.sh to ~/.hermes/agent-hooks/."""
+
+    def test_install_success(self, postinstall, tmp_path):
+        """Installs handler to ~/.hermes/agent-hooks/daedalus-ready.sh, makes executable."""
+        # Source script must exist for the install to work.
+        source = _repo_root / "scripts" / "daedalus-ready.sh"
+        if not source.is_file():
+            pytest.skip("scripts/daedalus-ready.sh not present")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = postinstall._install_webhook_handler()
+
+        assert ok is True
+        assert "OK:" in msg
+        installed = fake_home / ".hermes" / "agent-hooks" / "daedalus-ready.sh"
+        assert installed.is_file()
+        # Check executable bit
+        assert installed.stat().st_mode & 0o111
+
+    def test_install_source_missing(self, postinstall, tmp_path, monkeypatch):
+        """Returns FAIL when source script is missing."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        # Create a fake scripts dir that lacks daedalus-ready.sh
+        fake_scripts = tmp_path / "scripts"
+        fake_scripts.mkdir()
+        fake_postinstall = fake_scripts / "postinstall.py"
+        real_postinstall = _repo_root / "scripts" / "postinstall.py"
+        fake_postinstall.write_text(real_postinstall.read_text())
+
+        # Monkeypatch __file__ resolution so the function finds an empty scripts dir
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("postinstall_nomock", str(fake_postinstall))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = mod._install_webhook_handler()
+
+        assert ok is False
+        assert "MISSING" in msg

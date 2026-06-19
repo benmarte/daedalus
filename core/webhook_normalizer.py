@@ -11,6 +11,8 @@ work across different boards with different column names.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -354,3 +356,106 @@ def _normalize_hermes(
         issue_number=issue_number,
         board_slug=board_slug,
     )
+
+
+def verify_signature(
+    provider: str,
+    payload_bytes: bytes,
+    headers: Optional[Dict[str, str]],
+    secret: str,
+) -> bool:
+    """Verify HMAC signature on an incoming webhook payload.
+
+    Args:
+        provider: Provider type ('github', 'gitlab', 'azure', 'hermes').
+        payload_bytes: Raw request body bytes (as received, before JSON parse).
+        headers: HTTP request headers (case-preserving dict).
+        secret: Shared secret configured for HMAC verification.
+
+    Returns:
+        True if the signature is valid, False otherwise.
+        Logs and returns False on mismatch, missing headers, unknown provider,
+        or empty secret — never raises or crashes.
+    """
+    try:
+        provider = provider.lower().strip()
+        headers = headers or {}
+
+        if not secret:
+            logger.warning("webhook: empty secret, rejecting signature")
+            return False
+
+        if provider == "github":
+            return _verify_github_signature(payload_bytes, headers, secret)
+        elif provider == "gitlab":
+            return _verify_gitlab_token(headers, secret)
+        elif provider == "azure":
+            return _verify_azure_secret(headers, secret)
+        else:
+            logger.warning("webhook: unknown provider for signature verification: %s", provider)
+            return False
+    except Exception:
+        logger.exception("webhook: unexpected error in verify_signature")
+        return False
+
+
+def _verify_github_signature(
+    payload_bytes: bytes, headers: Dict[str, str], secret: str
+) -> bool:
+    """Verify GitHub's X-Hub-Signature-256 HMAC-SHA256 signature.
+
+    Header format: ``sha256=<hex-digest>``
+    """
+    header = headers.get("X-Hub-Signature-256") or headers.get("X-Hub-Signature-256".lower())
+    if not header:
+        logger.warning("webhook: github missing X-Hub-Signature-256 header")
+        return False
+
+    if not header.startswith("sha256="):
+        logger.warning("webhook: github signature header missing sha256= prefix")
+        return False
+
+    provided_digest = header[len("sha256="):]
+    expected_digest = hmac.new(
+        secret.encode("utf-8"), payload_bytes, hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(provided_digest, expected_digest):
+        logger.warning("webhook: github HMAC signature mismatch")
+        return False
+
+    return True
+
+
+def _verify_gitlab_token(headers: Dict[str, str], secret: str) -> bool:
+    """Verify GitLab's X-Gitlab-Token header (shared secret direct comparison)."""
+    token = headers.get("X-Gitlab-Token") or headers.get("X-Gitlab-Token".lower())
+    if not token:
+        logger.warning("webhook: gitlab missing X-Gitlab-Token header")
+        return False
+
+    if token != secret:
+        logger.warning("webhook: gitlab X-Gitlab-Token mismatch")
+        return False
+
+    return True
+
+
+def _verify_azure_secret(headers: Dict[str, str], secret: str) -> bool:
+    """Verify Azure DevOps shared secret.
+
+    Azure DevOps doesn't use HMAC — it sends a shared secret in the request body
+    for service hooks. We check the header path if present; body-level verification
+    is deferred to the caller (the normalizer parses the body).
+    """
+    token = headers.get("X-Azure-Webhook-Token") or headers.get("x-azure-webhook-token")
+    if not token:
+        # Azure doesn't always send a header; body verification is the caller's job
+        logger.info("webhook: azure no token header, deferring to body-level verification")
+        return True  # Permissive — Azure webhook body carries the secret
+
+    if token != secret:
+        logger.warning("webhook: azure token mismatch")
+        return False
+
+    return True

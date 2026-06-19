@@ -118,6 +118,31 @@ def _install_cron_wrapper() -> tuple[bool, str]:
         return False, f"FAIL: could not write cron wrapper at {wrapper}: {exc}"
 
 
+def _install_webhook_handler() -> tuple[bool, str]:
+    """Install the webhook handler to ~/.hermes/agent-hooks/daedalus-ready.sh (idempotent).
+
+    Copies scripts/daedalus-ready.sh from the repo to the user's agent-hooks dir
+    and makes it executable. The handler reads webhook payloads from stdin,
+    normalizes them via core.webhook_normalizer, and fires the dispatcher
+    if the item moved to the Ready column.
+    """
+    real_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+    hooks_dir = real_home / ".hermes" / "agent-hooks"
+    target = hooks_dir / "daedalus-ready.sh"
+    source = Path(__file__).resolve().parent / "daedalus-ready.sh"
+
+    if not source.is_file():
+        return False, f"MISSING: source script not found at {source}"
+
+    try:
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(source.read_text())
+        target.chmod(0o755)
+        return True, f"OK: webhook handler installed at {target}"
+    except OSError as exc:
+        return False, f"FAIL: could not install webhook handler at {target}: {exc}"
+
+
 # ── provision ────────────────────────────────────────────────────────────────
 
 def _run_provision(script_dir: Path) -> tuple[bool, str]:
@@ -188,6 +213,11 @@ def main(check_only: bool = False) -> int:
     print(msg)
     print()
     # Note: non-fatal — a wrapper failure is logged but doesn't block setup.
+
+    # Install the webhook handler script (idempotent, non-fatal)
+    ok, msg = _install_webhook_handler()
+    print(msg)
+    print()
 
     if check_only:
         print("\u2713 All prerequisites met (--check only, skipping provision).")
