@@ -124,6 +124,44 @@ def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
     return result
 
 
+def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
+    """Schedule a one-shot retry dispatch when CI is still pending.
+
+    Idempotent: if a retry cron named ``daedalus-ci-retry-<slug>`` already
+    exists, it is NOT recreated.
+
+    Returns True if a new cron was actually created, False if skipped.
+    """
+    try:
+        slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
+        cron_name = f"daedalus-ci-retry-{slug_safe}"
+        existing_jobs = subprocess.run(
+            ["hermes", "cron", "list", "--quiet"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if cron_name in (existing_jobs.stdout or ""):
+            logger.debug("dispatch: retry cron %s already exists — skipping", cron_name)
+            return False
+        subprocess.run(
+            [
+                "hermes", "cron", "create", "3m",
+                "--name", cron_name,
+                "--no-agent",
+                "--script", "daedalus-cron.sh",
+                "--repeat", "1",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        logger.info(
+            "dispatch: CI pending on %d card(s) — scheduled retry in 3m (%s)",
+            pending_count, cron_name,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("dispatch: failed to schedule CI retry cron: %s", exc)
+        return False
+
+
 def _hermes_profile_exists(name: str) -> bool:
     """Check whether a Hermes profile exists via filesystem (fast, no subprocess).
 
@@ -1411,7 +1449,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             logger.info("dispatch:   [%s] %s — %s",
                         d.get("severity", "?"), d.get("task_id", "?"),
                         d.get("message", ""))
-    iterate_counts, advance_prs = iterate.run_iterate(
+    iterate_counts, advance_prs, pending_ci_cards = iterate.run_iterate(
         slug, repo, resolved=resolved, provider=provider, dry_run=dry_run,
     )
     # Separate advance PR numbers from routed actions (dev_fix / escalate) for
@@ -1420,6 +1458,13 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                       if v > 0 and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE)}
     if any(c > 0 for c in iterate_counts.values()) and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    # ── CI pending retry scheduling ─────────────────────────────────────────
+    # When one or more cards were skipped because CI was still PENDING, schedule
+    # a one-shot retry so the dispatcher re-runs after CI has likely finished.
+    # Idempotent: skips creation if a retry job for this slug already exists.
+    if pending_ci_cards and not dry_run:
+        _schedule_ci_retry(slug, len(pending_ci_cards))
 
     # ── doc-report delivery ──────────────────────────────────────────────────
     # The dispatcher delivers documentation reports (PR comments prefixed
