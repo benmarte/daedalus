@@ -147,6 +147,31 @@ def classify_blocked(
             return APPROVE_ADVANCE
         return ""
 
+    # ── qa-daedalus card ──────────────────────────────────────────────────
+    # QA sits between developer and reviewer/security. The QA agent posts one
+    # of three signals: qa-passed (all good), qa-failed (tests/lint broken),
+    # or something unspecified (still running / unclear). CI is not a gate for
+    # QA — the dispatcher acts on the signal directly.
+    if assignee == "qa-daedalus":
+        summary = (handoff_text or "").lower()
+        if "qa-passed" in summary:
+            return ADVANCE
+        if "qa-failed" in summary:
+            return DEV_FIX_CI
+        return PENDING_CI
+
+    # ── accessibility-daedalus card ───────────────────────────────────────
+    # Accessibility auditors PRs for WCAG 2.1 AA compliance. Posts
+    # 'approved' / 'accessibility-na' to advance, 'changes requested' to
+    # route back to the PM for re-routing, otherwise pending.
+    if assignee == "accessibility-daedalus":
+        summary = (handoff_text or "").lower()
+        if "approved" in summary or "accessibility-na" in summary:
+            return ADVANCE
+        if "changes requested" in summary:
+            return PM_ROUTE
+        return PENDING_CI
+
     # ── unknown assignee ─────────────────────────────────────────────────
     return ""
 

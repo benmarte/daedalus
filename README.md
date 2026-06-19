@@ -20,12 +20,15 @@ flowchart TD
     V -->|"SECURITY_THREAT\nor BLOCK_FOR_REVIEW"| ST(["🔒 Card blocked\nIssue comment posted\nsecurity-escalation fired"])
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> CI{CI}
+    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
+    QA --> CI{CI}
     CI -->|green| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    CI -->|green| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
     CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
-    Fix --> CI
+    Fix --> Dev
     Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
     Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    A11y -->|cleared| Doc
     Doc --> Merge(["🔀 You merge the PR"])
     Merge --> Done(["✅ Issue closed\nCard → Done"])
 
@@ -93,7 +96,7 @@ demo" into "a tool the team can depend on."
 | One issue spawns 9 PRs | One issue → one tracked card → one PR |
 | Agent starts coding a bug that was fixed last week | **Validator** confirms the issue is real, unaddressed, and has enough detail before any code is written |
 | Agent "forgets" to lint → red PR | **Ship-gate** detects and runs the project's lint/format tools before the PR is opened — no tool mandated |
-| A single agent marks its own work done | **Decompose** into validator → developer → reviewer → security → documentation |
+| A single agent marks its own work done | **Decompose** into validator → developer → QA → reviewer → security → accessibility (UI only) → documentation |
 | You babysit every handoff | **Auto-advance**: each stage completes on green CI and flows to the next |
 | Issues merged to `dev` stay open forever | Dispatcher **closes the issue + moves card to Done** on merge |
 | "Works on my machine" | One config, checked in, runs on any teammate's Hermes |
@@ -125,10 +128,14 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    - **developer/reviewer/security-analyst/documentation** (Phase 2) — tasks are created by the
      dispatcher only after it detects the validator's `CONFIRMED:` summary. The dispatcher creates
      these atomically on the next tick: a triage card is decomposed across all four roles simultaneously.
-   - **developer** implements + tests, then must pass the **ship-gate** to open a PR,
-   - **reviewer** reviews, **security-analyst** audits, **documentation** writes a
-     completion report and posts it to the **PR and your chat channels**. All roles post
-     a summary comment on the GitHub issue after completing their step.
+   - **developer** implements + tests, then must pass the **ship-gate** to open a PR.
+   - **qa** runs the test suite, analyzes coverage, and reports a verdict (`qa-passed` or
+     `qa-failed`). The pipeline advances to reviewer/security only after QA passes.
+   - **reviewer** reviews, **security-analyst** audits, **accessibility** audits the PR for
+     WCAG 2.1 AA compliance (only when the issue references UI/frontend work), and
+     **documentation** writes a completion report and posts it to the **PR and your chat
+     channels**. All four roles post a summary comment on the GitHub issue after completing
+     their step.
 4. Each tick **auto-advances** any stage that's blocked on review once its PR's CI is
    green. When `_execute_advance()` completes the developer card, it also calls
    `_create_downstream_review_tasks()` — a safety net that auto-creates reviewer,
@@ -146,7 +153,7 @@ deterministic — never dependent on an agent remembering to update anything.
 
 ## Agent roster
 
-Clicking **Install Agents** provisions 7 specialist Hermes profiles. Each is a
+Clicking **Install Agents** provisions 9 specialist Hermes profiles. Each is a
 separate agent with its own context, credentials, and curated skill set — no
 profile can see another's in-progress work. The separation enforces the
 "no grading your own homework" principle: every handoff is a different agent with
@@ -155,12 +162,14 @@ a different perspective.
 | Profile | Role | Writes code? |
 |---|---|---|
 | `validator-daedalus` | **Phase 1 — runs alone before any other agent.** Validates the issue: reproduces the bug, checks git history, detects duplicates. Scans for security threats (prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks). Six possible outcomes: **CONFIRMED** (proceeds; summary prefix `CONFIRMED:` triggers Phase 2), **ALREADY_FIXED** (closes issue, pipeline ends), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, sends `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege request lacks verifiable context — blocks, posts comment listing missing details, sends `security-escalation` notification). Posts a summary comment to the GitHub issue regardless of outcome. | No |
-| `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. | No |
+| `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. Creates the conditional accessibility task when the issue references UI/frontend work. | No |
 | `planner-daedalus` | Task graph, interface contracts, architecture decisions. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
-| `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. | No |
-| `security-analyst-daedalus` | Security audit — OWASP, injection, secrets, authn/z. Blocks on risk with severity-rated findings. | No |
-| `documentation-daedalus` | READMEs, ADRs, changelogs, completion report posted to the PR and chat channels. | No |
+| `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Runs the test suite, analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). | No |
+| `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. Runs after QA passes. | No |
+| `security-analyst-daedalus` | Security audit — OWASP, injection, secrets, authn/z. Blocks on risk with severity-rated findings. Runs after QA passes, parallel to reviewer. | No |
+| `accessibility-daedalus` | **Runs after QA passes, parallel to reviewer/security. Conditional — only created for UI/frontend issues.** Audits the PR against WCAG 2.1 AA and posts a findings table. Blocks with `approved` or `changes requested`. | No |
+| `documentation-daedalus` | READMEs, ADRs, changelogs, completion report posted to the PR and chat channels. Waits for reviewer, security-analyst, and accessibility (when assigned) to clear. | No |
 
 ### Skills per profile
 
@@ -215,6 +224,15 @@ makes the pipeline repeatable rather than demo-quality.
 | `git-workflow-and-versioning` | Atomic commits, clean branch history |
 | `using-agent-skills` | Meta-skill |
 
+**`qa-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `test-driven-development` | Analyzes coverage gaps against the test pyramid; decides which scenarios are missing |
+| `debugging-and-error-recovery` | Triages failing tests and flaky-test signals before reporting qa-failed |
+| `git-workflow-and-versioning` | Inspects the diff to scope the test surface accurately |
+| `using-agent-skills` | Meta-skill |
+
 **`reviewer-daedalus`**
 
 | Skill | What it governs |
@@ -235,6 +253,14 @@ makes the pipeline repeatable rather than demo-quality.
 | `code-review-and-quality` | Quality gate alongside the security findings |
 | `source-driven-development` | Verifies security claims against authoritative references |
 | `debugging-and-error-recovery` | Traces exploit paths and edge-case failure modes |
+| `using-agent-skills` | Meta-skill |
+
+**`accessibility-daedalus`**
+
+| Skill | What it governs |
+|---|---|
+| `frontend-ui-engineering` | DOM structure, form field semantics, and the production-quality UI patterns that underlie WCAG 2.1 AA compliance |
+| `debugging-and-error-recovery` | Triages audit findings (contrast ratios, missing alt text, focus order) and reproduces keyboard-navigation failures |
 | `using-agent-skills` | Meta-skill |
 
 **`documentation-daedalus`**
@@ -277,8 +303,8 @@ execution:
       profile: my-code-reviewer-profile
 ```
 
-Both forms accept any role key: `validator`, `pm`, `developer`, `reviewer`, `security`,
-`documentation`.
+Both forms accept any role key: `validator`, `pm`, `developer`, `qa`, `reviewer`, `security`,
+`accessibility`, `documentation`.
 
 Built-in defaults (used for any unspecified role):
 
@@ -287,8 +313,10 @@ Built-in defaults (used for any unspecified role):
 | `validator` | `validator-daedalus` |
 | `pm` | `project-manager-daedalus` |
 | `developer` | `developer-daedalus` |
+| `qa` | `qa-daedalus` |
 | `reviewer` | `reviewer-daedalus` |
 | `security` | `security-analyst-daedalus` |
+| `accessibility` | `accessibility-daedalus` |
 | `documentation` | `documentation-daedalus` |
 
 ### Skills per agent
@@ -363,7 +391,7 @@ execution:
 
 | Placeholder | Value |
 |---|---|
-| `{role}` | Pipeline role name — `validator`, `project-manager`, `developer`, `reviewer`, `security-analyst`, `documentation`, `daedalus` |
+| `{role}` | Pipeline role name — `validator`, `project-manager`, `developer`, `qa`, `reviewer`, `security-analyst`, `accessibility`, `documentation`, `daedalus` |
 | `{profile}` | Hermes profile name for the role (empty if using the built-in default) |
 | `{issue}` | Issue reference, e.g. `#42` (empty when not applicable) |
 | `{pr}` | PR reference, e.g. `#7` (empty when not applicable) |
@@ -410,7 +438,7 @@ The cron job is still present as a last-resort safety net (in case an agent cras
 before reaching its final step), but it is no longer the primary advancement mechanism.
 
 The result is a fully autonomous pipeline: once an issue is marked Ready, the entire
-validator → PM → developer → reviewer → security-analyst → documentation chain runs
+validator → PM → developer → QA → reviewer + security-analyst + accessibility chain runs
 end-to-end without any human or scheduler intervention between phases.
 
 ```
@@ -424,13 +452,16 @@ PM / project-manager runs → SPEC: <note>
       │   └─ agent runs daedalus-cron.sh on any terminal state
       ▼
 developer → review-required
-      │   └─ agent runs daedalus-cron.sh → dispatcher detects CI green → reviewer starts
+      │   └─ agent runs daedalus-cron.sh → dispatcher detects CI green → QA starts
+      ▼
+QA → qa-passed (or qa-failed → dev fix card)
+      │   └─ agent runs daedalus-cron.sh → dispatcher creates reviewer + security-analyst
+      │       + accessibility (only when UI/frontend keywords present in issue)
       ▼
 reviewer → approved
-      │   └─ agent runs daedalus-cron.sh → security-analyst starts
-      ▼
 security-analyst → cleared
-      │   └─ agent runs daedalus-cron.sh → documentation starts
+accessibility → approved (or accessibility-na if no frontend files changed)
+      │   └─ all three run in parallel; each agent runs daedalus-cron.sh on its terminal state
       ▼
 documentation → done → report posted
 ```
@@ -820,10 +851,10 @@ hermes gateway restart            # load the plugin
 
 **2. Provision the agent roster** — open `hermes dashboard` → **Daedalus** tab →
 click **Install Agents**. This auto-installs agent-skills if missing and creates the
-7 specialist profiles (takes ~10–20 s). Or from the terminal:
+9 specialist profiles (takes ~10–20 s). Or from the terminal:
 ```bash
 python3 ~/.hermes/plugins/daedalus/scripts/postinstall.py
-hermes profile list               # expect: validator developer reviewer security-analyst documentation planner project-manager
+hermes profile list               # expect: validator developer reviewer security-analyst documentation planner project-manager qa accessibility
 ```
 
 ![Daedalus dashboard on fresh install — Install Agents banner prompts provisioning](docs/screenshots/guide/01-install-agents-banner.png)
@@ -911,7 +942,7 @@ what will be removed before confirming (or use `-y` for scripting).
 # Skip the plugin removal (keep daedalus installed, reset host state only):
 bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-plugin
 
-# Keep the 7 agent profiles:
+# Keep the 9 agent profiles:
 bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" --keep-profiles
 
 # Both — keep profiles AND the plugin, reset everything else:

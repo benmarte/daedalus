@@ -1,6 +1,6 @@
 # Daedalus — Installation & Usage Guide
 
-**Daedalus** is a [Hermes](https://herm.es) plugin that automates the journey from a GitHub, GitLab, or Azure DevOps issue all the way to a reviewed, mergeable pull request. You mark an issue **Ready**, and a team of seven AI agents validates it, implements it, reviews it, security-audits it, and documents it. When the PR is merged, Daedalus closes the issue and moves the board card to **Done**.
+**Daedalus** is a [Hermes](https://herm.es) plugin that automates the journey from a GitHub, GitLab, or Azure DevOps issue all the way to a reviewed, mergeable pull request. You mark an issue **Ready**, and a team of nine AI agents validates it, implements it, runs QA, reviews it, security-audits it, WCAG-audits it (for UI work), and documents it. When the PR is merged, Daedalus closes the issue and moves the board card to **Done**.
 
 This guide walks you through every step: installing the plugin, provisioning the agents, adding your first project, and keeping everything up to date.
 
@@ -64,23 +64,25 @@ Open the Hermes dashboard and go to the **Daedalus** tab. On a fresh install, yo
 
 ![Empty Daedalus dashboard showing the Install Agents banner](screenshots/guide/01-install-agents-banner.png)
 
-Click **Install Agents**. Daedalus runs its provisioner and creates seven specialist profiles. This takes about 10–20 seconds.
+Click **Install Agents**. Daedalus runs its provisioner and creates nine specialist profiles. This takes about 10–20 seconds.
 
 Verify the profiles by going to **Profiles** in Hermes:
 
-![Hermes Profiles page showing the 7 Daedalus agent profiles](screenshots/guide/02-profiles-page.png)
+![Hermes Profiles page showing the 9 Daedalus agent profiles](screenshots/guide/02-profiles-page.png)
 
-### The Seven Agent Roles
+### The Nine Agent Roles
 
 | Role | What it does |
 |---|---|
 | **validator** | **Runs alone in Phase 1.** No developer, reviewer, or other agent starts until this completes. Confirms the issue is real, reproducible, not already fixed. Detects security threats (prompt injection, social engineering, auth bypass, backdoor patterns, supply-chain attacks) and high-privilege requests lacking verifiable context. Six outcomes: **CONFIRMED** (Phase 2 begins on next tick), **ALREADY_FIXED** (closes issue), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, fires `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege action without identity/justification/approval — blocks, posts comment listing exactly what's missing, fires `security-escalation`). Posts a summary comment to the GitHub issue regardless of outcome. Blocking outcomes auto-move the VCS card to a **Blocked** column (created automatically if missing). |
-| **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines |
-| **planner** | Breaks an issue into a concrete plan with acceptance criteria |
+| **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines. Creates the conditional accessibility task when the issue references UI/frontend work. |
+| **planner** | Breaks an issue into a concrete plan with acceptance criteria. |
 | **developer** | Phase 2 only. Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR. Posts a summary comment to the GitHub issue on completion. |
-| **reviewer** | Reviews the PR for correctness, style, and logic. Posts a summary comment to the GitHub issue on completion. |
-| **security-analyst** | Audits for secrets, injection risks, and over-permissioned code. Posts a summary comment to the GitHub issue on completion. |
-| **documentation** | Writes a completion report, posts it on the PR, and sends it to notification channels. Posts a summary comment to the GitHub issue on completion. |
+| **qa** | **Runs after developer, before reviewer and security-analyst.** Runs the full test suite, analyzes coverage gaps, reports a QA verdict (`qa-passed` or `qa-failed`). Posts a summary comment to the GitHub issue. |
+| **reviewer** | Reviews the PR for correctness, style, and logic. Runs after QA passes. Posts a summary comment to the GitHub issue on completion. |
+| **security-analyst** | Audits for secrets, injection risks, and over-permissioned code. Runs after QA passes, in parallel with reviewer. Posts a summary comment to the GitHub issue on completion. |
+| **accessibility** | **Runs after QA passes, in parallel with reviewer/security-analyst. Conditional — only created when the issue references UI/frontend work.** Audits the PR against WCAG 2.1 AA and posts a findings table. Blocks with `approved` or `changes requested`. |
+| **documentation** | Writes a completion report, posts it on the PR, and sends it to notification channels. Waits for reviewer, security-analyst, and accessibility (when assigned) to clear. Posts a summary comment to the GitHub issue on completion. |
 
 > **Why separate roles?** An agent reviewing its own work is the same as no review. Hard role separation ensures each stage is independently verified. The validator prevents the entire pipeline from running on issues that aren't real work — and the enforcement is structural: downstream tasks don't exist until the validator says CONFIRMED.
 
@@ -354,8 +356,11 @@ bash ~/.hermes/scripts/daedalus-cron.sh
 ```
 
 This means each phase transition happens within seconds. For example:
-- Developer blocks with `review-required` → dispatcher fires → detects CI green → reviewer task starts (seconds, not 60 minutes)
+- Developer blocks with `review-required` → dispatcher fires → detects CI green → QA task starts (seconds, not 60 minutes)
+- QA blocks with `qa-passed` → dispatcher fires → reviewer + security + accessibility (conditional) tasks start
+- QA blocks with `qa-failed` → dispatcher fires → developer fix card created
 - Reviewer blocks with `awaiting-fix` → dispatcher fires → developer fix card created
+- Accessibility blocks with `changes requested` → dispatcher fires → PM routing card created
 - Any agent marks done → dispatcher fires → next phase begins
 
 **Error recovery:** If the state-transition call returns "already terminal" (a known Hermes platform behavior where tasks are sometimes marked done prematurely), agents are instructed to run the dispatcher anyway. The pipeline recovers immediately instead of stalling.
@@ -374,12 +379,18 @@ validator → CONFIRMED: <note>
 PM → SPEC: <note>
       │   (agent fires dispatcher immediately on any terminal state)
       ▼
-developer → review-required → CI green → reviewer starts (within seconds)
+developer → review-required → CI green → QA starts (within seconds)
       ▼
-reviewer → approved → security-analyst starts (within seconds)
+QA → qa-passed → reviewer + security-analyst + accessibility* start (in parallel)
+      │  *accessibility only for UI/frontend issues
       ▼
-security-analyst → cleared → documentation starts (within seconds)
-      ▼
+reviewer → approved ─────────────┐
+      │                          │
+security-analyst → cleared ──────┤
+      │                          │
+accessibility → approved ────────┤  (skipped for non-UI issues)
+      │                          │
+      ▼                          ▼
 documentation → done → report posted to PR + channels
 ```
 
@@ -508,7 +519,7 @@ Scroll to the bottom of the Daedalus dashboard tab and click **Uninstall**. A co
 
 ![Uninstall Daedalus confirmation modal](screenshots/guide/13-uninstall-confirm.png)
 
-The uninstall removes: all cron jobs, all seven agent profiles, all kanban boards, the project registry, and the plugin package itself.
+The uninstall removes: all cron jobs, all nine agent profiles, all kanban boards, the project registry, and the plugin package itself.
 
 **Option B — Terminal:**
 
@@ -521,7 +532,7 @@ Options:
 # Keep the plugin installed but reset all host state:
 bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh --keep-plugin
 
-# Keep the 7 agent profiles:
+# Keep the 9 agent profiles:
 bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh --keep-profiles
 
 # Non-interactive (for scripting):

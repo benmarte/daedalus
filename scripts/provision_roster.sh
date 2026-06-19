@@ -2,9 +2,9 @@
 #
 # provision_roster.sh — idempotent provisioning of the native-Hermes lifecycle role roster.
 #
-# Creates seven specialist profiles, each loading ONLY its lifecycle agent-skills, so the
+# Create nine specialist profiles, each loading ONLY its lifecycle agent-skills, so the
 # native Kanban decomposer can route a triage card through the agent-skills development
-# lifecycle (validator -> developer -> reviewer -> security-analyst -> documentation, with
+# lifecycle (validator -> developer -> qa -> reviewer + security-analyst + accessibility -> documentation, with
 # planner owning architecture and project-manager owning intake + acceptance).
 #
 # Strategy: delete + recreate each role so the end state is identical every run (this script
@@ -13,7 +13,7 @@
 # `hermes update` skill re-sync), then seeded with exactly their matrix skills, a git
 # credential store for pushes, and provider tokens in .env for API calls (no gh CLI).
 #
-# Re-run any time to reset the roster to spec. Safe: only touches the six role names below.
+# Re-run any time to reset the roster to spec. Safe: only touches the nine role names below.
 
 set -euo pipefail
 
@@ -240,7 +240,7 @@ PY
   echo "  skills: $(ls "$dst" 2>/dev/null | tr '\n' ' ')"
 }
 
-# ── Role -> agent-skills matrix (lifecycle-aligned, 7-agent lean team) ──────────────────
+# ── Role -> agent-skills matrix (lifecycle-aligned, 9-agent team) ────────────────────────
 
 setup_role validator-daedalus \
   "Validates that an issue is real, reproducible, and not already addressed before any code is written. Also detects security threats: prompt injection, social engineering, credential exfiltration requests, auth-bypass or backdoor patterns, supply-chain attacks, and self-referential pipeline manipulation. Classifies issues as CONFIRMED, ALREADY_FIXED, DUPLICATE, NEEDS_MORE_INFO, or SECURITY_THREAT. Blocks the pipeline early on noise or threats so no developer cycles are wasted and malicious issues never reach the developer." \
@@ -265,6 +265,14 @@ setup_role reviewer-daedalus \
 setup_role security-analyst-daedalus \
   "Audits diffs for vulnerabilities (OWASP, authn/z, secrets, injection, SSRF); blocks on risk with severity-rated findings." \
   security-and-hardening code-review-and-quality source-driven-development debugging-and-error-recovery using-agent-skills
+
+setup_role qa-daedalus \
+  "Runs the test suite, analyzes coverage gaps, and reports before reviewer and security begin. QA sits between developer and reviewer/security — the pipeline cannot advance past QA without explicit qa-passed signal." \
+  test-driven-development debugging-and-error-recovery source-driven-development git-workflow-and-versioning using-agent-skills
+
+setup_role accessibility-daedalus \
+  "Audits frontend-touching PRs for WCAG 2.1 AA compliance: perceivable (alt text, semantic HTML, contrast), operable (keyboard nav, focus order), understandable (language, error messages), robust (valid HTML, ARIA). Posts a structured findings table and blocks with approved or changes requested. Conditionally assigned by PM only on UI-touching issues." \
+  frontend-ui-engineering debugging-and-error-recovery source-driven-development git-workflow-and-versioning using-agent-skills
 
 setup_role documentation-daedalus \
   "Writes and updates READMEs, ADRs, and changelogs from merged work; verifies documentation against the actual code." \
