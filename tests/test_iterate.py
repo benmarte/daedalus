@@ -437,7 +437,7 @@ def test_execute_dev_fix_escalate_when_over_cap():
 def test_run_iterate_empty():
     """run_iterate with no blocked cards returns zero counts."""
     with mock.patch.object(kanban, "list_blocked", return_value=[]):
-        counts, prs = iterate.run_iterate("slug", "O/R", provider=gp)
+        counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
     check("empty board → all zeros", all(v == 0 for v in counts.values()))
     check("empty board → no prs", prs == [])
 
@@ -452,7 +452,7 @@ def test_run_iterate_dev_advance():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                counts, prs = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
     check("dev green CI → advance count 1", counts[iterate.ADVANCE] == 1)
     check("no other actions", sum(v for v in counts.values() if v > 0) == 1)
     check("advance PR is 42", prs == [42])
@@ -470,7 +470,7 @@ def test_run_iterate_dev_fix_ci():
         with mock.patch.object(kanban, "create_task", return_value="t_fix"):
             with mock.patch.object(kanban, "comment", return_value=True):
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
-                    counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                    counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("dev red CI → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
 
 
@@ -487,7 +487,7 @@ def test_run_iterate_reviewer_changes():
             with mock.patch.object(kanban, "comment", return_value=True):
                 with mock.patch.object(kanban, "block_task", return_value=True):
                     with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                        counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                        counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("reviewer changes → pm_route count 1", counts[iterate.PM_ROUTE] == 1)
 
 
@@ -501,7 +501,7 @@ def test_run_iterate_reviewer_approved():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("reviewer approved → approve_advance count 1", counts[iterate.APPROVE_ADVANCE] == 1)
 
 
@@ -518,7 +518,7 @@ def test_run_iterate_escalate():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "comment", return_value=True):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
-                counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("over cap → escalate count 1", counts[iterate.ESCALATE] == 1)
 
 
@@ -544,7 +544,7 @@ def test_run_iterate_mixed():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("mixed: advance count 1", counts[iterate.ADVANCE] == 1)
     check("mixed: approve_advance count 1", counts[iterate.APPROVE_ADVANCE] == 1)
     check("mixed: no other actions", counts[iterate.DEV_FIX_CI] == 0
@@ -562,7 +562,7 @@ def test_run_iterate_dry_run():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete") as mk_complete:
             with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                counts, _ = iterate.run_iterate("slug", "O/R", provider=gp, dry_run=True)
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp, dry_run=True)
     check("dry_run: advance counted", counts[iterate.ADVANCE] == 1)
     check("dry_run: complete NOT called", mk_complete.call_count == 0)
 
@@ -783,7 +783,7 @@ def test_run_iterate_falls_back_to_show_card_for_handoff():
         with mock.patch.object(kanban, "show_card", return_value=full_card) as mk_show:
             with mock.patch.object(kanban, "complete", return_value=True):
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                    counts, prs = iterate.run_iterate("slug", "O/R", provider=gp)
+                    counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
     check("show_card was called for the blocked card", mk_show.call_count == 1)
     check("show_card called with slug and tid", mk_show.call_args == mock.call("slug", "t_dev"))
     check("dev green CI → advance count 1", counts[iterate.ADVANCE] == 1)
@@ -799,7 +799,7 @@ def test_run_iterate_show_card_fallback_skip_on_failure():
     with mock.patch.object(kanban, "list_blocked", return_value=minimal_cards):
         with mock.patch.object(kanban, "show_card", return_value=None):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("show_card None → no actions", all(v == 0 for v in counts.values()))
 
 
@@ -812,7 +812,7 @@ def test_run_iterate_show_card_no_latest_summary():
     with mock.patch.object(kanban, "list_blocked", return_value=minimal_cards):
         with mock.patch.object(kanban, "show_card", return_value={"id": "t_dev"}):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("no latest_summary → no actions", all(v == 0 for v in counts.values()))
 
 
@@ -894,7 +894,7 @@ def test_run_iterate_branch_pr_fallback():
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "find_pr_for_branch", return_value=42) as mk_branch:
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                    counts, prs = iterate.run_iterate("slug", "O/R", provider=gp)
+                    counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
     check("branch PR fallback → advance count 1", counts[iterate.ADVANCE] == 1)
     check("branch PR fallback → PR is 42", prs == [42])
     mk_branch.assert_called_once_with("feat/my-feature")
@@ -911,7 +911,7 @@ def test_run_iterate_branch_pr_fallback_no_match():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(gp, "find_pr_for_branch", return_value=None):
             with mock.patch.object(gp, "get_pr_ci_status") as mk_ci:
-                counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("branch no match → no actions", all(v == 0 for v in counts.values()))
     mk_ci.assert_not_called()
 
@@ -928,7 +928,7 @@ def test_run_iterate_handoff_pr_still_works():
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "find_pr_for_branch") as mk_branch:
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="green") as mk_ci:
-                    counts, prs = iterate.run_iterate("slug", "O/R", provider=gp)
+                    counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
     check("handoff PR still works → advance count 1", counts[iterate.ADVANCE] == 1)
     check("handoff PR still works → PR is 55", prs == [55])
     # open_pr_for_branch should NOT be called since handoff has a PR
@@ -950,7 +950,7 @@ def test_run_iterate_branch_pr_fallback_ci_red():
             with mock.patch.object(kanban, "comment", return_value=True):
                 with mock.patch.object(gp, "find_pr_for_branch", return_value=99):
                     with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
-                        counts, _ = iterate.run_iterate("slug", "O/R", provider=gp)
+                        counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("branch PR ci red → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
 
 
@@ -1150,6 +1150,126 @@ def test_downstream_task_body_references_pr():
     check("body references developer card", "t_dev" in body)
 
 
+# ── Issue #24: robust CI polling ──────────────────────────────────────────────
+
+
+class _NoCIProvider:
+    """Provider that does NOT support CI status (supports_ci_status=False)."""
+    name = "generic"
+    supports_ci_status = False
+
+    def get_pr_ci_status(self, pr_number):
+        return "unknown"
+
+    def find_pr_for_branch(self, branch):
+        return None
+
+
+class _PendingProvider:
+    """Provider that supports CI but returns PENDING initially."""
+    name = "github"
+    supports_ci_status = True
+
+    def __init__(self, ci_status="pending"):
+        self._status = ci_status
+
+    def get_pr_ci_status(self, pr_number):
+        return self._status
+
+    def find_pr_for_branch(self, branch):
+        return None
+
+
+def test_run_iterate_no_ci_provider_advances_immediately():
+    """Provider without CI support + UNKNOWN status → treated as green → advance."""
+    no_ci = _NoCIProvider()
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 shipped"}],
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=no_ci)
+    check("no-CI provider → advance count 1", counts[iterate.ADVANCE] == 1)
+    check("no-CI provider → advance PR 42", prs == [42])
+    check("no-CI provider → no pending", pending == [])
+
+
+def test_run_iterate_pending_ci_returns_pending_cards():
+    """CI still PENDING → card skipped, returned in pending_ci_cards list."""
+    pp = _PendingProvider("pending")
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 shipped"}],
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=pp)
+    check("pending CI → no advance", counts[iterate.ADVANCE] == 0)
+    check("pending CI → no prs", prs == [])
+    check("pending CI → one pending card", len(pending) == 1)
+    check("pending CI → tid captured", pending[0]["tid"] == "t_dev")
+    check("pending CI → pr captured", pending[0]["pr"] == 42)
+
+
+def test_run_iterate_green_ci_no_pending_cards():
+    """CI green → advance, pending_ci_cards is empty."""
+    gp_green = _PendingProvider("green")
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 shipped"}],
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=gp_green)
+    check("green CI → advance count 1", counts[iterate.ADVANCE] == 1)
+    check("green CI → prs", prs == [42])
+    check("green CI → no pending", pending == [])
+
+
+def test_run_iterate_red_ci_no_pending_cards():
+    """CI red → dev_fix_ci action, no pending (RED is actionable, not waiting)."""
+    gp_red = _PendingProvider("red")
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 CI red"}, {"metadata": {"fix_attempts": 0}}],
+        "workspace": "dir:/w",
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "create_task", return_value="t_fix"):
+            with mock.patch.object(kanban, "comment", return_value=True):
+                counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=gp_red)
+    check("red CI → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
+    check("red CI → no pending", pending == [])
+
+
+def test_run_iterate_pending_ci_multiple_cards():
+    """Multiple cards with PENDING CI → all returned in pending_ci_cards."""
+    pp = _PendingProvider("pending")
+    cards = [
+        {
+            "id": "t_a",
+            "assignee": "developer-daedalus",
+            "runs": [{"reason": "review-required: PR #1 shipped"}],
+        },
+        {
+            "id": "t_b",
+            "assignee": "developer-daedalus",
+            "runs": [{"reason": "review-required: PR #2 shipped"}],
+        },
+    ]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=pp)
+    check("multi pending → 2 pending cards", len(pending) == 2)
+    check("multi pending → tids captured", {p["tid"] for p in pending} == {"t_a", "t_b"})
+    check("multi pending → prs captured", {p["pr"] for p in pending} == {1, 2})
+
+
 if __name__ == "__main__":
     print("Iterate (CI-aware auto-advance) tests")
     print("-" * 60)
@@ -1226,6 +1346,11 @@ if __name__ == "__main__":
         test_execute_advance_triggers_downstream,
         test_execute_advance_skip_downstream_no_issue_number,
         test_downstream_task_body_references_pr,
+        test_run_iterate_no_ci_provider_advances_immediately,
+        test_run_iterate_pending_ci_returns_pending_cards,
+        test_run_iterate_green_ci_no_pending_cards,
+        test_run_iterate_red_ci_no_pending_cards,
+        test_run_iterate_pending_ci_multiple_cards,
     ):
         fn()
     print("-" * 60)

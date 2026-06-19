@@ -688,12 +688,13 @@ def run_iterate(
     resolved: Optional[Dict[str, Any]] = None,
     provider: Optional[Any] = None,
     dry_run: bool = False,
-) -> tuple[Dict[str, int], List[int]]:
+) -> tuple[Dict[str, int], List[int], List[Dict[str, Any]]]:
     """Run the auto-advance routing and self-healing loop.
 
     For every blocked card on the board, classify its state and execute the
-    appropriate action. Returns (counts, advance_prs) where advance_prs lists
-    PR numbers for cards that were successfully advanced.
+    appropriate action. Returns (counts, advance_prs, pending_ci_cards) where
+    advance_prs lists PR numbers for cards that were successfully advanced,
+    and pending_ci_cards lists cards skipped because CI was still pending.
 
     Args:
         slug: Kanban board slug.
@@ -705,7 +706,8 @@ def run_iterate(
         dry_run: If True, log intentions without mutating anything.
 
     Returns:
-        (counts, advance_prs) tuple — counts has action→int, advance_prs has PR numbers.
+        (counts, advance_prs, pending_ci_cards) tuple — counts has action→int,
+        advance_prs has PR numbers, pending_ci_cards has card info for retry.
     """
     counts: Dict[str, int] = {
         ADVANCE: 0,
@@ -715,6 +717,7 @@ def run_iterate(
         ESCALATE: 0,
     }
     advance_prs: List[int] = []  # PR numbers for cards that were advanced
+    pending_ci_cards: List[Dict[str, Any]] = []  # Cards skipped due to PENDING CI
 
     workdir = (resolved or {}).get("workdir", "")
     notify_target = (resolved or {}).get("cron", {}).get("deliver", "")
@@ -722,7 +725,7 @@ def run_iterate(
 
     blocked_cards = kanban.list_blocked(slug)
     if not blocked_cards:
-        return counts, advance_prs
+        return counts, advance_prs, pending_ci_cards
 
     # Collect PR→CI cache so we don't call the provider for the same PR twice.
     # Stores the raw CIStatus string (not bool) so UNKNOWN/PENDING are distinguishable.
@@ -762,13 +765,22 @@ def run_iterate(
             if pr not in ci_cache:
                 ci_cache[pr] = provider.get_pr_ci_status(pr)
             raw_ci = ci_cache[pr]
-            ci_green = (raw_ci == CIStatus.GREEN)
+
+            # No CI configured → no gate: treat UNKNOWN as green when the
+            # provider doesn't support CI status checks (e.g. no check runs).
+            if not getattr(provider, "supports_ci_status", False) and raw_ci == CIStatus.UNKNOWN:
+                logger.info("iterate: %s provider has no CI support — treating as green", tid)
+                ci_green = True
+            else:
+                ci_green = (raw_ci == CIStatus.GREEN)
 
         action = classify_blocked(assignee, handoff, ci_green,
                                   fix_attempts=fix_attempts, pr_number=pr)
 
         # Don't fire DEV_FIX_CI when CI hasn't reported yet (only RED warrants a fix card).
         if action == DEV_FIX_CI and raw_ci not in (CIStatus.RED,):
+            if raw_ci == CIStatus.PENDING:
+                pending_ci_cards.append({"tid": tid, "pr": pr, "card": card})
             logger.info("iterate: %s DEV_FIX_CI suppressed — CI is %s (not RED)", tid, raw_ci)
             continue
 
@@ -798,4 +810,4 @@ def run_iterate(
         except Exception as e:
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
 
-    return counts, advance_prs
+    return counts, advance_prs, pending_ci_cards
