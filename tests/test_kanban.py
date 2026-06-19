@@ -16,9 +16,13 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Ensure project root is on sys.path BEFORE importing core.kanban
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from core import kanban
+from core.kanban import close_issue_tasks, complete, show_card, _hk
 
 
 _passed = 0
@@ -86,23 +90,25 @@ def test_close_issue_tasks_single_blocked_child():
             return 0, "", ""
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk), \
-         mock.patch.object(kanban, "show_card", side_effect=mock_show_card), \
-         mock.patch.object(kanban, "complete", return_value=True) as mock_complete:
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.show_card", side_effect=mock_show_card), \
+         mock.patch("core.kanban.complete", return_value=True) as mock_complete:
 
-        result = kanban.close_issue_tasks("test-board", 42, summary="closed: parent issue #42 merged and closed")
+        result = close_issue_tasks("test-board", 42, summary="closed: parent issue #42 merged and closed")
 
     check("returns 2 completed IDs (root + child)", len(result) == 2)
     check("root task completed", "t_root" in result)
     check("child task completed", "t_child" in result)
     check("complete() called 2 times", mock_complete.call_count == 2)
-    # Root task completed without summary (first pass)
-    root_call = mock_complete.call_args_list[0]
-    check("root complete called without summary arg", root_call == mock.call("test-board", "t_root"))
-    # Child completed with summary (second pass)
-    child_call = mock_complete.call_args_list[1]
-    check("child complete called with summary",
-          child_call == mock.call("test-board", "t_child", summary="closed: parent issue #42 merged and closed"))
+    if mock_complete.call_count >= 1:
+        # Root task completed without summary (first pass)
+        root_call = mock_complete.call_args_list[0]
+        check("root complete called without summary arg", root_call == mock.call("test-board", "t_root"))
+    if mock_complete.call_count >= 2:
+        # Child completed with summary (second pass)
+        child_call = mock_complete.call_args_list[1]
+        check("child complete called with summary",
+              child_call == mock.call("test-board", "t_child", summary="closed: parent issue #42 merged and closed"))
 
 
 # ── Test: multiple blocked children ──────────────────────────────────────────
@@ -135,11 +141,11 @@ def test_close_issue_tasks_multiple_blocked_children():
             return 0, json.dumps(tasks), ""
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk), \
-         mock.patch.object(kanban, "show_card", side_effect=mock_show_card), \
-         mock.patch.object(kanban, "complete", return_value=True) as mock_complete:
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.show_card", side_effect=mock_show_card), \
+         mock.patch("core.kanban.complete", return_value=True) as mock_complete:
 
-        result = kanban.close_issue_tasks("slug", 7, summary="closed: parent issue #7 merged and closed")
+        result = close_issue_tasks("slug", 7, summary="closed: parent issue #7 merged and closed")
 
     check("returns 3 completed IDs", len(result) == 3)
     check("root + child1 + child2 all completed",
@@ -173,11 +179,11 @@ def test_close_issue_tasks_no_blocked_children():
             return 0, json.dumps(tasks), ""
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk), \
-         mock.patch.object(kanban, "show_card", side_effect=mock_show_card), \
-         mock.patch.object(kanban, "complete", return_value=True) as mock_complete:
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.show_card", side_effect=mock_show_card), \
+         mock.patch("core.kanban.complete", return_value=True) as mock_complete:
 
-        result = kanban.close_issue_tasks("slug", 99, summary="closed: parent issue #99 merged and closed")
+        result = close_issue_tasks("slug", 99, summary="closed: parent issue #99 merged and closed")
 
     check("returns 1 completed ID (root only)", len(result) == 1)
     check("only root completed", result == ["t_root"])
@@ -199,10 +205,10 @@ def test_close_issue_tasks_already_done_child_skipped():
             return 0, json.dumps(tasks), ""
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk), \
-         mock.patch.object(kanban, "complete", return_value=True) as mock_complete:
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.complete", return_value=True) as mock_complete:
 
-        result = kanban.close_issue_tasks("slug", 5, summary="closed: parent issue #5 merged and closed")
+        result = close_issue_tasks("slug", 5, summary="closed: parent issue #5 merged and closed")
 
     check("returns empty list (root already done)", len(result) == 0)
     check("complete() never called", mock_complete.call_count == 0)
@@ -234,11 +240,11 @@ def test_close_issue_tasks_non_review_required_blocked_not_completed():
             return 0, json.dumps(tasks), ""
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk), \
-         mock.patch.object(kanban, "show_card", side_effect=mock_show_card), \
-         mock.patch.object(kanban, "complete", return_value=True) as mock_complete:
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.show_card", side_effect=mock_show_card), \
+         mock.patch("core.kanban.complete", return_value=True) as mock_complete:
 
-        result = kanban.close_issue_tasks("slug", 10, summary="closed: parent issue #10 merged and closed")
+        result = close_issue_tasks("slug", 10, summary="closed: parent issue #10 merged and closed")
 
     check("returns 1 completed ID (root only)", len(result) == 1)
     check("only root completed", result == ["t_root"])
@@ -271,11 +277,11 @@ def test_close_issue_tasks_no_summary_no_child_completion():
             return 0, json.dumps(tasks), ""
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk), \
-         mock.patch.object(kanban, "show_card", side_effect=mock_show_card) as mock_show, \
-         mock.patch.object(kanban, "complete", return_value=True) as mock_complete:
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.show_card", side_effect=mock_show_card) as mock_show, \
+         mock.patch("core.kanban.complete", return_value=True) as mock_complete:
 
-        result = kanban.close_issue_tasks("slug", 15)  # no summary arg
+        result = close_issue_tasks("slug", 15)  # no summary arg
 
     check("returns 1 completed ID (root only)", len(result) == 1)
     check("complete() called only for root", mock_complete.call_count == 1)
@@ -309,11 +315,11 @@ def test_close_issue_tasks_dry_run():
             return 0, json.dumps(tasks), ""
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk), \
-         mock.patch.object(kanban, "show_card", side_effect=mock_show_card), \
-         mock.patch.object(kanban, "complete", return_value=True) as mock_complete:
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.show_card", side_effect=mock_show_card), \
+         mock.patch("core.kanban.complete", return_value=True) as mock_complete:
 
-        result = kanban.close_issue_tasks(
+        result = close_issue_tasks(
             "slug", 3,
             summary="closed: parent issue #3 merged and closed",
             dry_run=True,
@@ -331,8 +337,8 @@ def test_complete_accepts_summary():
     def mock_hk(args, timeout=60):
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk) as mock_hk_obj:
-        kanban.complete("slug", "t_abc", summary="my summary")
+    with mock.patch("core.kanban._hk", side_effect=mock_hk) as mock_hk_obj:
+        complete("slug", "t_abc", summary="my summary")
 
     check("hermes kanban complete called", mock_hk_obj.call_count == 1)
     call_args = mock_hk_obj.call_args[0][0]
@@ -349,8 +355,8 @@ def test_complete_no_summary():
     def mock_hk(args, timeout=60):
         return 0, "", ""
 
-    with mock.patch.object(kanban, "_hk", side_effect=mock_hk) as mock_hk_obj:
-        kanban.complete("slug", "t_abc")
+    with mock.patch("core.kanban._hk", side_effect=mock_hk) as mock_hk_obj:
+        complete("slug", "t_abc")
 
     call_args = mock_hk_obj.call_args[0][0]
     check("--summary NOT in args when no summary given", "--summary" not in call_args)
