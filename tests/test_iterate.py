@@ -1270,6 +1270,94 @@ def test_run_iterate_pending_ci_multiple_cards():
     check("multi pending → prs captured", {p["pr"] for p in pending} == {1, 2})
 
 
+# ── Issue #30: PENDING_CI classification ──────────────────────────────────────
+
+
+def test_classify_blocked_pending_ci_returns_pending_ci():
+    """Developer + review-required + PR + CI PENDING → PENDING_CI."""
+    from core.providers.base import CIStatus
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped, waiting on CI",
+        ci_green=False,
+        pr_number=42,
+        raw_ci=CIStatus.PENDING,
+    )
+    check("dev pending CI → pending_ci", result == iterate.PENDING_CI)
+
+
+def test_classify_blocked_red_ci_returns_dev_fix_ci():
+    """Developer + review-required + PR + CI RED → DEV_FIX_CI (explicit raw_ci)."""
+    from core.providers.base import CIStatus
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 CI failing",
+        ci_green=False,
+        pr_number=42,
+        raw_ci=CIStatus.RED,
+    )
+    check("dev red CI (explicit) → dev_fix_ci", result == iterate.DEV_FIX_CI)
+
+
+def test_classify_blocked_unknown_ci_returns_dev_fix_ci():
+    """Developer + review-required + PR + CI UNKNOWN → DEV_FIX_CI (actionable)."""
+    from core.providers.base import CIStatus
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42",
+        ci_green=False,
+        pr_number=42,
+        raw_ci=CIStatus.UNKNOWN,
+    )
+    check("dev unknown CI → dev_fix_ci", result == iterate.DEV_FIX_CI)
+
+
+def test_classify_blocked_default_raw_ci_backward_compat():
+    """classify_blocked() with no raw_ci (default None) → DEV_FIX_CI for ci_green=False."""
+    # Ensures backward compat: existing callers without raw_ci still get DEV_FIX_CI
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 CI failing",
+        ci_green=False,
+    )
+    check("default raw_ci → dev_fix_ci (backward compat)", result == iterate.DEV_FIX_CI)
+
+
+def test_run_iterate_pending_ci_classified_correctly():
+    """run_iterate: PENDING CI → counts[PENDING_CI] == 1, no DEV_FIX_CI, card in pending list."""
+    pp = _PendingProvider("pending")
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 shipped"}],
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=pp)
+    check("pending CI → PENDING_CI count 1", counts[iterate.PENDING_CI] == 1)
+    check("pending CI → DEV_FIX_CI count 0", counts[iterate.DEV_FIX_CI] == 0)
+    check("pending CI → no fix task created", pending[0]["tid"] == "t_dev")
+    check("pending CI → no advance", counts[iterate.ADVANCE] == 0)
+
+
+def test_run_iterate_red_ci_classified_correctly():
+    """run_iterate: RED CI → counts[DEV_FIX_CI] == 1, no PENDING_CI."""
+    gp_red = _PendingProvider("red")
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 CI red"}, {"metadata": {"fix_attempts": 0}}],
+        "workspace": "dir:/w",
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "create_task", return_value="t_fix"):
+            with mock.patch.object(kanban, "comment", return_value=True):
+                counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=gp_red)
+    check("red CI → DEV_FIX_CI count 1", counts[iterate.DEV_FIX_CI] == 1)
+    check("red CI → PENDING_CI count 0", counts[iterate.PENDING_CI] == 0)
+    check("red CI → no pending cards", pending == [])
+
+
 if __name__ == "__main__":
     print("Iterate (CI-aware auto-advance) tests")
     print("-" * 60)
@@ -1351,6 +1439,12 @@ if __name__ == "__main__":
         test_run_iterate_green_ci_no_pending_cards,
         test_run_iterate_red_ci_no_pending_cards,
         test_run_iterate_pending_ci_multiple_cards,
+        test_classify_blocked_pending_ci_returns_pending_ci,
+        test_classify_blocked_red_ci_returns_dev_fix_ci,
+        test_classify_blocked_unknown_ci_returns_dev_fix_ci,
+        test_classify_blocked_default_raw_ci_backward_compat,
+        test_run_iterate_pending_ci_classified_correctly,
+        test_run_iterate_red_ci_classified_correctly,
     ):
         fn()
     print("-" * 60)
