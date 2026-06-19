@@ -1340,6 +1340,206 @@ def test_run_iterate_pending_ci_classified_correctly():
     check("pending CI → no advance", counts[iterate.ADVANCE] == 0)
 
 
+# ── qa-daedalus classify_blocked paths ──────────────────────────────────────
+
+
+def test_classify_blocked_qa_passed():
+    """QA card with qa-passed handoff + CI green → ADVANCE."""
+    result = iterate.classify_blocked(
+        "qa-daedalus",
+        "review-required: qa-passed: PR #5 — all tests pass, coverage adequate",
+        ci_green=True,
+    )
+    check("qa qa-passed + green CI → advance", result == iterate.ADVANCE)
+
+
+def test_classify_blocked_qa_failed():
+    """QA card with qa-failed handoff → DEV_FIX_CI."""
+    result = iterate.classify_blocked(
+        "qa-daedalus",
+        "review-required: qa-failed: PR #5 — lint failure in src/foo.py",
+        ci_green=True,
+    )
+    check("qa qa-failed → dev_fix_ci", result == iterate.DEV_FIX_CI)
+
+
+def test_classify_blocked_qa_pending_ci():
+    """QA card without explicit qa-passed/qa-failed signal → PENDING_CI fallback."""
+    result = iterate.classify_blocked(
+        "qa-daedalus",
+        "review-required: qa-checking: PR #5",
+        ci_green=True,
+    )
+    check("qa unspecified signal → pending_ci", result == iterate.PENDING_CI)
+
+
+def test_classify_blocked_qa_failed_ci_red():
+    """QA card with qa-failed + CI red → still DEV_FIX_CI (CI doesn't gate QA)."""
+    result = iterate.classify_blocked(
+        "qa-daedalus",
+        "review-required: qa-failed: PR #5 — test failures",
+        ci_green=False,
+    )
+    check("qa qa-failed + red CI → dev_fix_ci", result == iterate.DEV_FIX_CI)
+
+
+# ── accessibility-daedalus classify_blocked paths ────────────────────────────
+
+
+def test_classify_blocked_accessibility_approved():
+    """Accessibility card with 'approved' in handoff → ADVANCE."""
+    result = iterate.classify_blocked(
+        "accessibility-daedalus",
+        "review-required: approved: PR #5",
+        ci_green=True,
+    )
+    check("accessibility approved → advance", result == iterate.ADVANCE)
+
+
+def test_classify_blocked_accessibility_na():
+    """Accessibility card with accessibility-na (no frontend changes) → ADVANCE."""
+    result = iterate.classify_blocked(
+        "accessibility-daedalus",
+        "review-required: accessibility-na: PR #5 — no frontend files changed",
+        ci_green=True,
+    )
+    check("accessibility-na → advance", result == iterate.ADVANCE)
+
+
+def test_classify_blocked_accessibility_changes_requested():
+    """Accessibility card with 'changes requested' → PM_ROUTE."""
+    result = iterate.classify_blocked(
+        "accessibility-daedalus",
+        "review-required: changes requested: PR #5 — missing alt text on hero image",
+        ci_green=True,
+    )
+    check("accessibility changes requested → pm_route", result == iterate.PM_ROUTE)
+
+
+def test_classify_blocked_accessibility_pending():
+    """Accessibility card without a clear outcome → PENDING_CI."""
+    result = iterate.classify_blocked(
+        "accessibility-daedalus",
+        "review-required: PR #5 audit in progress",
+        ci_green=True,
+    )
+    check("accessibility unspecified signal → pending_ci", result == iterate.PENDING_CI)
+
+
+def test_run_iterate_qa_passed_advances():
+    """run_iterate: qa-daedalus with qa-passed → counts[ADVANCE] == 1."""
+    from core.providers.base import CIStatus
+
+    class _GreenProvider:
+        name = "github"
+        def get_pr_ci_status(self, pr_number):
+            return CIStatus.GREEN
+        def find_pr_for_branch(self, branch):
+            return None
+
+    cards = [{
+        "id": "t_qa",
+        "assignee": "qa-daedalus",
+        "runs": [{"reason": "review-required: qa-passed: PR #7 — all good"}],
+        "workspace": "dir:/w",
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            with mock.patch.object(kanban, "show_card", return_value=None):
+                with mock.patch.object(kanban, "list_tasks", return_value=[]):
+                    with mock.patch.object(kanban, "create_task", return_value="t_x"):
+                        counts, prs, pending = iterate.run_iterate(
+                            "slug", "O/R", provider=_GreenProvider(),
+                        )
+    check("run_iterate qa-passed → ADVANCE 1", counts[iterate.ADVANCE] == 1)
+    check("run_iterate qa-passed → PR #7 in advance_prs", 7 in prs)
+    check("run_iterate qa-passed → no pending", pending == [])
+
+
+def test_run_iterate_accessibility_approved_advances():
+    """run_iterate: accessibility-daedalus with approved handoff → ADVANCE."""
+    from core.providers.base import CIStatus
+
+    class _GreenProvider2:
+        name = "github"
+        def get_pr_ci_status(self, pr_number):
+            return CIStatus.GREEN
+        def find_pr_for_branch(self, branch):
+            return None
+
+    cards = [{
+        "id": "t_a11y",
+        "assignee": "accessibility-daedalus",
+        "runs": [{"reason": "review-required: approved: PR #9"}],
+        "workspace": "dir:/w",
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            with mock.patch.object(kanban, "show_card", return_value=None):
+                counts, prs, pending = iterate.run_iterate(
+                    "slug", "O/R", provider=_GreenProvider2(),
+                )
+    check("run_iterate accessibility-approved → ADVANCE 1", counts[iterate.ADVANCE] == 1)
+    check("run_iterate accessibility-approved → PR #9 in advance_prs", 9 in prs)
+
+
+def test_run_iterate_accessibility_changes_requested_routes_to_pm():
+    """run_iterate: accessibility-daedalus with changes requested → PM_ROUTE."""
+    from core.providers.base import CIStatus
+
+    class _GreenProvider3:
+        name = "github"
+        def get_pr_ci_status(self, pr_number):
+            return CIStatus.GREEN
+        def find_pr_for_branch(self, branch):
+            return None
+
+    cards = [{
+        "id": "t_a11y2",
+        "assignee": "accessibility-daedalus",
+        "runs": [{"reason": "review-required: changes requested: PR #10 — missing alt text"}],
+        "workspace": "dir:/w",
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "create_task", return_value="t_pm"):
+            with mock.patch.object(kanban, "comment", return_value=True):
+                with mock.patch.object(kanban, "block_task", return_value=True):
+                    with mock.patch.object(kanban, "show_card", return_value=None):
+                        counts, prs, pending = iterate.run_iterate(
+                            "slug", "O/R", provider=_GreenProvider3(),
+                        )
+    check("run_iterate accessibility-changes → PM_ROUTE 1", counts[iterate.PM_ROUTE] == 1)
+
+
+def test_run_iterate_qa_failed_creates_fix_card():
+    """run_iterate: qa-daedalus with qa-failed → DEV_FIX_CI."""
+    from core.providers.base import CIStatus
+
+    class _GreenProvider4:
+        name = "github"
+        def get_pr_ci_status(self, pr_number):
+            return CIStatus.GREEN
+        def find_pr_for_branch(self, branch):
+            return None
+
+    cards = [{
+        "id": "t_qa_fail",
+        "assignee": "qa-daedalus",
+        "runs": [{"reason": "review-required: qa-failed: PR #11 — test failure"}, {"metadata": {"fix_attempts": 0}}],
+        "workspace": "dir:/w",
+    }]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "create_task", return_value="t_fix"):
+            with mock.patch.object(kanban, "comment", return_value=True):
+                with mock.patch.object(kanban, "show_card", return_value=None):
+                    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+                        counts, prs, pending = iterate.run_iterate(
+                            "slug", "O/R", provider=_GreenProvider4(),
+                        )
+    check("run_iterate qa-failed → DEV_FIX_CI 1", counts[iterate.DEV_FIX_CI] == 1)
+    check("run_iterate qa-failed → no pending", pending == [])
+
+
 def test_run_iterate_red_ci_classified_correctly():
     """run_iterate: RED CI → counts[DEV_FIX_CI] == 1, no PENDING_CI."""
     gp_red = _PendingProvider("red")
@@ -1445,6 +1645,18 @@ if __name__ == "__main__":
         test_classify_blocked_default_raw_ci_backward_compat,
         test_run_iterate_pending_ci_classified_correctly,
         test_run_iterate_red_ci_classified_correctly,
+        test_classify_blocked_qa_passed,
+        test_classify_blocked_qa_failed,
+        test_classify_blocked_qa_pending_ci,
+        test_classify_blocked_qa_failed_ci_red,
+        test_classify_blocked_accessibility_approved,
+        test_classify_blocked_accessibility_na,
+        test_classify_blocked_accessibility_changes_requested,
+        test_classify_blocked_accessibility_pending,
+        test_run_iterate_qa_passed_advances,
+        test_run_iterate_accessibility_approved_advances,
+        test_run_iterate_accessibility_changes_requested_routes_to_pm,
+        test_run_iterate_qa_failed_creates_fix_card,
     ):
         fn()
     print("-" * 60)
