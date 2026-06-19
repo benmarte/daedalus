@@ -105,6 +105,14 @@ def classify_blocked(
     # Resolve PR number: handoff first, then the explicit fallback.
     effective_pr = handoff["pr_number"] or pr_number
 
+    # ── planner / documentation → PM route ───────────────────────────────
+    if assignee in ("planner-daedalus", "documentation-daedalus"):
+        return PM_ROUTE
+
+    # ── project-manager blocked → escalate (human gate — PM can't consult itself) ──
+    if assignee == "project-manager-daedalus":
+        return ESCALATE
+
     # ── developer card ───────────────────────────────────────────────────
     if assignee == "developer-daedalus":
         # Exceeded max fix attempts → escalate
@@ -116,8 +124,8 @@ def classify_blocked(
                 return ADVANCE
             else:
                 return DEV_FIX_CI
-        # No PR or not review-required — nothing to do (leave blocked)
-        return ""
+        # No PR or not review-required → PM route (was: silent drop returning "")
+        return PM_ROUTE
 
     # ── reviewer / security-analyst card ─────────────────────────────────
     if assignee in ("reviewer-daedalus", "security-analyst-daedalus"):

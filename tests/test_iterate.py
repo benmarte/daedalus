@@ -97,13 +97,13 @@ def test_classify_blocked_dev_escalate():
 
 
 def test_classify_blocked_dev_no_pr():
-    """Developer + no PR in handoff → empty string (no action)."""
+    """Developer + no PR in handoff → pm_route (was: silent drop, now routes to PM)."""
     result = iterate.classify_blocked(
         "developer-daedalus",
         "some other block reason",
         ci_green=True,
     )
-    check("dev no PR → no action", result == "")
+    check("dev no PR → pm_route", result == iterate.PM_ROUTE)
 
 
 def test_classify_blocked_reviewer_changes():
@@ -160,7 +160,7 @@ def test_classify_blocked_security_findings():
 def test_classify_blocked_unknown_assignee():
     """Unknown assignee → no action."""
     result = iterate.classify_blocked(
-        "documentation-daedalus",
+        "documentation-unknown",
         "review-required: APPROVED",
         ci_green=True,
     )
@@ -168,9 +168,9 @@ def test_classify_blocked_unknown_assignee():
 
 
 def test_classify_blocked_empty_handoff():
-    """Empty handoff → no action."""
+    """Empty handoff → pm_route for developer (no PR → routes to PM)."""
     result = iterate.classify_blocked("developer-daedalus", "", ci_green=True)
-    check("empty handoff → no action", result == "")
+    check("empty handoff dev → pm_route", result == iterate.PM_ROUTE)
 
 
 def test_classify_blocked_variant_approval():
@@ -655,11 +655,11 @@ def test_human_summary_format():
     check("summary mentions PR #42", "#42" in msg)
     check("summary mentions #99", "#99" in msg)
     check("summary does NOT contain count tuples", "count" not in msg)
-    check("summary has ci-fix count", "ci-fix:1" in msg)
-    check("summary has escalate count", "escalate:2" in msg)
+    check("summary has ci-fix count", "CI fixes: 1x" in msg)
+    check("summary has escalate count", "Escalations: 2x" in msg)
     check("summary has dispatched issues", "#1" in msg and "#2" in msg)
     check("summary has closed issues", "✅" in msg and "#3" in msg)
-    check("summary has reconciled status", "5→In review" in msg)
+    check("summary has reconciled status", "#5 → In review" in msg)
 
 
 def test_human_summary_no_routed_actions():
@@ -697,8 +697,8 @@ def test_human_summary_pm_route():
         }
     }
     msg = disp._human_summary(summaries)
-    check("summary has pm-route count", "pm-route:2" in msg)
-    check("summary has ci-fix count", "ci-fix:1" in msg)
+    check("summary has pm-route count", "PM routes: 2x" in msg)
+    check("summary has ci-fix count", "CI fixes: 1x" in msg)
     check("old review-fix NOT present", "review-fix" not in msg)
 
 
@@ -956,6 +956,39 @@ def test_run_iterate_branch_pr_fallback_ci_red():
 
 
 
+# ── pipeline reliability routing (issue #19) ──────────────────────────────
+
+
+def test_classify_blocked_planner_returns_pm_route():
+    """Planner blocked → pm_route (PM consultation)."""
+    result = iterate.classify_blocked(
+        "planner-daedalus",
+        "BLOCKED: missing acceptance criteria",
+        ci_green=True,
+    )
+    check("planner blocked → pm_route", result == iterate.PM_ROUTE)
+
+
+def test_classify_blocked_documentation_returns_pm_route():
+    """Documentation blocked → pm_route (PM consultation)."""
+    result = iterate.classify_blocked(
+        "documentation-daedalus",
+        "BLOCKED: unclear scope",
+        ci_green=True,
+    )
+    check("docs blocked → pm_route", result == iterate.PM_ROUTE)
+
+
+def test_classify_blocked_pm_returns_escalate():
+    """PM blocked → escalate (human gate — PM can't consult itself)."""
+    result = iterate.classify_blocked(
+        "project-manager-daedalus",
+        "BLOCKED: conflicting requirements",
+        ci_green=True,
+    )
+    check("PM blocked → escalate", result == iterate.ESCALATE)
+
+
 if __name__ == "__main__":
     print("Iterate (CI-aware auto-advance) tests")
     print("-" * 60)
@@ -1018,6 +1051,9 @@ if __name__ == "__main__":
         test_run_iterate_branch_pr_fallback_no_match,
         test_run_iterate_handoff_pr_still_works,
         test_run_iterate_branch_pr_fallback_ci_red,
+        test_classify_blocked_planner_returns_pm_route,
+        test_classify_blocked_documentation_returns_pm_route,
+        test_classify_blocked_pm_returns_escalate,
     ):
         fn()
     print("-" * 60)
