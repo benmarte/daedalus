@@ -17,7 +17,7 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from core.webhook_normalizer import normalize, ReadyEvent  # noqa: E402
+from core.webhook_normalizer import normalize, ReadyEvent, verify_signature  # noqa: E402
 
 # ── GitHub provider ──────────────────────────────────────────────────────────
 
@@ -495,3 +495,102 @@ def test_hermes_custom_status_map_negative():
     }
     result = normalize("hermes", payload, status_map={"ready": "Triaged"})
     assert result is None
+
+
+# ── HMAC signature verification ──────────────────────────────────────────────
+
+
+import hmac
+import hashlib
+import os  # noqa: E402
+
+
+def _hmac_sha256(payload_bytes: bytes, secret: str) -> str:
+    """Helper: compute HMAC-SHA256 hex digest."""
+    return hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+
+
+# -- GitHub (X-Hub-Signature-256) --
+
+
+def test_verify_github_valid_signature():
+    """GitHub HMAC-SHA256 signature with valid header returns True."""
+    secret = "test-secret"
+    payload_bytes = b'{"action":"edited","projects_v2_item":{}}'
+    digest = _hmac_sha256(payload_bytes, secret)
+    headers = {"X-Hub-Signature-256": f"sha256={digest}"}
+    assert verify_signature("github", payload_bytes, headers, secret) is True
+
+
+def test_verify_github_invalid_signature():
+    """GitHub HMAC-SHA256 signature with mismatched header returns False (no crash)."""
+    secret = "test-secret"
+    payload_bytes = b'{"action":"edited"}'
+    headers = {"X-Hub-Signature-256": "sha256=" + "0" * 64}  # wrong digest
+    assert verify_signature("github", payload_bytes, headers, secret) is False
+
+
+def test_verify_github_missing_signature_header():
+    """GitHub webhook without X-Hub-Signature-256 header returns False (logged)."""
+    payload_bytes = b'{"test": true}'
+    headers = {}  # no signature header
+    assert verify_signature("github", payload_bytes, headers, "secret") is False
+
+
+def test_verify_github_malformed_signature_header():
+    """GitHub webhook with malformed X-Hub-Signature-256 (no sha256= prefix) returns False."""
+    payload_bytes = b'{"test": true}'
+    headers = {"X-Hub-Signature-256": "not-a-valid-sig"}  # no sha256= prefix
+    assert verify_signature("github", payload_bytes, headers, "secret") is False
+
+
+# -- GitLab (X-Gitlab-Token) --
+
+
+def test_verify_gitlab_valid_token():
+    """GitLab webhook with matching X-Gitlab-Token returns True."""
+    secret = "gitlab-secret"
+    payload_bytes = b'{"object_kind":"issue"}'
+    headers = {"X-Gitlab-Token": secret}
+    assert verify_signature("gitlab", payload_bytes, headers, secret) is True
+
+
+def test_verify_gitlab_invalid_token():
+    """GitLab webhook with mismatched X-Gitlab-Token returns False."""
+    payload_bytes = b'{"object_kind":"issue"}'
+    headers = {"X-Gitlab-Token": "wrong-token"}
+    assert verify_signature("gitlab", payload_bytes, headers, "real-secret") is False
+
+
+def test_verify_gitlab_missing_token():
+    """GitLab webhook without X-Gitlab-Token header returns False."""
+    payload_bytes = b'{"object_kind":"issue"}'
+    headers = {}
+    assert verify_signature("gitlab", payload_bytes, headers, "secret") is False
+
+
+# -- Edge cases --
+
+
+def test_verify_unknown_provider_returns_false():
+    """Unknown provider returns False (logged, no crash)."""
+    assert verify_signature("bitbucket", b'{}', {}, "secret") is False
+
+
+def test_verify_empty_secret_returns_false():
+    """Empty secret returns False for any provider (logged)."""
+    assert verify_signature("github", b'{}', {"X-Hub-Signature-256": "sha256=abc"}, "") is False
+
+
+def test_verify_none_headers_handled():
+    """None headers dict doesn't crash — returns False."""
+    assert verify_signature("github", b'{}', None, "secret") is False
+
+
+def test_verify_case_insensitive_provider():
+    """Provider name is case-insensitive for signature verification."""
+    secret = "secret"
+    payload_bytes = b'{"test": true}'
+    digest = _hmac_sha256(payload_bytes, secret)
+    # GitHub with uppercase should still work
+    assert verify_signature("GitHub", payload_bytes, {"X-Hub-Signature-256": f"sha256={digest}"}, secret) is True
