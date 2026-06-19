@@ -98,8 +98,9 @@ def _normalize_github(
         "sender": {...}
     }
 
-    The actual new value is in `projects_v2_item[field_values]` — but for simplicity
-    we check `changes.field_value.from` or fall back to inferring from the event type.
+    The new Status value after the edit lives at `projects_v2_item.field_value.name`
+    (single Object). When GitHub sends the full item snapshot, it may also appear
+    inside `projects_v2_item.field_values` (plural array); we check both locations.
     """
     # GitHub sends 'projects_v2_item' at top level
     if "projects_v2_item" not in payload:
@@ -120,11 +121,26 @@ def _normalize_github(
     if field_name != "Status":
         return None
 
+    # Extract the NEW Status value after the edit.
+    # GitHub's projects_v2_item webhook exposes it via:
+    #   - `projects_v2_item.field_value.name`          (single edited field object)
+    #   - `projects_v2_item.field_values[i].name`      (array snapshot, field_name=="Status")
+    new_status_value: Optional[str] = None
+    fv = pvi.get("field_value")
+    if isinstance(fv, dict):
+        new_status_value = fv.get("name") or fv.get("value")
+    if not new_status_value:
+        for entry in pvi.get("field_values") or []:
+            if isinstance(entry, dict) and entry.get("field_name") == "Status":
+                new_status_value = entry.get("name") or entry.get("value")
+                break
+
+    if not new_status_value or new_status_value != ready_status:
+        # Status changed, but NOT to the configured ready column — ignore.
+        return None
+
     # Extract repo and issue info from the projects_v2_item
     # The payload includes a nested issue/PR reference
-    # In real GitHub webhook, we'd parse the node_id to get the issue number
-    # For this implementation, we extract from a custom field or infer
-    node_id = pvi.get("node_id", "")
     # GitHub node IDs contain encoded type: 'I_' prefix = Issue, 'PR_' = Pull Request
     if "__typename" in pvi and pvi.get("__typename") == "PullRequest":
         # Ignore PRs — we only dispatch on Issues
@@ -309,9 +325,9 @@ def _normalize_hermes(
 
     This is a stub for future Hermes kanban integration.
     """
-    # Check if new_status matches ready_status
+    # Check if new_status matches ready_status (provider-agnostic via status_map)
     new_status = payload.get("new_status", "")
-    if new_status != "ready":
+    if new_status != ready_status:
         return None
 
     # Extract task_id — Hermes kanban uses task IDs, not issue numbers
