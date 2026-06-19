@@ -547,9 +547,16 @@ re-dispatched by the next polling tick (the card already exists on the board).
 blocked card and routes it to the agent that can clear it — the pipeline never
 stalls waiting for a human unless it has already retried 3 times.
 
+**Validator None-summary recovery.** When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
+
+1. **GitHub-comment fallback** — scans the issue for a comment with the mandatory `**Agent: validator**` attribution header and looks for `CONFIRMED` in the body. If found, advances directly to PM without re-running the validator.
+2. **Validator retry** — if no confirming comment exists, re-queues the validator with a per-run idempotency key (`validator-retry-N-r1`, `validator-retry-N-r2`), capped at 2 retries before human escalation.
+
+The validator SOUL.md also instructs the agent to call `hermes kanban show <tid>` after `kanban_complete` and re-issue the complete call if `latest_summary` is null.
+
 **PM stale-task recovery.** If the Hermes platform prematurely marks a PM task done
 before the agent finishes (a known platform-level bug), the task is left with no
-`SPEC:` summary. The dispatcher detects this "stale" state on the next tick and
+`assigned:` summary. The dispatcher detects this "stale" state on the next tick and
 re-creates the PM task with a new idempotency key (`pm-{n}-r1`, `pm-{n}-r2`),
 capped at 3 retries. Previously this stalled the pipeline indefinitely.
 
