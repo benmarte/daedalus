@@ -19,6 +19,8 @@ import logging
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -939,7 +941,70 @@ def _check_confirmed_validators(
             summary_raw = (card.get("latest_summary") or "").strip()
         summary = summary_raw.lower()
         if not summary.startswith("confirmed"):
-            continue  # BLOCKED/ESCALATED/STOP/empty — not confirmed
+            # Non-CONFIRMED validator done cards: re-triage instead of silent drop.
+            m_nr = re.search(r"#(\d+)", task.get("title") or "")
+            if not m_nr:
+                continue
+            n_nr = int(m_nr.group(1))
+            if summary.startswith("escalate:"):
+                # Security/harm escalation — existing human escalation path, skip silently.
+                continue
+            if summary.startswith("blocked:") or summary.startswith("stop:"):
+                # Validator couldn't proceed or it's a duplicate/already-fixed — PM consultation.
+                issue_nt = issues_map.get(n_nr)
+                if issue_nt and summary.startswith("blocked:"):
+                    if dry_run:
+                        logger.info("[dry-run] validator BLOCKED #%s — would create PM consultation", n_nr)
+                        triggered.append(n_nr)
+                        continue
+                    blocker_text = summary_raw
+                    cid = kanban.create_task(
+                        slug, f"consult: #{n_nr} {issue_nt.get('title', '')}",
+                        body=_pm_consultation_body(
+                            repo, issue_nt,
+                            f"Validator blocked: {blocker_text}",
+                            workdir, provider_name,
+                        ),
+                        assignee=p["pm"],
+                        idempotency_key=f"validator-blocked-{n_nr}",
+                        workspace=f"dir:{workdir}" if workdir else "",
+                        skills=rs.get("pm") or None,
+                    )
+                    if cid:
+                        logger.info("dispatch: validator BLOCKED #%s — PM consultation %s", n_nr, cid)
+                        triggered.append(n_nr)
+                continue
+            # Empty or unrecognized summary — retry validator once (idempotency key).
+            issue_nr = issues_map.get(n_nr)
+            if issue_nr:
+                retry_key = f"validator-retry-{n_nr}"
+                if dry_run:
+                    logger.info("[dry-run] validator silent-drop #%s — would retry validator", n_nr)
+                    triggered.append(n_nr)
+                    continue
+                # Check if retry already exists.
+                existing_retry = False
+                for existing_task in kanban.list_tasks(slug):
+                    if (existing_task.get("idempotency_key") or "") == retry_key:
+                        existing_retry = True
+                        break
+                if not existing_retry:
+                    vbody = _validator_body(repo, issue_nr, workdir, base_branch, provider_name)
+                    vid = kanban.create_task(
+                        slug, f"#validate: #{n_nr} {issue_nr.get('title', '')}",
+                        body=vbody,
+                        assignee=p["validator"],
+                        idempotency_key=retry_key,
+                        workspace=f"dir:{workdir}" if workdir else "",
+                        skills=rs.get("validator") or None,
+                    )
+                    if vid:
+                        logger.warning(
+                            "dispatch: validator done with empty/unrecognized summary for #%s — "
+                            "retrying validator (key=%s)", n_nr, retry_key,
+                        )
+                        triggered.append(n_nr)
+            continue
         m = re.search(r"#(\d+)", task.get("title") or "")
         if not m:
             continue
@@ -1084,6 +1149,60 @@ def _pm_consultation_body(repo: str, issue: Dict[str, Any], blocker_summary: str
         f"If this blocker cannot be resolved without human input (requires legal, compliance, "
         f"or C-level sign-off), complete your card with 'ESCALATED: ' and explain why.\n"
     )
+
+
+def _check_stalled_in_progress(
+    slug: str, stall_minutes: int = 30, *, dry_run: bool = False,
+) -> List[str]:
+    """Detect stalled in-progress cards and move them to blocked.
+
+    For every card in 'running' status whose last update is older than
+    ``stall_minutes``, move it to 'blocked' with a STALLED summary so that
+    _check_team_blockers picks it up on the next tick and routes it to PM.
+
+    Returns list of task ids that were transitioned.
+    """
+    stalled: List[str] = []
+    # List running tasks
+    for task in kanban.list_tasks(slug, status="running"):
+        tid = (task.get("id") or task.get("task_id") or "").strip()
+        if not tid:
+            continue
+        # Fetch full card to get updated_at
+        card = kanban.show_card(slug, tid) or {}
+        updated_raw = card.get("updated_at") or card.get("started_at") or ""
+        if not updated_raw:
+            continue
+        try:
+            # Try parsing ISO timestamp
+            if isinstance(updated_raw, str):
+                # Handle various ISO formats
+                updated_dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+            elif isinstance(updated_raw, (int, float)):
+                updated_dt = datetime.fromtimestamp(updated_raw, tz=timezone.utc)
+            else:
+                continue
+            # If naive, assume UTC
+            if updated_dt.tzinfo is None:
+                updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+            age_minutes = (datetime.now(timezone.utc) - updated_dt).total_seconds() / 60.0
+        except (ValueError, TypeError, OSError):
+            continue
+        if age_minutes < stall_minutes:
+            continue
+        # Stalled — move to blocked
+        if dry_run:
+            logger.info("[dry-run] stalled card %s (age=%.0fm) — would move to blocked", tid, age_minutes)
+            stalled.append(tid)
+            continue
+        # Use kanban.block to move to blocked state
+        try:
+            kanban.block_task(slug, tid, f"STALLED: session ended without completing (age={age_minutes:.0f}m)")
+            logger.info("dispatch: stalled card %s moved to blocked (age=%.0fm)", tid, age_minutes)
+            stalled.append(tid)
+        except Exception as e:
+            logger.warning("dispatch: failed to block stalled card %s: %s", tid, e)
+    return stalled
 
 
 def _check_team_blockers(
@@ -1350,6 +1469,16 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     blocked_issues = _enforce_validator_blocks(slug, provider, existing,
                                                validator_profile=profiles["validator"],
                                                dry_run=dry_run)
+
+    # Stall detection: move in-progress cards older than threshold to blocked.
+    # Uses dispatch_stale_timeout_seconds from config (default 30min) as the threshold.
+    stall_seconds = int((resolved.get("kanban") or {}).get(
+        "dispatch_stale_timeout_seconds",
+        1800))
+    stall_minutes = stall_seconds // 60
+    stalled_cards = _check_stalled_in_progress(slug, stall_minutes=stall_minutes, dry_run=dry_run)
+    if stalled_cards:
+        logger.info("dispatch: %d stalled card(s) moved to blocked", len(stalled_cards))
 
     # Phase-2 trigger: validator CONFIRMED → PM spec task.
     # Phase-3 trigger: PM SPEC done → team triage (developer/reviewer/security/docs).

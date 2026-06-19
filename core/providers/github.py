@@ -439,6 +439,61 @@ class GitHubProvider(VCSProvider):
         self._board_meta = None  # clear cache so next call reloads with the new option
         return True
 
+    def _board_add_item(self, issue_number: int) -> Optional[str]:
+        """Enroll an issue into the project via addProjectV2ItemById.
+
+        Returns the project item ID, or None if already present or on failure.
+        Uses content=issue (not pull_request) — issues are enrolled by their
+        GraphQL node id via ``convertProjectV2DraftIssueItemToDraftIssueItem``
+        is not needed; ``addProjectV2ItemById`` accepts the issue node id
+        directly as ``contentId``.
+        """
+        meta = self._load_board_meta()
+        if not meta:
+            return None
+        project_id = meta["project_id"]
+        # Resolve the issue's GraphQL node id.
+        repo_name = self.repo.split("/", 1)[1]
+        q = """query($owner:String!,$name:String!,$number:Int!){
+                 repository(owner:$owner,name:$name){
+                   issue(number:$number){ id } } }"""
+        data = self._graphql(q, {"owner": self.owner, "name": repo_name, "number": issue_number})
+        issue_id = (((data or {}).get("repository") or {}).get("issue") or {}).get("id")
+        if not issue_id:
+            self._log.warning("board: cannot resolve issue #%s node id for enrollment", issue_number)
+            return None
+        m = """mutation($project:ID!,$content:ID!){
+                 addProjectV2ItemById(input:{projectId:$project,contentId:$content}){
+                   item { id } } }"""
+        result = self._graphql(m, {"project": project_id, "content": issue_id})
+        if result is None:
+            self._log.warning("board: addProjectV2ItemById failed for #%s", issue_number)
+            return None
+        item_id = (((result or {}).get("addProjectV2ItemById") or {}).get("item") or {}).get("id")
+        if item_id:
+            # Invalidate cache so the new item is visible to subsequent _items() calls.
+            self.invalidate_board_cache()
+            self._log.info("board: enrolled #%s into project #%s", issue_number, self._board_number)
+        return item_id
+
+    def board_ensure_backlog(self, issue_number: int) -> bool:
+        """Enroll an issue into the project and set its status to 'Backlog'.
+
+        Returns True if the item is now on the board with Backlog status.
+        Idempotent — if the item is already present, falls through to
+        board_set_status which will no-op if already at Backlog.
+        """
+        if not self.board_configured():
+            return False
+        # Check if already on the board.
+        current_item = next((it for it in self._items()
+                             if it.get("number") == issue_number), None)
+        if not current_item:
+            added = self._board_add_item(issue_number)
+            if not added:
+                return False
+        return self.board_set_status(issue_number, "Backlog")
+
     def board_set_status(self, issue_number: int, status_name: str) -> bool:
         if not self.board_configured():
             return False
@@ -458,9 +513,18 @@ class GitHubProvider(VCSProvider):
         current_item = next((it for it in self._items()
                              if it.get("number") == issue_number), None)
         if not current_item:
-            self._log.warning("board: issue #%s not on project #%s",
-                              issue_number, self._board_number)
-            return False
+            # Auto-enroll: item not on project yet — add it first, then retry status.
+            self._log.info("board: #%s not on project #%s — auto-enrolling",
+                           issue_number, self._board_number)
+            added = self._board_add_item(issue_number)
+            if not added:
+                return False
+            current_item = next((it for it in self._items()
+                                 if it.get("number") == issue_number), None)
+            if not current_item:
+                self._log.warning("board: issue #%s still not found after enrollment",
+                                  issue_number)
+                return False
         if (current_item.get("status") or "").lower() == (status_name or "").lower():
             self._log.debug("board: #%s already at '%s' — skipping", issue_number, status_name)
             return False
@@ -468,7 +532,7 @@ class GitHubProvider(VCSProvider):
         m = """mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){
                  updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,
                    fieldId:$field,value:{singleSelectOptionId:$option}}){
-                   projectV2Item{ id } } }"""
+                   projectV2Item{id}} }"""
         data = self._graphql(m, {"project": meta["project_id"], "item": item_id,
                                  "field": meta["status_field_id"], "option": option_id})
         if data is None:
