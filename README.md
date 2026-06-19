@@ -52,6 +52,7 @@ flowchart TD
   - [Profile fallback behavior](#profile-fallback-behavior)
   - [Comment attribution template](#comment-attribution-template)
 - [Autonomous pipeline advancement](#autonomous-pipeline-advancement)
+- [Webhook configuration](#webhook-configuration)
 - [Self-healing loop](#self-healing-loop)
 - [Design decisions](#design-decisions)
 - [Multi-repo: one Daedalus, many repos](#multi-repo-one-daedalus-many-repos)
@@ -433,6 +434,78 @@ security-analyst → cleared
       ▼
 documentation → done → report posted
 ```
+
+---
+
+## Webhook configuration
+
+The dispatcher can advance instantly when an issue is marked **Ready** via an
+inbound webhook — no waiting for the next cron tick. The webhook normalizer
+(`core/webhook_normalizer.py`) parses payloads from **GitHub**, **GitLab**,
+**Azure DevOps**, and **Hermes Kanban**, extracting a `ReadyEvent` when an item
+transitions to the configured ready status.
+
+### 1. Enable the webhook server
+
+The Hermes gateway hosts the webhook endpoint. Enable it in `~/.hermes/config.yaml`:
+
+```yaml
+platforms:
+  webhook:
+    host: "0.0.0.0"        # bind address (default: 0.0.0.0)
+    port: 8644             # HTTP port (default: 8644)
+    secret: "your-hmac-secret"  # shared secret for HMAC-SHA256 signature verification
+```
+
+The gateway must be restarted after changing webhook config: `hermes gateway restart`.
+
+### 2. Expose the gateway to the internet
+
+VCS providers need a public URL to deliver webhooks. Options:
+
+| Method | Command | Notes |
+|---|---|---|
+| **Hermes portal** (built-in) | `hermes portal` | Free, auto-provisioned Cloudflare tunnel. Easiest. |
+| **Cloudflared** (manual) | `cloudflared tunnel --url http://localhost:8644` | Free tunnel; use when you need a stable URL. |
+| **ngrok** | `ngrok http 8644` | Free tier available; good for quick local testing. |
+
+All three expose port 8644 to the internet. Copy the public URL they provide — that's your webhook base URL.
+
+### 3. Register the webhook with your VCS provider
+
+Set the **Payload URL** to `<your-public-url>/webhook/daedalus` and use the
+**secret** from step 1 for HMAC-SHA256 signature verification:
+
+- **GitHub:** Settings → Webhooks → Add webhook. Set Payload URL, content type
+  to `application/json`, **Secret** to the shared secret, and subscribe to
+  `projects_v2_item` events.
+- **GitLab:** Settings → Webhooks. Set the URL, **Secret token** to the shared
+  secret, and enable `Issue` events.
+- **Azure DevOps:** Project Settings → Service hooks → Web Hooks. Trigger on
+  `Work item updated`. (Azure doesn't support HMAC — use the `on_session_end`
+  fallback for Azure, or poll via the cron tick.)
+
+### 4. Dead-man's-switch: local-only setups still work
+
+**Webhooks are a latency optimization, not a requirement.** The dispatcher's
+ready-polling logic runs on every cron tick regardless of webhook state, and
+the `on_session_end` fallback catches any session that finishes without a
+webhook. If the tunnel drops, the secret is wrong, or webhooks are disabled
+entirely, issues still get dispatched — just with cron-tick latency instead of
+instant.
+
+```
+issue marked Ready
+      │
+      ├─► webhook delivered instantly ──► normalizer ──► dispatch (fast path)
+      │
+      └─► cron tick (next interval) ──► poll ──► dispatch (fallback)
+      │
+      └─► on_session_end ──► dispatch (last-resort fallback)
+```
+
+Both paths are idempotent: an issue dispatched via webhook won't be
+re-dispatched by the next polling tick (the card already exists on the board).
 
 ---
 
