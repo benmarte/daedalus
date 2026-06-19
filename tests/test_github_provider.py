@@ -178,8 +178,10 @@ ITEMS_GQL = {
 
 def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
     """Stateful GraphQL mock. Tracks options added via updateProjectV2Field so
-    that subsequent fields(first queries include them (simulates real GitHub)."""
+    that subsequent fields(first queries include them (simulates real GitHub).
+    Also tracks items added via addProjectV2ItemById."""
     extra_opts: list = []  # options created via board_ensure_status_option
+    added_items: list = []  # items created via addProjectV2ItemById
 
     def fake_post(path, payload, **kw):
         q = payload["query"]
@@ -199,7 +201,13 @@ def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
             ]}}}}
             return {"data": data}
         if "items(first" in q:
-            return {"data": ITEMS_GQL}
+            import copy
+            data = copy.deepcopy(ITEMS_GQL)
+            # Append any items added via addProjectV2ItemById
+            if added_items:
+                nodes = data["repository"]["projectV2"]["items"]["nodes"]
+                nodes.extend(added_items)
+            return {"data": data}
         if "updateProjectV2Field" in q:
             # Track newly added options for future fields(first queries
             for o in (payload.get("variables") or {}).get("options", []):
@@ -211,6 +219,13 @@ def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
         if "updateProjectV2ItemFieldValue" in q:
             return mutation_result or {"data": {"updateProjectV2ItemFieldValue":
                                                 {"projectV2Item": {"id": "I_1"}}}}
+        if "addProjectV2ItemById" in q:
+            added_items.append({"id": "I_NEW", "content": {"number": 99},
+                                "fieldValueByName": None})
+            return {"data": {"addProjectV2ItemById": {"item": {"id": "I_NEW"}}}}
+        if "issue(number" in q and "repository" in q and "items" not in q:
+            # Issue node id lookup for _board_add_item
+            return {"data": {"repository": {"issue": {"id": "ISSUE_NODE_1"}}}}
         raise AssertionError(q)
     provider._http.post_json.side_effect = fake_post
 
@@ -322,3 +337,45 @@ def test_get_issue_ignores_pull_requests(provider):
         "labels": [], "state": "open", "html_url": "u",
     }
     assert provider.get_issue(5) is None
+
+
+# ── board_ensure_backlog / _board_add_item (issue #19) ─────────────────────
+
+
+def test_board_add_item_returns_item_id(provider):
+    """_board_add_item resolves issue node id and calls addProjectV2ItemById."""
+    _gql_mock(provider)
+    # Issue 99 is NOT in ITEMS_GQL — should trigger enrollment
+    item_id = provider._board_add_item(99)
+    assert item_id == "I_NEW"
+    # Verify addProjectV2ItemById was called
+    calls = [c for c in provider._http.post_json.call_args_list
+             if "addProjectV2ItemById" in (c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")]
+    assert len(calls) == 1
+
+
+def test_board_add_item_invalidates_cache(provider):
+    """_board_add_item invalidates _board_items cache after enrollment."""
+    _gql_mock(provider)
+    # Pre-populate cache
+    provider._board_items = [{"id": "I_1", "number": 7, "status": "Ready"}]
+    provider._board_add_item(99)
+    assert provider._board_items is None, "cache should be invalidated"
+
+
+def test_board_ensure_backlog_enrolls_and_sets_status(provider):
+    """board_ensure_backlog enrolls missing item then sets Backlog status."""
+    _gql_mock(provider)
+    # Issue 99 is not on the board
+    assert provider.board_ensure_backlog(99) is True
+
+
+def test_board_set_status_auto_enrolls_missing_item(provider):
+    """board_set_status auto-enrolls item if not found on board."""
+    _gql_mock(provider)
+    # Issue 99 is not in ITEMS_GQL
+    assert provider.board_set_status(99, "Ready") is True
+    # Verify addProjectV2ItemById was called (enrollment)
+    add_calls = [c for c in provider._http.post_json.call_args_list
+                 if "addProjectV2ItemById" in (c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")]
+    assert len(add_calls) == 1
