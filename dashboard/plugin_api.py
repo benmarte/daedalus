@@ -1417,14 +1417,15 @@ async def get_meta_pick_directory(request: Request) -> dict[str, Any]:
 _ALL_DAEDALUS_PROFILES = [
     "validator-daedalus",
     "project-manager-daedalus", "planner-daedalus", "developer-daedalus",
-    "reviewer-daedalus", "security-analyst-daedalus", "documentation-daedalus",
+    "qa-daedalus", "reviewer-daedalus", "security-analyst-daedalus",
+    "accessibility-daedalus", "documentation-daedalus",
 ]
 _PROVISION_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "provision_roster.sh"
 
 
 @meta_router.get("/roster-status")
 async def get_roster_status(request: Request) -> dict[str, Any]:
-    """Check which of the seven specialist profiles are provisioned.
+    """Check which of the nine specialist profiles are provisioned.
 
     Returns ``{"all_provisioned": bool, "profiles": {name: bool}}``.
     """
@@ -1441,7 +1442,7 @@ async def get_roster_status(request: Request) -> dict[str, Any]:
 
 @meta_router.post("/provision-roster")
 async def post_provision_roster(request: Request) -> dict[str, Any]:
-    """Run provision_roster.sh to install the seven specialist profiles.
+    """Run provision_roster.sh to install the nine specialist profiles.
 
     Reads any tokens already in ~/.hermes/.env and passes them as environment
     variables so the profiles get push auth without the user re-typing them.

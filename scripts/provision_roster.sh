@@ -143,7 +143,7 @@ if [ -n "${AZURE_DEVOPS_PAT:-}" ]; then
   _validate_token "AZURE_DEVOPS_PAT" "${AZURE_DEVOPS_PAT}" "" "Azure DevOps"
 fi
 
-# Remove legacy / stray profiles from earlier spikes so the roster is exactly the seven below.
+# Remove legacy / stray profiles from earlier spikes so the roster is exactly the nine below.
 for legacy in builder probe-role; do
   hermes profile delete "$legacy" -y >/dev/null 2>&1 || true
 done
