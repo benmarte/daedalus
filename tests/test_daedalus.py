@@ -82,6 +82,9 @@ class _FakeProvider:
     def list_pr_comments(self, pr):
         return []
 
+    def get_issue_comments(self, issue_number):
+        return []
+
     def pr_has_delivery_marker(self, pr):
         return False
 
@@ -1415,6 +1418,126 @@ def test_custom_pm_profile_used_after_validator_confirms():
     check("custom pm profile used for PM task creation", "my-pm" in assigned)
 
 
+# ── validator github comment fallback (issue #40) ─────────────────────────────
+
+def test_validator_github_comment_outcome_confirmed():
+    """Returns 'confirmed' when comment has Agent: validator header + CONFIRMED."""
+    disp = _load_dispatch()
+
+    class _FP:
+        def get_issue_comments(self, n):
+            return [{"user": {"login": "benmarte"},
+                     "body": "**Agent: validator**\n\nCONFIRMED — issue is real."}]
+
+    result = disp._validator_github_comment_outcome(_FP(), 42)
+    check("confirmed detected from github comment", result == "confirmed")
+
+
+def test_validator_github_comment_outcome_no_match():
+    """Returns '' when no comment has the Agent: validator attribution header."""
+    disp = _load_dispatch()
+
+    class _FP:
+        def get_issue_comments(self, n):
+            return [{"user": {"login": "some-other-user"}, "body": "Just a regular comment."}]
+
+    result = disp._validator_github_comment_outcome(_FP(), 42)
+    check("no match returns empty string", result == "")
+
+
+def test_validator_github_comment_outcome_none_provider():
+    """Returns '' safely when provider is None."""
+    disp = _load_dispatch()
+    result = disp._validator_github_comment_outcome(None, 42)
+    check("none provider returns empty string", result == "")
+
+
+def test_check_confirmed_validators_github_comment_fallback_advances_to_pm():
+    """None-summary validator with CONFIRMED github comment → creates PM task, no retry."""
+    disp = _load_dispatch()
+    created_titles = []
+    created_keys = []
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return [{"title": "#42 fix some bug", "assignee": "validator-daedalus",
+                     "summary": None, "status": "done", "id": "t_v42"}]
+        return []
+
+    class _FP:
+        name = "github"
+        def get_issue_comments(self, n):
+            return [{"user": {"login": "validator-daedalus"},
+                     "body": "**Agent: validator**\nCONFIRMED — issue is real and safe."}]
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": None}
+
+        def fake_create(slug, title, *, assignee="", idempotency_key="", **kw):
+            created_titles.append(title)
+            created_keys.append(idempotency_key)
+            return "t_pm_new"
+
+        disp.kanban.create_task = fake_create
+        disp._check_confirmed_validators(
+            "slug", "O/R",
+            {42: {"number": 42, "title": "fix some bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+            provider=_FP(),
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+
+    check("PM task created (not validator retry)", any("pm" in k for k in created_keys))
+    check("no validator retry task created", not any("validator" in t.lower() for t in created_titles
+                                                     if "validate" in t.lower()))
+
+
+def test_check_confirmed_validators_none_summary_retries_when_no_github_comment():
+    """None-summary validator with no CONFIRMED github comment → creates retry validator."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return [{"title": "#43 fix bug", "assignee": "validator-daedalus",
+                     "summary": None, "status": "done", "id": "t_v43"}]
+        return [{"title": "#43 fix bug", "assignee": "validator-daedalus",
+                 "summary": None, "status": "done", "id": "t_v43"}]
+
+    class _FP:
+        name = "github"
+        def get_issue_comments(self, n):
+            return []  # no validator comment
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": None}
+
+        def fake_create(slug, title, *, assignee="", idempotency_key="", **kw):
+            created_keys.append(idempotency_key)
+            return "t_retry"
+
+        disp.kanban.create_task = fake_create
+        disp._check_confirmed_validators(
+            "slug", "O/R",
+            {43: {"number": 43, "title": "fix bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+            provider=_FP(),
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+
+    check("validator retry created", any("validator-retry" in k for k in created_keys))
+
+
 # ── profile validation (issue #16) ────────────────────────────────────────────
 
 def test_hermes_profile_exists_directory():
@@ -2134,6 +2257,11 @@ if __name__ == "__main__":
                test_pm_task_state_complete,
                test_pm_task_state_stale,
                test_check_confirmed_validators_retries_stale_pm,
+               test_validator_github_comment_outcome_confirmed,
+               test_validator_github_comment_outcome_no_match,
+               test_validator_github_comment_outcome_none_provider,
+               test_check_confirmed_validators_github_comment_fallback_advances_to_pm,
+               test_check_confirmed_validators_none_summary_retries_when_no_github_comment,
                test_check_completed_pm_creates_team_tasks,
                test_check_completed_pm_provider_fallback,
                test_check_completed_pm_no_issue_found,

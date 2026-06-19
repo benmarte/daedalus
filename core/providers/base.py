@@ -258,6 +258,11 @@ class VCSProvider(abc.ABC):
         """Post a comment on an issue (distinct from PR comments). Returns True on success."""
         return False
 
+    def get_issue_comments(self, issue_number: int) -> List[Dict[str, Any]]:
+        """Return issue comments as dicts with at least 'body' and 'user' keys.
+        Defaults to [] — providers that support it override."""
+        return []
+
     def append_changelog(self, base_branch: str, entry: str) -> bool:
         """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the VCS API.
         Returns True on success; defaults to False (providers that support it override)."""
