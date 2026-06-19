@@ -25,6 +25,7 @@ logger = logging.getLogger("daedalus.iterate")
 # Actions that classify_blocked can return
 ADVANCE = "advance"            # dev card with green CI → complete, advance chain
 DEV_FIX_CI = "dev_fix_ci"     # dev card with red CI → create fix card
+PENDING_CI = "pending_ci"     # dev card with CI still pending → wait (cron handles retry)
 PM_ROUTE = "pm_route"         # reviewer flagged changes → create PM routing card
 APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
 ESCALATE = "escalate"         # max iterations exceeded → log + notify
@@ -83,6 +84,7 @@ def classify_blocked(
     *,
     fix_attempts: int = 0,
     pr_number: Optional[int] = None,
+    raw_ci: Optional[str] = None,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -96,8 +98,11 @@ def classify_blocked(
         pr_number: Explicit PR number from a non-handoff source (e.g. branch
                    lookup). Used as a fallback when the handoff doesn't
                    contain a ``PR #N`` reference.
+        raw_ci: The raw CIStatus string (e.g. 'pending', 'red', 'green',
+                'unknown'). When None (default), treated as 'unknown' for
+                backward compatibility.
 
-    Returns one of: {advance, dev_fix_ci, pm_route, approve_advance, escalate}.
+    Returns one of: {advance, dev_fix_ci, pending_ci, pm_route, approve_advance, escalate}.
     """
     assignee = (card_assignee or "").lower().strip()
     handoff = _parse_handoff(handoff_text)
@@ -118,10 +123,14 @@ def classify_blocked(
         # Exceeded max fix attempts → escalate
         if fix_attempts >= MAX_FIX_ATTEMPTS:
             return ESCALATE
-        # Review-required handoff with PR → check CI
+        # Review-required handoff with PR → check CI state
         if handoff["is_review_required"] and effective_pr:
             if ci_green:
                 return ADVANCE
+            # raw_ci is None (backward compat) or UNKNOWN → treat as RED (actionable)
+            resolved_ci = (raw_ci or CIStatus.UNKNOWN)
+            if resolved_ci == CIStatus.PENDING:
+                return PENDING_CI
             else:
                 return DEV_FIX_CI
         # No PR or not review-required → PM route (was: silent drop returning "")
@@ -712,6 +721,7 @@ def run_iterate(
     counts: Dict[str, int] = {
         ADVANCE: 0,
         DEV_FIX_CI: 0,
+        PENDING_CI: 0,
         PM_ROUTE: 0,
         APPROVE_ADVANCE: 0,
         ESCALATE: 0,
@@ -775,13 +785,15 @@ def run_iterate(
                 ci_green = (raw_ci == CIStatus.GREEN)
 
         action = classify_blocked(assignee, handoff, ci_green,
-                                  fix_attempts=fix_attempts, pr_number=pr)
+                                  fix_attempts=fix_attempts, pr_number=pr,
+                                  raw_ci=raw_ci)
 
-        # Don't fire DEV_FIX_CI when CI hasn't reported yet (only RED warrants a fix card).
-        if action == DEV_FIX_CI and raw_ci not in (CIStatus.RED,):
-            if raw_ci == CIStatus.PENDING:
-                pending_ci_cards.append({"tid": tid, "pr": pr, "card": card})
-            logger.info("iterate: %s DEV_FIX_CI suppressed — CI is %s (not RED)", tid, raw_ci)
+        # PENDING_CI is a skip-action: card goes to pending_ci_cards for the
+        # CI retry cron to pick up when CI resolves. No executor needed.
+        if action == PENDING_CI:
+            pending_ci_cards.append({"tid": tid, "pr": pr, "card": card})
+            counts[PENDING_CI] += 1
+            logger.info("iterate: %s CI still pending — deferred to retry cron", tid)
             continue
 
         if not action:

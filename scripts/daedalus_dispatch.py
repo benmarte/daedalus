@@ -1455,7 +1455,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     # Separate advance PR numbers from routed actions (dev_fix / escalate) for
     # the human summary so PR numbers are reported correctly.
     routed_actions = {k: v for k, v in iterate_counts.items()
-                      if v > 0 and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE)}
+                      if v > 0 and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE, iterate.PENDING_CI)}
     if any(c > 0 for c in iterate_counts.values()) and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
