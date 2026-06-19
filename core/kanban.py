@@ -163,9 +163,18 @@ def review_handoff_pr(slug: str, task_id: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def complete(slug: str, task_id: str) -> bool:
-    """Mark a task complete (advances any children that were blocked on it)."""
-    rc, out, err = _hk(["--board", slug, "complete", task_id])
+def complete(slug: str, task_id: str, summary: str = "") -> bool:
+    """Mark a task complete (advances any children that were blocked on it).
+    
+    Args:
+        slug: Board slug
+        task_id: Task ID to complete
+        summary: Optional summary message to record with the completion
+    """
+    args = ["--board", slug, "complete", task_id]
+    if summary:
+        args += ["--summary", summary]
+    rc, out, err = _hk(args)
     if rc != 0:
         logger.warning("kanban: complete %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -354,16 +363,26 @@ def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:
     return completed_ids
 
 
-def close_issue_tasks(slug: str, issue_number: int) -> List[str]:
+def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_run: bool = False) -> List[str]:
     """Complete all non-done kanban tasks that reference #issue_number in their title.
 
-    Used when a GitHub/GitLab/Azure issue is closed externally (no merged PR),
-    so the decomposed sub-tasks (developer, reviewer, etc.) don't linger on the board.
+    Also walks the task tree to find any blocked children with review-required
+    summaries and completes them with the provided summary message. Used when a
+    GitHub/GitLab/Azure issue is closed externally (no merged PR), so the
+    decomposed sub-tasks (developer, reviewer, etc.) don't linger on the board.
     Returns the list of task IDs that were completed.
+    
+    Args:
+        slug: Board slug
+        issue_number: Issue number to close tasks for
+        summary: Optional summary message for completed blocked/review-required children
+        dry_run: If True, log what would be completed without acting
     """
     tasks = list_tasks(slug)
     pattern = f"#{issue_number}"
     completed_ids: List[str] = []
+    
+    # First pass: complete all non-done tasks that reference the issue in their title
     for t in tasks:
         if pattern not in (t.get("title") or ""):
             continue
@@ -371,6 +390,47 @@ def close_issue_tasks(slug: str, issue_number: int) -> List[str]:
         if status in ("done", "complete", "completed"):
             continue
         tid = t.get("id") or t.get("task_id")
-        if tid and complete(slug, str(tid)):
+        if not tid:
+            continue
+        if dry_run:
+            logger.info("[dry-run] would complete task %s (status: %s)", tid, status)
             completed_ids.append(str(tid))
+        elif complete(slug, str(tid)):
+            completed_ids.append(str(tid))
+    
+    # Second pass: walk task trees and complete blocked/review-required children
+    # This handles cases where child tasks don't reference the issue in their title
+    # but are still blocked waiting for the parent issue to close
+    if summary:
+        for t in tasks:
+            if pattern not in (t.get("title") or ""):
+                continue
+            tid = t.get("id") or t.get("task_id")
+            if not tid:
+                continue
+            # Get full card details to find children
+            card = show_card(slug, str(tid))
+            if not card:
+                continue
+            children = card.get("children") or []
+            for child_id in children:
+                child_card = show_card(slug, child_id)
+                if not child_card:
+                    continue
+                child_task = child_card.get("task", child_card)
+                child_status = (child_task.get("status") or "").lower()
+                # Skip already-done children
+                if child_status in ("done", "complete", "completed"):
+                    continue
+                # Check if blocked with review-required summary
+                if child_status == "blocked":
+                    latest_summary = child_card.get("latest_summary") or ""
+                    if latest_summary.startswith("review-required:"):
+                        if dry_run:
+                            logger.info("[dry-run] would complete blocked/review-required child %s with summary: %s", 
+                                      child_id, summary)
+                            completed_ids.append(child_id)
+                        elif complete(slug, child_id, summary=summary):
+                            completed_ids.append(child_id)
+    
     return completed_ids

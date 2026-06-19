@@ -1584,14 +1584,15 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                 # Merged into target branch = work complete. GitHub does NOT
                 # auto-close issues on a non-default-branch merge, so we do it.
                 if dry_run:
-                    logger.info("[dry-run] would set #%s -> Done + close issue (PR merged)", n)
+                    dry_closed = kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed", dry_run=True)
+                    logger.info("[dry-run] would set #%s -> Done + close issue (PR merged) (%d task(s))", n, len(dry_closed))
                     completed.append(n)
                 else:
                     provider.board_set_status(n, provider.status_name("done"))
                     provider.close_issue(n)
                     # Archive kanban tasks immediately so the orphan cleanup path
                     # on the next tick doesn't re-report this issue as completed.
-                    kanban.close_issue_tasks(slug, n)
+                    kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed")
                     dispatch_state.clear_dispatch(workdir, n)
                     completed.append(n)
                     # CHANGELOG auto-update: prepend a brief entry using the PR title.
@@ -1735,10 +1736,11 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         already_completed = set(completed)
         for n in sorted((board_done_nums & existing) - already_completed):
             if dry_run:
-                logger.info("[dry-run] #%s is Done on VCS board → would archive kanban tasks", n)
+                dry_closed = kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed", dry_run=True)
+                logger.info("[dry-run] #%s is Done on VCS board → would archive kanban tasks (%d task(s))", n, len(dry_closed))
                 completed.append(n)
             else:
-                closed_tasks = kanban.close_issue_tasks(slug, n)
+                closed_tasks = kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed")
                 if closed_tasks:
                     logger.info(
                         "dispatch: #%s moved to Done on VCS board → archived %d kanban task(s)",
@@ -1784,11 +1786,12 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         if state != "closed":
             continue  # still open (filtered by label/limit) or unknown — leave it
         if dry_run:
-            logger.info("[dry-run] #%s closed externally → would archive kanban tasks + Done", n)
+            dry_closed = kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed", dry_run=True)
+            logger.info("[dry-run] #%s closed externally → would archive kanban tasks + Done (%d task(s))", n, len(dry_closed))
             completed.append(n)
             continue
         provider.board_set_status(n, provider.status_name("done"))
-        closed_tasks = kanban.close_issue_tasks(slug, n)
+        closed_tasks = kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed")
         logger.info("dispatch: #%s closed externally → Done (%d task(s) completed: %s)",
                     n, len(closed_tasks), closed_tasks)
         # Only report as completed if we actually archived tasks — guards against
