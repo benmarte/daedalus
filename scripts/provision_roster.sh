@@ -34,6 +34,18 @@ if [ "$REPO_ROOT" != "$PLUGIN_DST" ]; then
   echo "daedalus plugin synced ($(grep '^version:' "$PLUGIN_DST/plugin.yaml" | awk '{print $2}'))."
 fi
 
+# Remove broken symlinks under ~/.hermes/skills — a dangling symlink causes
+# shutil.copytree to crash on every `hermes profile create --clone`, silently
+# blocking all new profile creation. Safe to remove: broken links have no target.
+broken=$(find "$HERMES/skills" -type l ! -exec test -e {} \; -print 2>/dev/null)
+if [ -n "$broken" ]; then
+  echo "Removing broken symlinks in $HERMES/skills:"
+  echo "$broken" | while IFS= read -r link; do
+    echo "  $link"
+    rm -f "$link"
+  done
+fi
+
 if [ ! -d "$SRC" ]; then
   echo "agent-skills plugin not found at $SRC — installing automatically..."
   if ! command -v hermes >/dev/null 2>&1; then
