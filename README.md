@@ -125,16 +125,17 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
      on the GitHub issue and completes with a `CONFIRMED: <note>` summary — the dispatcher detects
      this exact prefix to trigger Phase 2. If the outcome is anything other than CONFIRMED, Phase 2
      never runs.
-   - **developer/reviewer/security-analyst/documentation** (Phase 2) — tasks are created by the
+   - **developer/reviewer/security-analyst/accessibility/documentation** (Phase 2) — tasks are created by the
      dispatcher only after it detects the validator's `CONFIRMED:` summary. The dispatcher creates
-     these atomically on the next tick: a triage card is decomposed across all four roles simultaneously.
+     these atomically on the next tick: a triage card is decomposed across all roles with QA gating
+     the reviewer/security/accessibility stages.
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR.
    - **qa** runs the test suite, analyzes coverage, and reports a verdict (`qa-passed` or
-     `qa-failed`). The pipeline advances to reviewer/security only after QA passes.
+     `qa-failed`). The pipeline advances to reviewer/security/accessibility only after QA passes.
    - **reviewer** reviews, **security-analyst** audits, **accessibility** audits the PR for
      WCAG 2.1 AA compliance (only when the issue references UI/frontend work), and
      **documentation** writes a completion report and posts it to the **PR and your chat
-     channels**. All four roles post a summary comment on the GitHub issue after completing
+     channels**. All roles post a summary comment on the GitHub issue after completing
      their step.
 4. Each tick **auto-advances** any stage that's blocked on review once its PR's CI is
    green. When `_execute_advance()` completes the developer card, it also calls
@@ -704,7 +705,7 @@ on its board.
 | `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `core/notify_templates.py` | Rich markdown notification templates (dispatch summary, doc report envelope, PR-ready, pipeline-failure) with clickable issue/PR links for every Hermes messaging platform. |
-| `scripts/provision_roster.sh` | Provisions the 7-agent Hermes roster. |
+| `scripts/provision_roster.sh` | Provisions the 9-agent Hermes roster. |
 | `core/providers/` | VCS provider layer: GitHub (REST + GraphQL Projects v2), GitLab (REST), Azure DevOps (REST/WIQL) — token-authenticated HTTPS APIs, extensible via `register_provider()`. |
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
 | `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |

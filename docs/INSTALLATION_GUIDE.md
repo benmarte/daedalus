@@ -190,9 +190,10 @@ Every Daedalus project gets its own **kanban board** inside Hermes. Cards move t
    fires a `security-escalation` notification. A Blocked column is created on your VCS board
    automatically if it doesn't exist.
 4. The next cron tick after CONFIRMED detects the prefix and creates Phase 2: a triage card
-   decomposed across developer → reviewer → security-analyst → documentation.
-5. Cards advance as work is completed — developer opens a PR, reviewer approves, security clears
-   it, documentation posts the report. Each role posts a summary comment on the GitHub issue.
+   decomposed across developer → qa → reviewer + security-analyst + accessibility (conditional) → documentation.
+5. Cards advance as work is completed — developer opens a PR, QA validates tests, reviewer approves,
+   security clears it, accessibility audits (when applicable), documentation posts the report. Each
+   role posts a summary comment on the GitHub issue.
 6. When you **merge the PR**, the card moves to **Done** and the original issue is closed.
 
 View the board at any time from the Hermes **Kanban** page:
@@ -212,7 +213,7 @@ Every time the cron job fires, Daedalus runs its dispatch loop:
 3. For new Ready issues: creates a **validator-only task** (Phase 1). Developer and other agents
    do not get tasks yet.
 4. Scans done validator tasks for a `CONFIRMED:` summary — when found, creates the downstream
-   triage card (Phase 2: developer → reviewer → security-analyst → documentation).
+   triage card (Phase 2: developer → qa → reviewer + security-analyst + accessibility (conditional) → documentation).
 5. On **SECURITY_THREAT** or **BLOCK_FOR_REVIEW**: validator blocks the pipeline, posts an issue
    comment, and fires a `security-escalation` notification to configured channels. The VCS board
    card is moved to **Blocked** (column auto-created if it doesn't exist).
@@ -252,8 +253,10 @@ Only the keys you specify are overridden. Any role you omit continues to use the
 | `validator` | `validator-daedalus` |
 | `pm` | `project-manager-daedalus` |
 | `developer` | `developer-daedalus` |
+| `qa` | `qa-daedalus` |
 | `reviewer` | `reviewer-daedalus` |
 | `security` | `security-analyst-daedalus` |
+| `accessibility` | `accessibility-daedalus` |
 | `documentation` | `documentation-daedalus` |
 
 ### Skills per Agent
@@ -323,7 +326,7 @@ execution:
 
 | Placeholder | Value |
 |---|---|
-| `{role}` | Role name: `validator`, `project-manager`, `developer`, `reviewer`, `security-analyst`, `documentation`, or `daedalus` (for dispatcher-posted notices) |
+| `{role}` | Role name: `validator`, `project-manager`, `developer`, `qa`, `reviewer`, `security-analyst`, `accessibility`, `documentation`, or `daedalus` (for dispatcher-posted notices) |
 | `{profile}` | Hermes profile name for the role (empty if using the built-in default) |
 | `{issue}` | Issue reference such as `#42` (empty when not applicable) |
 | `{pr}` | PR reference such as `#7` (empty when not applicable) |

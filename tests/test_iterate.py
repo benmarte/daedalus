@@ -969,14 +969,24 @@ def test_classify_blocked_planner_returns_pm_route():
     check("planner blocked → pm_route", result == iterate.PM_ROUTE)
 
 
-def test_classify_blocked_documentation_returns_pm_route():
-    """Documentation blocked → pm_route (PM consultation)."""
+def test_classify_blocked_documentation_docs_posted_returns_approve_advance():
+    """Documentation blocked with 'docs posted' → approve_advance (terminal complete)."""
+    result = iterate.classify_blocked(
+        "documentation-daedalus",
+        "review-required: docs posted: issue #32 PR #34 — README updated",
+        ci_green=True,
+    )
+    check("docs posted → approve_advance", result == iterate.APPROVE_ADVANCE)
+
+
+def test_classify_blocked_documentation_unknown_returns_pm_route():
+    """Documentation blocked with unknown signal → pm_route (PM consultation)."""
     result = iterate.classify_blocked(
         "documentation-daedalus",
         "BLOCKED: unclear scope",
         ci_green=True,
     )
-    check("docs blocked → pm_route", result == iterate.PM_ROUTE)
+    check("docs unknown → pm_route", result == iterate.PM_ROUTE)
 
 
 def test_classify_blocked_pm_returns_escalate():
@@ -1621,7 +1631,8 @@ if __name__ == "__main__":
         test_run_iterate_handoff_pr_still_works,
         test_run_iterate_branch_pr_fallback_ci_red,
         test_classify_blocked_planner_returns_pm_route,
-        test_classify_blocked_documentation_returns_pm_route,
+        test_classify_blocked_documentation_docs_posted_returns_approve_advance,
+        test_classify_blocked_documentation_unknown_returns_pm_route,
         test_classify_blocked_pm_returns_escalate,
         test_extract_issue_number_repo_qualified,
         test_extract_issue_number_bare_hash,

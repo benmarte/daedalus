@@ -110,8 +110,16 @@ def classify_blocked(
     # Resolve PR number: handoff first, then the explicit fallback.
     effective_pr = handoff["pr_number"] or pr_number
 
-    # ── planner / documentation → PM route ───────────────────────────────
-    if assignee in ("planner-daedalus", "documentation-daedalus"):
+    # ── planner → PM route ───────────────────────────────────────────────
+    if assignee == "planner-daedalus":
+        return PM_ROUTE
+
+    # ── documentation-daedalus → terminal complete ────────────────────────
+    # Docs is the last pipeline stage. When it blocks with 'docs posted:'
+    # the job is done — complete the card. Anything else routes to PM.
+    if assignee == "documentation-daedalus":
+        if "docs posted" in (handoff_text or "").lower():
+            return APPROVE_ADVANCE
         return PM_ROUTE
 
     # ── project-manager blocked → escalate (human gate — PM can't consult itself) ──

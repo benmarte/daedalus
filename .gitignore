@@ -39,3 +39,4 @@ dashboard/dist/*.map
 
 # ── Tooling artifacts ────────────────────────────────────────────────────────
 .playwright-mcp/
+.claude/
