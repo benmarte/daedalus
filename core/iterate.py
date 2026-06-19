@@ -232,6 +232,24 @@ def _parse_pr_number(handoff_text: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _extract_issue_number_from_card(card: dict) -> Optional[int]:
+    """Parse the GitHub issue number from a card body.
+
+    Looks for ``{org}/{repo}#<n>`` or bare ``#<n>`` patterns in the card body.
+    Prefers the repo-qualified form (e.g. ``benmarte/daedalus#21``) to avoid
+    false matches on PR numbers embedded in prose.
+    """
+    body = (card.get("body") or "")
+    # Prefer repo-qualified: org/repo#N
+    m = re.search(r"[\w\-]+/[\w\-]+#(\d+)", body)
+    if m:
+        return int(m.group(1))
+    # Fallback: bare #N (skip if it looks like a PR reference)
+    for m in re.finditer(r"(?<!\w)#(\d+)", body):
+        return int(m.group(1))
+    return None
+
+
 def _handoff_from_card(card: dict) -> str:
     """Extract handoff text from a card dict.
 
@@ -265,6 +283,8 @@ def _execute_advance(
 
     Also unblocks any reviewer/security cards that were blocked with
     'awaiting-fix: {this_card_id}' so they re-engage after the fix lands.
+    After completing the developer card, creates downstream reviewer,
+    security-analyst, and documentation tasks if they don't already exist.
     """
     tid = (card.get("id") or "")
     if not tid:
@@ -291,7 +311,111 @@ def _execute_advance(
                                                 f"fix {tid} completed — re-engage review")
                 if unblocked:
                     logger.info("iterate: unblocked %s (was awaiting fix %s)", btid, tid)
+
+    # Post-developer handoff: create reviewer/security/docs tasks.
+    issue_number = _extract_issue_number_from_card(card)
+    if issue_number is not None:
+        _create_downstream_review_tasks(
+            slug, issue_number, card,
+            pr_number=pr, dry_run=dry_run,
+        )
+    else:
+        logger.warning(
+            "iterate: advanced %s but could not extract issue number — "
+            "skipping downstream review task creation", tid,
+        )
     return True
+
+
+# Downstream review-task role mapping (idempotency suffix → assignee).
+_DOWNSTREAM_REVIEW_ROLES = [
+    ("reviewer", "reviewer-daedalus"),
+    ("security", "security-analyst-daedalus"),
+    ("docs", "documentation-daedalus"),
+]
+
+
+def _create_downstream_review_tasks(
+    slug: str,
+    issue_number: int,
+    card: dict,
+    *,
+    pr_number: Optional[int] = None,
+    dry_run: bool = False,
+) -> List[str]:
+    """Create reviewer/security/docs tasks after a developer card completes.
+
+    Each task uses an idempotency key (``reviewer-{n}``, ``security-{n}``,
+    ``docs-{n}``) so re-runs never duplicate.  If a task with that key already
+    exists on the board (any status), creation is skipped for that role.
+
+    Returns the list of newly-created task ids.
+    """
+    created: List[str] = []
+    tid = card.get("id") or ""
+    workspace = card.get("workspace") or ""
+
+    # Build a concise body referencing the issue and PR.
+    pr_ref = f"PR #{pr_number}" if pr_number else "(PR number unknown)"
+    base_body = (
+        f"The developer has completed work for issue #{issue_number} "
+        f"({pr_ref}). The PR is open and CI is green.\n\n"
+        f"Developer card: {tid}\n"
+        f"Workspace: {workspace}\n"
+    )
+
+    # Idempotency: check which keys already exist on the board.
+    existing_keys: Set[str] = set()
+    for task in kanban.list_tasks(slug):
+        ikey = task.get("idempotency_key") or ""
+        if ikey:
+            existing_keys.add(ikey)
+
+    for role_suffix, assignee in _DOWNSTREAM_REVIEW_ROLES:
+        ikey = f"{role_suffix}-{issue_number}"
+        if ikey in existing_keys:
+            logger.info("iterate: downstream task with key '%s' already exists — skip", ikey)
+            continue
+
+        title = f"#{issue_number} {assignee.replace('-daedalus', '').title()} review"
+        body = base_body
+
+        if dry_run:
+            logger.info(
+                "[dry-run] would create downstream %s task for issue #%s (key=%s)",
+                role_suffix, issue_number, ikey,
+            )
+            continue
+
+        new_tid = kanban.create_task(
+            slug,
+            title,
+            body=body,
+            assignee=assignee,
+            workspace=workspace,
+            idempotency_key=ikey,
+            parents=[tid] if tid else None,
+        )
+        if new_tid:
+            created.append(new_tid)
+            logger.info(
+                "iterate: created downstream %s task %s for issue #%s",
+                role_suffix, new_tid, issue_number,
+            )
+        else:
+            logger.warning(
+                "iterate: failed to create downstream %s task for issue #%s",
+                role_suffix, issue_number,
+            )
+
+    if not dry_run and created:
+        kanban.comment(
+            slug, tid,
+            f"Created {len(created)} downstream review task(s): "
+            + ", ".join(created),
+        )
+
+    return created
 
 
 def _execute_dev_fix_ci(
