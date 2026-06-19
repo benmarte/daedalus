@@ -129,7 +129,11 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
      completion report and posts it to the **PR and your chat channels**. All roles post
      a summary comment on the GitHub issue after completing their step.
 4. Each tick **auto-advances** any stage that's blocked on review once its PR's CI is
-   green — the chain flows hands-off.
+   green. When `_execute_advance()` completes the developer card, it also calls
+   `_create_downstream_review_tasks()` — a safety net that auto-creates reviewer,
+   security-analyst, and documentation tasks (idempotency keys `reviewer-{n}`,
+   `security-{n}`, `docs-{n}`) if they don't already exist on the board. This handles
+   the edge case where the initial Phase 2 decompose didn't propagate to all four roles.
 5. When you **merge** the PR, the next tick sets the card **Done** and **closes the
    issue** (GitHub doesn't auto-close on a non-default-branch merge, so the dispatcher
    does it).
@@ -450,7 +454,10 @@ blocked card detected
         ├─ developer card + CI green + review-required?
         │       └──► advance
         │             complete the developer card
-        │             chain flows automatically to reviewer + security-analyst
+        │             _create_downstream_review_tasks() fires:
+        │               creates reviewer, security-analyst, docs tasks
+        │               idempotency keys: reviewer-{n}, security-{n}, docs-{n}
+        │               skips any whose key already exists on the board
         │
         ├─ developer card + CI red?
         │       └──► dev_fix_ci
@@ -528,9 +535,16 @@ Each piece exists because the obvious approach failed:
 - **Auto-advance** — workers *block for review* instead of completing, which stalls the
   chain. The dispatcher completes a review-required handoff once its PR's CI is green,
   so the pipeline is genuinely hands-off (the PR still waits for a human merge).
+- **Post-developer handoff safety net** — when `_execute_advance()` completes a developer
+  card, it calls `_create_downstream_review_tasks()` as a guard. If the initial Phase 2
+  decompose (triage → developer + reviewer + security + docs) failed to create any of the
+  downstream tasks, this path creates them with idempotent keys (`reviewer-{n}`,
+  `security-{n}`, `docs-{n}`). Any task that already exists on the board (any status) is
+  skipped — re-runs never duplicate. This closed a production gap where reviewer, security,
+  and docs tasks had to be manually created by the human operator (issue #21).
 - **Self-healing loop** (`core/iterate.py`) — every blocked card is classified into one
   of 5 actions and routed to the agent that can clear it:
-    - `advance` — dev PR green + review-required → complete dev card, chain flows to reviewer/security
+    - `advance` — dev PR green + review-required → complete dev card, then `_create_downstream_review_tasks()` creates reviewer/security/docs tasks (idempotent keys `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
     - `dev_fix_ci` — CI red → creates idempotent developer fix card
     - `pm_route` — reviewer/security requests changes → creates PM routing card with findings; PM decides owner (developer, security-analyst, re-spec), then fix lands. Reviewer cards are marked "awaiting-fix" and auto-unblocked when the fix completes.
     - `approve_advance` — reviewer/security approved → complete the card
