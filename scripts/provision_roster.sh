@@ -21,6 +21,19 @@ HERMES="${HERMES_HOME:-$HOME/.hermes}"
 SRC="$HERMES/plugins/agent-skills/skills"
 PROFILES="$HERMES/profiles"
 
+# Self-sync: copy this repo into the installed plugin location so the running
+# version always matches the cloned source (hermes plugins update only works for
+# git-cloned plugins; local-copy installs are never updated automatically).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLUGIN_DST="$HERMES/plugins/daedalus"
+if [ "$REPO_ROOT" != "$PLUGIN_DST" ]; then
+  echo "Syncing daedalus plugin: $REPO_ROOT → $PLUGIN_DST"
+  mkdir -p "$PLUGIN_DST"
+  rsync -a --delete --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
+    "$REPO_ROOT/" "$PLUGIN_DST/"
+  echo "daedalus plugin synced ($(grep '^version:' "$PLUGIN_DST/plugin.yaml" | awk '{print $2}'))."
+fi
+
 if [ ! -d "$SRC" ]; then
   echo "agent-skills plugin not found at $SRC — installing automatically..."
   if ! command -v hermes >/dev/null 2>&1; then
