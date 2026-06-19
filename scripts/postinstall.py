@@ -4,7 +4,7 @@ postinstall.py — Prerequisite installer + roster provisioner for the daedalus 
 
 Ensures the host environment is ready (default profile, agent-skills plugin),
 installing agent-skills automatically if missing, then runs
-scripts/provision_roster.sh to seed the 6-agent lifecycle roster.
+scripts/provision_roster.sh to seed the 9-agent lifecycle roster.
 No gh CLI involved — VCS access is via provider APIs with tokens from env.
 
 Usage:
