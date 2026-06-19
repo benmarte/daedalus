@@ -1568,6 +1568,178 @@ def test_run_iterate_red_ci_classified_correctly():
     check("red CI → no pending cards", pending == [])
 
 
+# ── Issue #35: escalation dedup tests ───────────────────────────────────────
+
+
+def test_escalation_dedup_same_issue():
+    """Two cards for same issue at max attempts → only one escalates, second is silently completed."""
+    cards = [
+        {
+            "id": "t_dev1",
+            "assignee": "developer-daedalus",
+            "body": "benmarte/daedalus#35",
+            "runs": [{"reason": "review-required: PR #50",
+                      "metadata": {"fix_attempts": 3}}],
+        },
+        {
+            "id": "t_rev1",
+            "assignee": "reviewer-daedalus",
+            "body": "benmarte/daedalus#35",
+            "runs": [{"reason": "review-required: changes requested",
+                      "metadata": {"fix_attempts": 3}}],
+        },
+    ]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+            with mock.patch.object(kanban, "complete", return_value=True) as mk_complete:
+                # show_card returns no stamp, so _is_card_already_escalated returns False
+                with mock.patch.object(kanban, "show_card", return_value={"id": "", "comments": []}):
+                    with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
+                        counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
+
+    # First card escalates, second is silently completed
+    check("dedup: first card escalates", counts[iterate.ESCALATE] == 1)
+    # The second card should be completed with 'skipped: escalated by' summary
+    complete_calls = mk_complete.call_args_list
+    # Expect exactly one complete call for the duplicate card (not the first)
+    check("dedup: complete called for duplicate",
+          len(complete_calls) == 1)
+    if complete_calls:
+        # complete takes (slug, tid, summary=...)
+        call_kwargs = complete_calls[0][1] if len(complete_calls[0]) > 1 else {}
+        call_args = complete_calls[0][0]
+        summary = call_kwargs.get("summary", "")
+        if len(call_args) > 2 and not summary:
+            summary = call_args[2]
+        check("dedup: skip summary references first_tid",
+              "skipped: escalated by" in summary and "t_dev1" in summary)
+    # Only one ESCALATE comment posted (the first one)
+    escalate_comments = [c for c in mk_comment.call_args_list
+                         if "ESCALATE" in str(c)]
+    check("dedup: only one ESCALATE comment posted", len(escalate_comments) == 1)
+
+
+def test_escalation_stamp_prevents_rerun():
+    """Card with 'escalated: issue #N' stamp in comments is skipped on subsequent tick."""
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "body": "benmarte/daedalus#35",
+        "runs": [{"reason": "review-required: PR #50",
+                  "metadata": {"fix_attempts": 3}}],
+    }]
+    # show_card returns a stamp in comments (simulating a previous tick)
+    stamped_card = {
+        "id": "t_dev",
+        "comments": [{"body": "escalated: issue #35"}],
+        "latest_summary": "",
+    }
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "show_card", return_value=stamped_card):
+            with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+                with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
+                    counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
+
+    check("stamp: no escalation counted", counts[iterate.ESCALATE] == 0)
+    mk_comment.assert_not_called()
+
+
+def test_escalation_dedup_dry_run():
+    """Dry-run mode: first card logs 'would escalate', second logs 'would skip'."""
+    cards = [
+        {
+            "id": "t_dev1",
+            "assignee": "developer-daedalus",
+            "body": "benmarte/daedalus#35",
+            "runs": [{"reason": "review-required: PR #50",
+                      "metadata": {"fix_attempts": 3}}],
+        },
+        {
+            "id": "t_rev1",
+            "assignee": "reviewer-daedalus",
+            "body": "benmarte/daedalus#35",
+            "runs": [{"reason": "review-required: changes requested",
+                      "metadata": {"fix_attempts": 3}}],
+        },
+    ]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+            with mock.patch.object(kanban, "complete", return_value=True) as mk_complete:
+                with mock.patch.object(kanban, "show_card", return_value={"id": "", "comments": []}):
+                    with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
+                        counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp, dry_run=True)
+
+    # In dry-run, no side effects
+    mk_comment.assert_not_called()
+    mk_complete.assert_not_called()
+    # First card still counted as ESCALATE in counts (dry-run path still increments)
+    check("dry-run: first ESCALATE counted", counts[iterate.ESCALATE] == 1)
+
+
+def test_escalation_different_issues_independent():
+    """Cards for different issues escalate independently (no dedup)."""
+    cards = [
+        {
+            "id": "t_dev1",
+            "assignee": "developer-daedalus",
+            "body": "benmarte/daedalus#35",
+            "runs": [{"reason": "review-required: PR #50",
+                      "metadata": {"fix_attempts": 3}}],
+        },
+        {
+            "id": "t_dev2",
+            "assignee": "developer-daedalus",
+            "body": "benmarte/daedalus#36",
+            "runs": [{"reason": "review-required: PR #51",
+                      "metadata": {"fix_attempts": 3}}],
+        },
+    ]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+            with mock.patch.object(kanban, "show_card", return_value={"id": "", "comments": []}):
+                with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
+                    counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
+
+    # Both issues are independent, both should escalate
+    check("independent: both escalate", counts[iterate.ESCALATE] == 2)
+
+
+def test_execute_escalate_stamps_card():
+    """_execute_escalate posts both ESCALATE comment and escalation stamp."""
+    with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        card = {"id": "t_stuck", "body": "benmarte/daedalus#35"}
+        ok = iterate._execute_escalate("slug", card, "O/R", "review-required: PR #42")
+    check("escalate returns True", ok is True)
+    # Two comments: the ESCALATE msg + the stamp
+    check("stamp: two comments posted", mk_comment.call_count == 2)
+    # Second comment should be the stamp
+    stamp_call = mk_comment.call_args_list[1]
+    check("stamp comment body", "escalated: issue #35" in stamp_call[0][2])
+
+
+def test_execute_escalate_no_stamp_without_issue_number():
+    """_execute_escalate skips stamp when card has no extractable issue number."""
+    with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        card = {"id": "t_stuck", "body": "task with no issue reference"}
+        ok = iterate._execute_escalate("slug", card, "O/R", "review-required: PR #42")
+    check("escalate returns True", ok is True)
+    # Only one comment (the ESCALATE msg), no stamp
+    check("no stamp without issue number", mk_comment.call_count == 1)
+
+
+def test_extract_issue_number_from_card_basic():
+    """_extract_issue_number_from_card resolves issue from body."""
+    card = {"body": "Implement issue benmarte/daedalus#35 in the repo."}
+    n = iterate._extract_issue_number_from_card(card)
+    check("extracts issue #35 from repo-qualified ref", n == 35)
+
+
+def test_extract_issue_number_from_card_none():
+    """_extract_issue_number_from_card returns None when no body."""
+    card = {"body": ""}
+    check("empty body → None", iterate._extract_issue_number_from_card(card) is None)
+
+
 if __name__ == "__main__":
     print("Iterate (CI-aware auto-advance) tests")
     print("-" * 60)
@@ -1668,6 +1840,12 @@ if __name__ == "__main__":
         test_run_iterate_accessibility_approved_advances,
         test_run_iterate_accessibility_changes_requested_routes_to_pm,
         test_run_iterate_qa_failed_creates_fix_card,
+        test_escalation_dedup_same_issue,
+        test_escalation_stamp_prevents_rerun,
+        test_escalation_dedup_dry_run,
+        test_escalation_different_issues_independent,
+        test_execute_escalate_stamps_card,
+        test_execute_escalate_no_stamp_without_issue_number,
     ):
         fn()
     print("-" * 60)

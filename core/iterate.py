@@ -292,6 +292,26 @@ def _extract_issue_number_from_card(card: dict) -> Optional[int]:
     return None
 
 
+_ESCALATION_STAMP_PREFIX = "escalated: issue #"
+
+
+def _is_card_already_escalated(slug: str, tid: str, issue_n: int) -> bool:
+    """Return True if the card has an ``escalated: issue #N`` stamp comment.
+
+    Fetches the card via ``kanban.show_card`` and inspects its comments.
+    Returns False if the card cannot be fetched or has no matching stamp.
+    """
+    card = kanban.show_card(slug, tid)
+    if not card:
+        return False
+    stamp = f"{_ESCALATION_STAMP_PREFIX}{issue_n}"
+    for c in card.get("comments") or []:
+        body = (c.get("body") or "").strip()
+        if body == stamp:
+            return True
+    return False
+
+
 def _handoff_from_card(card: dict) -> str:
     """Extract handoff text from a card dict.
 
@@ -691,8 +711,15 @@ def _execute_escalate(
     pr_number: Optional[int] = None,
     **_kwargs: Any,
 ) -> bool:
-    """Escalate a card that has exceeded max fix attempts."""
+    """Escalate a card that has exceeded max fix attempts.
+
+    After posting the escalation comment, stamps the card with an
+    ``escalated: issue #N`` comment so future dispatcher ticks skip it.
+    Returns True on success.
+    """
     tid = card.get("id")
+    if not tid:
+        return False
     pr = pr_number or _parse_pr_number(handoff_text)
     msg = (
         f"⚠️ ESCALATE: card {tid} (PR #{pr or '?'}) has exceeded "
@@ -701,10 +728,18 @@ def _execute_escalate(
     logger.warning("iterate: %s", msg)
 
     if dry_run:
-        logger.info("[dry-run] would escalate %s", tid)
+        issue_n = _extract_issue_number_from_card(card)
+        logger.info("[dry-run] would escalate %s for issue #%s", tid, issue_n)
         return True
 
     kanban.comment(slug, tid, msg)
+
+    # Stamp the card so future ticks skip it (cross-tick dedup).
+    issue_n = _extract_issue_number_from_card(card)
+    if issue_n is not None:
+        kanban.comment(slug, tid, f"escalated: issue #{issue_n}")
+        logger.info("iterate: stamped %s with escalated: issue #%s", tid, issue_n)
+
     # Leave the card blocked for human review (do not auto-advance)
     return True
 
@@ -774,6 +809,10 @@ def run_iterate(
     # Stores the raw CIStatus string (not bool) so UNKNOWN/PENDING are distinguishable.
     ci_cache: Dict[int, str] = {}
 
+    # Per-tick escalation dedup: tracks which issue numbers have already been
+    # escalated this tick. Maps issue number → first card's tid that escalated.
+    escalated_issues: Dict[int, str] = {}
+
     for card in blocked_cards:
         tid = card.get("id")
         if not tid:
@@ -820,6 +859,42 @@ def run_iterate(
         action = classify_blocked(assignee, handoff, ci_green,
                                   fix_attempts=fix_attempts, pr_number=pr,
                                   raw_ci=raw_ci)
+
+        # ── Escalation dedup (issue #35) ─────────────────────────────────
+        # Before executing ESCALATE, check two layers of dedup:
+        #   1. Cross-tick stamp: card already has "escalated: issue #N" comment.
+        #   2. Per-tick sentinel: another card already escalated for this issue.
+        # Both layers skip the card silently (or complete duplicates).
+        if action == ESCALATE:
+            issue_n = _extract_issue_number_from_card(card)
+
+            # Layer 2: per-tick dedup (different card, same issue, same tick)
+            if issue_n is not None and issue_n in escalated_issues:
+                first_tid = escalated_issues[issue_n]
+                if dry_run:
+                    logger.info(
+                        "[dry-run] would skip duplicate ESCALATE for %s "
+                        "(already escalated by %s)", tid, first_tid)
+                else:
+                    logger.info(
+                        "iterate: %s skipping duplicate ESCALATE for "
+                        "issue #%s (already escalated by %s)",
+                        tid, issue_n, first_tid)
+                    kanban.complete(
+                        slug, tid,
+                        summary=f"skipped: escalated by {first_tid}")
+                continue
+
+            # Layer 1: cross-tick stamp (same card, previous tick already escalated)
+            if issue_n is not None and _is_card_already_escalated(slug, tid, issue_n):
+                logger.info(
+                    "iterate: %s already stamped escalated: issue #%s — skipping",
+                    tid, issue_n)
+                continue
+
+            # Record this card as the escalation owner for this issue/tick
+            if issue_n is not None:
+                escalated_issues[issue_n] = tid
 
         # PENDING_CI is a skip-action: card goes to pending_ci_cards for the
         # CI retry cron to pick up when CI resolves. No executor needed.
