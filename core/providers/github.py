@@ -112,6 +112,16 @@ class GitHubProvider(VCSProvider):
             url=data.get("html_url") or "",
         )
 
+    def get_issue_comments(self, issue_number: int) -> List[Dict[str, Any]]:
+        try:
+            return self._http.get_json(
+                f"/repos/{self.repo}/issues/{issue_number}/comments",
+                params={"per_page": 100},
+            ) or []
+        except ProviderError as e:
+            self._log.warning("get_issue_comments #%s failed: %s", issue_number, e)
+            return []
+
     # ── pull requests ────────────────────────────────────────────────────────
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
         rest_state = "all" if state == "merged" else state

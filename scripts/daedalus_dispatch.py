@@ -794,8 +794,11 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"using: {comment_howto}. Your comment must clearly state: your role, your findings/decision, "
         f"and the explicit next steps.\n\n"
         f"⛔ HARD STOP FOR ALL ROLES: If you discover the validator card for issue #{n} was NOT "
-        f"actually CONFIRMED (summary doesn't start with 'CONFIRMED:'), mark your card Complete "
-        f"immediately with summary 'Skipped: validator outcome not confirmed' and exit.\n\n"
+        f"actually CONFIRMED (summary doesn't start with 'CONFIRMED:' AND no GitHub comment on "
+        f"issue #{n} from validator-daedalus contains 'CONFIRMED'), mark your card Complete "
+        f"immediately with summary 'Skipped: validator outcome not confirmed' and exit. "
+        f"Always check GitHub comments as fallback before triggering the hard stop — the validator "
+        f"may have confirmed via comment even if its kanban summary is None.\n\n"
         f"⚠️ TEAM BLOCKER: If the developer hits a technical blocker they cannot resolve alone, "
         f"post a comment on GitHub issue #{n} describing the blocker clearly. The PM monitors "
         f"this issue and will respond with clarification. Only escalate to human review if the "
@@ -808,6 +811,40 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
 
 
 _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
+
+_MAX_VALIDATOR_RETRIES = 2
+
+
+def _validator_github_comment_outcome(
+    provider, issue_number: int, validator_profile: str = "validator-daedalus",
+) -> str:
+    """Return 'confirmed', 'rejected', or '' by scanning GitHub issue comments.
+
+    When a validator agent's kanban summary is None (context-limit dropout), its
+    GitHub comment is the only reliable record of its decision.  We scan all
+    comments on the issue for one authored by the validator (detected via the
+    mandatory '**Agent: validator**' attribution prefix from SOUL.md) and look
+    for the outcome keyword in the comment body.
+    """
+    if provider is None:
+        return ""
+    try:
+        comments = provider.get_issue_comments(issue_number) or []
+    except Exception:
+        return ""
+    # Extract the role name for the SOUL.md attribution header check.
+    # e.g. "validator-daedalus" → match "agent: validator" in the body.
+    role_slug = validator_profile.split("-")[0]  # "validator"
+    agent_marker = f"agent: {role_slug}"         # "agent: validator"
+    for c in reversed(comments):
+        body_lower = (c.get("body") or "").lower()
+        if agent_marker not in body_lower[:300]:
+            continue
+        if "confirmed" in body_lower:
+            return "confirmed"
+        if "rejected" in body_lower or "cannot_reproduce" in body_lower or "already_fixed" in body_lower:
+            return "rejected"
+    return ""
 
 
 def _has_notified_block(slug: str, issue_number: int,
@@ -951,7 +988,7 @@ def _check_confirmed_validators(
     label_overrides: Optional[Dict[str, Any]] = None,
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
-    *, dry_run: bool = False,
+    *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
     create a PM task to write the spec + acceptance criteria.
@@ -1008,36 +1045,75 @@ def _check_confirmed_validators(
                         logger.info("dispatch: validator BLOCKED #%s — PM consultation %s", n_nr, cid)
                         triggered.append(n_nr)
                 continue
-            # Empty or unrecognized summary — retry validator once (idempotency key).
+            # Empty or unrecognized summary — check GitHub comments before retrying.
+            # When a validator's context window fills before kanban_complete runs,
+            # its GitHub comment is the only record of its decision.
             issue_nr = issues_map.get(n_nr)
-            if issue_nr:
-                retry_key = f"validator-retry-{n_nr}"
-                if dry_run:
-                    logger.info("[dry-run] validator silent-drop #%s — would retry validator", n_nr)
-                    triggered.append(n_nr)
-                    continue
-                # Check if retry already exists.
-                existing_retry = False
-                for existing_task in kanban.list_tasks(slug):
-                    if (existing_task.get("idempotency_key") or "") == retry_key:
-                        existing_retry = True
-                        break
-                if not existing_retry:
-                    vbody = _validator_body(repo, issue_nr, workdir, base_branch, provider_name)
-                    vid = kanban.create_task(
-                        slug, f"#validate: #{n_nr} {issue_nr.get('title', '')}",
-                        body=vbody,
-                        assignee=p["validator"],
-                        idempotency_key=retry_key,
-                        workspace=f"dir:{workdir}" if workdir else "",
-                        skills=rs.get("validator") or None,
-                    )
-                    if vid:
-                        logger.warning(
-                            "dispatch: validator done with empty/unrecognized summary for #%s — "
-                            "retrying validator (key=%s)", n_nr, retry_key,
+            gh_outcome = _validator_github_comment_outcome(provider, n_nr, p["validator"])
+            if gh_outcome == "confirmed" and issue_nr:
+                # GitHub comment confirms — advance to PM without another validator run.
+                logger.warning(
+                    "dispatch: validator #%s kanban summary is None but GitHub comment "
+                    "contains CONFIRMED — advancing to PM (github-comment fallback)",
+                    n_nr,
+                )
+                if not dry_run:
+                    pm_state, stale_count = _pm_task_state(slug, n_nr, p["pm"])
+                    if pm_state not in ("running", "complete"):
+                        ikey = f"pm-{n_nr}" if pm_state == "none" else f"pm-{n_nr}-r{stale_count}"
+                        issue_for_pm = issue_nr
+                        vid = kanban.create_task(
+                            slug, f"#{n_nr} {issue_for_pm.get('title', '')}",
+                            body=_pm_body(repo, issue_for_pm, "CONFIRMED: (from github comment fallback)",
+                                          workdir, base_branch, provider_name),
+                            assignee=p["pm"],
+                            idempotency_key=ikey,
+                            workspace=f"dir:{workdir}" if workdir else "",
+                            skills=rs.get("pm") or None,
                         )
-                        triggered.append(n_nr)
+                        if vid:
+                            logger.info("dispatch: github-fallback PM task %s created for #%s", vid, n_nr)
+                            triggered.append(n_nr)
+                else:
+                    triggered.append(n_nr)
+                continue
+            if not issue_nr:
+                continue
+            # Count existing validator tasks (original + retries) to enforce retry cap.
+            retry_count = sum(
+                1 for t in kanban.list_tasks(slug)
+                if (t.get("assignee") or "") == p["validator"]
+                and f"#{n_nr}" in (t.get("title") or "")
+            )
+            if retry_count >= _MAX_VALIDATOR_RETRIES + 1:
+                logger.error(
+                    "dispatch: validator for #%s has %d runs (cap %d) with no CONFIRMED — "
+                    "manual intervention required",
+                    n_nr, retry_count, _MAX_VALIDATOR_RETRIES,
+                )
+                continue
+            retry_key = f"validator-retry-{n_nr}-r{retry_count}"
+            if dry_run:
+                logger.info("[dry-run] validator empty summary #%s — would retry (run %d/%d)",
+                            n_nr, retry_count, _MAX_VALIDATOR_RETRIES)
+                triggered.append(n_nr)
+                continue
+            vbody = _validator_body(repo, issue_nr, workdir, base_branch, provider_name)
+            vid = kanban.create_task(
+                slug, f"#validate: #{n_nr} {issue_nr.get('title', '')}",
+                body=vbody,
+                assignee=p["validator"],
+                idempotency_key=retry_key,
+                workspace=f"dir:{workdir}" if workdir else "",
+                skills=rs.get("validator") or None,
+            )
+            if vid:
+                logger.warning(
+                    "dispatch: validator done with empty summary for #%s — "
+                    "retrying (run %d/%d, key=%s)",
+                    n_nr, retry_count, _MAX_VALIDATOR_RETRIES, retry_key,
+                )
+                triggered.append(n_nr)
             continue
         m = re.search(r"#(\d+)", task.get("title") or "")
         if not m:
@@ -1540,7 +1616,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     confirmed_triggered = _check_confirmed_validators(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
-        profiles=profiles, role_skills=role_skills, dry_run=dry_run,
+        profiles=profiles, role_skills=role_skills, dry_run=dry_run, provider=provider,
     )
     if confirmed_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
