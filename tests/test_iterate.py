@@ -989,6 +989,167 @@ def test_classify_blocked_pm_returns_escalate():
     check("PM blocked → escalate", result == iterate.ESCALATE)
 
 
+# ── _extract_issue_number_from_card ─────────────────────────────────────────
+
+
+def test_extract_issue_number_repo_qualified():
+    """Extracts issue number from org/repo#N pattern."""
+    card = {"body": "Implement issue benmarte/daedalus#21 in the repo."}
+    check("repo-qualified #21", iterate._extract_issue_number_from_card(card) == 21)
+
+
+def test_extract_issue_number_bare_hash():
+    """Falls back to bare #N when no repo-qualified pattern."""
+    card = {"body": "Fix for #42 is ready."}
+    check("bare #42", iterate._extract_issue_number_from_card(card) == 42)
+
+
+def test_extract_issue_number_none():
+    """Returns None when no issue number found."""
+    card = {"body": "Some task without an issue reference."}
+    check("no issue number → None", iterate._extract_issue_number_from_card(card) is None)
+
+    card2 = {"body": ""}
+    check("empty body → None", iterate._extract_issue_number_from_card(card2) is None)
+
+
+def test_extract_issue_number_prefers_repo_qualified():
+    """Prefers org/repo#N over a bare #N that appears first."""
+    card = {"body": "PR #10 was opened. Implements benmarte/daedalus#21."}
+    check("prefers repo-qualified #21 over bare #10",
+          iterate._extract_issue_number_from_card(card) == 21)
+
+
+# ── _create_downstream_review_tasks ─────────────────────────────────────────
+
+
+def test_create_downstream_happy_path():
+    """Creates reviewer/security/docs tasks with correct keys and assignees."""
+    card = {
+        "id": "t_dev",
+        "body": "Implement benmarte/daedalus#19",
+        "workspace": "dir:/work",
+    }
+    with mock.patch.object(kanban, "list_tasks", return_value=[]) as mk_list:
+        with mock.patch.object(kanban, "create_task", side_effect=["t_rev", "t_sec", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("created 3 tasks", len(created) == 3)
+    check("returns correct ids", created == ["t_rev", "t_sec", "t_doc"])
+    check("create_task called 3 times", mk_create.call_count == 3)
+
+    # Verify assignees
+    assignees = [call.kwargs["assignee"] for call in mk_create.call_args_list]
+    check("reviewer assignee", assignees[0] == "reviewer-daedalus")
+    check("security assignee", assignees[1] == "security-analyst-daedalus")
+    check("docs assignee", assignees[2] == "documentation-daedalus")
+
+    # Verify idempotency keys
+    keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("reviewer key", keys[0] == "reviewer-19")
+    check("security key", keys[1] == "security-19")
+    check("docs key", keys[2] == "docs-19")
+
+    # Verify workspace propagated
+    workspaces = [call.kwargs["workspace"] for call in mk_create.call_args_list]
+    check("workspace propagated", all(w == "dir:/work" for w in workspaces))
+
+    # Verify comment posted
+    mk_comment.assert_called_once()
+
+
+def test_create_downstream_idempotency_guard():
+    """Skips creation for tasks whose idempotency keys already exist."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    existing = [
+        {"idempotency_key": "reviewer-19"},
+        {"idempotency_key": "security-19"},
+        {"idempotency_key": "docs-19"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("all exist → nothing created", created == [])
+    mk_create.assert_not_called()
+
+
+def test_create_downstream_partial_idempotency():
+    """Creates only the tasks whose keys don't yet exist."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    existing = [{"idempotency_key": "reviewer-19"}]  # reviewer already exists
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_sec", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("partial: 2 created (security + docs)", len(created) == 2)
+    check("create_task called 2 times", mk_create.call_count == 2)
+    # Verify the right keys were used (not reviewer-19)
+    keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("security key created", keys[0] == "security-19")
+    check("docs key created", keys[1] == "docs-19")
+
+
+def test_create_downstream_dry_run():
+    """dry_run=True logs but does not create or comment."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+        with mock.patch.object(kanban, "create_task") as mk_create:
+            with mock.patch.object(kanban, "comment") as mk_comment:
+                created = iterate._create_downstream_review_tasks(
+                    "slug", 19, card, pr_number=22, dry_run=True,
+                )
+    check("dry_run: nothing created", created == [])
+    mk_create.assert_not_called()
+    mk_comment.assert_not_called()
+
+
+def test_execute_advance_triggers_downstream():
+    """_execute_advance calls _create_downstream_review_tasks after completing."""
+    card = {
+        "id": "t_dev",
+        "body": "Implement benmarte/daedalus#42",
+        "workspace": "dir:/work",
+    }
+    with mock.patch.object(kanban, "complete", return_value=True):
+        with mock.patch.object(kanban, "list_blocked", return_value=[]):
+            with mock.patch.object(iterate, "_create_downstream_review_tasks", return_value=["t1"]) as mk_downstream:
+                ok = iterate._execute_advance("slug", card, "O/R", "review-required: PR #44")
+    check("advance returns True", ok is True)
+    mk_downstream.assert_called_once()
+    call_args = mk_downstream.call_args
+    check("issue number passed", call_args[0][1] == 42)
+    check("pr_number passed", call_args[1]["pr_number"] == 44)
+
+
+def test_execute_advance_skip_downstream_no_issue_number():
+    """_execute_advance skips downstream creation when issue number can't be parsed."""
+    card = {
+        "id": "t_dev",
+        "body": "Some task with no issue reference",
+        "workspace": "dir:/work",
+    }
+    with mock.patch.object(kanban, "complete", return_value=True):
+        with mock.patch.object(kanban, "list_blocked", return_value=[]):
+            with mock.patch.object(iterate, "_create_downstream_review_tasks") as mk_downstream:
+                ok = iterate._execute_advance("slug", card, "O/R", "review-required: PR #44")
+    check("advance returns True even without issue number", ok is True)
+    mk_downstream.assert_not_called()
+
+
+def test_downstream_task_body_references_pr():
+    """Downstream task body includes PR number when available."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+        with mock.patch.object(kanban, "create_task", return_value="t_rev") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card, pr_number=42)
+    body = mk_create.call_args[1]["body"]
+    check("body references PR #42", "PR #42" in body)
+    check("body references issue #19", "issue #19" in body)
+    check("body references developer card", "t_dev" in body)
+
+
 if __name__ == "__main__":
     print("Iterate (CI-aware auto-advance) tests")
     print("-" * 60)
@@ -1054,6 +1215,17 @@ if __name__ == "__main__":
         test_classify_blocked_planner_returns_pm_route,
         test_classify_blocked_documentation_returns_pm_route,
         test_classify_blocked_pm_returns_escalate,
+        test_extract_issue_number_repo_qualified,
+        test_extract_issue_number_bare_hash,
+        test_extract_issue_number_none,
+        test_extract_issue_number_prefers_repo_qualified,
+        test_create_downstream_happy_path,
+        test_create_downstream_idempotency_guard,
+        test_create_downstream_partial_idempotency,
+        test_create_downstream_dry_run,
+        test_execute_advance_triggers_downstream,
+        test_execute_advance_skip_downstream_no_issue_number,
+        test_downstream_task_body_references_pr,
     ):
         fn()
     print("-" * 60)
