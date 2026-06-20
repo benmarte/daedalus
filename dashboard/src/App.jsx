@@ -1720,6 +1720,7 @@ function App() {
   var ui = useState(false); var showUninstall = ui[0], setShowUninstall = ui[1];
   var vr = useState(null); var pluginVersion = vr[0], setPluginVersion = vr[1];
   var hu = useState(null); var hasUpdate = hu[0], setHasUpdate = hu[1];
+  var cf = useState(false); var checkFailed = cf[0], setCheckFailed = cf[1];
   var up = useState(false); var updating = up[0], setUpdating = up[1];
   var ur = useState(null); var updateResult = ur[0], setUpdateResult = ur[1];
   var rg = useState(false); var restarting = rg[0], setRestarting = rg[1];
@@ -1748,7 +1749,8 @@ function App() {
     }).catch(function () {});
     fetchJSON("/api/plugins/daedalus/meta/check-update").then(function (d) {
       setHasUpdate(d && d.has_update === true);
-    }).catch(function () { setHasUpdate(false); });
+      setCheckFailed(!!(d && d.check_failed));
+    }).catch(function () { setHasUpdate(false); setCheckFailed(true); });
   }, []);
 
   function updatePlugin() {
@@ -1909,6 +1911,17 @@ function App() {
           disabled: updating,
           style: Object.assign({}, S.btnSmall, updating ? { opacity: 0.5 } : {})
         }, updating ? "Updating…" : "Update Plugin") : null,
+        !hasUpdate && checkFailed ? React.createElement("button", {
+          onClick: function () {
+            setCheckFailed(false);
+            fetchJSON("/api/plugins/daedalus/meta/check-update").then(function (d) {
+              setHasUpdate(d && d.has_update === true);
+              setCheckFailed(!!(d && d.check_failed));
+            }).catch(function () { setCheckFailed(true); });
+          },
+          title: "Could not reach GitHub to check for updates. Click to retry.",
+          style: Object.assign({}, S.btnSmall, { color: "#888", borderColor: "#444" })
+        }, "Check for updates") : null,
         React.createElement("button", {
           onClick: function () { setShowUninstall(true); },
           style: Object.assign({}, S.btnSmall, { color: "#f87171", borderColor: "#7f1d1d" })

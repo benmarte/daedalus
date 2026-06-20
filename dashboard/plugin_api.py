@@ -1541,12 +1541,12 @@ async def get_check_update() -> dict[str, Any]:
         with urllib.request.urlopen(req, timeout=5) as resp:
             tags = json.loads(resp.read())
         if not isinstance(tags, list) or not tags:
-            return {"has_update": False, "current": current, "latest": None}
+            return {"has_update": False, "check_failed": False, "current": current, "latest": None}
         latest = (tags[0].get("name") or "").lstrip("v").strip()
         has_update = bool(latest) and latest != current
-        return {"has_update": has_update, "current": current, "latest": latest or None}
+        return {"has_update": has_update, "check_failed": False, "current": current, "latest": latest or None}
     except Exception:
-        return {"has_update": False, "current": current, "latest": None}
+        return {"has_update": False, "check_failed": True, "current": current, "latest": None}
 
 
 @meta_router.post("/update-plugin")
