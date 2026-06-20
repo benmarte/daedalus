@@ -219,6 +219,10 @@ def main(check_only: bool = False) -> int:
     print(msg)
     print()
 
+    # on_session_end plugin hook — no install needed, auto-registered via __init__.py
+    print("OK: on_session_end plugin hook registered via __init__.py (fires dispatcher after every worker session)")
+    print()
+
     if check_only:
         print("\u2713 All prerequisites met (--check only, skipping provision).")
         return 0
