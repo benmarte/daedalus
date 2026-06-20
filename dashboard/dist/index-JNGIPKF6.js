@@ -1181,6 +1181,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var branches = br[0], setBranches = br[1];
     var la = useState([]);
     var labels = la[0], setLabels = la[1];
+    var ll = useState(false);
+    var labelsLoaded = ll[0], setLabelsLoaded = ll[1];
     var st = useState([]);
     var statuses = st[0], setStatuses = st[1];
     var gp = useState([]);
@@ -1225,10 +1227,13 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       });
     }, [name]);
     useEffect(function() {
+      setLabelsLoaded(false);
       fetchJSON(apiMetaUrl(name, "labels")).then(function(data) {
         setLabels(data && data.labels ? data.labels : []);
+        setLabelsLoaded(true);
       }).catch(function() {
         setLabels([]);
+        setLabelsLoaded(true);
       });
     }, [name]);
     useEffect(function() {
@@ -1600,8 +1605,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               onChange: function(arr) {
                 updateField("issues.filters.labels", arr);
               },
-              placeholder: labels.length === 0 ? "\u2014 loading labels\u2026 \u2014" : "\u2514 select a label to filter",
-              emptyHint: "Requires 'repo' scope on your GITHUB_TOKEN to load labels"
+              placeholder: !labelsLoaded ? "\u2014 loading labels\u2026 \u2014" : labels.length === 0 ? "\u2014 no labels found \u2014" : "\u2514 select a label to filter",
+              emptyHint: "No labels found \u2014 check that your VCS token has the correct scopes and the project path is set"
             })
           ),
           // Throughput caps
@@ -2129,7 +2134,13 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setUpdating(false);
         var result = r || { ok: false, output: "no response" };
         setUpdateResult(result);
-        if (result.ok) setHasUpdate(false);
+        if (result.ok) {
+          setHasUpdate(false);
+          fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function(d) {
+            setRosterStatus(d || null);
+          }).catch(function() {
+          });
+        }
       }).catch(function(err) {
         setUpdating(false);
         setUpdateResult({ ok: false, output: String(err && err.message || err) });
@@ -2138,7 +2149,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     function restartHermes() {
       setRestarting(true);
       setRestartResult(null);
-      fetchJSON("/api/plugins/daedalus/meta/restart", { method: "POST" }).then(function() {
+      fetchJSON("/api/plugins/daedalus/meta/restart").then(function() {
         setRestarting(false);
         setRestartResult({ ok: true });
       }).catch(function() {
@@ -2216,7 +2227,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           }
         })
       ),
-      // Roster provisioning banner — shown when any of the 6 profiles are missing
+      // Roster provisioning banner — shown when any of the 9 profiles are missing
       rosterStatus && !rosterStatus.all_provisioned ? React.createElement(
         "div",
         {
@@ -2242,7 +2253,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           React.createElement(
             "div",
             { style: { fontSize: "12px", color: "#888" } },
-            "Install the 6 specialist profiles (project-manager, planner, developer, reviewer, security-analyst, documentation) to enable automated workflow dispatch."
+            "Install the 9 specialist profiles (validator, project-manager, planner, developer, qa, reviewer, security-analyst, accessibility, documentation) to enable automated workflow dispatch."
           ),
           rosterResult ? React.createElement("div", {
             style: { fontSize: "11px", marginTop: "4px", color: rosterResult.ok ? "#4ade80" : "#f87171" }

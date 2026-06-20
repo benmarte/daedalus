@@ -1847,7 +1847,7 @@ function App() {
       })
     ),
 
-    // Roster provisioning banner — shown when any of the 7 profiles are missing
+    // Roster provisioning banner — shown when any of the 9 profiles are missing
     rosterStatus && !rosterStatus.all_provisioned ? React.createElement("div", {
       style: {
         border: "1px solid #444", borderRadius: "8px", padding: "12px 16px",
@@ -1860,7 +1860,7 @@ function App() {
           "Worker Agents not provisioned"
         ),
         React.createElement("div", { style: { fontSize: "12px", color: "#888" } },
-          "Install the 6 specialist profiles (project-manager, planner, developer, reviewer, security-analyst, documentation) to enable automated workflow dispatch."
+          "Install the 9 specialist profiles (validator, project-manager, planner, developer, qa, reviewer, security-analyst, accessibility, documentation) to enable automated workflow dispatch."
         ),
         rosterResult ? React.createElement("div", {
           style: { fontSize: "11px", marginTop: "4px", color: rosterResult.ok ? "#4ade80" : "#f87171" },

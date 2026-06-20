@@ -1553,17 +1553,22 @@ async def get_check_update() -> dict[str, Any]:
 async def post_update_plugin() -> dict[str, Any]:
     """Update the Daedalus plugin then re-provision the roster.
 
-    Runs ``hermes plugins update daedalus`` to pull the latest code, then
-    immediately re-runs ``provision_roster.sh`` so new agent profiles (e.g.
-    validator-daedalus added in beta.7) are installed without a separate
-    "Install Agents" click.
+    Runs ``hermes plugins update daedalus`` to pull the latest code (git-cloned
+    installs only; local-copy installs skip the pull gracefully), then always
+    re-runs ``provision_roster.sh`` so new agent profiles are created without a
+    separate "Install Agents" click.
     """
-    rc, output = _hermes_cli(["plugins", "update", "daedalus"], timeout=120)
-    if rc != 0:
-        return {"ok": False, "output": output}
+    rc, update_out = _hermes_cli(["plugins", "update", "daedalus"], timeout=120)
+    # "not installed from git" is not a fatal error — the plugin may be a
+    # local-copy install synced by provision_roster.sh; still run the provisioner.
+    not_git = rc != 0 and "not installed from git" in (update_out or "").lower()
+    if rc != 0 and not not_git:
+        return {"ok": False, "output": update_out}
 
-    # Re-run the provisioner so any newly added profiles are installed.
+    # Always re-run the provisioner so any newly added profiles are installed
+    # and any broken symlinks that block profile creation are cleaned up.
     provision_out = ""
+    provision_ok = True
     if _PROVISION_SCRIPT.exists():
         env = {**os.environ, **_parse_env_file(_real_home() / ".hermes" / ".env")}
         try:
@@ -1572,11 +1577,13 @@ async def post_update_plugin() -> dict[str, Any]:
                 capture_output=True, text=True, timeout=180, env=env,
             )
             provision_out = (pr.stdout + pr.stderr).strip()
+            provision_ok = pr.returncode == 0
         except Exception as exc:
             provision_out = f"[provisioner error: {exc}]"
+            provision_ok = False
 
-    combined = (output + ("\n" + provision_out if provision_out else "")).strip()
-    return {"ok": True, "output": combined[:4000]}
+    combined = (update_out + ("\n" + provision_out if provision_out else "")).strip()
+    return {"ok": provision_ok, "output": combined[:4000]}
 
 
 @meta_router.get("/restart")
