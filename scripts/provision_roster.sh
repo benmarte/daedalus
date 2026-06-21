@@ -20,6 +20,7 @@ set -euo pipefail
 HERMES="${HERMES_HOME:-$HOME/.hermes}"
 SRC="$HERMES/plugins/agent-skills/skills"
 PROFILES="$HERMES/profiles"
+PLUGIN_DIR="$HERMES/plugins/daedalus"
 
 # Self-sync: copy this repo into the installed plugin location so the running
 # version always matches the cloned source (hermes plugins update only works for
@@ -254,6 +255,16 @@ term["env_passthrough"] = passthrough
 with open(path, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
+
+  # Install role-specific SOUL.md from config/souls/ — overrides the generic
+  # SOUL.md copied from default by --clone. This is critical: without it, every
+  # re-provision wipes the role instructions and agents post no PR comments.
+  local soul_src="$PLUGIN_DIR/config/souls/${name}.md"
+  if [ -f "$soul_src" ]; then
+    cp "$soul_src" "$PROFILES/$name/SOUL.md"
+  else
+    echo "  WARN: no SOUL.md found at $soul_src — agent will use default SOUL.md" >&2
+  fi
 
   # Lock the profile down: it holds credentials (.git-credentials, .env).
   chmod 700 "$PROFILES/$name" 2>/dev/null || true
