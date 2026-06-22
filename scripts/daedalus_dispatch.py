@@ -136,9 +136,16 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
         slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
         cron_name = f"daedalus-ci-retry-{slug_safe}"
         existing_jobs = subprocess.run(
-            ["hermes", "cron", "list", "--quiet"],
+            ["hermes", "cron", "list", "--all"],
             capture_output=True, text=True, timeout=10,
         )
+        # If the list command itself fails, bail out rather than spawn a duplicate.
+        if existing_jobs.returncode != 0:
+            logger.warning(
+                "dispatch: could not list cron jobs (rc=%d) — skipping CI retry schedule",
+                existing_jobs.returncode,
+            )
+            return False
         if cron_name in (existing_jobs.stdout or ""):
             logger.debug("dispatch: retry cron %s already exists — skipping", cron_name)
             return False

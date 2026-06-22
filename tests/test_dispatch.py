@@ -46,6 +46,7 @@ def check(name, cond):
 def test_schedule_ci_retry_happy_path():
     """No existing job → creates a cron with --name and --repeat 1."""
     list_result = mock.Mock()
+    list_result.returncode = 0
     list_result.stdout = ""
     create_result = mock.Mock()
     create_result.stdout = "daedalus-ci-retry-my-board"
@@ -55,6 +56,10 @@ def test_schedule_ci_retry_happy_path():
 
     check("happy path returns True", created is True)
     check("two subprocess calls (list + create)", mk_run.call_count == 2)
+    # The list call must use --all (not the nonexistent --quiet)
+    list_args = mk_run.call_args_list[0][0][0]
+    check("list uses --all flag", "--all" in list_args)
+    check("list does not use --quiet", "--quiet" not in list_args)
     # The create call arguments
     create_args = mk_run.call_args_list[1][0][0]
     check("create uses hermes cron create", create_args[0:3] == ["hermes", "cron", "create"])
@@ -68,6 +73,7 @@ def test_schedule_ci_retry_happy_path():
 def test_schedule_ci_retry_idempotent():
     """If job name already in `hermes cron list` output → no creation call."""
     list_result = mock.Mock()
+    list_result.returncode = 0
     list_result.stdout = "daedalus-ci-retry-my-board\nother-job\n"
 
     with mock.patch("subprocess.run", return_value=list_result) as mk_run:
@@ -77,9 +83,23 @@ def test_schedule_ci_retry_idempotent():
     check("only one subprocess call (no create)", mk_run.call_count == 1)
 
 
+def test_schedule_ci_retry_list_nonzero_rc():
+    """If `hermes cron list` exits non-zero → bail out, don't spawn a duplicate."""
+    list_result = mock.Mock()
+    list_result.returncode = 1
+    list_result.stdout = ""
+
+    with mock.patch("subprocess.run", return_value=list_result) as mk_run:
+        created = disp._schedule_ci_retry("slug", 1)
+
+    check("non-zero list rc returns False", created is False)
+    check("no create call attempted", mk_run.call_count == 1)
+
+
 def test_schedule_ci_retry_slug_sanitized():
     """Unsafe chars in the slug become '-' so the cron name is safe."""
     list_result = mock.Mock()
+    list_result.returncode = 0
     list_result.stdout = ""
     create_result = mock.Mock()
 
@@ -103,6 +123,7 @@ def test_schedule_ci_retry_subprocess_failure():
 def test_schedule_ci_retry_create_swallows_error():
     """The creation step failing is handled — still returns True if list succeeded."""
     list_result = mock.Mock()
+    list_result.returncode = 0
     list_result.stdout = ""
 
     def fake_run(cmd, *a, **kw):
@@ -124,6 +145,7 @@ if __name__ == "__main__":
     for fn in (
         test_schedule_ci_retry_happy_path,
         test_schedule_ci_retry_idempotent,
+        test_schedule_ci_retry_list_nonzero_rc,
         test_schedule_ci_retry_slug_sanitized,
         test_schedule_ci_retry_subprocess_failure,
         test_schedule_ci_retry_create_swallows_error,
