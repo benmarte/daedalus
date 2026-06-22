@@ -1601,12 +1601,9 @@ async def post_update_plugin() -> dict[str, Any]:
     ``provision_roster.sh`` so new agent profiles are created.
     """
     rc, update_out = _hermes_cli(["plugins", "update", "daedalus"], timeout=120)
-    not_git = rc != 0 and "not installed from git" in (update_out or "").lower()
-    if rc != 0 and not not_git:
-        return {"ok": False, "output": update_out}
-
-    # Non-git install: clone source and rsync into place.
-    if not_git:
+    # If hermes plugins update fails for any reason (non-git install, hermes-dashboard
+    # install, or any other error) fall back to git clone + rsync from the source URL.
+    if rc != 0:
         plugin_yaml = Path(__file__).resolve().parent.parent / "plugin.yaml"
         try:
             with open(plugin_yaml) as f:
