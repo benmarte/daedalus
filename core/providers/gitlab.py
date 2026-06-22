@@ -96,6 +96,21 @@ class GitLabProvider(VCSProvider):
         self._log.info("close_issue: closed #%s", issue_number)
         return True
 
+    def create_issue(self, title: str, body: str,
+                     labels: Optional[List[str]] = None) -> Optional[int]:
+        payload: Dict[str, Any] = {"title": title, "description": body}
+        if labels:
+            payload["labels"] = ",".join(labels)
+        try:
+            data = self._http.post_json(f"{self._proj}/issues", payload)
+            iid = (data or {}).get("iid")
+            if isinstance(iid, int):
+                self._log.info("create_issue: created !%s %r", iid, title[:60])
+                return iid
+        except ProviderError as e:
+            self._log.warning("create_issue failed: %s", e)
+        return None
+
     def get_issue_state(self, issue_number: int) -> Optional[str]:
         try:
             data = self._http.get_json(f"{self._proj}/issues/{issue_number}")

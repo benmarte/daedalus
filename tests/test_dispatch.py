@@ -139,6 +139,235 @@ def test_schedule_ci_retry_create_swallows_error():
     check("called list and attempted create", mk_run.call_count == 2)
 
 
+# ── _parse_follow_ups ────────────────────────────────────────────────────────
+
+
+def test_parse_follow_ups_section_numbered():
+    """Numbered list under a Follow-up section header is extracted."""
+    body = """## Follow-up items
+
+1. Wire walkAncestorChain into PREVIOUS dropdowns
+2. Thread action_context into filter-condition JINJA evaluation
+3. Add runtime verification in staging
+
+## Other section
+"""
+    items = disp._parse_follow_ups(body)
+    check("3 items extracted from numbered list", len(items) == 3)
+    check("item 1 correct", items[0] == "Wire walkAncestorChain into PREVIOUS dropdowns")
+    check("item 2 correct", items[1] == "Thread action_context into filter-condition JINJA evaluation")
+    check("item 3 correct", items[2] == "Add runtime verification in staging")
+
+
+def test_parse_follow_ups_deferred_markers():
+    """Explicit deferred markers are extracted regardless of section."""
+    body = """The following items were deferred:
+
+- Deferred to follow-up issue: Fix misleading upstreamActionsOf docstring
+- AC3b: Deferred to follow-up issue
+"""
+    items = disp._parse_follow_ups(body)
+    check("deferred marker extracted", any("Fix misleading" in i for i in items))
+
+
+def test_parse_follow_ups_none_found():
+    """Comment with no follow-up patterns returns empty list."""
+    body = """## Summary
+
+This PR fixes the login bug. All tests pass. No known follow-ups.
+"""
+    items = disp._parse_follow_ups(body)
+    check("no items when no patterns match", items == [])
+
+
+def test_parse_follow_ups_custom_patterns():
+    """Caller-supplied custom regex patterns are applied."""
+    body = """Some notes.
+
+CUSTOM: Do the thing
+CUSTOM: Fix the other thing
+"""
+    items = disp._parse_follow_ups(body, extra_patterns=[r"CUSTOM:\s+(.+)$"])
+    check("custom pattern extracts 2 items", len(items) == 2)
+    check("custom item 1", items[0] == "Do the thing")
+
+
+# ── _extract_follow_ups_from_pr_comment ──────────────────────────────────────
+
+
+def _make_comment(body, author="reviewer-daedalus", cid="1"):
+    """Build a minimal Comment-like object."""
+    c = mock.Mock()
+    c.body = body
+    c.author = author
+    c.id = cid
+    return c
+
+
+def test_extract_follow_ups_reviewer_comment():
+    """3 follow-up items in a reviewer comment → 3 issues + 3 kanban cards created."""
+    reviewer_body = """## Review
+
+Looks good overall.
+
+## Follow-up items
+
+1. Wire walkAncestorChain into PREVIOUS dropdowns
+2. Thread action_context into filter-condition JINJA evaluation
+3. Add runtime verification in staging
+"""
+    comments = [_make_comment(reviewer_body, "reviewer-daedalus")]
+
+    provider = mock.Mock()
+    provider.list_pr_comments.return_value = comments
+    provider.list_issues.return_value = []
+    provider.create_issue.side_effect = [101, 102, 103]
+    provider.pr_url.return_value = "https://github.com/org/repo/pull/10"
+    provider.post_pr_comment.return_value = True
+
+    with mock.patch.object(disp.kanban, "create_triage", return_value="t_abc") as mk_triage:
+        created = disp._extract_follow_ups_from_pr_comment(
+            "slug", "org/repo", provider, 10, "/tmp",
+            ["reviewer-daedalus", "qa-daedalus"],
+            ["enhancement", "follow-up"],
+            "project-manager-daedalus",
+            [],
+        )
+
+    check("3 issues created", len(created) == 3)
+    check("create_issue called 3 times", provider.create_issue.call_count == 3)
+    check("3 kanban triage cards created", mk_triage.call_count == 3)
+    check("PR summary comment posted", provider.post_pr_comment.call_count == 1)
+    summary_body = provider.post_pr_comment.call_args[0][1]
+    check("summary contains marker", "daedalus:follow-up-extracted" in summary_body)
+    check("summary contains issue refs", "#101" in summary_body)
+
+
+def test_extract_follow_ups_idempotency():
+    """Running twice on the same PR: second run creates no new issues."""
+    reviewer_body = """## Follow-up items
+
+1. Wire walkAncestorChain
+"""
+    marker_comment = _make_comment(
+        "Agent: dispatcher\n\n<!-- daedalus:follow-up-extracted PR #10 issue #101 -->",
+        author="dispatcher",
+        cid="99",
+    )
+    comments = [_make_comment(reviewer_body, "reviewer-daedalus"), marker_comment]
+
+    provider = mock.Mock()
+    provider.list_pr_comments.return_value = comments
+    provider.list_issues.return_value = []
+    # create_issue should not be called (already extracted)
+    provider.create_issue.return_value = 101
+    provider.pr_url.return_value = "https://github.com/org/repo/pull/10"
+
+    with mock.patch.object(disp.kanban, "create_triage", return_value="t_abc") as mk_triage:
+        created = disp._extract_follow_ups_from_pr_comment(
+            "slug", "org/repo", provider, 10, "/tmp",
+            ["reviewer-daedalus", "qa-daedalus"],
+            ["enhancement", "follow-up"],
+            "project-manager-daedalus",
+            [],
+        )
+
+    # Issue 101 was already in already_extracted, so it is skipped after creation.
+    check("idempotency: no new issues added to created list", 101 not in created)
+
+
+def test_extract_follow_ups_qa_comment():
+    """QA comments (qa-daedalus) are also processed."""
+    qa_body = """## Action Items
+
+1. Verify staging deployment
+"""
+    comments = [_make_comment(qa_body, "qa-daedalus")]
+
+    provider = mock.Mock()
+    provider.list_pr_comments.return_value = comments
+    provider.list_issues.return_value = []
+    provider.create_issue.return_value = 200
+    provider.pr_url.return_value = "https://github.com/org/repo/pull/11"
+    provider.post_pr_comment.return_value = True
+
+    with mock.patch.object(disp.kanban, "create_triage", return_value="t_qa"):
+        created = disp._extract_follow_ups_from_pr_comment(
+            "slug", "org/repo", provider, 11, "/tmp",
+            ["reviewer-daedalus", "qa-daedalus"],
+            ["enhancement", "follow-up"],
+            "project-manager-daedalus",
+            [],
+        )
+
+    check("QA comment processed: 1 issue created", len(created) == 1)
+    check("issue number is 200", created[0] == 200)
+
+
+def test_extract_follow_ups_none_found():
+    """No follow-up patterns in comment → no issues, no summary comment."""
+    body = "LGTM. Nice clean implementation. No follow-ups needed."
+    comments = [_make_comment(body, "reviewer-daedalus")]
+
+    provider = mock.Mock()
+    provider.list_pr_comments.return_value = comments
+
+    created = disp._extract_follow_ups_from_pr_comment(
+        "slug", "org/repo", provider, 12, "/tmp",
+        ["reviewer-daedalus", "qa-daedalus"],
+        ["enhancement", "follow-up"],
+        "project-manager-daedalus",
+        [],
+    )
+
+    check("no items found → empty list", created == [])
+    check("create_issue never called", provider.create_issue.call_count == 0)
+    check("post_pr_comment never called", provider.post_pr_comment.call_count == 0)
+
+
+def test_extract_follow_ups_disabled_in_config():
+    """enabled: false in config → no PRs scanned."""
+    provider = mock.Mock()
+    result = disp._check_follow_ups_from_reviewer_prs(
+        "slug", "org/repo", provider, "/tmp",
+        disp._DEFAULT_PROFILES,
+        {"enabled": False},
+    )
+    check("disabled: returns 0", result == 0)
+    check("disabled: no PR list call", provider.list_prs.call_count == 0)
+
+
+def test_extract_follow_ups_summary_comment_posted():
+    """Summary comment body includes agent header, issue refs, and idempotency markers."""
+    body = """## Follow-up items
+
+1. Do the follow-up thing
+"""
+    comments = [_make_comment(body, "reviewer-daedalus")]
+
+    provider = mock.Mock()
+    provider.list_pr_comments.return_value = comments
+    provider.list_issues.return_value = []
+    provider.create_issue.return_value = 500
+    provider.pr_url.return_value = "https://github.com/org/repo/pull/20"
+    provider.post_pr_comment.return_value = True
+
+    with mock.patch.object(disp.kanban, "create_triage", return_value="t_x"):
+        disp._extract_follow_ups_from_pr_comment(
+            "slug", "org/repo", provider, 20, "/tmp",
+            ["reviewer-daedalus", "qa-daedalus"],
+            ["enhancement", "follow-up"],
+            "project-manager-daedalus",
+            [],
+        )
+
+    posted_body = provider.post_pr_comment.call_args[0][1]
+    check("summary has agent header", "Agent: dispatcher" in posted_body)
+    check("summary has issue ref", "#500" in posted_body)
+    check("summary has idempotency marker for PR 20 issue 500",
+          "<!-- daedalus:follow-up-extracted PR #20 issue #500 -->" in posted_body)
+
+
 if __name__ == "__main__":
     print("CI retry scheduling tests")
     print("-" * 60)
@@ -149,6 +378,22 @@ if __name__ == "__main__":
         test_schedule_ci_retry_slug_sanitized,
         test_schedule_ci_retry_subprocess_failure,
         test_schedule_ci_retry_create_swallows_error,
+    ):
+        fn()
+    print()
+    print("Follow-up extraction tests")
+    print("-" * 60)
+    for fn in (
+        test_parse_follow_ups_section_numbered,
+        test_parse_follow_ups_deferred_markers,
+        test_parse_follow_ups_none_found,
+        test_parse_follow_ups_custom_patterns,
+        test_extract_follow_ups_reviewer_comment,
+        test_extract_follow_ups_idempotency,
+        test_extract_follow_ups_qa_comment,
+        test_extract_follow_ups_none_found,
+        test_extract_follow_ups_disabled_in_config,
+        test_extract_follow_ups_summary_comment_posted,
     ):
         fn()
     print("-" * 60)

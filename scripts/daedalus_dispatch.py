@@ -994,6 +994,256 @@ def _has_active_pm_consultation(slug: str, issue_number: int,
     return False
 
 
+# ── follow-up extraction ─────────────────────────────────────────────────────
+
+# Section headers that introduce a follow-up list in reviewer/QA PR comments.
+_FOLLOW_UP_SECTION_RE = re.compile(
+    r"^#{1,4}\s*(?:follow[- ]?up(?:\s+items?)?|action\s+items?|future\s+work"
+    r"|recommended\s+follow[- ]?ups?|deferred(?:\s+items?)?|deferred\s+to\s+follow[- ]?up)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Patterns that extract a follow-up title from a line.  Tried in order; first match wins.
+_FOLLOW_UP_LINE_PATTERNS = [
+    re.compile(r"^\s*-\s+\*\*(?:Follow-?up|Future\s+work)[*:]+\*\*\s*(.+?)(?:\n|$)", re.IGNORECASE),
+    re.compile(r"^\s*-\s+\*\*AC\d+[a-z]?\*\*[:\s]+(.+?)(?:\n|$)", re.IGNORECASE),
+    re.compile(r"^\s*-\s+(.+?)\s*\(follow[- ]?up\)", re.IGNORECASE),
+    re.compile(r"^\s*(?:\d+)\.\s+(.+?)(?:\n|$)"),
+    re.compile(r"^\s*-\s+(?:Follow-?up|Future\s+work)[:\s]+(.+?)(?:\n|$)", re.IGNORECASE),
+    re.compile(r"^\s*-\s+AC\d+[a-z]?\s+\w.*?\(follow[- ]?up\)[:\s]*(.+?)(?:\n|$)", re.IGNORECASE),
+]
+
+# Lines inside a follow-up section that signal "deferred" but carry a title.
+_DEFERRED_LINE_RE = re.compile(
+    r"^\s*[-*]\s+(?:AC\d+[a-z]?[:\s]+)?[Dd]eferred(?:\s+to\s+follow[- ]?up\s+issue)?[:\s]*(.+?)$",
+    re.MULTILINE,
+)
+
+# Marker embedded in the summary comment for idempotency.
+_FOLLOWUP_MARKER = "<!-- daedalus:follow-up-extracted PR #{pr} issue #{issue} -->"
+_FOLLOWUP_MARKER_RE = re.compile(
+    r"<!-- daedalus:follow-up-extracted PR #(\d+) issue #(\d+) -->",
+)
+
+
+def _parse_follow_ups(body: str, extra_patterns: Optional[List[str]] = None) -> List[str]:
+    """Extract follow-up item titles from a Markdown comment body.
+
+    Scans for section headers that introduce follow-up lists, then collects
+    items under those sections.  Also catches inline "deferred" markers.
+    Returns deduplicated, non-empty title strings.
+    """
+    titles: List[str] = []
+    seen: set = set()
+
+    def _add(t: str) -> None:
+        t = t.strip().rstrip(".")
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            titles.append(t)
+
+    # Compile any caller-supplied custom patterns.
+    custom = [re.compile(p, re.IGNORECASE | re.MULTILINE) for p in (extra_patterns or [])]
+
+    lines = body.splitlines()
+    in_section = False
+    for line in lines:
+        # Entering a follow-up section header resets the capture window.
+        if _FOLLOW_UP_SECTION_RE.match(line):
+            in_section = True
+            continue
+        # A new top-level heading closes the section.
+        if in_section and re.match(r"^#{1,4}\s", line) and not _FOLLOW_UP_SECTION_RE.match(line):
+            in_section = False
+
+        target_line = line if in_section else None
+
+        # Try built-in patterns on lines that are inside a section.
+        if target_line is not None:
+            for pat in _FOLLOW_UP_LINE_PATTERNS:
+                m = pat.match(target_line)
+                if m:
+                    _add(m.group(1))
+                    break
+
+        # Try custom patterns on every line (they may not require section context).
+        for pat in custom:
+            m = pat.match(line)
+            if m:
+                _add(m.group(1))
+
+    # Also catch deferred markers anywhere in the body.
+    for m in _DEFERRED_LINE_RE.finditer(body):
+        _add(m.group(1))
+
+    return titles
+
+
+def _extract_follow_ups_from_pr_comment(
+    slug: str,
+    repo: str,
+    provider,
+    pr_number: int,
+    workdir: str,
+    reviewer_slugs: List[str],
+    labels: List[str],
+    triage_assignee: str,
+    extra_patterns: List[str],
+    *,
+    dry_run: bool = False,
+) -> List[int]:
+    """Extract follow-ups from one PR's reviewer/QA comments and create tracking issues.
+
+    Returns list of newly created GitHub issue numbers.  Idempotent: already-extracted
+    items are skipped via embedded HTML comment markers in the PR summary comment.
+    """
+    comments = provider.list_pr_comments(pr_number)
+
+    # Collect already-extracted issue numbers from marker comments (idempotency).
+    already_extracted: set = set()
+    for c in comments:
+        for m in _FOLLOWUP_MARKER_RE.finditer(c.body or ""):
+            if int(m.group(1)) == pr_number:
+                already_extracted.add(int(m.group(2)))
+
+    # Filter to reviewer / QA comments.
+    reviewer_comments = [c for c in comments if (c.author or "") in reviewer_slugs]
+    if not reviewer_comments:
+        return []
+
+    # Parse follow-up items from each qualifying comment.
+    follow_ups: List[tuple] = []  # (title, source_excerpt)
+    for c in reviewer_comments:
+        items = _parse_follow_ups(c.body or "", extra_patterns)
+        for item in items:
+            excerpt = (c.body or "")[:600]
+            follow_ups.append((item, excerpt))
+
+    if not follow_ups:
+        return []
+
+    # Deduplicate titles across comments.
+    seen_titles: set = set()
+    deduped: List[tuple] = []
+    for title, excerpt in follow_ups:
+        key = title.lower()
+        if key not in seen_titles:
+            seen_titles.add(key)
+            deduped.append((title, excerpt))
+
+    created: List[int] = []
+    pr_url = provider.pr_url(pr_number) if hasattr(provider, "pr_url") else f"#{pr_number}"
+
+    for title, excerpt in deduped:
+        issue_title = f"[Follow-up from PR #{pr_number}] {title}"
+
+        # Skip titles that look like already-existing issues (exact title match guard).
+        try:
+            existing_issues = provider.list_issues(state="open", labels=["follow-up"], limit=100)
+            existing_titles = {i.title.lower() for i in existing_issues}
+            if issue_title.lower() in existing_titles:
+                logger.debug("follow-up already exists as open issue, skipping: %r", issue_title)
+                continue
+        except Exception:
+            pass  # dedup is best-effort
+
+        issue_body = (
+            f"_Auto-extracted by Daedalus from PR #{pr_number} reviewer/QA comment._\n\n"
+            f"**Original PR:** {pr_url}\n\n"
+            f"**Follow-up item:** {title}\n\n"
+            f"---\n\n"
+            f"**Comment excerpt:**\n\n"
+            f"```\n{excerpt}\n```\n"
+        )
+
+        if dry_run:
+            logger.info("[dry-run] would create follow-up issue: %r (PR #%s)", title, pr_number)
+            created.append(0)
+            continue
+
+        issue_num = provider.create_issue(issue_title, issue_body, labels)
+        if not issue_num:
+            logger.warning("follow-up extraction: create_issue failed for PR #%s: %r",
+                           pr_number, title)
+            continue
+
+        if issue_num in already_extracted:
+            logger.debug("follow-up #%s already tracked (PR #%s)", issue_num, pr_number)
+            continue
+
+        kanban.create_triage(
+            slug, issue_num, issue_title, issue_body,
+            idempotency_key=f"follow-up-{pr_number}-{issue_num}",
+            workspace=f"dir:{workdir}" if workdir else None,
+        )
+        created.append(issue_num)
+        logger.info("follow-up extracted: PR #%s → issue #%s %r", pr_number, issue_num, title)
+
+    if created and not dry_run:
+        markers = "\n".join(
+            _FOLLOWUP_MARKER.format(pr=pr_number, issue=n) for n in created
+        )
+        issue_refs = "\n".join(f"- #{n}" for n in created)
+        summary = (
+            f"Agent: dispatcher\n\n"
+            f"Follow-up items extracted from reviewer/QA comments:\n\n"
+            f"{issue_refs}\n\n"
+            f"{markers}"
+        )
+        provider.post_pr_comment(pr_number, summary)
+
+    return created
+
+
+def _check_follow_ups_from_reviewer_prs(
+    slug: str,
+    repo: str,
+    provider,
+    workdir: str,
+    profiles: Dict[str, str],
+    follow_up_cfg: Dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Scan recent PRs for follow-up items in reviewer/QA comments.
+
+    Called from run() after _check_completed_pm.  Returns count of new issues created.
+    Controlled by follow_up_extraction: enabled: true/false in daedalus.yaml.
+    """
+    if not follow_up_cfg.get("enabled", True):
+        return 0
+
+    reviewer_slugs = [
+        profiles.get("reviewer", _DEFAULT_PROFILES["reviewer"]),
+        "qa-daedalus",
+    ]
+    labels: List[str] = follow_up_cfg.get("labels") or ["enhancement", "follow-up"]
+    triage_assignee: str = follow_up_cfg.get(
+        "assign_triage_to", profiles.get("pm", _DEFAULT_PROFILES["pm"])
+    )
+    extra_patterns: List[str] = follow_up_cfg.get("patterns") or []
+    scan_limit: int = int(follow_up_cfg.get("scan_pr_limit", 20))
+
+    try:
+        prs = provider.list_prs(state="all", limit=scan_limit)
+    except Exception as exc:
+        logger.warning("follow-up extraction: list_prs failed: %s", exc)
+        return 0
+
+    total = 0
+    for pr in prs:
+        try:
+            created = _extract_follow_ups_from_pr_comment(
+                slug, repo, provider, pr.number, workdir,
+                reviewer_slugs, labels, triage_assignee, extra_patterns,
+                dry_run=dry_run,
+            )
+            total += len(created)
+        except Exception as exc:
+            logger.warning("follow-up extraction: PR #%s failed: %s", pr.number, exc)
+    return total
+
+
 def _check_confirmed_validators(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -1608,6 +1858,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                                                validator_profile=profiles["validator"],
                                                dry_run=dry_run)
 
+    _follow_up_cfg: Dict[str, Any] = resolved.get("follow_up_extraction") or {}
+
     # Stall detection: move in-progress cards older than threshold to blocked.
     # Uses dispatch_stale_timeout_seconds from config (default 30min) as the threshold.
     stall_seconds = int((resolved.get("kanban") or {}).get(
@@ -1640,6 +1892,12 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         profiles=profiles, role_skills=role_skills, dry_run=dry_run, provider=provider,
     )
     if pm_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    follow_up_count = _check_follow_ups_from_reviewer_prs(
+        slug, repo, provider, workdir, profiles, _follow_up_cfg, dry_run=dry_run,
+    )
+    if follow_up_count and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     blocker_triggered = _check_team_blockers(

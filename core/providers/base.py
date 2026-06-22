@@ -198,6 +198,14 @@ class VCSProvider(abc.ABC):
         """
         return None
 
+    def create_issue(self, title: str, body: str,
+                     labels: Optional[List[str]] = None) -> Optional[int]:
+        """Create a new issue. Returns the issue number on success, None on failure.
+
+        Providers that support issue creation override this; default is a no-op.
+        """
+        return None
+
     # ── pull/merge requests ──────────────────────────────────────────────────
     @abc.abstractmethod
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]: ...

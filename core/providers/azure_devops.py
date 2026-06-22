@@ -125,6 +125,29 @@ class AzureDevOpsProvider(VCSProvider):
             self._log.info("close_issue: closed #%s (state %s)", issue_number, closed_state)
         return ok
 
+    def create_issue(self, title: str, body: str,
+                     labels: Optional[List[str]] = None) -> Optional[int]:
+        patch = [
+            {"op": "add", "path": "/fields/System.Title", "value": title},
+            {"op": "add", "path": "/fields/System.Description", "value": body},
+        ]
+        if labels:
+            patch.append({"op": "add", "path": "/fields/System.Tags",
+                          "value": "; ".join(labels)})
+        try:
+            data = self._http.post_json(
+                f"{self._pproj}/_apis/wit/workitems/${self.work_item_type}",
+                patch,
+                content_type="application/json-patch+json",
+            )
+            num = (data or {}).get("id")
+            if isinstance(num, int):
+                self._log.info("create_issue: created #%s %r", num, title[:60])
+                return num
+        except ProviderError as e:
+            self._log.warning("create_issue failed: %s", e)
+        return None
+
     def get_issue_state(self, issue_number: int) -> Optional[str]:
         try:
             data = self._http.get_json(

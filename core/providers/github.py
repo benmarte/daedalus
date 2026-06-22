@@ -85,6 +85,21 @@ class GitHubProvider(VCSProvider):
         self._log.info("close_issue: closed #%s", issue_number)
         return True
 
+    def create_issue(self, title: str, body: str,
+                     labels: Optional[List[str]] = None) -> Optional[int]:
+        payload: Dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        try:
+            data = self._http.post_json(f"/repos/{self.repo}/issues", payload)
+            num = (data or {}).get("number")
+            if isinstance(num, int):
+                self._log.info("create_issue: created #%s %r", num, title[:60])
+                return num
+        except ProviderError as e:
+            self._log.warning("create_issue failed: %s", e)
+        return None
+
     def get_issue_state(self, issue_number: int) -> Optional[str]:
         try:
             data = self._http.get_json(f"/repos/{self.repo}/issues/{issue_number}")
