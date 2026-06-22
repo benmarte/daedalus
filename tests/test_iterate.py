@@ -1034,31 +1034,35 @@ def test_extract_issue_number_prefers_repo_qualified():
 
 
 def test_create_downstream_happy_path():
-    """Creates reviewer/security/docs tasks with correct keys and assignees."""
+    """Creates qa/reviewer/security/accessibility/docs tasks with correct keys and assignees."""
     card = {
         "id": "t_dev",
         "body": "Implement benmarte/daedalus#19",
         "workspace": "dir:/work",
     }
     with mock.patch.object(kanban, "list_tasks", return_value=[]) as mk_list:
-        with mock.patch.object(kanban, "create_task", side_effect=["t_rev", "t_sec", "t_doc"]) as mk_create:
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"]) as mk_create:
             with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
                 created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
-    check("created 3 tasks", len(created) == 3)
-    check("returns correct ids", created == ["t_rev", "t_sec", "t_doc"])
-    check("create_task called 3 times", mk_create.call_count == 3)
+    check("created 5 tasks", len(created) == 5)
+    check("returns correct ids", created == ["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"])
+    check("create_task called 5 times", mk_create.call_count == 5)
 
     # Verify assignees
     assignees = [call.kwargs["assignee"] for call in mk_create.call_args_list]
-    check("reviewer assignee", assignees[0] == "reviewer-daedalus")
-    check("security assignee", assignees[1] == "security-analyst-daedalus")
-    check("docs assignee", assignees[2] == "documentation-daedalus")
+    check("qa assignee", assignees[0] == "qa-daedalus")
+    check("reviewer assignee", assignees[1] == "reviewer-daedalus")
+    check("security assignee", assignees[2] == "security-analyst-daedalus")
+    check("accessibility assignee", assignees[3] == "accessibility-daedalus")
+    check("docs assignee", assignees[4] == "documentation-daedalus")
 
     # Verify idempotency keys
     keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
-    check("reviewer key", keys[0] == "reviewer-19")
-    check("security key", keys[1] == "security-19")
-    check("docs key", keys[2] == "docs-19")
+    check("qa key", keys[0] == "qa-19")
+    check("reviewer key", keys[1] == "reviewer-19")
+    check("security key", keys[2] == "security-19")
+    check("accessibility key", keys[3] == "accessibility-19")
+    check("docs key", keys[4] == "docs-19")
 
     # Verify workspace propagated
     workspaces = [call.kwargs["workspace"] for call in mk_create.call_args_list]
@@ -1072,8 +1076,10 @@ def test_create_downstream_idempotency_guard():
     """Skips creation for tasks whose idempotency keys already exist."""
     card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
     existing = [
+        {"idempotency_key": "qa-19"},
         {"idempotency_key": "reviewer-19"},
         {"idempotency_key": "security-19"},
+        {"idempotency_key": "accessibility-19"},
         {"idempotency_key": "docs-19"},
     ]
     with mock.patch.object(kanban, "list_tasks", return_value=existing):
@@ -1087,17 +1093,19 @@ def test_create_downstream_idempotency_guard():
 def test_create_downstream_partial_idempotency():
     """Creates only the tasks whose keys don't yet exist."""
     card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
-    existing = [{"idempotency_key": "reviewer-19"}]  # reviewer already exists
+    # qa and reviewer already exist; security, accessibility, docs need creating
+    existing = [{"idempotency_key": "qa-19"}, {"idempotency_key": "reviewer-19"}]
     with mock.patch.object(kanban, "list_tasks", return_value=existing):
-        with mock.patch.object(kanban, "create_task", side_effect=["t_sec", "t_doc"]) as mk_create:
+        with mock.patch.object(kanban, "create_task", side_effect=["t_sec", "t_acc", "t_doc"]) as mk_create:
             with mock.patch.object(kanban, "comment", return_value=True):
                 created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
-    check("partial: 2 created (security + docs)", len(created) == 2)
-    check("create_task called 2 times", mk_create.call_count == 2)
-    # Verify the right keys were used (not reviewer-19)
+    check("partial: 3 created (security + accessibility + docs)", len(created) == 3)
+    check("create_task called 3 times", mk_create.call_count == 3)
+    # Verify the right keys were used
     keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
     check("security key created", keys[0] == "security-19")
-    check("docs key created", keys[1] == "docs-19")
+    check("accessibility key created", keys[1] == "accessibility-19")
+    check("docs key created", keys[2] == "docs-19")
 
 
 def test_create_downstream_dry_run():

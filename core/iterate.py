@@ -345,8 +345,8 @@ def _execute_advance(
 
     Also unblocks any reviewer/security cards that were blocked with
     'awaiting-fix: {this_card_id}' so they re-engage after the fix lands.
-    After completing the developer card, creates downstream reviewer,
-    security-analyst, and documentation tasks if they don't already exist.
+    After completing the developer card, creates downstream QA, reviewer,
+    security-analyst, accessibility, and documentation tasks if they don't already exist.
     """
     tid = (card.get("id") or "")
     if not tid:
@@ -391,8 +391,10 @@ def _execute_advance(
 
 # Downstream review-task role mapping (idempotency suffix → assignee).
 _DOWNSTREAM_REVIEW_ROLES = [
+    ("qa", "qa-daedalus"),
     ("reviewer", "reviewer-daedalus"),
     ("security", "security-analyst-daedalus"),
+    ("accessibility", "accessibility-daedalus"),
     ("docs", "documentation-daedalus"),
 ]
 
@@ -405,10 +407,10 @@ def _create_downstream_review_tasks(
     pr_number: Optional[int] = None,
     dry_run: bool = False,
 ) -> List[str]:
-    """Create reviewer/security/docs tasks after a developer card completes.
+    """Create qa/reviewer/security/accessibility/docs tasks after a developer card completes.
 
-    Each task uses an idempotency key (``reviewer-{n}``, ``security-{n}``,
-    ``docs-{n}``) so re-runs never duplicate.  If a task with that key already
+    Each task uses an idempotency key (``qa-{n}``, ``reviewer-{n}``, ``security-{n}``,
+    ``accessibility-{n}``, ``docs-{n}``) so re-runs never duplicate.  If a task with that key already
     exists on the board (any status), creation is skipped for that role.
 
     Returns the list of newly-created task ids.

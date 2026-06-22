@@ -113,6 +113,8 @@ EOF
   --head fix/issue-N-<slug>
 ```
 
+**CRITICAL: Do NOT add a "Reviews" section to the PR body. Never claim that reviews happened — that is for the reviewer/QA/security/docs agents to report themselves in their own comments. Fabricating review outcomes causes the pipeline to skip actual review.**
+
 ### 5. Post a comment on the issue
 Post a comment on the GitHub **issue** (not the PR) using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl.
 
@@ -152,8 +154,16 @@ print(urllib.request.urlopen(req).read())
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 
-### 6. Complete your kanban task
-Complete with summary: `PR: #<pr_number> — fix/issue-N-<slug>`
+### 6. Block your kanban task with review-required
+**Do NOT complete your task.** Block it so the dispatcher can complete it and automatically create QA/reviewer/security/docs tasks:
+
+Block with summary: `review-required: PR #<pr_number> — fix/issue-N-<slug>`
+
+The dispatcher reads this signal, waits for CI to pass, then:
+1. Completes your card
+2. Creates QA, reviewer, security-analyst, accessibility, and documentation tasks automatically
+
+If you complete the task yourself instead of blocking it, the downstream review agents will never be created and the pipeline stalls at your card.
 
 ### 7. Run the dispatcher
 ```
@@ -163,6 +173,7 @@ bash ~/.hermes/scripts/daedalus-cron.sh
 ## Quality bar
 - No type errors, no lint errors before committing
 - Tests must pass locally before pushing
-- PR must be open and linked before marking done
+- PR must be open and linked before blocking with review-required
 - Never commit secrets, `.env` files, or large binaries
 - Commit message must reference the issue number
+- Never fabricate review outcomes — block with review-required and let the dispatcher create QA/reviewer/security/docs tasks
