@@ -73,7 +73,7 @@ class _FakeProvider:
     def update_pr_body(self, pr, body):
         return False
 
-    def list_prs(self, state="open"):
+    def list_prs(self, state="open", limit=50):
         return []
 
     def pr_ci_green(self, pr):
