@@ -53,7 +53,7 @@ from core.util import board_slug as _board_slug  # noqa: E402
 
 logger = logging.getLogger("daedalus.dispatch")
 
-_LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify → Ship")
+_LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify")
 
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready", "security-escalation")
@@ -510,12 +510,15 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"validator block before development may begin.\n"
         f"   If the validator card is CONFIRMED, implement the fix/feature. "
         f"Follow the agent-skills lifecycle ({_LIFECYCLE}). "
+        f"⛔ NEVER merge the PR — merging is a human-only action. Do NOT run `gh pr merge`, "
+        f"`git merge`, or any merge command. Do NOT invoke the /ship skill. "
+        f"Your job ends at opening the PR and blocking your kanban card with 'review-required: PR #N'. "
         f"BRANCH SETUP (mandatory): `git checkout {base_branch} && git pull && "
         f"git checkout -b fix/issue-{n}-<slug>` — always branch off `{base_branch}`, "
         f"never off main or any other branch. "
         f"Write code + tests, iterate up to {iterations}x if review fails. "
-        f"Before pushing, run the project's configured lint and format tools (ship gate — "
-        f"use whatever is present, skip gracefully if nothing is configured): "
+        f"Before pushing, run the project's configured lint and format tools "
+        f"(use whatever is present, skip gracefully if nothing is configured): "
         f".pre-commit-config.yaml → `pre-commit run --all-files`; "
         f"package.json lint/format scripts → `npm run lint && npm run format`; "
         f"pyproject.toml ruff config → `ruff check --fix && ruff format`; "
@@ -524,7 +527,7 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"Push the branch (git credentials are pre-configured) and open a PR "
         f"into {base_branch} via {pr_create_howto} — no gh/glab/az CLI is installed. "
         f"CRITICAL: The PR body MUST include `Closes #{n}` (or `Fixes #{n}`) on its own line. "
-        f"(REQUIRED: GitHub only auto-closes issues on non-default-branch merges. Since this PR "
+        f"(REQUIRED: GitHub only auto-closes issues on default-branch merges. Since this PR "
         f"targets '{base_branch}', the Daedalus dispatcher relies on this exact keyword to "
         f"automatically close the issue and mark the Kanban task Done upon merge.) Also include "
         f"sections for: Problem, Fix, How to test, and Manual testing.\n\n"
@@ -743,12 +746,15 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         roles.append(
             f"{role_num}. DEVELOPER — implement the fix/feature. Follow the agent-skills lifecycle "
             f"({_LIFECYCLE}). "
+            f"⛔ NEVER merge the PR — merging is a human-only action. Do NOT run `gh pr merge`, "
+            f"`git merge`, or any merge command. Do NOT invoke the /ship skill. "
+            f"Your job ends at opening the PR and blocking your kanban card with 'review-required: PR #N'. "
             f"BRANCH SETUP (mandatory): `git checkout {base_branch} && git pull && "
             f"git checkout -b fix/issue-{n}-<slug>` — always branch off `{base_branch}`, "
             f"never off main or any other branch. "
             f"Write code + tests, iterate up to {iterations}x if review fails. "
-            f"Before pushing, run the project's configured lint and format tools (ship gate — "
-            f"use whatever is present, skip gracefully if nothing is configured): "
+            f"Before pushing, run the project's configured lint and format tools "
+            f"(use whatever is present, skip gracefully if nothing is configured): "
             f".pre-commit-config.yaml → `pre-commit run --all-files`; "
             f"package.json lint/format scripts → `npm run lint && npm run format`; "
             f"pyproject.toml ruff config → `ruff check --fix && ruff format`; "
