@@ -1756,6 +1756,7 @@ function App() {
   var vr = useState(null); var pluginVersion = vr[0], setPluginVersion = vr[1];
   var hu = useState(null); var hasUpdate = hu[0], setHasUpdate = hu[1];
   var cf = useState(false); var checkFailed = cf[0], setCheckFailed = cf[1];
+  var lv = useState(null); var latestVersion = lv[0], setLatestVersion = lv[1];
   var up = useState(false); var updating = up[0], setUpdating = up[1];
   var ur = useState(null); var updateResult = ur[0], setUpdateResult = ur[1];
   var rg = useState(false); var restarting = rg[0], setRestarting = rg[1];
@@ -1785,6 +1786,7 @@ function App() {
     fetchJSON("/api/plugins/daedalus/meta/check-update").then(function (d) {
       setHasUpdate(d && d.has_update === true);
       setCheckFailed(!!(d && d.check_failed));
+      setLatestVersion((d && d.latest) || null);
     }).catch(function () { setHasUpdate(false); setCheckFailed(true); });
   }, []);
 
@@ -1937,26 +1939,32 @@ function App() {
       React.createElement("div", { style: { fontSize: "12px", color: "#888" } },
         "Daedalus" + (pluginVersion ? " v" + pluginVersion : "")
       ),
-      React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } },
+      React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
         updateResult ? React.createElement("span", {
           style: { fontSize: "11px", color: updateResult.ok ? "#4ade80" : "#f87171" }
         }, updateResult.ok ? "Updated — restart the gateway then reload this tab" : "Update failed: " + (updateResult.output || "").slice(0, 80)) : null,
-        hasUpdate ? React.createElement("button", {
+        hasUpdate && latestVersion ? React.createElement("span", {
+          style: { fontSize: "11px", color: "#4ade80" }
+        }, "v" + latestVersion + " available") : null,
+        hasUpdate || checkFailed ? React.createElement("button", {
           onClick: updatePlugin,
           disabled: updating,
-          style: Object.assign({}, S.btnSmall, updating ? { opacity: 0.5 } : {})
-        }, updating ? "Updating…" : "Update Plugin") : null,
-        !hasUpdate ? React.createElement("button", {
+          title: checkFailed && !hasUpdate ? "Version check failed — click to update to the latest release anyway." : "",
+          style: Object.assign({}, S.btnSmall, updating ? { opacity: 0.5 } :
+            (checkFailed && !hasUpdate ? { color: "#fbbf24", borderColor: "#78350f" } : {}))
+        }, updating ? "Updating…" : (checkFailed && !hasUpdate ? "Update Plugin ↺" : "Update Plugin")) : null,
+        React.createElement("button", {
           onClick: function () {
             setCheckFailed(false);
             fetchJSON("/api/plugins/daedalus/meta/check-update").then(function (d) {
               setHasUpdate(d && d.has_update === true);
               setCheckFailed(!!(d && d.check_failed));
+              setLatestVersion((d && d.latest) || null);
             }).catch(function () { setCheckFailed(true); });
           },
           title: checkFailed ? "Could not reach GitHub to check for updates. Click to retry." : "Check GitHub for a newer version of Daedalus.",
           style: Object.assign({}, S.btnSmall, { color: checkFailed ? "#f87171" : "#888", borderColor: checkFailed ? "#7f1d1d" : "#444" })
-        }, checkFailed ? "Check for updates ↺" : "Check for updates") : null,
+        }, checkFailed ? "Check for updates ↺" : "Check for updates"),
         React.createElement("button", {
           onClick: function () { setShowUninstall(true); },
           style: Object.assign({}, S.btnSmall, { color: "#f87171", borderColor: "#7f1d1d" })

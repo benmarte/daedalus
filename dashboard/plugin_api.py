@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1499,16 +1500,29 @@ async def get_meta_version() -> dict[str, Any]:
         return {"version": "unknown"}
 
 
+def _semver_key(v: str) -> tuple:
+    """Return a comparable tuple for a semver-ish version string like '1.0.0-beta.22'."""
+    v = (v or "").lstrip("v").strip()
+    parts = re.split(r"[.\-]", v)
+    result: list = []
+    for p in parts:
+        try:
+            result.append((1, int(p)))   # numeric: sort numerically
+        except ValueError:
+            order = {"alpha": -3, "beta": -2, "rc": -1}
+            result.append((0, order.get(p.lower(), -4)))  # pre-release label
+    return tuple(result)
+
+
 @meta_router.get("/check-update")
 async def get_check_update() -> dict[str, Any]:
-    """Compare the installed version against the latest GitHub tag.
+    """Compare the installed version against the latest GitHub release.
 
-    Reads ``source`` from plugin.yaml, hits the GitHub tags API, and
-    returns whether a newer tag exists.  Fails gracefully to
-    ``{"has_update": false}`` on any network or parse error.
+    Tries the Releases API first (includes pre-releases, sorted by semver),
+    falls back to the Tags API.  Fails gracefully on network errors.
 
     Returns:
-        ``{"has_update": bool, "current": str, "latest": str|null}``
+        ``{"has_update": bool, "check_failed": bool, "current": str, "latest": str|null}``
     """
     plugin_yaml = Path(__file__).resolve().parent.parent / "plugin.yaml"
     try:
@@ -1517,53 +1531,111 @@ async def get_check_update() -> dict[str, Any]:
         current = (data.get("version") or "unknown").strip()
         source = (data.get("source") or "").strip()
     except Exception:
-        return {"has_update": False, "current": "unknown", "latest": None}
+        return {"has_update": False, "check_failed": True, "current": "unknown", "latest": None}
 
     if not source:
-        return {"has_update": False, "current": current, "latest": None}
+        return {"has_update": False, "check_failed": False, "current": current, "latest": None}
 
-    # Extract owner/repo from https://github.com/owner/repo
     m = re.match(r"https?://github\.com/([^/]+/[^/.]+?)(?:\.git)?$", source)
     if not m:
-        return {"has_update": False, "current": current, "latest": None}
+        return {"has_update": False, "check_failed": False, "current": current, "latest": None}
 
     repo = m.group(1)
+    headers: dict = {"Accept": "application/vnd.github+json",
+                     "User-Agent": "daedalus-plugin/update-check"}
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    latest: str | None = None
+
+    # 1. Try releases API (returns drafts=false; includes pre-releases when listed).
     try:
-        headers: dict = {"Accept": "application/vnd.github+json",
-                         "User-Agent": "daedalus-plugin/update-check"}
-        token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(
-            f"https://api.github.com/repos/{repo}/tags",
+            f"https://api.github.com/repos/{repo}/releases?per_page=20",
             headers=headers,
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            tags = json.loads(resp.read())
-        if not isinstance(tags, list) or not tags:
-            return {"has_update": False, "check_failed": False, "current": current, "latest": None}
-        latest = (tags[0].get("name") or "").lstrip("v").strip()
-        has_update = bool(latest) and latest != current
-        return {"has_update": has_update, "check_failed": False, "current": current, "latest": latest or None}
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            releases = json.loads(resp.read())
+        if isinstance(releases, list) and releases:
+            names = [
+                (r.get("tag_name") or "").lstrip("v").strip()
+                for r in releases
+                if not r.get("draft") and r.get("tag_name")
+            ]
+            if names:
+                latest = max(names, key=_semver_key)
     except Exception:
-        return {"has_update": False, "check_failed": True, "current": current, "latest": None}
+        pass  # fall through to tags
+
+    # 2. Fall back to tags API.
+    if not latest:
+        try:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{repo}/tags?per_page=20",
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                tags = json.loads(resp.read())
+            if isinstance(tags, list) and tags:
+                names = [(t.get("name") or "").lstrip("v").strip() for t in tags if t.get("name")]
+                if names:
+                    latest = max(names, key=_semver_key)
+        except Exception:
+            return {"has_update": False, "check_failed": True, "current": current, "latest": None}
+
+    if not latest:
+        return {"has_update": False, "check_failed": False, "current": current, "latest": None}
+
+    has_update = _semver_key(latest) > _semver_key(current)
+    return {"has_update": has_update, "check_failed": False, "current": current, "latest": latest}
 
 
 @meta_router.post("/update-plugin")
 async def post_update_plugin() -> dict[str, Any]:
     """Update the Daedalus plugin then re-provision the roster.
 
-    Runs ``hermes plugins update daedalus`` to pull the latest code (git-cloned
-    installs only; local-copy installs skip the pull gracefully), then always
-    re-runs ``provision_roster.sh`` so new agent profiles are created without a
-    separate "Install Agents" click.
+    For git-cloned installs: runs ``hermes plugins update daedalus``.
+    For non-git (cloud/copy) installs: clones the source repo into a temp dir
+    and rsyncs the new code into the plugin directory, then re-runs
+    ``provision_roster.sh`` so new agent profiles are created.
     """
     rc, update_out = _hermes_cli(["plugins", "update", "daedalus"], timeout=120)
-    # "not installed from git" is not a fatal error — the plugin may be a
-    # local-copy install synced by provision_roster.sh; still run the provisioner.
     not_git = rc != 0 and "not installed from git" in (update_out or "").lower()
     if rc != 0 and not not_git:
         return {"ok": False, "output": update_out}
+
+    # Non-git install: clone source and rsync into place.
+    if not_git:
+        plugin_yaml = Path(__file__).resolve().parent.parent / "plugin.yaml"
+        try:
+            with open(plugin_yaml) as f:
+                py_data = yaml.safe_load(f) or {}
+            source_url = (py_data.get("source") or "").strip()
+        except Exception as exc:
+            return {"ok": False, "output": f"Could not read plugin.yaml: {exc}"}
+        if not source_url:
+            return {"ok": False, "output": "No source URL in plugin.yaml — cannot auto-update."}
+        plugin_dir = str(Path(__file__).resolve().parent.parent)
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                clone_result = subprocess.run(
+                    ["git", "clone", "--depth=1", source_url, tmp_dir],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if clone_result.returncode != 0:
+                    return {"ok": False, "output": (clone_result.stdout + clone_result.stderr).strip()}
+                rsync_result = subprocess.run(
+                    ["rsync", "-a", "--delete",
+                     "--exclude=.git", "--exclude=__pycache__", "--exclude=*.pyc",
+                     tmp_dir + "/", plugin_dir + "/"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if rsync_result.returncode != 0:
+                    return {"ok": False, "output": (rsync_result.stdout + rsync_result.stderr).strip()}
+                update_out = f"Cloned from {source_url} and synced to {plugin_dir}."
+        except Exception as exc:
+            return {"ok": False, "output": f"Update failed: {exc}"}
 
     # Always re-run the provisioner so any newly added profiles are installed
     # and any broken symlinks that block profile creation are cleaned up.
