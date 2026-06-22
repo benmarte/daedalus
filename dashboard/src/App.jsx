@@ -1320,6 +1320,41 @@ function ConfigModal(props) {
         )
       ),
 
+      // ── Auto-Merge ────────────────────────────────────────────────────────────
+      React.createElement("div", { style: S.section }, "Auto-Merge"),
+      React.createElement("div", { style: S.fieldRow },
+        React.createElement("label", { style: Object.assign({}, S.field, { flexDirection: "row", alignItems: "center", gap: "10px", cursor: "pointer" }) },
+          React.createElement("input", {
+            type: "checkbox",
+            checked: !!getIn(config, ["execution", "auto_merge"], false),
+            onChange: function (e) { updateField("execution.auto_merge", e.target.checked); },
+            style: { width: "16px", height: "16px", cursor: "pointer", accentColor: "#3b82f6", flexShrink: 0 }
+          }),
+          React.createElement("div", null,
+            React.createElement("div", { style: { fontSize: "13px", color: "#e2e8f0", fontWeight: 500 } }, "Automatically merge PR after all reviews pass"),
+            React.createElement("div", { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
+              "When enabled, the dispatcher merges the PR via the GitHub API after the documentation agent completes. When disabled (default), a human merges the PR."
+            )
+          )
+        )
+      ),
+      getIn(config, ["execution", "auto_merge"], false)
+        ? React.createElement("div", { style: S.fieldRow },
+            React.createElement("label", { style: S.field },
+              React.createElement("span", { style: S.fieldLabel }, "Merge Method"),
+              React.createElement("select", {
+                style: S.select,
+                value: getIn(config, ["execution", "merge_method"], "squash"),
+                onChange: function (e) { updateField("execution.merge_method", e.target.value); }
+              },
+                React.createElement("option", { value: "squash" }, "Squash and merge"),
+                React.createElement("option", { value: "merge" }, "Create a merge commit"),
+                React.createElement("option", { value: "rebase" }, "Rebase and merge")
+              )
+            )
+          )
+        : null,
+
       // Errors
       fieldErrors && fieldErrors.length > 0 ? React.createElement("div", { style: { marginBottom: "8px" } },
         fieldErrors.map(function (errMsg, i) {

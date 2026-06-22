@@ -263,6 +263,16 @@ class VCSProvider(abc.ABC):
         Defaults to [] — providers that support it override."""
         return []
 
+    def merge_pr(self, pr_number: int, merge_method: str = "squash") -> bool:
+        """Merge a PR via the VCS API.
+
+        ``merge_method`` is one of 'merge', 'squash', 'rebase'.
+        Returns True on success, False if unsupported or the merge failed.
+        Providers that support it override; default is a no-op so callers can
+        safely call this without checking provider type.
+        """
+        return False
+
     def append_changelog(self, base_branch: str, entry: str) -> bool:
         """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the VCS API.
         Returns True on success; defaults to False (providers that support it override)."""

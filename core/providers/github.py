@@ -223,6 +223,21 @@ class GitHubProvider(VCSProvider):
         self._log.info("update_pr_body: patched #%s with closing keyword", pr_number)
         return True
 
+    def merge_pr(self, pr_number: int, merge_method: str = "squash") -> bool:
+        """Merge a PR via PUT /repos/{repo}/pulls/{pr}/merge."""
+        valid_methods = ("merge", "squash", "rebase")
+        method = merge_method if merge_method in valid_methods else "squash"
+        try:
+            self._http.put_json(
+                f"/repos/{self.repo}/pulls/{pr_number}/merge",
+                {"merge_method": method},
+            )
+            self._log.info("merge_pr: merged PR #%s (%s)", pr_number, method)
+            return True
+        except ProviderError as e:
+            self._log.warning("merge_pr PR #%s failed: %s", pr_number, e)
+            return False
+
     def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
         """Changed files in a PR via GET /pulls/{n}/files (paginated)."""
         try:

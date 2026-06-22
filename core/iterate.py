@@ -802,6 +802,9 @@ def run_iterate(
     workdir = (resolved or {}).get("workdir", "")
     notify_target = (resolved or {}).get("cron", {}).get("deliver", "")
     router_profile = (resolved or {}).get("router_profile", "project-manager-daedalus")
+    execution = (resolved or {}).get("execution") or {}
+    auto_merge = bool(execution.get("auto_merge", False))
+    merge_method = str(execution.get("merge_method", "squash")).lower()
 
     blocked_cards = kanban.list_blocked(slug)
     if not blocked_cards:
@@ -929,6 +932,30 @@ def run_iterate(
                 # report which PRs were advanced (not just a count tuple).
                 if action == ADVANCE and pr is not None:
                     advance_prs.append(pr)
+
+                # Auto-merge: when the docs card completes and auto_merge is enabled,
+                # the dispatcher merges the PR via the VCS API. This is the ONLY path
+                # that can trigger a merge — agents never merge directly.
+                if (
+                    action == APPROVE_ADVANCE
+                    and assignee == "documentation-daedalus"
+                    and auto_merge
+                    and pr is not None
+                    and provider is not None
+                ):
+                    if dry_run:
+                        logger.info(
+                            "[dry-run] auto_merge=true: would merge PR #%s (%s)", pr, merge_method)
+                    else:
+                        merged = provider.merge_pr(pr, merge_method=merge_method)
+                        if merged:
+                            logger.info(
+                                "iterate: auto-merged PR #%s (%s) after docs complete",
+                                pr, merge_method)
+                        else:
+                            logger.warning(
+                                "iterate: auto_merge failed for PR #%s — leaving open for human",
+                                pr)
         except Exception as e:
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
 

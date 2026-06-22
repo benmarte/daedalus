@@ -53,7 +53,7 @@ from core.util import board_slug as _board_slug  # noqa: E402
 
 logger = logging.getLogger("daedalus.dispatch")
 
-_LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify")
+_LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify → Ship")
 
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready", "security-escalation")
