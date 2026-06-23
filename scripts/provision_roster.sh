@@ -206,6 +206,25 @@ with open(path, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
 
+  # Reset the credential_pool in auth.json so cloned provider keys (e.g. OpenRouter)
+  # don't override global model selection. Without this, a profile cloned from a session
+  # with OpenRouter credentials will try to use OpenRouter with no model set → HTTP 400.
+  python3 - "$PROFILES/$name/auth.json" <<'PY'
+import sys, json, os
+
+path = sys.argv[1]
+if not os.path.exists(path):
+    sys.exit(0)
+try:
+    with open(path) as f:
+        auth = json.load(f)
+except (json.JSONDecodeError, FileNotFoundError):
+    sys.exit(0)
+auth["credential_pool"] = {}
+with open(path, "w") as f:
+    json.dump(auth, f, indent=2)
+PY
+
   # Reseed skills to EXACTLY the matrix: nuke the cloned skill set, keep only agent-skills.
   local dst="$PROFILES/$name/skills/agent-skills"
   rm -rf "${PROFILES:?}/$name/skills"
