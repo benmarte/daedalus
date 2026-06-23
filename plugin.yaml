@@ -1,5 +1,5 @@
 name: daedalus
-version: 1.0.0-beta.24
+version: 1.0.0-beta.25
 source: https://github.com/benmarte/daedalus
 description: "Hermes Daedalus — issue/spec → reviewed-PR automation with kanban dispatch, GitHub/GitLab/Azure DevOps board syncing, and multi-platform notifications."
 author: "Ben Marte"
