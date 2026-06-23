@@ -187,3 +187,35 @@ execution:
   #     skip_developer: true
   #   security:
   #     security_first: true
+
+  # Which coding agent handles developer tasks. Controls how coding work is
+  # delegated: the dispatcher injects delegation instructions into task bodies
+  # so the developer agent knows how to use the configured coding agent.
+  #
+  # Options:
+  #   hermes       (default) — use Hermes delegate_task to spawn a subagent
+  #                    with the coding-agents skill pre-loaded. The subagent
+  #                    runs the configured coding agent CLI (claude-code, codex,
+  #                    or opencode) in one-shot mode.
+  #   claude-code  — delegate to Claude Code CLI (one-shot -p mode preferred)
+  #   codex        — delegate to OpenAI Codex CLI (exec mode)
+  #   opencode     — delegate to OpenCode CLI (run mode)
+  #   none         — no delegation; developer agent does coding directly
+  #
+  # When set to a CLI agent (claude-code/codex/opencode), the dispatcher
+  # injects a delegation instruction telling the developer to use `delegate_task`
+  # with the appropriate CLI command for that agent. The coding-agents skill is
+  # automatically attached to the developer profile when delegation is enabled.
+  #
+  # coding_agent: hermes
+
+  # When coding_agent is set to a CLI agent, which model/backend should the
+  # coding agent use? Passes through to the agent's --model flag where applicable.
+  # If omitted, the agent uses its default model.
+  #
+  # coding_agent_model: ""
+
+  # Max turns/iterations for delegated coding agent sessions. Prevents runaway
+  # agent loops. Defaults to 10 for one-shot modes.
+  #
+  # coding_agent_max_turns: 10

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sqlite3
 import subprocess
 from typing import List, Optional, Set
 
@@ -304,6 +306,39 @@ def block_task(slug: str, task_id: str, reason: str = "") -> bool:
         logger.warning("kanban: block %s failed: %s", task_id, (err or out or "").strip())
         return False
     return True
+
+
+def reassign_task(slug: str, task_id: str, profile: str, *, reclaim: bool = False) -> bool:
+    """Reassign a task to a different profile. Returns True on success."""
+    args = ["--board", slug, "reassign", task_id, profile]
+    if reclaim:
+        args.append("--reclaim")
+    rc, out, err = _hk(args)
+    if rc != 0:
+        logger.warning("kanban: reassign %s → %s failed: %s", task_id, profile, (err or out or "").strip())
+        return False
+    return True
+
+
+def rename_task(slug: str, task_id: str, new_title: str) -> bool:
+    """Update a task's title via direct SQLite write. Returns True on success.
+
+    There is no ``hermes kanban rename`` CLI command, so this writes directly to
+    the board's SQLite database at ~/.hermes/kanban/boards/<slug>/kanban.db.
+    """
+    db_path = os.path.expanduser(f"~/.hermes/kanban/boards/{slug}/kanban.db")
+    if not os.path.exists(db_path):
+        logger.warning("kanban: rename: DB not found for board %r", slug)
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (new_title, task_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as exc:
+        logger.warning("kanban: rename %s failed: %s", task_id, exc)
+        return False
 
 
 def diagnostics(slug: str) -> List[dict]:

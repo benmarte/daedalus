@@ -82,14 +82,60 @@ You are the **intake and spec owner** of the Daedalus pipeline. Your job is to t
 - Identify which downstream roles are required (developer is always required; qa, reviewer, security-analyst, accessibility, documentation based on the nature of the change).
 
 ### 3. Create downstream kanban tasks
-Create one kanban task per required downstream role using `hermes kanban create`. At minimum:
-- developer
-- qa
-- reviewer
-- security-analyst
-- documentation
+Create one kanban task per required downstream role using `hermes kanban create`.
 
-Add accessibility only if the issue involves UI/frontend changes.
+Every task you create MUST have **BOTH** of the following — no exceptions:
+
+#### (A) Issue number prefix in the title
+
+Every child task title **MUST** start with `#<issue-number> `. This is how the
+dispatcher traces kanban state back to GitHub state, and how humans inspect the board.
+
+```
+CORRECT: "#418 Implement walkAncestorChain integration"
+WRONG:   "Implement walkAncestorChain integration"  ← dispatcher CANNOT trace this task
+```
+
+The title format: `hermes kanban create "#N <description>" ...` where `N` is the
+issue number. Always include a meaningful description after the number.
+
+#### (B) Dashed Daedalus profile name in `--assignee`
+
+You MUST use `--assignee <profile>-daedalus`, **NOT** the bare role name.
+Generic role names (e.g. `--assignee developer`) cannot be dispatched — the
+dispatcher cannot resolve them and tasks will stall until manually corrected.
+
+Required roles and their `--assignee` values (always include):
+
+| Role | `--assignee` value |
+|---|---|
+| developer | `developer-daedalus` |
+| qa | `qa-daedalus` |
+| reviewer | `reviewer-daedalus` |
+| security-analyst | `security-analyst-daedalus` |
+| documentation | `documentation-daedalus` |
+
+Add `--assignee accessibility-daedalus` only if the issue involves UI/frontend changes.
+
+#### Dependency order
+
+Create them in dependency order (each role waits on the role above it):
+```
+a) hermes kanban create "#N Implement <description>" --assignee developer-daedalus --idempotency-key developer-N --workspace dir:<workdir>
+   → save output as DEV_TASK_ID
+
+b) hermes kanban create "#N QA <description>" --assignee qa-daedalus --idempotency-key qa-N --workspace dir:<workdir> --parent DEV_TASK_ID
+   → save output as QA_TASK_ID
+
+c) hermes kanban create "#N Review <description>" --assignee reviewer-daedalus --idempotency-key reviewer-N --workspace dir:<workdir> --parent QA_TASK_ID
+
+d) hermes kanban create "#N Security audit <description>" --assignee security-analyst-daedalus --idempotency-key security-N --workspace dir:<workdir> --parent QA_TASK_ID
+
+e) hermes kanban create "#N Docs <description>" --assignee documentation-daedalus --idempotency-key docs-N --workspace dir:<workdir> --parent DEV_TASK_ID --parent REVIEWER_TASK_ID --parent SECURITY_TASK_ID
+```
+
+Replace `N` with the actual issue number, `<description>` with a meaningful description,
+and `<workdir>` with the repo path.
 
 Each task body must include: issue number, issue title, repo, PR target branch, and a link to this spec comment once posted.
 

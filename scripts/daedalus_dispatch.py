@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -71,9 +73,11 @@ _DEFAULT_PROFILES: Dict[str, str] = {
     "validator": "validator-daedalus",
     "pm": "project-manager-daedalus",
     "developer": "developer-daedalus",
+    "qa": "qa-daedalus",
     "reviewer": "reviewer-daedalus",
     "security": "security-analyst-daedalus",
     "documentation": "documentation-daedalus",
+    "accessibility": "accessibility-daedalus",
 }
 
 
@@ -122,6 +126,72 @@ def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
             if skills:
                 result[k] = skills
     return result
+
+
+_DELEGATION_INSTRUCTIONS: Dict[str, str] = {
+    "claude-code": (
+        "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
+        "  You MUST use `delegate_task` (available via the computer_use tool or\n"
+        "  hermes CLI) to spawn a Claude Code subagent rather than coding directly.\n\n"
+        "  Steps:\n"
+        "  1. Read the task requirements carefully.\n"
+        "  2. Use `delegate_task` with:\n"
+        "     - goal: \"<copy the full task requirements here>\"\n"
+        "     - context: \"<include file paths, error messages, repo structure>\"\n"
+        "     - toolsets: [\"terminal\", \"file\"]  (for code work)\n"
+        "     - acp_command: \"copilot\"  (if Claude Code CLI is configured)\n"
+        "  3. The subagent will run Claude Code in one-shot mode and return results.\n"
+        "  4. Verify the subagent's work before completing your card.\n"
+        "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
+        "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+    ),
+    "codex": (
+        "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
+        "  You MUST use `delegate_task` to spawn an OpenAI Codex subagent rather\n"
+        "  than coding directly.\n\n"
+        "  Steps:\n"
+        "  1. Read the task requirements carefully.\n"
+        "  2. Use `delegate_task` with:\n"
+        "     - goal: \"<copy the full task requirements here>\"\n"
+        "     - context: \"<include file paths, error messages, repo structure>\"\n"
+        "     - toolsets: [\"terminal\", \"file\"]\n"
+        "  3. The subagent will run Codex CLI and return results.\n"
+        "  4. Verify the subagent's work before completing your card.\n"
+        "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
+        "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+    ),
+    "opencode": (
+        "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
+        "  You MUST use `delegate_task` to spawn an OpenCode subagent rather than\n"
+        "  coding directly.\n\n"
+        "  Steps:\n"
+        "  1. Read the task requirements carefully.\n"
+        "  2. Use `delegate_task` with:\n"
+        "     - goal: \"<copy the full task requirements here>\"\n"
+        "     - context: \"<include file paths, error messages, repo structure>\"\n"
+        "     - toolsets: [\"terminal\", \"file\"]\n"
+        "  3. The subagent will run OpenCode CLI and return results.\n"
+        "  4. Verify the subagent's work before completing your card.\n"
+        "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
+        "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+    ),
+}
+
+
+def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
+    """Return the configured coding agent from execution.coding_agent.
+
+    Returns one of: hermes, claude-code, codex, opencode, none
+    Defaults to 'none' if not configured.
+    """
+    agent = (execution or {}).get("coding_agent")
+    if not agent or not isinstance(agent, str):
+        return "none"
+    agent = agent.strip().lower()
+    if agent not in ("hermes", "claude-code", "codex", "opencode", "none"):
+        logger.warning("dispatch: invalid coding_agent %r — defaulting to none", agent)
+        return "none"
+    return agent
 
 
 def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
@@ -411,7 +481,8 @@ _PR_CREATE_HOWTO = {
 def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                notify_target: str = "", base_branch: str = "dev",
                provider_name: str = "github",
-               security_notify_targets: Optional[List[str]] = None) -> str:
+               security_notify_targets: Optional[List[str]] = None,
+               coding_agent: str = "none") -> str:
     """Triage body for decompose(): describes the FULL lifecycle so the decomposer
     fans it out across the roster (validator → developer → reviewer → security-analyst →
     documentation). Each role's instructions are spelled out so routing is clean."""
@@ -437,7 +508,7 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         if security_targets
         else "       (no notification targets configured for this project)"
     )
-    return (
+    _body = (
         f"Deliver issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
         f"🚨 MANDATORY FOR ALL ROLES: Upon completing your assigned step (whether finishing, requesting changes, or blocking), you MUST post a summary comment to the GitHub issue #{n} using: {comment_howto}.\n"
@@ -561,6 +632,9 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"attempt to send the report yourself.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
+    if coding_agent != "none" and coding_agent in _DELEGATION_INSTRUCTIONS:
+        _body += _DELEGATION_INSTRUCTIONS[coding_agent]
+    return _body
 
 
 def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch: str,
@@ -670,14 +744,22 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
 
 
 def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: str,
-             base_branch: str, provider_name: str) -> str:
+             base_branch: str, provider_name: str,
+             profiles: Optional[Dict[str, str]] = None,
+             coding_agent: str = "none") -> str:
     """Phase-2 task body: PM reads spec, assigns tasks to full team."""
     n = issue.get("number")
     title = issue.get("title", "")
     body = (issue.get("body") or "").strip()
+    p = profiles or _DEFAULT_PROFILES
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    return (
+    dev_profile = p.get("developer", _DEFAULT_PROFILES["developer"])
+    qa_profile = p.get("qa", _DEFAULT_PROFILES["qa"])
+    rev_profile = p.get("reviewer", _DEFAULT_PROFILES["reviewer"])
+    sec_profile = p.get("security", _DEFAULT_PROFILES["security"])
+    doc_profile = p.get("documentation", _DEFAULT_PROFILES["documentation"])
+    _body = (
         f"You are the PROJECT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
         f"The VALIDATOR has confirmed this issue is real, safe, and ready to implement.\n"
@@ -687,26 +769,42 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"Your SOUL.md has full instructions. Follow them exactly. Summary of steps:\n"
         f"   1) Read the issue and validator findings below.\n"
         f"   2) Post a spec comment to issue #{n} via: {comment_howto}\n"
-        f"   3) Create ALL team tasks with `hermes kanban create` in this order:\n"
-        f"      a) Developer task (starts immediately) — save task ID as DEV_TASK_ID\n"
-        f"      b) QA task (--parent <DEV_TASK_ID>) — save as QA_TASK_ID\n"
-        f"      c) Reviewer task (--parent <QA_TASK_ID>)\n"
-        f"      d) Security task (--parent <QA_TASK_ID>)\n"
-        f"      e) Docs task (--parent <DEV_TASK_ID> --parent <REVIEWER_TASK_ID> --parent <SECURITY_TASK_ID>)\n"
-        f"      Use idempotency keys: developer-{n}, qa-{n}, reviewer-{n}, security-{n}, docs-{n}\n"
-        f"      Use workspace: dir:{workdir}\n"
+        f"   3) Create ALL team tasks with `hermes kanban create` in this order.\n"
+        f"      🚨 CRITICAL — every task MUST have BOTH:\n"
+        f"        A) `--assignee <profile>` using the DASHED name (e.g. developer-daedalus).\n"
+        f"           Generic role names (e.g. --assignee developer) cannot be dispatched.\n"
+        f"        B) Title starting with `#{n} ` — the issue number MUST prefix every title.\n"
+        f"           CORRECT: \"#{n} Implement fix for the bug\"\n"
+        f"           WRONG:   \"Implement fix for the bug\" (dispatcher cannot trace orphan tasks)\n"
+        f"      Role → --assignee value for this install:\n"
+        f"        developer     → --assignee {dev_profile}\n"
+        f"        qa            → --assignee {qa_profile}\n"
+        f"        reviewer      → --assignee {rev_profile}\n"
+        f"        security      → --assignee {sec_profile}\n"
+        f"        documentation → --assignee {doc_profile}\n"
+        f"      Create in this order:\n"
+        f"      a) hermes kanban create \"#{n} developer\" --assignee {dev_profile} --idempotency-key developer-{n} --workspace dir:{workdir} → save as DEV_TASK_ID\n"
+        f"      b) hermes kanban create \"#{n} qa\" --assignee {qa_profile} --idempotency-key qa-{n} --workspace dir:{workdir} --parent DEV_TASK_ID → save as QA_TASK_ID\n"
+        f"      c) hermes kanban create \"#{n} reviewer\" --assignee {rev_profile} --idempotency-key reviewer-{n} --workspace dir:{workdir} --parent QA_TASK_ID\n"
+        f"      d) hermes kanban create \"#{n} security\" --assignee {sec_profile} --idempotency-key security-{n} --workspace dir:{workdir} --parent QA_TASK_ID\n"
+        f"      e) hermes kanban create \"#{n} docs\" --assignee {doc_profile} --idempotency-key docs-{n} --workspace dir:{workdir} --parent DEV_TASK_ID --parent REVIEWER_TASK_ID --parent SECURITY_TASK_ID\n"
         f"   4) 🚨 COMPLETE YOUR KANBAN CARD with summary starting EXACTLY:\n"
         f"      'assigned: developer=<id>, qa=<id>, reviewer=<id>, security=<id>, docs=<id> for issue #{n}'\n"
         f"      The dispatcher detects this EXACT prefix to confirm team assignment.\n"
         f"   5) Run: bash ~/.hermes/scripts/daedalus-cron.sh\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
+    if coding_agent != "none" and coding_agent in _DELEGATION_INSTRUCTIONS:
+        _body += _DELEGATION_INSTRUCTIONS[coding_agent]
+    return _body
 
 
 def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                      notify_target: str, base_branch: str, provider_name: str,
                      security_notify_targets: Optional[List[str]] = None,
-                     label_overrides: Optional[Dict[str, Any]] = None) -> str:
+                     label_overrides: Optional[Dict[str, Any]] = None,
+                     profiles: Optional[Dict[str, str]] = None,
+                     coding_agent: str = "none") -> str:
     """Phase-3 triage body: DEVELOPER → REVIEWER → SECURITY-ANALYST → DOCUMENTATION.
 
     ``label_overrides`` (from ``execution.label_overrides`` in config) can suppress
@@ -727,6 +825,7 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         (lbl["name"] if isinstance(lbl, dict) else lbl).lower()
         for lbl in (issue.get("labels") or [])
     ]
+    p = profiles or _DEFAULT_PROFILES
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     pr_create_howto = _PR_CREATE_HOWTO.get(provider_name,
@@ -797,7 +896,7 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"NOTE: messaging-platform delivery is handled automatically by the dispatcher — do NOT "
         f"attempt to send the report yourself.\n"
     )
-    return (
+    _body = (
         f"Implement issue {repo}#{n}: {title}\n"
         f"The VALIDATOR confirmed this issue is real and safe. The PM has written the spec — "
         f"read it on GitHub issue #{n} before starting. "
@@ -816,11 +915,24 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"post a comment on GitHub issue #{n} describing the blocker clearly. The PM monitors "
         f"this issue and will respond with clarification. Only escalate to human review if the "
         f"blocker is a genuine security risk or fundamentally unsolvable without product-level decisions.\n\n"
+        f"⚠️  REQUIRED FOR ALL TASKS YOU CREATE:\n"
+        f"  (A) Title MUST start with `#{n} ` — e.g. `#{n} Implement fix`.\n"
+        f"      The dispatcher uses the issue number to trace board state back to GitHub.\n"
+        f"  (B) Assignee MUST use the dashed Daedalus profile name:\n"
+        f"      --assignee {p.get('developer', _DEFAULT_PROFILES['developer'])} (NOT --assignee developer)\n"
+        f"      --assignee {p.get('qa', _DEFAULT_PROFILES['qa'])} (NOT --assignee qa)\n"
+        f"      --assignee {p.get('reviewer', _DEFAULT_PROFILES['reviewer'])} (NOT --assignee reviewer)\n"
+        f"      --assignee {p.get('security', _DEFAULT_PROFILES['security'])} (NOT --assignee security-analyst)\n"
+        f"      --assignee {p.get('documentation', _DEFAULT_PROFILES['documentation'])} (NOT --assignee documentation)\n"
+        f"      Generic role names CANNOT be dispatched and will stall the pipeline.\n\n"
         f"Decompose this into the following role tasks IN ORDER — each depends on the previous:\n\n"
         f"{roles_text}"
         f"{doc_role}"
         f"\n--- Issue #{n} ---\n{body}\n"
     )
+    if coding_agent != "none" and coding_agent in _DELEGATION_INSTRUCTIONS:
+        _body += _DELEGATION_INSTRUCTIONS[coding_agent]
+    return _body
 
 
 _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
@@ -1244,6 +1356,176 @@ def _check_follow_ups_from_reviewer_prs(
     return total
 
 
+# Generic role names the PM agent may use instead of Daedalus profile names.
+# Maps generic name → key in the profiles dict.
+_GENERIC_TO_ROLE: Dict[str, str] = {
+    "developer": "developer",
+    "qa": "qa",
+    "reviewer": "reviewer",
+    "security-analyst": "security",
+    "security": "security",
+    "documentation": "documentation",
+    "accessibility": "accessibility",
+    "planner": "pm",
+}
+
+
+def _remap_generic_role_assignees(
+    slug: str, profiles: Dict[str, str], *, dry_run: bool = False,
+) -> Dict[str, tuple]:
+    """Auto-correct generic role names to Daedalus profile names on todo/ready tasks.
+
+    The PM agent sometimes sets assignee='developer' instead of 'developer-daedalus'.
+    This runs each tick before dispatch so tasks are corrected before workers are spawned.
+    Returns {task_id: (original_assignee, remapped_assignee)} for any remapped tasks.
+    """
+    profile_values = set(profiles.values())
+    remapped: Dict[str, tuple] = {}
+    for status in ("todo", "ready"):
+        for task in kanban.list_tasks(slug, status=status):
+            original = (task.get("assignee") or "").strip()
+            if not original or original in profile_values:
+                continue
+            role = _GENERIC_TO_ROLE.get(original)
+            if role is None:
+                logger.debug(
+                    "dispatch: remap: unknown assignee %r on task %s — skipping",
+                    original, task.get("id", "?"),
+                )
+                continue
+            new_assignee = profiles.get(role)
+            if not new_assignee:
+                continue
+            task_id = (task.get("id") or task.get("task_id") or "").strip()
+            if not task_id:
+                continue
+            if dry_run:
+                logger.info(
+                    "[dry-run] remap: would reassign %s: %s → %s",
+                    task_id, original, new_assignee,
+                )
+                remapped[task_id] = (original, new_assignee)
+            elif kanban.reassign_task(slug, task_id, new_assignee):
+                remapped[task_id] = (original, new_assignee)
+    if remapped:
+        lines = "\n".join(
+            f"  {tid}: {orig} → {new}" for tid, (orig, new) in remapped.items()
+        )
+        logger.info("dispatch: remapped %d generic assignee(s) → Daedalus profiles:\n%s",
+                    len(remapped), lines)
+    return remapped
+
+
+def _find_issue_n_from_parents(slug: str, task_id: str) -> Optional[str]:
+    """Return the first issue number found in a parent task's title or body.
+
+    Queries task_links in the board SQLite DB directly since the kanban CLI
+    does not expose parent IDs in list output.
+    """
+    db_path = os.path.expanduser(f"~/.hermes/kanban/boards/{slug}/kanban.db")
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT t.title, t.body FROM task_links l JOIN tasks t ON t.id = l.parent_id WHERE l.child_id = ?",
+            (task_id,),
+        ).fetchall()
+        conn.close()
+        for parent_title, parent_body in rows:
+            text = (parent_title or "") + " " + (parent_body or "")
+            m = re.search(r"#(\d+)", text)
+            if m:
+                return m.group(1)
+    except Exception as exc:
+        logger.debug("dispatch: repair: parent lookup failed for %s: %s", task_id, exc)
+    return None
+
+
+def _repair_orphan_tasks(
+    slug: str, profiles: Dict[str, str], *, dry_run: bool = False,
+) -> int:
+    """Auto-repair orphan kanban tasks caused by PM creation bugs.
+
+    Fixes two classes of orphan on todo/ready tasks:
+      1. Generic role assignees (developer/qa/reviewer/etc.) → Daedalus profiles
+      2. Child task titles missing the parent issue #N → auto-prefix from body/parents
+
+    Both repairs are idempotent (re-running on already-fixed tasks is a no-op) and
+    logged at INFO so the operator sees exactly what was auto-fixed.
+    Returns the count of individual repairs applied.
+    """
+    profile_values = set(profiles.values())
+    repaired = 0
+
+    for task in kanban.list_tasks(slug):
+        if (task.get("status") or "").lower() not in ("todo", "ready"):
+            continue
+        task_id = (task.get("id") or task.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        title = (task.get("title") or "").strip()
+        assignee = (task.get("assignee") or "").strip()
+
+        # ── Bug 1: generic assignee → Daedalus profile ────────────────────
+        if assignee and assignee not in profile_values:
+            role = _GENERIC_TO_ROLE.get(assignee)
+            if role:
+                new_assignee = profiles.get(role)
+                if new_assignee:
+                    if dry_run:
+                        logger.info(
+                            "[dry-run] repair: would reassign %s: %s → %s (title=%r)",
+                            task_id, assignee, new_assignee, title[:60],
+                        )
+                        repaired += 1
+                    elif kanban.reassign_task(slug, task_id, new_assignee):
+                        logger.info(
+                            "dispatch: repair: reassigned %s: %s → %s title=%r",
+                            task_id, assignee, new_assignee, title[:60],
+                        )
+                        repaired += 1
+            else:
+                logger.debug(
+                    "dispatch: repair: unknown assignee %r on %s — skipping",
+                    assignee, task_id,
+                )
+
+        # ── Bug 2: missing issue-number prefix in title ────────────────────
+        if re.search(r"#\d+", title):
+            continue  # already has issue number, nothing to do
+
+        # Body not included in list_tasks output — fetch via show_card.
+        issue_n: Optional[str] = None
+        card = kanban.show_card(slug, task_id) or {}
+        body_text = (card.get("body") or "").strip()
+        m = re.search(r"#(\d+)", body_text)
+        if m:
+            issue_n = m.group(1)
+
+        if not issue_n:
+            issue_n = _find_issue_n_from_parents(slug, task_id)
+
+        if issue_n:
+            new_title = f"#{issue_n} {title}"
+            if dry_run:
+                logger.info(
+                    "[dry-run] repair: would prefix title on %s: %r → %r",
+                    task_id, title[:60], new_title[:80],
+                )
+                repaired += 1
+            elif kanban.rename_task(slug, task_id, new_title):
+                logger.info(
+                    "dispatch: repair: prefixed title on %s: %r → %r",
+                    task_id, title[:60], new_title[:80],
+                )
+                repaired += 1
+
+    if repaired > 0:
+        logger.info("dispatch: repaired %d orphan task(s) on board %s", repaired, slug)
+    return repaired
+
+
 def _check_confirmed_validators(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -1251,6 +1533,7 @@ def _check_confirmed_validators(
     label_overrides: Optional[Dict[str, Any]] = None,
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
+    coding_agent: str = "none",
     *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
@@ -1328,7 +1611,8 @@ def _check_confirmed_validators(
                         vid = kanban.create_task(
                             slug, f"#{n_nr} {issue_for_pm.get('title', '')}",
                             body=_pm_body(repo, issue_for_pm, "CONFIRMED: (from github comment fallback)",
-                                          workdir, base_branch, provider_name),
+                                          workdir, base_branch, provider_name, profiles=p,
+                                          coding_agent=coding_agent),
                             assignee=p["pm"],
                             idempotency_key=ikey,
                             workspace=f"dir:{workdir}" if workdir else "",
@@ -1410,7 +1694,8 @@ def _check_confirmed_validators(
             continue
         vid = kanban.create_task(
             slug, f"#{n} {issue.get('title', '')}",
-            body=_pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name),
+            body=_pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name, profiles=p,
+                          coding_agent=coding_agent),
             assignee=p["pm"],
             idempotency_key=ikey,
             workspace=f"dir:{workdir}" if workdir else "",
@@ -1429,6 +1714,7 @@ def _check_completed_pm(
     label_overrides: Optional[Dict[str, Any]] = None,
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
+    coding_agent: str = "none",
     *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
@@ -1492,7 +1778,8 @@ def _check_completed_pm(
         tid = kanban.create_triage(
             slug, n, issue.get("title", ""),
             _downstream_body(repo, issue, iterations, workdir, notify_target, base_branch,
-                             provider_name, security_notify_targets, label_overrides),
+                             provider_name, security_notify_targets, label_overrides,
+                             profiles=p, coding_agent=coding_agent),
             idempotency_key=f"issue-{n}",
             workspace=f"dir:{workdir}" if workdir else None,
         )
@@ -1719,6 +2006,12 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     iterations = int(execution.get("max_lifecycle_iterations", 3))   # self-improving loop cap (configurable)
     profiles = _resolve_profiles(execution)
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
+    coding_agent = _resolve_coding_agent(execution)
+    if coding_agent not in ("none", "hermes"):
+        _dev_skills = list(role_skills.get("developer") or [])
+        if "coding-agents" not in _dev_skills:
+            _dev_skills.append("coding-agents")
+        role_skills = {**role_skills, "developer": _dev_skills}
     _comment_header_tpl: str = (
         execution.get("comment_header_template")
         or notify_templates.DEFAULT_COMMENT_HEADER_TEMPLATE
@@ -1870,6 +2163,12 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     if stalled_cards:
         logger.info("dispatch: %d stalled card(s) moved to blocked", len(stalled_cards))
 
+    # Defense-in-depth: auto-repair orphan tasks created by the PM agent.
+    # Fixes generic assignees (developer → developer-daedalus) AND missing issue-
+    # number prefixes in titles (#N). Runs before dispatch so workers are never
+    # spawned with unresolvable assignees or untraceable titles.
+    _repair_orphan_tasks(slug, profiles, dry_run=dry_run)
+
     # Phase-2 trigger: validator CONFIRMED → PM spec task.
     # Phase-3 trigger: PM SPEC done → team triage (developer/reviewer/security/docs).
     # Phase-3b: team BLOCKED → PM consultation task (re-activation).
@@ -1881,7 +2180,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     confirmed_triggered = _check_confirmed_validators(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
-        profiles=profiles, role_skills=role_skills, dry_run=dry_run, provider=provider,
+        profiles=profiles, role_skills=role_skills, coding_agent=coding_agent,
+        dry_run=dry_run, provider=provider,
     )
     if confirmed_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -1889,7 +2189,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     pm_triggered = _check_completed_pm(
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
-        profiles=profiles, role_skills=role_skills, dry_run=dry_run, provider=provider,
+        profiles=profiles, role_skills=role_skills, coding_agent=coding_agent,
+        dry_run=dry_run, provider=provider,
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

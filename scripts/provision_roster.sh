@@ -8,10 +8,11 @@
 # planner owning architecture and project-manager owning intake + acceptance).
 #
 # Strategy: delete + recreate each role so the end state is identical every run (this script
-# is the source of truth). Profiles are cloned from `default` for model + provider keys,
-# created with --no-skills (no bundled skill packs -> genuinely specialized + opts out of
-# `hermes update` skill re-sync), then seeded with exactly their matrix skills, a git
-# credential store for pushes, and provider tokens in .env for API calls (no gh CLI).
+# is the source of truth). Profiles are cloned from `default` (which copies skills, agent
+# config, etc.), then model/provider/fallback_providers are stripped so they inherit from
+# top-level config.yaml defaults. Users can still override per-profile by adding model: to
+# their config. Profiles are seeded with exactly their matrix skills, a git credential store
+# for pushes, and provider tokens in .env for API calls (no gh CLI).
 #
 # Re-run any time to reset the roster to spec. Safe: only touches the nine role names below.
 
@@ -185,6 +186,25 @@ setup_role() {
   # profile loads ONLY its lifecycle skills. (--no-skills can't combine with --clone.)
   hermes profile delete "$name" -y >/dev/null 2>&1 || true
   hermes profile create "$name" --clone --description "$desc" >/dev/null
+
+  # Strip model/provider so profiles inherit from top-level config.yaml defaults.
+  # Users can still override per-profile by adding model: to their config.
+  python3 - "$PROFILES/$name/config.yaml" <<'PY'
+import sys
+import yaml
+
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    sys.exit(0)
+cfg.pop("model", None)
+cfg.pop("providers", None)
+cfg.pop("fallback_providers", None)
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PY
 
   # Reseed skills to EXACTLY the matrix: nuke the cloned skill set, keep only agent-skills.
   local dst="$PROFILES/$name/skills/agent-skills"

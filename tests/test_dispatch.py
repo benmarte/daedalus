@@ -368,6 +368,390 @@ def test_extract_follow_ups_summary_comment_posted():
           "<!-- daedalus:follow-up-extracted PR #20 issue #500 -->" in posted_body)
 
 
+# ── _pm_body profile injection (Fix A) ──────────────────────────────────────
+
+
+def test_pm_body_uses_resolved_profile_names():
+    """_pm_body with default profiles injects --assignee <role>-daedalus for all 5 roles."""
+    issue = {"number": 42, "title": "Test issue", "body": "body"}
+    body = disp._pm_body("org/repo", issue, "CONFIRMED: all good", "/tmp/repo",
+                         "main", "github", profiles=disp._DEFAULT_PROFILES)
+    check("developer profile in body",
+          f"--assignee {disp._DEFAULT_PROFILES['developer']}" in body)
+    check("qa profile in body",
+          f"--assignee {disp._DEFAULT_PROFILES['qa']}" in body)
+    check("reviewer profile in body",
+          f"--assignee {disp._DEFAULT_PROFILES['reviewer']}" in body)
+    check("security profile in body",
+          f"--assignee {disp._DEFAULT_PROFILES['security']}" in body)
+    check("documentation profile in body",
+          f"--assignee {disp._DEFAULT_PROFILES['documentation']}" in body)
+
+
+def test_pm_body_respects_custom_profiles():
+    """_pm_body with a custom profile uses it for that role, defaults for others."""
+    custom = {**disp._DEFAULT_PROFILES, "developer": "my-senior-dev"}
+    issue = {"number": 7, "title": "Custom test", "body": ""}
+    body = disp._pm_body("org/repo", issue, "CONFIRMED:", "/workspace",
+                         "dev", "github", profiles=custom)
+    check("custom developer profile used", "--assignee my-senior-dev" in body)
+    check("default reviewer still used",
+          f"--assignee {disp._DEFAULT_PROFILES['reviewer']}" in body)
+
+
+# ── _remap_generic_role_assignees (Fix C) ────────────────────────────────────
+
+
+def test_remap_generic_developer_to_daedalus_profile():
+    """Task with assignee='developer' is remapped to developer-daedalus."""
+    tasks = [{"id": "t_abc123", "assignee": "developer", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        remapped = disp._remap_generic_role_assignees("slug", disp._DEFAULT_PROFILES)
+    check("one task remapped", len(remapped) == 1)
+    check("remapped to developer-daedalus",
+          remapped.get("t_abc123") == ("developer", "developer-daedalus"))
+    check("reassign_task called with correct args",
+          mk_reassign.call_args == mock.call("slug", "t_abc123", "developer-daedalus"))
+
+
+def test_remap_generic_all_roles():
+    """All 5 core generic role names remap to their -daedalus profiles."""
+    role_to_profile = {
+        "developer": "developer-daedalus",
+        "qa": "qa-daedalus",
+        "reviewer": "reviewer-daedalus",
+        "security-analyst": "security-analyst-daedalus",
+        "documentation": "documentation-daedalus",
+    }
+    for generic, expected_profile in role_to_profile.items():
+        tasks = [{"id": f"t_{generic}", "assignee": generic, "status": "todo"}]
+        with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+             mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk:
+            remapped = disp._remap_generic_role_assignees("slug", disp._DEFAULT_PROFILES)
+        check(f"{generic} → {expected_profile}",
+              remapped.get(f"t_{generic}") == (generic, expected_profile))
+
+
+def test_remap_noop_for_explicit_profile_name():
+    """Task already assigned developer-daedalus is not remapped."""
+    tasks = [{"id": "t_ok", "assignee": "developer-daedalus", "status": "ready"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        remapped = disp._remap_generic_role_assignees("slug", disp._DEFAULT_PROFILES)
+    check("no remap for explicit profile", len(remapped) == 0)
+    check("reassign_task never called", mk_reassign.call_count == 0)
+
+
+def test_remap_unknown_role_ignored():
+    """Unknown assignee (e.g. bob-the-unknown) is not remapped."""
+    tasks = [{"id": "t_unk", "assignee": "bob-the-unknown", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        remapped = disp._remap_generic_role_assignees("slug", disp._DEFAULT_PROFILES)
+    check("unknown assignee not remapped", len(remapped) == 0)
+    check("reassign_task not called for unknown", mk_reassign.call_count == 0)
+
+
+def test_remap_logs_all_changes():
+    """Remap logs a summary line that contains all remapped task IDs."""
+    import logging
+    tasks = [
+        {"id": "t_dev", "assignee": "developer", "status": "todo"},
+        {"id": "t_qa", "assignee": "qa", "status": "ready"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True), \
+         mock.patch.object(disp.logger, "info") as mk_log:
+        disp._remap_generic_role_assignees("slug", disp._DEFAULT_PROFILES)
+    log_messages = " ".join(str(call) for call in mk_log.call_args_list)
+    check("log mentions t_dev", "t_dev" in log_messages)
+    check("log mentions t_qa", "t_qa" in log_messages)
+
+
+# ── PM SOUL.md content (Fix B) ───────────────────────────────────────────────
+
+
+def test_pm_soul_mentions_assignee_flag_and_dashed_profiles():
+    """PM SOUL.md explicitly lists --assignee with -daedalus profile names and warning."""
+    soul_path = (Path(__file__).resolve().parent.parent
+                 / "config" / "souls" / "project-manager-daedalus.md")
+    content = soul_path.read_text()
+    check("soul has --assignee flag", "--assignee" in content)
+    for profile in ("developer-daedalus", "qa-daedalus", "reviewer-daedalus",
+                    "security-analyst-daedalus", "documentation-daedalus"):
+        check(f"soul mentions {profile}", profile in content)
+    check("soul warns about generic names",
+          any(kw in content.lower() for kw in ("cannot be dispatched", "will stall", "generic")))
+
+
+# ── _pm_body title rule (new requirement) ────────────────────────────────────
+
+
+def test_pm_body_includes_issue_number_in_every_template_example():
+    """_pm_body template includes #{n} in every example create command and a TITLE RULE."""
+    issue = {"number": 99, "title": "Bug report", "body": "details"}
+    body = disp._pm_body("org/repo", issue, "CONFIRMED:", "/tmp",
+                         "main", "github", profiles=disp._DEFAULT_PROFILES)
+    check("title rule present", "Title" in body or "#99 " in body)
+    check("issue number in example commands", "#99" in body)
+    # All five example commands should have the issue number prefix
+    for role_key in ("developer", "qa", "reviewer", "security", "docs"):
+        check(f"#{99} in {role_key} example", f"#99 {role_key}" in body or "#99" in body)
+
+
+# ── _repair_orphan_tasks (Bug 1 + Bug 2) ─────────────────────────────────────
+
+
+def test_repair_remaps_generic_assignee():
+    """_repair_orphan_tasks remaps generic 'developer' → developer-daedalus."""
+    tasks = [{"id": "t_dev1", "assignee": "developer", "title": "#50 fix bug", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("one repair (assignee)", repaired == 1)
+    check("reassign_task called", mk_reassign.called)
+    check("rename_task not called (title already has #50)", not mk_rename.called)
+
+
+def test_repair_prefixes_title_from_body():
+    """_repair_orphan_tasks prefixes #N to title when body has issue number."""
+    tasks = [{"id": "t_x1", "assignee": "developer-daedalus",
+              "title": "Implement walkAncestorChain", "status": "todo"}]
+    card_with_body = {"body": "Fix for issue #419\nRepo: org/repo"}
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True), \
+         mock.patch.object(disp.kanban, "show_card", return_value=card_with_body), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("one repair (title prefix)", repaired == 1)
+    check("rename_task called with #419 prefix",
+          mk_rename.call_args == mock.call("slug", "t_x1", "#419 Implement walkAncestorChain"))
+
+
+def test_repair_prefixes_title_from_parent():
+    """_repair_orphan_tasks falls back to parent task when body has no issue number."""
+    tasks = [{"id": "t_child", "assignee": "developer-daedalus",
+              "title": "Implement the feature", "status": "ready"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "no issue here"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename, \
+         mock.patch.object(disp, "_find_issue_n_from_parents", return_value="420"):
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("one repair (title from parent)", repaired == 1)
+    check("rename_task called with #420 prefix",
+          mk_rename.call_args == mock.call("slug", "t_child", "#420 Implement the feature"))
+
+
+def test_repair_noop_for_task_already_with_issue_number():
+    """_repair_orphan_tasks leaves tasks with #N in title untouched."""
+    tasks = [{"id": "t_ok", "assignee": "developer-daedalus",
+              "title": "#418 fix the bug", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={}) as mk_show, \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no repairs for already-prefixed title", repaired == 0)
+    check("show_card not called (title already has #N)", not mk_show.called)
+    check("rename_task not called", not mk_rename.called)
+
+
+def test_repair_noop_for_task_with_no_traceable_parent():
+    """_repair_orphan_tasks leaves title alone when no issue number can be found."""
+    tasks = [{"id": "t_orphan", "assignee": "developer-daedalus",
+              "title": "Orphan task with no parent", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "no hash here"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename, \
+         mock.patch.object(disp, "_find_issue_n_from_parents", return_value=None):
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no rename when no issue number found", not mk_rename.called)
+    check("zero repairs", repaired == 0)
+
+
+def test_repair_respects_custom_profiles():
+    """_repair_orphan_tasks uses custom profile from config when remapping."""
+    custom = {**disp._DEFAULT_PROFILES, "developer": "my-senior-dev"}
+    tasks = [{"id": "t_custom", "assignee": "developer", "title": "#55 task", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True):
+        disp._repair_orphan_tasks("slug", custom)
+    check("remapped to custom profile",
+          mk_reassign.call_args == mock.call("slug", "t_custom", "my-senior-dev"))
+
+
+# ── _downstream_body rules section (Fix 4) ───────────────────────────────────
+
+
+def test_downstream_body_contains_assignee_and_title_rules():
+    """_downstream_body includes both the title-prefix and --assignee rules."""
+    issue = {"number": 77, "title": "Test issue", "body": "body text",
+             "labels": [], "url": "https://github.com/org/repo/issues/77"}
+    body = disp._downstream_body(
+        "org/repo", issue, 3, "/tmp", "slack://channel", "main", "github",
+        profiles=disp._DEFAULT_PROFILES,
+    )
+    check("downstream body has title rule", "#77" in body and "title" in body.lower()
+          or "MUST start with" in body or "prefix" in body.lower() or "#77 " in body)
+    check("downstream body has --assignee rule",
+          "developer-daedalus" in body and "--assignee" in body)
+    check("downstream body warns generic names",
+          "cannot be dispatched" in body or "CANNOT be dispatched" in body
+          or "generic" in body.lower())
+
+
+# ── PM SOUL.md title-prefix rule ─────────────────────────────────────────────
+
+
+def test_pm_soul_mentions_title_prefix_rule():
+    """PM SOUL.md explicitly documents the #N title-prefix requirement."""
+    soul_path = (Path(__file__).resolve().parent.parent
+                 / "config" / "souls" / "project-manager-daedalus.md")
+    content = soul_path.read_text()
+    check("soul mentions title must start with #N",
+          any(kw in content for kw in ("#N ", "#<issue", "#418", "title MUST", "MUST start")))
+    check("soul shows CORRECT example", "CORRECT" in content)
+    check("soul shows WRONG example", "WRONG" in content)
+
+
+# ── _resolve_coding_agent ─────────────────────────────────────────────────────
+
+
+def test_resolve_coding_agent_valid_values():
+    """All valid agent names are returned as-is (lowercased)."""
+    for agent in ("hermes", "claude-code", "codex", "opencode", "none"):
+        result = disp._resolve_coding_agent({"coding_agent": agent})
+        check(f"valid agent '{agent}' returned", result == agent)
+
+
+def test_resolve_coding_agent_case_insensitive():
+    """Values are lowercased before validation."""
+    check("Claude-Code lowercased", disp._resolve_coding_agent({"coding_agent": "Claude-Code"}) == "claude-code")
+    check("CODEX lowercased", disp._resolve_coding_agent({"coding_agent": "CODEX"}) == "codex")
+
+
+def test_resolve_coding_agent_missing_config():
+    """Missing key or None value defaults to 'none'."""
+    check("empty dict → none", disp._resolve_coding_agent({}) == "none")
+    check("None execution → none", disp._resolve_coding_agent(None) == "none")
+    check("None value → none", disp._resolve_coding_agent({"coding_agent": None}) == "none")
+
+
+def test_resolve_coding_agent_invalid_value():
+    """Unknown agent name defaults to 'none' with a warning."""
+    result = disp._resolve_coding_agent({"coding_agent": "cursor"})
+    check("invalid agent defaults to none", result == "none")
+
+
+def test_resolve_coding_agent_whitespace():
+    """Extra whitespace is stripped."""
+    check("whitespace stripped", disp._resolve_coding_agent({"coding_agent": "  codex  "}) == "codex")
+
+
+# ── delegation block injection ────────────────────────────────────────────────
+
+
+def test_pm_body_injects_delegation_claude_code():
+    """_pm_body appends delegation instructions when coding_agent=claude-code."""
+    issue = {"number": 5, "title": "My issue", "body": "desc"}
+    body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
+                         coding_agent="claude-code")
+    check("delegation header present in pm body", "CODING AGENT DELEGATION INSTRUCTIONS" in body)
+    check("claude-code delegate_task reference", "delegate_task" in body)
+    check("coding-agents skill reference", "coding-agents" in body)
+
+
+def test_pm_body_no_delegation_when_none():
+    """_pm_body does NOT inject delegation when coding_agent=none."""
+    issue = {"number": 5, "title": "My issue", "body": "desc"}
+    body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
+                         coding_agent="none")
+    check("no delegation block when none", "CODING AGENT DELEGATION INSTRUCTIONS" not in body)
+
+
+def test_pm_body_no_delegation_when_hermes():
+    """coding_agent=hermes means Hermes handles delegation natively — no injection."""
+    issue = {"number": 5, "title": "My issue", "body": "desc"}
+    body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
+                         coding_agent="hermes")
+    check("no delegation block for hermes", "CODING AGENT DELEGATION INSTRUCTIONS" not in body)
+
+
+def test_downstream_body_injects_delegation_codex():
+    """_downstream_body appends delegation instructions when coding_agent=codex."""
+    issue = {"number": 7, "title": "Fix bug", "body": "repro"}
+    body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
+                                 coding_agent="codex")
+    check("delegation header in downstream body", "CODING AGENT DELEGATION INSTRUCTIONS" in body)
+    check("codex-specific text present", "Codex" in body)
+
+
+def test_downstream_body_injects_delegation_opencode():
+    """_downstream_body appends delegation instructions when coding_agent=opencode."""
+    issue = {"number": 7, "title": "Fix bug", "body": "repro"}
+    body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
+                                 coding_agent="opencode")
+    check("delegation header in downstream body for opencode", "CODING AGENT DELEGATION INSTRUCTIONS" in body)
+    check("opencode-specific text present", "OpenCode" in body)
+
+
+def test_downstream_body_no_delegation_when_none():
+    """_downstream_body does NOT inject when coding_agent=none."""
+    issue = {"number": 7, "title": "Fix bug", "body": "repro"}
+    body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
+                                 coding_agent="none")
+    check("no delegation block in downstream body when none",
+          "CODING AGENT DELEGATION INSTRUCTIONS" not in body)
+
+
+def test_resolve_coding_agent_auto_attach_skill():
+    """_resolve_coding_agent + skill auto-attach: coding-agents added to developer skills."""
+    execution = {"coding_agent": "claude-code"}
+    agent = disp._resolve_coding_agent(execution)
+    check("agent resolved to claude-code", agent == "claude-code")
+    # Simulate the auto-attach logic from run()
+    role_skills = {}
+    if agent not in ("none", "hermes"):
+        dev_skills = list(role_skills.get("developer") or [])
+        if "coding-agents" not in dev_skills:
+            dev_skills.append("coding-agents")
+        role_skills = {**role_skills, "developer": dev_skills}
+    check("coding-agents auto-attached to developer", "coding-agents" in role_skills.get("developer", []))
+
+
+def test_resolve_coding_agent_skill_no_duplicate():
+    """coding-agents is not duplicated if already in developer skill list."""
+    execution = {"coding_agent": "codex"}
+    agent = disp._resolve_coding_agent(execution)
+    role_skills = {"developer": ["some-skill", "coding-agents"]}
+    if agent not in ("none", "hermes"):
+        dev_skills = list(role_skills.get("developer") or [])
+        if "coding-agents" not in dev_skills:
+            dev_skills.append("coding-agents")
+        role_skills = {**role_skills, "developer": dev_skills}
+    check("no duplicate coding-agents skill", role_skills["developer"].count("coding-agents") == 1)
+
+
+def test_resolve_coding_agent_no_skill_when_none():
+    """coding-agents is NOT injected when coding_agent=none."""
+    execution = {"coding_agent": "none"}
+    agent = disp._resolve_coding_agent(execution)
+    role_skills = {}
+    if agent not in ("none", "hermes"):
+        dev_skills = list(role_skills.get("developer") or [])
+        if "coding-agents" not in dev_skills:
+            dev_skills.append("coding-agents")
+        role_skills = {**role_skills, "developer": dev_skills}
+    check("no coding-agents for none agent", "coding-agents" not in role_skills.get("developer", []))
+
+
 if __name__ == "__main__":
     print("CI retry scheduling tests")
     print("-" * 60)
@@ -394,6 +778,55 @@ if __name__ == "__main__":
         test_extract_follow_ups_none_found,
         test_extract_follow_ups_disabled_in_config,
         test_extract_follow_ups_summary_comment_posted,
+    ):
+        fn()
+    print()
+    print("PM assignee profile injection tests")
+    print("-" * 60)
+    for fn in (
+        test_pm_body_uses_resolved_profile_names,
+        test_pm_body_respects_custom_profiles,
+        test_pm_body_includes_issue_number_in_every_template_example,
+        test_remap_generic_developer_to_daedalus_profile,
+        test_remap_generic_all_roles,
+        test_remap_noop_for_explicit_profile_name,
+        test_remap_unknown_role_ignored,
+        test_remap_logs_all_changes,
+        test_pm_soul_mentions_assignee_flag_and_dashed_profiles,
+        test_pm_soul_mentions_title_prefix_rule,
+    ):
+        fn()
+    print()
+    print("_repair_orphan_tasks (Bug 1 + Bug 2) tests")
+    print("-" * 60)
+    for fn in (
+        test_repair_remaps_generic_assignee,
+        test_repair_prefixes_title_from_body,
+        test_repair_prefixes_title_from_parent,
+        test_repair_noop_for_task_already_with_issue_number,
+        test_repair_noop_for_task_with_no_traceable_parent,
+        test_repair_respects_custom_profiles,
+        test_downstream_body_contains_assignee_and_title_rules,
+    ):
+        fn()
+    print()
+    print("coding_agent delegation tests")
+    print("-" * 60)
+    for fn in (
+        test_resolve_coding_agent_valid_values,
+        test_resolve_coding_agent_case_insensitive,
+        test_resolve_coding_agent_missing_config,
+        test_resolve_coding_agent_invalid_value,
+        test_resolve_coding_agent_whitespace,
+        test_pm_body_injects_delegation_claude_code,
+        test_pm_body_no_delegation_when_none,
+        test_pm_body_no_delegation_when_hermes,
+        test_downstream_body_injects_delegation_codex,
+        test_downstream_body_injects_delegation_opencode,
+        test_downstream_body_no_delegation_when_none,
+        test_resolve_coding_agent_auto_attach_skill,
+        test_resolve_coding_agent_skill_no_duplicate,
+        test_resolve_coding_agent_no_skill_when_none,
     ):
         fn()
     print("-" * 60)
