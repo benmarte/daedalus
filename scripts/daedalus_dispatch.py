@@ -128,17 +128,27 @@ def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
     return result
 
 
+_CODING_AGENT_DEFAULTS: Dict[str, str] = {
+    "claude-code": "claude -p",
+    "codex": "codex exec --full-auto",
+    "opencode": "opencode run",
+}
+
+
 def _build_delegation_instructions(agent: str, cmd: str = "") -> str:
     """Return delegation instruction text for the developer task body.
 
     ``cmd`` is the custom CLI command (e.g. 'cc-rizq', 'cc-rewst'); when
-    empty the agent-specific default is used (see coding-agents skill).
+    empty the agent-specific default command is shown.
     """
-    acp_line = (
-        f"     - acp_command: \"{cmd}\"  (custom CLI command configured for this project)\n"
-        if cmd else
-        "     - acp_command: \"<CLI command from coding-agents skill>\"\n"
-    )
+    effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
+    if cmd:
+        acp_note = f"(custom command configured for this project)"
+    else:
+        acp_note = f"(default for {agent} — set coding_agent_cmd to override)"
+
+    acp_line = f"     - acp_command: \"{effective_cmd}\"  {acp_note}\n" if effective_cmd else ""
+
     if agent == "claude-code":
         return (
             "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
@@ -151,7 +161,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "") -> str:
             "     - context: \"<include file paths, error messages, repo structure>\"\n"
             "     - toolsets: [\"terminal\", \"file\"]  (for code work)\n"
             + acp_line +
-            "  3. The subagent will run Claude Code in one-shot mode and return results.\n"
+            "  3. The subagent will run Claude Code in print mode and return results.\n"
             "  4. Verify the subagent's work before completing your card.\n"
             "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
             "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
@@ -167,8 +177,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "") -> str:
             "     - goal: \"<copy the full task requirements here>\"\n"
             "     - context: \"<include file paths, error messages, repo structure>\"\n"
             "     - toolsets: [\"terminal\", \"file\"]\n"
-            + (acp_line if cmd else "") +
-            "  3. The subagent will run Codex CLI and return results.\n"
+            + acp_line +
+            "  3. The subagent will run Codex in exec mode and return results.\n"
             "  4. Verify the subagent's work before completing your card.\n"
             "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
             "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
@@ -184,8 +194,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "") -> str:
             "     - goal: \"<copy the full task requirements here>\"\n"
             "     - context: \"<include file paths, error messages, repo structure>\"\n"
             "     - toolsets: [\"terminal\", \"file\"]\n"
-            + (acp_line if cmd else "") +
-            "  3. The subagent will run OpenCode CLI and return results.\n"
+            + acp_line +
+            "  3. The subagent will run OpenCode in one-shot mode and return results.\n"
             "  4. Verify the subagent's work before completing your card.\n"
             "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
             "     `skill_view(name='coding-agents')` for exact CLI flags.\n"

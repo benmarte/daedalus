@@ -1375,18 +1375,23 @@ function ConfigModal(props) {
           )
         ),
         ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1
-          ? React.createElement("label", { style: S.field },
-              React.createElement("span", { style: S.fieldLabel }, "CLI Command"),
-              React.createElement("input", {
-                style: S.input,
-                value: getIn(config, ["execution", "coding_agent_cmd"], ""),
-                placeholder: "e.g. cc, cc-rizq, cc-rewst, claude",
-                onChange: function (e) { updateField("execution.coding_agent_cmd", e.target.value); }
-              }),
-              React.createElement("div", { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
-                "Custom shell command to pass as acp_command to delegate_task. Leave blank to use the agent's default."
-              )
-            )
+          ? (function() {
+              var _AGENT_CMD_DEFAULTS = {"claude-code": "claude -p", "codex": "codex exec --full-auto", "opencode": "opencode run"};
+              var _currentAgent = getIn(config, ["execution", "coding_agent"], "hermes");
+              var _defaultCmd = _AGENT_CMD_DEFAULTS[_currentAgent] || "";
+              return React.createElement("label", { style: S.field },
+                React.createElement("span", { style: S.fieldLabel }, "CLI Command"),
+                React.createElement("input", {
+                  style: S.input,
+                  value: getIn(config, ["execution", "coding_agent_cmd"], ""),
+                  placeholder: _defaultCmd ? ("default: " + _defaultCmd + " — override e.g. cc-rizq") : "e.g. cc, cc-rizq, cc-rewst",
+                  onChange: function (e) { updateField("execution.coding_agent_cmd", e.target.value); }
+                }),
+                React.createElement("div", { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
+                  "Custom shell command passed as acp_command to delegate_task. Leave blank to use the default above."
+                )
+              );
+            })()
           : null
       ),
 
