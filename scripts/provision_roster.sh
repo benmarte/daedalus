@@ -187,22 +187,38 @@ setup_role() {
   hermes profile delete "$name" -y >/dev/null 2>&1 || true
   hermes profile create "$name" --clone --description "$desc" >/dev/null
 
-  # Strip model/provider so profiles inherit from top-level config.yaml defaults.
-  # Users can still override per-profile by adding model: to their config.
-  python3 - "$PROFILES/$name/config.yaml" <<'PY'
+  # Sync model/providers/fallback_providers/custom_providers from the global
+  # ~/.hermes/config.yaml into the profile so the profile uses whatever model
+  # Hermes is currently configured to use. Profiles are self-contained — they
+  # do NOT inherit from the global config at runtime, so we must copy explicitly.
+  # Users can still override by editing the profile config after provisioning.
+  python3 - "$PROFILES/$name/config.yaml" "$HOME/.hermes/config.yaml" <<'PY'
 import sys
 import yaml
 
-path = sys.argv[1]
+profile_path = sys.argv[1]
+global_path = sys.argv[2]
+
 try:
-    with open(path) as f:
+    with open(profile_path) as f:
         cfg = yaml.safe_load(f) or {}
 except FileNotFoundError:
     sys.exit(0)
-cfg.pop("model", None)
-cfg.pop("providers", None)
-cfg.pop("fallback_providers", None)
-with open(path, "w") as f:
+
+try:
+    with open(global_path) as f:
+        global_cfg = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    global_cfg = {}
+
+# Copy model-selection fields from global config into profile.
+# Strip first to remove stale cloned values, then repopulate from global.
+for key in ("model", "providers", "fallback_providers", "custom_providers"):
+    cfg.pop(key, None)
+    if key in global_cfg:
+        cfg[key] = global_cfg[key]
+
+with open(profile_path, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
 
