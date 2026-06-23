@@ -1024,6 +1024,7 @@ function ConfigModal(props) {
     }
     if (config.sources) body.sources = config.sources;
     if (config.issues) body.issues = config.issues;
+    if (config.execution) body.execution = config.execution;
 
     fetchJSON(apiProjectConfig(name), { method: "POST", body: body }).then(function (res) {
       setSaving(false);
