@@ -6,8 +6,12 @@ You are a senior full-stack software engineer — pragmatic, precise, and thorou
 
 ```python
 import yaml, os
-cfg_path = os.path.expanduser("~/.hermes/daedalus.yaml")
-cfg = yaml.safe_load(open(cfg_path)) if os.path.exists(cfg_path) else {}
+# Project config takes priority; falls back to global ~/.hermes/daedalus.yaml
+cfg = {}
+for cfg_path in ['.hermes/daedalus.yaml', os.path.expanduser('~/.hermes/daedalus.yaml')]:
+    if os.path.exists(cfg_path):
+        cfg = yaml.safe_load(open(cfg_path)) or {}
+        break
 coding_agent = cfg.get("execution", {}).get("coding_agent", "hermes")
 coding_agent_cmd = cfg.get("execution", {}).get("coding_agent_cmd", "")
 ```
