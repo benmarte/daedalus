@@ -1362,10 +1362,9 @@ function ConfigModal(props) {
           React.createElement("span", { style: S.fieldLabel }, "Agent"),
           React.createElement("select", {
             style: S.select,
-            value: getIn(config, ["execution", "coding_agent"], "none"),
+            value: getIn(config, ["execution", "coding_agent"], "hermes"),
             onChange: function (e) { updateField("execution.coding_agent", e.target.value); }
           },
-            React.createElement("option", { value: "none" }, "None — developer codes directly"),
             React.createElement("option", { value: "hermes" }, "Hermes — delegate via built-in subagent"),
             React.createElement("option", { value: "claude-code" }, "Claude Code"),
             React.createElement("option", { value: "codex" }, "Codex"),
@@ -1375,7 +1374,7 @@ function ConfigModal(props) {
             "When set, the developer agent uses delegate_task to hand off coding work to a CLI agent subagent."
           )
         ),
-        ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "none")) !== -1
+        ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1
           ? React.createElement("label", { style: S.field },
               React.createElement("span", { style: S.fieldLabel }, "CLI Command"),
               React.createElement("input", {

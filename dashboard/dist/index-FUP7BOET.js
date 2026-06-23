@@ -1723,12 +1723,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                 "select",
                 {
                   style: S.select,
-                  value: getIn(config, ["execution", "coding_agent"], "none"),
+                  value: getIn(config, ["execution", "coding_agent"], "hermes"),
                   onChange: function(e2) {
                     updateField("execution.coding_agent", e2.target.value);
                   }
                 },
-                React.createElement("option", { value: "none" }, "None \u2014 developer codes directly"),
                 React.createElement("option", { value: "hermes" }, "Hermes \u2014 delegate via built-in subagent"),
                 React.createElement("option", { value: "claude-code" }, "Claude Code"),
                 React.createElement("option", { value: "codex" }, "Codex"),
@@ -1740,7 +1739,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                 "When set, the developer agent uses delegate_task to hand off coding work to a CLI agent subagent."
               )
             ),
-            ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "none")) !== -1 ? React.createElement(
+            ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1 ? React.createElement(
               "label",
               { style: S.field },
               React.createElement("span", { style: S.fieldLabel }, "CLI Command"),

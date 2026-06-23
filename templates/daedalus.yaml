@@ -192,8 +192,8 @@ execution:
   # delegated: the dispatcher injects delegation instructions into task bodies
   # so the developer agent knows how to use the configured coding agent.
   #
-  # Options:
-  #   hermes       (default) — use Hermes delegate_task to spawn a subagent
+  # Options (default: hermes):
+  #   hermes       — use Hermes delegate_task to spawn a subagent
   #                    with the coding-agents skill pre-loaded. The subagent
   #                    runs the configured coding agent CLI (claude-code, codex,
   #                    or opencode) in one-shot mode.

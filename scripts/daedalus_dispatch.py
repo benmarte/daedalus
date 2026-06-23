@@ -205,15 +205,15 @@ def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
     """Return the configured coding agent from execution.coding_agent.
 
     Returns one of: hermes, claude-code, codex, opencode, none
-    Defaults to 'none' if not configured.
+    Defaults to 'hermes' if not configured.
     """
     agent = (execution or {}).get("coding_agent")
     if not agent or not isinstance(agent, str):
-        return "none"
+        return "hermes"
     agent = agent.strip().lower()
     if agent not in ("hermes", "claude-code", "codex", "opencode", "none"):
-        logger.warning("dispatch: invalid coding_agent %r — defaulting to none", agent)
-        return "none"
+        logger.warning("dispatch: invalid coding_agent %r — defaulting to hermes", agent)
+        return "hermes"
     return agent
 
 
