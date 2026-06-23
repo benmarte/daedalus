@@ -13,7 +13,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("<command from delegation block> \"$(cat /tmp/pm-task.txt)\" > /tmp/pm-out.txt 2>&1", background=True)
+   terminal("cat /tmp/pm-task.txt | <command from delegation block> > /tmp/pm-out.txt 2>&1", background=True)
    ```
 4. Wait for it to finish: `terminal("cat /tmp/pm-out.txt")`
 5. Read the output. The agent will have posted the spec to GitHub and printed `spec: <summary>`.

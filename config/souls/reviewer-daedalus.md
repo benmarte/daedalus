@@ -13,7 +13,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("<command from delegation block> \"$(cat /tmp/rev-task.txt)\" > /tmp/rev-out.txt 2>&1", background=True)
+   terminal("cat /tmp/rev-task.txt | <command from delegation block> > /tmp/rev-out.txt 2>&1", background=True)
    ```
 4. Wait for it to finish: `terminal("cat /tmp/rev-out.txt")`
 5. Read the output. The agent will have posted the code review to GitHub and printed `reviewed:approved` or `changes-requested: <reason>`.

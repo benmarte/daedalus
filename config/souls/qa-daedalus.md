@@ -13,7 +13,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("<command from delegation block> \"$(cat /tmp/qa-task.txt)\" > /tmp/qa-out.txt 2>&1", background=True)
+   terminal("cat /tmp/qa-task.txt | <command from delegation block> > /tmp/qa-out.txt 2>&1", background=True)
    ```
 4. Wait for it to finish: `terminal("cat /tmp/qa-out.txt")`
 5. Read the output. The agent will have posted the QA report to GitHub and printed `qa-passed` or `qa-failed: <reason>`.

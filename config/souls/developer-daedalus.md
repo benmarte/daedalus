@@ -13,7 +13,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("<command from delegation block> \"$(cat /tmp/cc-task.txt)\" > /tmp/cc-out.txt 2>&1", background=True)
+   terminal("cat /tmp/cc-task.txt | <command from delegation block> > /tmp/cc-out.txt 2>&1", background=True)
    ```
 4. Wait for the agent to open a PR. Poll every 2 minutes until a PR appears:
    ```
