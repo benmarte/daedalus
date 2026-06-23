@@ -829,8 +829,6 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"   5) Run: bash ~/.hermes/scripts/daedalus-cron.sh\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
-    if coding_agent != "none":
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
     return _body
 
 
