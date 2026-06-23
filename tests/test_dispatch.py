@@ -368,35 +368,35 @@ def test_extract_follow_ups_summary_comment_posted():
           "<!-- daedalus:follow-up-extracted PR #20 issue #500 -->" in posted_body)
 
 
-# ── _pm_body profile injection (Fix A) ──────────────────────────────────────
+# ── _pm_body spec-only (dispatcher creates tasks) ────────────────────────────
 
 
-def test_pm_body_uses_resolved_profile_names():
-    """_pm_body with default profiles injects --assignee <role>-daedalus for all 5 roles."""
+def test_pm_body_has_no_task_creation():
+    """_pm_body no longer tells the PM to create kanban tasks — dispatcher owns that."""
     issue = {"number": 42, "title": "Test issue", "body": "body"}
     body = disp._pm_body("org/repo", issue, "CONFIRMED: all good", "/tmp/repo",
                          "main", "github", profiles=disp._DEFAULT_PROFILES)
-    check("developer profile in body",
-          f"--assignee {disp._DEFAULT_PROFILES['developer']}" in body)
-    check("qa profile in body",
-          f"--assignee {disp._DEFAULT_PROFILES['qa']}" in body)
-    check("reviewer profile in body",
-          f"--assignee {disp._DEFAULT_PROFILES['reviewer']}" in body)
-    check("security profile in body",
-          f"--assignee {disp._DEFAULT_PROFILES['security']}" in body)
-    check("documentation profile in body",
-          f"--assignee {disp._DEFAULT_PROFILES['documentation']}" in body)
+    assert "hermes kanban create" not in body, "PM body must not instruct kanban task creation"
+    assert "--assignee" not in body, "PM body must not reference --assignee"
 
 
-def test_pm_body_respects_custom_profiles():
-    """_pm_body with a custom profile uses it for that role, defaults for others."""
-    custom = {**disp._DEFAULT_PROFILES, "developer": "my-senior-dev"}
+def test_pm_body_has_spec_completion_signal():
+    """_pm_body tells PM to complete with 'spec:' prefix — the dispatcher trigger."""
     issue = {"number": 7, "title": "Custom test", "body": ""}
-    body = disp._pm_body("org/repo", issue, "CONFIRMED:", "/workspace",
-                         "dev", "github", profiles=custom)
-    check("custom developer profile used", "--assignee my-senior-dev" in body)
-    check("default reviewer still used",
-          f"--assignee {disp._DEFAULT_PROFILES['reviewer']}" in body)
+    body = disp._pm_body("org/repo", issue, "CONFIRMED:", "/workspace", "dev", "github")
+    assert "spec:" in body.lower(), "PM body must mention 'spec:' completion signal"
+    assert "#7" in body, "PM body must contain the issue number"
+
+
+def test_pm_body_never_has_delegation():
+    """_pm_body never injects delegation — delegation goes into _dev_task_body."""
+    issue = {"number": 5, "title": "My issue", "body": "desc"}
+    for agent in ("claude-code", "codex", "opencode", "hermes", "none"):
+        body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
+                             coding_agent=agent)
+        assert "CODING AGENT DELEGATION" not in body, (
+            f"PM body must never have delegation (agent={agent})"
+        )
 
 
 # ── _remap_generic_role_assignees (Fix C) ────────────────────────────────────
@@ -469,35 +469,28 @@ def test_remap_logs_all_changes():
     check("log mentions t_qa", "t_qa" in log_messages)
 
 
-# ── PM SOUL.md content (Fix B) ───────────────────────────────────────────────
+# ── PM SOUL.md content (spec-only role) ──────────────────────────────────────
 
 
-def test_pm_soul_mentions_assignee_flag_and_dashed_profiles():
-    """PM SOUL.md explicitly lists --assignee with -daedalus profile names and warning."""
+def test_pm_soul_has_no_task_creation():
+    """PM SOUL.md must not instruct the PM to create kanban tasks (dispatcher owns that)."""
     soul_path = (Path(__file__).resolve().parent.parent
                  / "config" / "souls" / "project-manager-daedalus.md")
     content = soul_path.read_text()
-    check("soul has --assignee flag", "--assignee" in content)
-    for profile in ("developer-daedalus", "qa-daedalus", "reviewer-daedalus",
-                    "security-analyst-daedalus", "documentation-daedalus"):
-        check(f"soul mentions {profile}", profile in content)
-    check("soul warns about generic names",
-          any(kw in content.lower() for kw in ("cannot be dispatched", "will stall", "generic")))
+    assert "hermes kanban create" not in content, "PM SOUL must not contain kanban create instructions"
+    assert "spec:" in content.lower(), "PM SOUL must mention 'spec:' completion signal"
 
 
-# ── _pm_body title rule (new requirement) ────────────────────────────────────
+# ── _pm_body title rule ───────────────────────────────────────────────────────
 
 
-def test_pm_body_includes_issue_number_in_every_template_example():
-    """_pm_body template includes #{n} in every example create command and a TITLE RULE."""
+def test_pm_body_includes_issue_number():
+    """_pm_body includes the issue number so the PM can reference it in the spec."""
     issue = {"number": 99, "title": "Bug report", "body": "details"}
     body = disp._pm_body("org/repo", issue, "CONFIRMED:", "/tmp",
                          "main", "github", profiles=disp._DEFAULT_PROFILES)
-    check("title rule present", "Title" in body or "#99 " in body)
-    check("issue number in example commands", "#99" in body)
-    # All five example commands should have the issue number prefix
-    for role_key in ("developer", "qa", "reviewer", "security", "docs"):
-        check(f"#{99} in {role_key} example", f"#99 {role_key}" in body or "#99" in body)
+    assert "#99" in body, "PM body must contain issue number"
+    assert "spec:" in body.lower(), "PM body must mention spec: completion signal"
 
 
 # ── _repair_orphan_tasks (Bug 1 + Bug 2) ─────────────────────────────────────
@@ -610,15 +603,13 @@ def test_downstream_body_contains_assignee_and_title_rules():
 # ── PM SOUL.md title-prefix rule ─────────────────────────────────────────────
 
 
-def test_pm_soul_mentions_title_prefix_rule():
-    """PM SOUL.md explicitly documents the #N title-prefix requirement."""
+def test_pm_soul_mentions_spec_completion():
+    """PM SOUL.md tells the PM to complete with 'spec:' — the dispatcher trigger."""
     soul_path = (Path(__file__).resolve().parent.parent
                  / "config" / "souls" / "project-manager-daedalus.md")
     content = soul_path.read_text()
-    check("soul mentions title must start with #N",
-          any(kw in content for kw in ("#N ", "#<issue", "#418", "title MUST", "MUST start")))
-    check("soul shows CORRECT example", "CORRECT" in content)
-    check("soul shows WRONG example", "WRONG" in content)
+    assert "spec:" in content.lower(), "PM SOUL must mention spec: completion signal"
+    assert "dispatcher" in content.lower(), "PM SOUL must mention dispatcher creates tasks"
 
 
 # ── _resolve_coding_agent ─────────────────────────────────────────────────────
@@ -658,30 +649,14 @@ def test_resolve_coding_agent_whitespace():
 # ── delegation block injection ────────────────────────────────────────────────
 
 
-def test_pm_body_injects_delegation_claude_code():
-    """_pm_body appends delegation instructions when coding_agent=claude-code."""
+def test_pm_body_no_delegation_for_any_agent():
+    """_pm_body never injects delegation — that belongs in _dev_task_body."""
     issue = {"number": 5, "title": "My issue", "body": "desc"}
-    body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
-                         coding_agent="claude-code")
-    check("delegation header present in pm body", "CODING AGENT DELEGATION INSTRUCTIONS" in body)
-    check("claude-code delegate_task reference", "delegate_task" in body)
-    check("coding-agents skill reference", "coding-agents" in body)
-
-
-def test_pm_body_no_delegation_when_none():
-    """_pm_body does NOT inject delegation when coding_agent=none."""
-    issue = {"number": 5, "title": "My issue", "body": "desc"}
-    body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
-                         coding_agent="none")
-    check("no delegation block when none", "CODING AGENT DELEGATION INSTRUCTIONS" not in body)
-
-
-def test_pm_body_no_delegation_when_hermes():
-    """coding_agent=hermes means Hermes handles delegation natively — no injection."""
-    issue = {"number": 5, "title": "My issue", "body": "desc"}
-    body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
-                         coding_agent="hermes")
-    check("no delegation block for hermes", "CODING AGENT DELEGATION INSTRUCTIONS" not in body)
+    for agent in ("claude-code", "codex", "opencode", "hermes", "none"):
+        body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
+                             coding_agent=agent)
+        check(f"no delegation in pm body (agent={agent})",
+              "CODING AGENT DELEGATION" not in body)
 
 
 def test_downstream_body_injects_delegation_codex():
@@ -851,6 +826,103 @@ def test_downstream_body_delegation_uses_default_cmd_when_empty():
                                  coding_agent="claude-code", coding_agent_cmd="")
     assert "CODING AGENT DELEGATION" in body
     assert "terminal(" in body
+
+
+# ── per-role task body functions (dispatcher-owned task creation) ─────────────
+
+
+_ISSUE = {"number": 55, "title": "Fix the bug", "body": "repro steps",
+           "labels": [], "url": "https://github.com/org/repo/issues/55"}
+
+
+def test_dev_task_body_has_delegation_when_claude_code():
+    """_dev_task_body puts delegation block FIRST when coding_agent=claude-code."""
+    body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
+                               coding_agent="claude-code")
+    assert "CODING AGENT DELEGATION" in body
+    assert "terminal(" in body
+    # Delegation must appear before the "You are the DEVELOPER" line
+    assert body.index("CODING AGENT DELEGATION") < body.index("You are the DEVELOPER")
+
+
+def test_dev_task_body_no_delegation_when_none():
+    """_dev_task_body has no delegation block when coding_agent=none."""
+    body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
+                               coding_agent="none")
+    assert "CODING AGENT DELEGATION" not in body
+    assert "You are the DEVELOPER" in body
+
+
+def test_dev_task_body_no_delegation_when_hermes():
+    """coding_agent=hermes → no delegation block (Hermes handles it natively)."""
+    body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
+                               coding_agent="hermes")
+    assert "CODING AGENT DELEGATION" not in body
+
+
+def test_dev_task_body_contains_issue_context():
+    """_dev_task_body includes issue number, title, workdir, and PR instructions."""
+    body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp/repo", "dev", "github")
+    assert "#55" in body
+    assert "Fix the bug" in body
+    assert "/tmp/repo" in body
+    assert "Closes #55" in body
+    assert "review-required" in body
+
+
+def test_dev_task_body_custom_cmd_for_codex():
+    """_dev_task_body uses custom coding_agent_cmd when set."""
+    body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
+                               coding_agent="codex", coding_agent_cmd="my-codex exec")
+    assert "my-codex exec" in body
+    assert "CODING AGENT DELEGATION" in body
+
+
+def test_qa_task_body_has_role_instructions():
+    """_qa_task_body contains QA-specific instructions and issue reference."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "#55" in body
+    assert "QA" in body or "qa" in body.lower()
+    assert "test" in body.lower()
+    assert "qa-passed" in body or "qa-failed" in body
+
+
+def test_reviewer_task_body_has_role_instructions():
+    """_reviewer_task_body contains reviewer-specific instructions."""
+    body = disp._reviewer_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "#55" in body
+    assert "reviewed: approved" in body or "reviewed:" in body
+
+
+def test_security_task_body_has_role_instructions():
+    """_security_task_body contains security audit instructions."""
+    body = disp._security_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "#55" in body
+    assert "security" in body.lower()
+    assert "security: cleared" in body or "security:" in body
+
+
+def test_docs_task_body_has_role_instructions():
+    """_docs_task_body references the DOC_COMMENT_TEMPLATE."""
+    body = disp._docs_task_body("org/repo", _ISSUE, "/tmp", "github", "slack://ch")
+    assert "#55" in body
+    assert "DOC_COMMENT_TEMPLATE" in body or "completion report" in body.lower()
+
+
+def test_dev_task_body_gitlab_provider():
+    """_dev_task_body uses GitLab PR creation howto for gitlab provider."""
+    body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "gitlab")
+    assert "CODING AGENT DELEGATION" not in body
+    assert "#55" in body
+
+
+def test_dev_task_body_delegation_all_cli_agents():
+    """All CLI agents (claude-code, codex, opencode) get delegation in _dev_task_body."""
+    for agent in ("claude-code", "codex", "opencode"):
+        body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
+                                   coding_agent=agent)
+        assert "CODING AGENT DELEGATION" in body, f"delegation missing for {agent}"
+        assert "terminal(" in body, f"terminal() missing for {agent}"
 
 
 if __name__ == "__main__":
