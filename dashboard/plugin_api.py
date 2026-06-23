@@ -183,10 +183,10 @@ def _channel_target_and_label(platform_name: str, channel: dict) -> tuple[str, s
     guild = (channel.get("guild") or "").strip()
 
     if platform_name == "discord":
-        if not name:
+        if not ch_id:
             return "", ""
-        label = f"#{name}" + (f" ({guild})" if guild else "")
-        return f"discord:#{name}", label
+        label = (f"#{name}" if name else ch_id) + (f" ({guild})" if guild else "")
+        return f"discord:{ch_id}", label
 
     if platform_name == "slack":
         target = f"slack:{name}" if name else (f"slack:{ch_id}" if ch_id else "")

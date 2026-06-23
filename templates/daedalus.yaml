@@ -77,7 +77,7 @@ sources:
 # ── Cron + Notifications ──────────────────────────────────────────────────────
 cron:
   schedule: "every 60m"                 # How often the daedalus polls (every 60m, every 2h, 0 9 * * *)
-  deliver: ""                           # Legacy single target: slack:C123, discord:#general, …
+  deliver: ""                           # Legacy single target: slack:C123, discord:1234567890123456789, …
 
   # Multi-target notifications (takes precedence over `deliver` when set).
   # Targets are `hermes send` strings for ANY configured Hermes platform
@@ -89,7 +89,7 @@ cron:
   #     target: "slack:C0CHANNEL1"
   #     events: ["doc-report", "pipeline-failure"]
   #   - platform: "Discord"
-  #     target: "discord:#daedalus"
+  #     target: "discord:1234567890123456789"  # numeric channel ID (not name)
   #     events: ["dispatch-summary", "pr-ready"]
 
 # ── Execution tunables ────────────────────────────────────────────────────────
@@ -208,6 +208,12 @@ execution:
   # automatically attached to the developer profile when delegation is enabled.
   #
   # coding_agent: hermes
+
+  # Custom shell command passed as acp_command to delegate_task when coding_agent
+  # is set to a CLI agent.  Useful when you have multiple accounts or shell aliases
+  # (e.g. cc-rizq, cc-rewst, cc).  Leave blank to use the agent's default command.
+  #
+  # coding_agent_cmd: "cc"
 
   # When coding_agent is set to a CLI agent, which model/backend should the
   # coding agent use? Passes through to the agent's --model flag where applicable.

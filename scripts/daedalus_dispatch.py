@@ -128,54 +128,77 @@ def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
     return result
 
 
-_DELEGATION_INSTRUCTIONS: Dict[str, str] = {
-    "claude-code": (
-        "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
-        "  You MUST use `delegate_task` (available via the computer_use tool or\n"
-        "  hermes CLI) to spawn a Claude Code subagent rather than coding directly.\n\n"
-        "  Steps:\n"
-        "  1. Read the task requirements carefully.\n"
-        "  2. Use `delegate_task` with:\n"
-        "     - goal: \"<copy the full task requirements here>\"\n"
-        "     - context: \"<include file paths, error messages, repo structure>\"\n"
-        "     - toolsets: [\"terminal\", \"file\"]  (for code work)\n"
-        "     - acp_command: \"copilot\"  (if Claude Code CLI is configured)\n"
-        "  3. The subagent will run Claude Code in one-shot mode and return results.\n"
-        "  4. Verify the subagent's work before completing your card.\n"
-        "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
-        "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
-    ),
-    "codex": (
-        "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
-        "  You MUST use `delegate_task` to spawn an OpenAI Codex subagent rather\n"
-        "  than coding directly.\n\n"
-        "  Steps:\n"
-        "  1. Read the task requirements carefully.\n"
-        "  2. Use `delegate_task` with:\n"
-        "     - goal: \"<copy the full task requirements here>\"\n"
-        "     - context: \"<include file paths, error messages, repo structure>\"\n"
-        "     - toolsets: [\"terminal\", \"file\"]\n"
-        "  3. The subagent will run Codex CLI and return results.\n"
-        "  4. Verify the subagent's work before completing your card.\n"
-        "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
-        "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
-    ),
-    "opencode": (
-        "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
-        "  You MUST use `delegate_task` to spawn an OpenCode subagent rather than\n"
-        "  coding directly.\n\n"
-        "  Steps:\n"
-        "  1. Read the task requirements carefully.\n"
-        "  2. Use `delegate_task` with:\n"
-        "     - goal: \"<copy the full task requirements here>\"\n"
-        "     - context: \"<include file paths, error messages, repo structure>\"\n"
-        "     - toolsets: [\"terminal\", \"file\"]\n"
-        "  3. The subagent will run OpenCode CLI and return results.\n"
-        "  4. Verify the subagent's work before completing your card.\n"
-        "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
-        "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
-    ),
-}
+def _build_delegation_instructions(agent: str, cmd: str = "") -> str:
+    """Return delegation instruction text for the developer task body.
+
+    ``cmd`` is the custom CLI command (e.g. 'cc-rizq', 'cc-rewst'); when
+    empty the agent-specific default is used (see coding-agents skill).
+    """
+    acp_line = (
+        f"     - acp_command: \"{cmd}\"  (custom CLI command configured for this project)\n"
+        if cmd else
+        "     - acp_command: \"<CLI command from coding-agents skill>\"\n"
+    )
+    if agent == "claude-code":
+        return (
+            "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
+            "  You MUST use `delegate_task` (available via the computer_use tool or\n"
+            "  hermes CLI) to spawn a Claude Code subagent rather than coding directly.\n\n"
+            "  Steps:\n"
+            "  1. Read the task requirements carefully.\n"
+            "  2. Use `delegate_task` with:\n"
+            "     - goal: \"<copy the full task requirements here>\"\n"
+            "     - context: \"<include file paths, error messages, repo structure>\"\n"
+            "     - toolsets: [\"terminal\", \"file\"]  (for code work)\n"
+            + acp_line +
+            "  3. The subagent will run Claude Code in one-shot mode and return results.\n"
+            "  4. Verify the subagent's work before completing your card.\n"
+            "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
+            "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+        )
+    if agent == "codex":
+        return (
+            "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
+            "  You MUST use `delegate_task` to spawn an OpenAI Codex subagent rather\n"
+            "  than coding directly.\n\n"
+            "  Steps:\n"
+            "  1. Read the task requirements carefully.\n"
+            "  2. Use `delegate_task` with:\n"
+            "     - goal: \"<copy the full task requirements here>\"\n"
+            "     - context: \"<include file paths, error messages, repo structure>\"\n"
+            "     - toolsets: [\"terminal\", \"file\"]\n"
+            + (acp_line if cmd else "") +
+            "  3. The subagent will run Codex CLI and return results.\n"
+            "  4. Verify the subagent's work before completing your card.\n"
+            "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
+            "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+        )
+    if agent == "opencode":
+        return (
+            "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
+            "  You MUST use `delegate_task` to spawn an OpenCode subagent rather than\n"
+            "  coding directly.\n\n"
+            "  Steps:\n"
+            "  1. Read the task requirements carefully.\n"
+            "  2. Use `delegate_task` with:\n"
+            "     - goal: \"<copy the full task requirements here>\"\n"
+            "     - context: \"<include file paths, error messages, repo structure>\"\n"
+            "     - toolsets: [\"terminal\", \"file\"]\n"
+            + (acp_line if cmd else "") +
+            "  3. The subagent will run OpenCode CLI and return results.\n"
+            "  4. Verify the subagent's work before completing your card.\n"
+            "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
+            "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+        )
+    return ""
+
+
+def _resolve_coding_agent_cmd(execution: Dict[str, Any]) -> str:
+    """Return the configured CLI command for the coding agent, or empty string."""
+    cmd = (execution or {}).get("coding_agent_cmd")
+    if not cmd or not isinstance(cmd, str):
+        return ""
+    return cmd.strip()
 
 
 def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
@@ -482,7 +505,8 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                notify_target: str = "", base_branch: str = "dev",
                provider_name: str = "github",
                security_notify_targets: Optional[List[str]] = None,
-               coding_agent: str = "none") -> str:
+               coding_agent: str = "none",
+               coding_agent_cmd: str = "") -> str:
     """Triage body for decompose(): describes the FULL lifecycle so the decomposer
     fans it out across the roster (validator → developer → reviewer → security-analyst →
     documentation). Each role's instructions are spelled out so routing is clean."""
@@ -632,8 +656,8 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"attempt to send the report yourself.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
-    if coding_agent != "none" and coding_agent in _DELEGATION_INSTRUCTIONS:
-        _body += _DELEGATION_INSTRUCTIONS[coding_agent]
+    if coding_agent != "none":
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
     return _body
 
 
@@ -746,7 +770,8 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
 def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: str,
              base_branch: str, provider_name: str,
              profiles: Optional[Dict[str, str]] = None,
-             coding_agent: str = "none") -> str:
+             coding_agent: str = "none",
+             coding_agent_cmd: str = "") -> str:
     """Phase-2 task body: PM reads spec, assigns tasks to full team."""
     n = issue.get("number")
     title = issue.get("title", "")
@@ -794,8 +819,8 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"   5) Run: bash ~/.hermes/scripts/daedalus-cron.sh\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
-    if coding_agent != "none" and coding_agent in _DELEGATION_INSTRUCTIONS:
-        _body += _DELEGATION_INSTRUCTIONS[coding_agent]
+    if coding_agent != "none":
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
     return _body
 
 
@@ -804,7 +829,8 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
                      security_notify_targets: Optional[List[str]] = None,
                      label_overrides: Optional[Dict[str, Any]] = None,
                      profiles: Optional[Dict[str, str]] = None,
-                     coding_agent: str = "none") -> str:
+                     coding_agent: str = "none",
+                     coding_agent_cmd: str = "") -> str:
     """Phase-3 triage body: DEVELOPER → REVIEWER → SECURITY-ANALYST → DOCUMENTATION.
 
     ``label_overrides`` (from ``execution.label_overrides`` in config) can suppress
@@ -930,8 +956,8 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"{doc_role}"
         f"\n--- Issue #{n} ---\n{body}\n"
     )
-    if coding_agent != "none" and coding_agent in _DELEGATION_INSTRUCTIONS:
-        _body += _DELEGATION_INSTRUCTIONS[coding_agent]
+    if coding_agent != "none":
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
     return _body
 
 
@@ -1534,6 +1560,7 @@ def _check_confirmed_validators(
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
     coding_agent: str = "none",
+    coding_agent_cmd: str = "",
     *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
@@ -1612,7 +1639,7 @@ def _check_confirmed_validators(
                             slug, f"#{n_nr} {issue_for_pm.get('title', '')}",
                             body=_pm_body(repo, issue_for_pm, "CONFIRMED: (from github comment fallback)",
                                           workdir, base_branch, provider_name, profiles=p,
-                                          coding_agent=coding_agent),
+                                          coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd),
                             assignee=p["pm"],
                             idempotency_key=ikey,
                             workspace=f"dir:{workdir}" if workdir else "",
@@ -1695,7 +1722,7 @@ def _check_confirmed_validators(
         vid = kanban.create_task(
             slug, f"#{n} {issue.get('title', '')}",
             body=_pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name, profiles=p,
-                          coding_agent=coding_agent),
+                          coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd),
             assignee=p["pm"],
             idempotency_key=ikey,
             workspace=f"dir:{workdir}" if workdir else "",
@@ -1715,6 +1742,7 @@ def _check_completed_pm(
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
     coding_agent: str = "none",
+    coding_agent_cmd: str = "",
     *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
@@ -1779,7 +1807,7 @@ def _check_completed_pm(
             slug, n, issue.get("title", ""),
             _downstream_body(repo, issue, iterations, workdir, notify_target, base_branch,
                              provider_name, security_notify_targets, label_overrides,
-                             profiles=p, coding_agent=coding_agent),
+                             profiles=p, coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd),
             idempotency_key=f"issue-{n}",
             workspace=f"dir:{workdir}" if workdir else None,
         )
@@ -2007,6 +2035,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     profiles = _resolve_profiles(execution)
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
     coding_agent = _resolve_coding_agent(execution)
+    coding_agent_cmd = _resolve_coding_agent_cmd(execution)
     if coding_agent not in ("none", "hermes"):
         _dev_skills = list(role_skills.get("developer") or [])
         if "coding-agents" not in _dev_skills:
@@ -2181,6 +2210,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
         profiles=profiles, role_skills=role_skills, coding_agent=coding_agent,
+        coding_agent_cmd=coding_agent_cmd,
         dry_run=dry_run, provider=provider,
     )
     if confirmed_triggered and not dry_run:
@@ -2190,6 +2220,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
         profiles=profiles, role_skills=role_skills, coding_agent=coding_agent,
+        coding_agent_cmd=coding_agent_cmd,
         dry_run=dry_run, provider=provider,
     )
     if pm_triggered and not dry_run:
