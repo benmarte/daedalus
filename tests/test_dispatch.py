@@ -698,44 +698,57 @@ def test_downstream_body_no_delegation_when_none():
 
 
 def test_resolve_coding_agent_auto_attach_skill():
-    """_resolve_coding_agent + skill auto-attach: coding-agents added to developer skills."""
+    """Cloud agent skill auto-attached to developer role when coding_agent is set."""
     execution = {"coding_agent": "claude-code"}
     agent = disp._resolve_coding_agent(execution)
     check("agent resolved to claude-code", agent == "claude-code")
-    # Simulate the auto-attach logic from run()
-    role_skills = {}
-    if agent not in ("none", "hermes"):
+    expected_skill = "autonomous-ai-agents/claude-code"
+    _AGENT_SKILL = {"claude-code": expected_skill, "codex": "autonomous-ai-agents/codex",
+                    "opencode": "autonomous-ai-agents/opencode"}
+    role_skills: dict = {}
+    _skill = _AGENT_SKILL.get(agent)
+    if _skill:
         dev_skills = list(role_skills.get("developer") or [])
-        if "coding-agents" not in dev_skills:
-            dev_skills.append("coding-agents")
+        if _skill not in dev_skills:
+            dev_skills.append(_skill)
         role_skills = {**role_skills, "developer": dev_skills}
-    check("coding-agents auto-attached to developer", "coding-agents" in role_skills.get("developer", []))
+    check("autonomous-ai-agents/claude-code auto-attached to developer",
+          expected_skill in role_skills.get("developer", []))
 
 
 def test_resolve_coding_agent_skill_no_duplicate():
-    """coding-agents is not duplicated if already in developer skill list."""
+    """Cloud agent skill is not duplicated if already in skill list."""
     execution = {"coding_agent": "codex"}
     agent = disp._resolve_coding_agent(execution)
-    role_skills = {"developer": ["some-skill", "coding-agents"]}
-    if agent not in ("none", "hermes"):
+    skill = "autonomous-ai-agents/codex"
+    role_skills: dict = {"developer": ["some-skill", skill]}
+    _AGENT_SKILL = {"claude-code": "autonomous-ai-agents/claude-code",
+                    "codex": skill, "opencode": "autonomous-ai-agents/opencode"}
+    _s = _AGENT_SKILL.get(agent)
+    if _s:
         dev_skills = list(role_skills.get("developer") or [])
-        if "coding-agents" not in dev_skills:
-            dev_skills.append("coding-agents")
+        if _s not in dev_skills:
+            dev_skills.append(_s)
         role_skills = {**role_skills, "developer": dev_skills}
-    check("no duplicate coding-agents skill", role_skills["developer"].count("coding-agents") == 1)
+    check("no duplicate skill", role_skills["developer"].count(skill) == 1)
 
 
 def test_resolve_coding_agent_no_skill_when_none():
-    """coding-agents is NOT injected when coding_agent=none."""
+    """No cloud agent skill injected when coding_agent=none."""
     execution = {"coding_agent": "none"}
     agent = disp._resolve_coding_agent(execution)
-    role_skills = {}
-    if agent not in ("none", "hermes"):
+    role_skills: dict = {}
+    _AGENT_SKILL = {"claude-code": "autonomous-ai-agents/claude-code",
+                    "codex": "autonomous-ai-agents/codex",
+                    "opencode": "autonomous-ai-agents/opencode"}
+    _skill = _AGENT_SKILL.get(agent)
+    if _skill:
         dev_skills = list(role_skills.get("developer") or [])
-        if "coding-agents" not in dev_skills:
-            dev_skills.append("coding-agents")
+        if _skill not in dev_skills:
+            dev_skills.append(_skill)
         role_skills = {**role_skills, "developer": dev_skills}
-    check("no coding-agents for none agent", "coding-agents" not in role_skills.get("developer", []))
+    check("no skill injected for none agent",
+          not any("autonomous-ai-agents" in s for s in role_skills.get("developer", [])))
 
 
 # ── _CODING_AGENT_DEFAULTS and per-agent default commands ────────────────────

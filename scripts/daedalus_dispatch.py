@@ -2332,12 +2332,18 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     role_agents: Dict[str, str] = {
         role: _resolve_agent_for_role(execution, role) for role in _DEFAULT_PROFILES
     }
-    # Inject coding-agents skill for every role that delegates to a cloud agent.
+    # Inject the correct autonomous-ai-agents skill for every role that delegates to a cloud agent.
+    _AGENT_SKILL: Dict[str, str] = {
+        "claude-code": "autonomous-ai-agents/claude-code",
+        "codex": "autonomous-ai-agents/codex",
+        "opencode": "autonomous-ai-agents/opencode",
+    }
     for _role, _agent in role_agents.items():
-        if _agent not in ("none", "hermes"):
+        _skill = _AGENT_SKILL.get(_agent)
+        if _skill:
             _role_skills = list(role_skills.get(_role) or [])
-            if "coding-agents" not in _role_skills:
-                _role_skills.append("coding-agents")
+            if _skill not in _role_skills:
+                _role_skills.append(_skill)
             role_skills = {**role_skills, _role: _role_skills}
     _comment_header_tpl: str = (
         execution.get("comment_header_template")
