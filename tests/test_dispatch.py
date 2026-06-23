@@ -388,14 +388,20 @@ def test_pm_body_has_spec_completion_signal():
     assert "#7" in body, "PM body must contain the issue number"
 
 
-def test_pm_body_never_has_delegation():
-    """_pm_body never injects delegation — delegation goes into _dev_task_body."""
+def test_pm_body_has_delegation_for_cloud_agents():
+    """_pm_body injects delegation when a cloud agent is configured."""
     issue = {"number": 5, "title": "My issue", "body": "desc"}
-    for agent in ("claude-code", "codex", "opencode", "hermes", "none"):
+    for agent in ("claude-code", "codex", "opencode"):
         body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
                              coding_agent=agent)
-        assert "CODING AGENT DELEGATION" not in body, (
-            f"PM body must never have delegation (agent={agent})"
+        assert "AGENT DELEGATION" in body, (
+            f"PM body must have delegation block for cloud agent={agent}"
+        )
+    for agent in ("hermes", "none"):
+        body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
+                             coding_agent=agent)
+        assert "AGENT DELEGATION" not in body, (
+            f"PM body must not have delegation for local agent={agent}"
         )
 
 
@@ -649,14 +655,19 @@ def test_resolve_coding_agent_whitespace():
 # ── delegation block injection ────────────────────────────────────────────────
 
 
-def test_pm_body_no_delegation_for_any_agent():
-    """_pm_body never injects delegation — that belongs in _dev_task_body."""
+def test_pm_body_delegation_for_cloud_agents():
+    """_pm_body injects delegation for cloud agents, not for local LLM."""
     issue = {"number": 5, "title": "My issue", "body": "desc"}
-    for agent in ("claude-code", "codex", "opencode", "hermes", "none"):
+    for agent in ("claude-code", "codex", "opencode"):
         body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
                              coding_agent=agent)
-        check(f"no delegation in pm body (agent={agent})",
-              "CODING AGENT DELEGATION" not in body)
+        check(f"delegation in pm body for cloud agent={agent}",
+              "AGENT DELEGATION" in body)
+    for agent in ("hermes", "none"):
+        body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
+                             coding_agent=agent)
+        check(f"no delegation in pm body for local agent={agent}",
+              "AGENT DELEGATION" not in body)
 
 
 def test_downstream_body_injects_delegation_codex():
@@ -664,7 +675,7 @@ def test_downstream_body_injects_delegation_codex():
     issue = {"number": 7, "title": "Fix bug", "body": "repro"}
     body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
                                  coding_agent="codex")
-    check("delegation header in downstream body", "CODING AGENT DELEGATION INSTRUCTIONS" in body)
+    check("delegation header in downstream body", "AGENT DELEGATION" in body)
     check("codex-specific text present", "Codex" in body)
 
 
@@ -673,7 +684,7 @@ def test_downstream_body_injects_delegation_opencode():
     issue = {"number": 7, "title": "Fix bug", "body": "repro"}
     body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
                                  coding_agent="opencode")
-    check("delegation header in downstream body for opencode", "CODING AGENT DELEGATION INSTRUCTIONS" in body)
+    check("delegation header in downstream body for opencode", "AGENT DELEGATION" in body)
     check("opencode-specific text present", "OpenCode" in body)
 
 
@@ -683,7 +694,7 @@ def test_downstream_body_no_delegation_when_none():
     body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
                                  coding_agent="none")
     check("no delegation block in downstream body when none",
-          "CODING AGENT DELEGATION INSTRUCTIONS" not in body)
+          "AGENT DELEGATION" not in body)
 
 
 def test_resolve_coding_agent_auto_attach_skill():
@@ -742,7 +753,7 @@ def test_coding_agent_defaults_dict_exists():
 def test_build_delegation_instructions_claude_code_default_cmd():
     """When coding_agent_cmd is empty, claude-code instructions use the built-in default."""
     body = disp._build_delegation_instructions("claude-code", cmd="")
-    assert "CODING AGENT DELEGATION" in body
+    assert "AGENT DELEGATION" in body
     assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
     assert "claude" in body.lower(), f"expected claude binary reference in instructions, got:\n{body}"
 
@@ -750,7 +761,7 @@ def test_build_delegation_instructions_claude_code_default_cmd():
 def test_build_delegation_instructions_codex_default_cmd():
     """When coding_agent_cmd is empty, codex instructions use 'codex exec --full-auto'."""
     body = disp._build_delegation_instructions("codex", cmd="")
-    assert "CODING AGENT DELEGATION" in body
+    assert "AGENT DELEGATION" in body
     assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
     assert "codex exec --full-auto" in body, f"expected 'codex exec --full-auto' in instructions, got:\n{body}"
 
@@ -758,7 +769,7 @@ def test_build_delegation_instructions_codex_default_cmd():
 def test_build_delegation_instructions_opencode_default_cmd():
     """When coding_agent_cmd is empty, opencode instructions use 'opencode run'."""
     body = disp._build_delegation_instructions("opencode", cmd="")
-    assert "CODING AGENT DELEGATION" in body
+    assert "AGENT DELEGATION" in body
     assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
     assert "opencode run" in body, f"expected 'opencode run' in instructions, got:\n{body}"
 
@@ -801,13 +812,14 @@ def test_resolve_coding_agent_cmd_strips_whitespace():
 
 
 def test_pm_body_has_no_delegation_instructions():
-    """_pm_body must NOT contain delegation instructions — PM assigns tasks, doesn't code."""
+    """_pm_body DOES contain delegation when cloud agent is configured."""
     issue = {"number": 5, "title": "My issue", "body": "desc"}
     body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
                          coding_agent="claude-code", coding_agent_cmd="cc-rewst")
-    assert "CODING AGENT DELEGATION" not in body, (
-        "_pm_body must not inject coding delegation (PM doesn't implement code)"
+    assert "AGENT DELEGATION" in body, (
+        "_pm_body must inject delegation block when cloud agent is configured"
     )
+    assert "spec:" in body.lower(), "_pm_body must still include spec: completion signal"
 
 
 def test_downstream_body_delegation_uses_custom_cmd():
@@ -824,7 +836,7 @@ def test_downstream_body_delegation_uses_default_cmd_when_empty():
     issue = {"number": 7, "title": "Fix bug", "body": "repro"}
     body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
                                  coding_agent="claude-code", coding_agent_cmd="")
-    assert "CODING AGENT DELEGATION" in body
+    assert "AGENT DELEGATION" in body
     assert "terminal(" in body
 
 
@@ -839,17 +851,17 @@ def test_dev_task_body_has_delegation_when_claude_code():
     """_dev_task_body puts delegation block FIRST when coding_agent=claude-code."""
     body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
                                coding_agent="claude-code")
-    assert "CODING AGENT DELEGATION" in body
+    assert "AGENT DELEGATION" in body
     assert "terminal(" in body
     # Delegation must appear before the "You are the DEVELOPER" line
-    assert body.index("CODING AGENT DELEGATION") < body.index("You are the DEVELOPER")
+    assert body.index("AGENT DELEGATION") < body.index("You are the DEVELOPER")
 
 
 def test_dev_task_body_no_delegation_when_none():
     """_dev_task_body has no delegation block when coding_agent=none."""
     body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
                                coding_agent="none")
-    assert "CODING AGENT DELEGATION" not in body
+    assert "AGENT DELEGATION" not in body
     assert "You are the DEVELOPER" in body
 
 
@@ -857,7 +869,7 @@ def test_dev_task_body_no_delegation_when_hermes():
     """coding_agent=hermes → no delegation block (Hermes handles it natively)."""
     body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
                                coding_agent="hermes")
-    assert "CODING AGENT DELEGATION" not in body
+    assert "AGENT DELEGATION" not in body
 
 
 def test_dev_task_body_contains_issue_context():
@@ -875,7 +887,7 @@ def test_dev_task_body_custom_cmd_for_codex():
     body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
                                coding_agent="codex", coding_agent_cmd="my-codex exec")
     assert "my-codex exec" in body
-    assert "CODING AGENT DELEGATION" in body
+    assert "AGENT DELEGATION" in body
 
 
 def test_qa_task_body_has_role_instructions():
@@ -912,7 +924,7 @@ def test_docs_task_body_has_role_instructions():
 def test_dev_task_body_gitlab_provider():
     """_dev_task_body uses GitLab PR creation howto for gitlab provider."""
     body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "gitlab")
-    assert "CODING AGENT DELEGATION" not in body
+    assert "AGENT DELEGATION" not in body
     assert "#55" in body
 
 
@@ -921,8 +933,125 @@ def test_dev_task_body_delegation_all_cli_agents():
     for agent in ("claude-code", "codex", "opencode"):
         body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
                                    coding_agent=agent)
-        assert "CODING AGENT DELEGATION" in body, f"delegation missing for {agent}"
+        assert "AGENT DELEGATION" in body, f"delegation missing for {agent}"
         assert "terminal(" in body, f"terminal() missing for {agent}"
+
+
+# ── global delegation for all roles ──────────────────────────────────────────
+
+
+def test_resolve_agent_for_role_uses_global_when_no_override():
+    """_resolve_agent_for_role falls back to global coding_agent when no profile override."""
+    execution = {"coding_agent": "claude-code"}
+    for role in ("developer", "qa", "reviewer", "security", "documentation", "pm"):
+        assert disp._resolve_agent_for_role(execution, role) == "claude-code"
+
+
+def test_resolve_agent_for_role_uses_profile_override():
+    """_resolve_agent_for_role uses profiles[role].agent when present."""
+    execution = {
+        "coding_agent": "claude-code",
+        "profiles": {"qa": {"name": "qa-daedalus", "agent": "hermes"}},
+    }
+    assert disp._resolve_agent_for_role(execution, "qa") == "hermes"
+    assert disp._resolve_agent_for_role(execution, "developer") == "claude-code"
+
+
+def test_resolve_agent_for_role_rejects_invalid_override():
+    """_resolve_agent_for_role ignores invalid agent values in profile overrides."""
+    execution = {
+        "coding_agent": "claude-code",
+        "profiles": {"qa": {"name": "qa-daedalus", "agent": "not-a-real-agent"}},
+    }
+    assert disp._resolve_agent_for_role(execution, "qa") == "claude-code"
+
+
+def test_qa_body_has_delegation_when_global_claude_code():
+    """_qa_task_body injects delegation block when coding_agent=claude-code."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github", coding_agent="claude-code")
+    assert "AGENT DELEGATION" in body
+    assert "terminal(" in body
+    assert "qa-passed" in body.lower()
+
+
+def test_qa_body_no_delegation_when_hermes():
+    """_qa_task_body has no delegation when coding_agent=hermes."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github", coding_agent="hermes")
+    assert "AGENT DELEGATION" not in body
+
+
+def test_reviewer_body_has_delegation_when_global_claude_code():
+    """_reviewer_task_body injects delegation block when coding_agent=claude-code."""
+    body = disp._reviewer_task_body("org/repo", _ISSUE, "/tmp", "github",
+                                    coding_agent="claude-code")
+    assert "AGENT DELEGATION" in body
+    assert "terminal(" in body
+    assert "reviewed:" in body.lower()
+
+
+def test_security_body_has_delegation_when_global_claude_code():
+    """_security_task_body injects delegation block when coding_agent=claude-code."""
+    body = disp._security_task_body("org/repo", _ISSUE, "/tmp", "github",
+                                    coding_agent="claude-code")
+    assert "AGENT DELEGATION" in body
+    assert "terminal(" in body
+    assert "security:" in body.lower()
+
+
+def test_docs_body_has_delegation_when_global_claude_code():
+    """_docs_task_body injects delegation block when coding_agent=claude-code."""
+    body = disp._docs_task_body("org/repo", _ISSUE, "/tmp", "github", "",
+                                coding_agent="claude-code")
+    assert "AGENT DELEGATION" in body
+    assert "terminal(" in body
+    assert "docs:" in body.lower()
+
+
+def test_all_roles_get_delegation_for_cloud_agent():
+    """All 6 roles get delegation injected when global coding_agent is a cloud agent."""
+    issue = {"number": 7, "title": "Fix bug", "body": "repro"}
+    bodies = {
+        "pm": disp._pm_body("o/r", issue, "CONFIRMED", "/tmp", "main", "github",
+                            coding_agent="claude-code"),
+        "developer": disp._dev_task_body("o/r", issue, 3, "/tmp", "main", "github",
+                                         coding_agent="claude-code"),
+        "qa": disp._qa_task_body("o/r", issue, "/tmp", "github", coding_agent="claude-code"),
+        "reviewer": disp._reviewer_task_body("o/r", issue, "/tmp", "github",
+                                             coding_agent="claude-code"),
+        "security": disp._security_task_body("o/r", issue, "/tmp", "github",
+                                             coding_agent="claude-code"),
+        "documentation": disp._docs_task_body("o/r", issue, "/tmp", "github", "",
+                                              coding_agent="claude-code"),
+    }
+    for role, body in bodies.items():
+        assert "AGENT DELEGATION" in body, f"delegation missing for role={role}"
+        assert "terminal(" in body, f"terminal() missing for role={role}"
+
+
+def test_local_agent_roles_have_no_delegation():
+    """No role gets delegation when coding_agent=hermes (local LLM)."""
+    issue = {"number": 7, "title": "Fix bug", "body": "repro"}
+    bodies = [
+        disp._pm_body("o/r", issue, "CONFIRMED", "/tmp", "main", "github", coding_agent="hermes"),
+        disp._dev_task_body("o/r", issue, 3, "/tmp", "main", "github", coding_agent="hermes"),
+        disp._qa_task_body("o/r", issue, "/tmp", "github", coding_agent="hermes"),
+        disp._reviewer_task_body("o/r", issue, "/tmp", "github", coding_agent="hermes"),
+        disp._security_task_body("o/r", issue, "/tmp", "github", coding_agent="hermes"),
+        disp._docs_task_body("o/r", issue, "/tmp", "github", "", coding_agent="hermes"),
+    ]
+    for body in bodies:
+        assert "AGENT DELEGATION" not in body
+
+
+def test_role_delegation_uses_role_specific_tmp_file():
+    """Each role uses a distinct tmp file prefix to avoid conflicts."""
+    issue = {"number": 7, "title": "T", "body": "B"}
+    qa_body = disp._qa_task_body("o/r", issue, "/tmp", "github", coding_agent="claude-code")
+    rev_body = disp._reviewer_task_body("o/r", issue, "/tmp", "github",
+                                        coding_agent="claude-code")
+    assert "/tmp/qa-task.txt" in qa_body
+    assert "/tmp/rev-task.txt" in rev_body
+    assert "/tmp/qa-task.txt" not in rev_body
 
 
 if __name__ == "__main__":

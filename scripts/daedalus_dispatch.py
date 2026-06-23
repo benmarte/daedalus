@@ -135,57 +135,126 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
 }
 
 
-def _build_delegation_instructions(agent: str, cmd: str = "") -> str:
-    """Return delegation instruction text for the developer task body.
+_ROLE_TMP_PREFIX: Dict[str, str] = {
+    "pm": "pm",
+    "developer": "cc",
+    "qa": "qa",
+    "reviewer": "rev",
+    "security": "sec",
+    "documentation": "docs",
+}
 
-    ``cmd`` is the full CLI command from coding_agent_cmd (must be absolute
-    path, not a shell alias).  When empty, the agent-specific default is used.
+_ROLE_AFTER_SPAWN: Dict[str, str] = {
+    "developer": (
+        "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
+        "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
+        "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not implement the code yourself.\n"
+    ),
+    "pm": (
+        "  4. Wait: terminal(\"cat /tmp/pm-out.txt\")\n"
+        "  5. The agent will have posted the spec to GitHub and output \"spec: <summary>\".\n"
+        "  6. Complete your card with: 'spec: <one-line summary from the output>'\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not write the spec yourself.\n"
+    ),
+    "qa": (
+        "  4. Wait: terminal(\"cat /tmp/qa-out.txt\")\n"
+        "  5. The agent will have posted a QA report to GitHub and output its verdict.\n"
+        "  6. Complete your card: 'qa-passed: PR #N' or block with 'qa-failed: <reason>'\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not run the tests yourself.\n"
+    ),
+    "reviewer": (
+        "  4. Wait: terminal(\"cat /tmp/rev-out.txt\")\n"
+        "  5. The agent will have posted review findings to GitHub and output its verdict.\n"
+        "  6. Complete your card: 'reviewed: approved' or 'reviewed: changes-requested: <reason>'\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not review the PR yourself.\n"
+    ),
+    "security": (
+        "  4. Wait: terminal(\"cat /tmp/sec-out.txt\")\n"
+        "  5. The agent will have posted security findings to GitHub and output its verdict.\n"
+        "  6. Complete your card: 'security: cleared' or 'security: flagged: <finding>'\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not audit the PR yourself.\n"
+    ),
+    "documentation": (
+        "  4. Wait: terminal(\"cat /tmp/docs-out.txt\")\n"
+        "  5. The agent will have posted the completion report to GitHub.\n"
+        "  6. Complete your card: 'docs: posted completion report for PR #N'\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not write the report yourself.\n"
+    ),
+}
+
+_CLOUD_AGENT_LABELS: Dict[str, str] = {
+    "claude-code": "Claude Code",
+    "codex": "Codex",
+    "opencode": "OpenCode",
+}
+
+
+def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "developer") -> str:
+    """Return delegation instruction text to inject into any role's task body.
+
+    ``cmd`` is the full CLI command from coding_agent_cmd.
+    ``role`` selects role-specific post-spawn steps (what to do with the output).
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
+    pfx = _ROLE_TMP_PREFIX.get(role, role)
+    after = _ROLE_AFTER_SPAWN.get(role, _ROLE_AFTER_SPAWN["developer"])
+    label = _CLOUD_AGENT_LABELS.get(agent, agent)
 
     if agent == "claude-code":
         run_cmd = effective_cmd or "CLAUDE_CONFIG_DIR=$HOME/.claude /Users/benmarte/.local/bin/claude --dangerously-skip-permissions -p"
         return (
-            "\n⚠️  CODING AGENT DELEGATION — DO NOT WRITE CODE YOURSELF:\n"
-            "  Spawn Claude Code via terminal instead of writing code directly.\n\n"
+            f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
+            f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            "  2. write_file(\"/tmp/cc-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"{run_cmd} \\\"$(cat /tmp/cc-task.txt)\\\" > /tmp/cc-out.txt 2>&1\", background=True)\n"
-            "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
-            "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
-            "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-            "  STOP — do not implement the code yourself.\n"
+            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"{run_cmd} \\\"$(cat /tmp/{pfx}-task.txt)\\\" > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            + after
         )
     if agent == "codex":
         run_cmd = effective_cmd or "codex exec --full-auto"
         return (
-            "\n⚠️  CODING AGENT DELEGATION — DO NOT WRITE CODE YOURSELF:\n"
-            "  Spawn Codex via terminal instead of writing code directly.\n\n"
+            f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
+            f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            "  2. write_file(\"/tmp/codex-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"{run_cmd} < /tmp/codex-task.txt > /tmp/codex-out.txt 2>&1\", background=True)\n"
-            "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
-            "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
-            "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-            "  STOP — do not implement the code yourself.\n"
+            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            + after
         )
     if agent == "opencode":
         run_cmd = effective_cmd or "opencode run"
         return (
-            "\n⚠️  CODING AGENT DELEGATION — DO NOT WRITE CODE YOURSELF:\n"
-            "  Spawn OpenCode via terminal instead of writing code directly.\n\n"
+            f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
+            f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            "  2. write_file(\"/tmp/oc-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"{run_cmd} < /tmp/oc-task.txt > /tmp/oc-out.txt 2>&1\", background=True)\n"
-            "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
-            "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
-            "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-            "  STOP — do not implement the code yourself.\n"
+            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            + after
         )
     return ""
+
+
+def _resolve_agent_for_role(execution: Dict[str, Any], role: str) -> str:
+    """Return the agent to use for a specific pipeline role.
+
+    Checks execution.profiles[role].agent first (per-role override), then
+    falls back to the global execution.coding_agent setting.
+    """
+    profiles = (execution or {}).get("profiles") or {}
+    entry = profiles.get(role)
+    if isinstance(entry, dict):
+        role_agent = (entry.get("agent") or "").strip().lower()
+        if role_agent in ("hermes", "claude-code", "codex", "opencode", "none"):
+            return role_agent
+    return _resolve_coding_agent(execution)
 
 
 def _resolve_coding_agent_cmd(execution: Dict[str, Any]) -> str:
@@ -773,7 +842,10 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
     body = (issue.get("body") or "").strip()
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    _body = (
+    _body = ""
+    if coding_agent not in ("none", "hermes"):
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="pm") + "\n\n"
+    _body += (
         f"You are the PROJECT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
         f"The VALIDATOR has confirmed this issue is real, safe, and ready to implement.\n"
@@ -982,12 +1054,16 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
 
 
 def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
-                  provider_name: str, profiles: Optional[Dict[str, str]] = None) -> str:
+                  provider_name: str, profiles: Optional[Dict[str, str]] = None,
+                  coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
     n = issue.get("number")
     title = issue.get("title", "")
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    return (
+    _body = ""
+    if coding_agent not in ("none", "hermes"):
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="qa") + "\n\n"
+    _body += (
         f"You are the QA for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"The developer has opened a PR. Your job:\n"
@@ -1001,15 +1077,20 @@ def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"   - Tests fail: block with 'qa-failed: <reason>' — developer will fix\n"
         f"7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     )
+    return _body
 
 
 def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
-                        provider_name: str, profiles: Optional[Dict[str, str]] = None) -> str:
+                        provider_name: str, profiles: Optional[Dict[str, str]] = None,
+                        coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
     n = issue.get("number")
     title = issue.get("title", "")
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    return (
+    _body = ""
+    if coding_agent not in ("none", "hermes"):
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="reviewer") + "\n\n"
+    _body += (
         f"You are the REVIEWER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"QA has passed. Review the developer's PR for correctness, quality, and performance.\n"
@@ -1021,15 +1102,20 @@ def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"   - 'reviewed: changes-requested: <reason>' if fixes needed\n"
         f"5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     )
+    return _body
 
 
 def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
-                        provider_name: str, profiles: Optional[Dict[str, str]] = None) -> str:
+                        provider_name: str, profiles: Optional[Dict[str, str]] = None,
+                        coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
     n = issue.get("number")
     title = issue.get("title", "")
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    return (
+    _body = ""
+    if coding_agent not in ("none", "hermes"):
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="security") + "\n\n"
+    _body += (
         f"You are the SECURITY-ANALYST for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"Audit the developer's PR diff for security vulnerabilities.\n"
@@ -1043,17 +1129,22 @@ def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"   - 'security: flagged: <finding>' if human review needed\n"
         f"5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     )
+    return _body
 
 
 def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                     provider_name: str, notify_target: str,
-                    profiles: Optional[Dict[str, str]] = None) -> str:
+                    profiles: Optional[Dict[str, str]] = None,
+                    coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
     n = issue.get("number")
     title = issue.get("title", "")
     issue_url = issue.get("url", "")
     comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    return (
+    _body = ""
+    if coding_agent not in ("none", "hermes"):
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="documentation") + "\n\n"
+    _body += (
         f"You are the DOCUMENTATION agent for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"The PR has been reviewed and approved. Write a detailed completion report.\n"
@@ -1066,6 +1157,7 @@ def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"3. Complete with summary: 'docs: posted completion report for PR #N'\n"
         f"4. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     )
+    return _body
 
 
 _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
@@ -1668,6 +1760,7 @@ def _check_confirmed_validators(
     role_skills: Optional[Dict[str, List[str]]] = None,
     coding_agent: str = "none",
     coding_agent_cmd: str = "",
+    role_agents: Optional[Dict[str, str]] = None,
     *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
@@ -1826,10 +1919,11 @@ def _check_confirmed_validators(
             logger.info("[dry-run] validator CONFIRMED #%s — would create PM task", n)
             triggered.append(n)
             continue
+        _pm_agent = (role_agents or {}).get("pm", coding_agent)
         vid = kanban.create_task(
             slug, f"#{n} {issue.get('title', '')}",
             body=_pm_body(repo, issue, summary_raw, workdir, base_branch, provider_name, profiles=p,
-                          coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd),
+                          coding_agent=_pm_agent, coding_agent_cmd=coding_agent_cmd),
             assignee=p["pm"],
             idempotency_key=ikey,
             workspace=f"dir:{workdir}" if workdir else "",
@@ -1850,6 +1944,7 @@ def _check_completed_pm(
     role_skills: Optional[Dict[str, List[str]]] = None,
     coding_agent: str = "none",
     coding_agent_cmd: str = "",
+    role_agents: Optional[Dict[str, str]] = None,
     *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
@@ -1860,6 +1955,7 @@ def _check_completed_pm(
     """
     p = profiles or _DEFAULT_PROFILES
     rs = role_skills or {}
+    ra = role_agents or {}
     triggered: List[int] = []
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p["pm"]:
@@ -1929,7 +2025,9 @@ def _check_completed_pm(
         if security_first:
             sec_id = kanban.create_task(
                 slug, f"#{n} Security: {issue_title}",
-                body=_security_task_body(repo, issue, workdir, provider_name, profiles=p),
+                body=_security_task_body(repo, issue, workdir, provider_name, profiles=p,
+                                         coding_agent=ra.get("security", coding_agent),
+                                         coding_agent_cmd=coding_agent_cmd),
                 assignee=p.get("security", _DEFAULT_PROFILES["security"]),
                 idempotency_key=f"security-{n}",
                 workspace=workspace_arg,
@@ -1942,7 +2040,8 @@ def _check_completed_pm(
             dev_id = kanban.create_task(
                 slug, f"#{n} Developer: {issue_title}",
                 body=_dev_task_body(repo, issue, iterations, workdir, base_branch,
-                                    provider_name, coding_agent, coding_agent_cmd,
+                                    provider_name,
+                                    ra.get("developer", coding_agent), coding_agent_cmd,
                                     profiles=p, label_overrides=label_overrides),
                 assignee=p.get("developer", _DEFAULT_PROFILES["developer"]),
                 idempotency_key=f"developer-{n}",
@@ -1953,7 +2052,9 @@ def _check_completed_pm(
 
         qa_id = kanban.create_task(
             slug, f"#{n} QA: {issue_title}",
-            body=_qa_task_body(repo, issue, workdir, provider_name, profiles=p),
+            body=_qa_task_body(repo, issue, workdir, provider_name, profiles=p,
+                               coding_agent=ra.get("qa", coding_agent),
+                               coding_agent_cmd=coding_agent_cmd),
             assignee=p.get("qa", _DEFAULT_PROFILES["qa"]),
             idempotency_key=f"qa-{n}",
             workspace=workspace_arg,
@@ -1964,7 +2065,9 @@ def _check_completed_pm(
 
         rev_id = kanban.create_task(
             slug, f"#{n} Reviewer: {issue_title}",
-            body=_reviewer_task_body(repo, issue, workdir, provider_name, profiles=p),
+            body=_reviewer_task_body(repo, issue, workdir, provider_name, profiles=p,
+                                     coding_agent=ra.get("reviewer", coding_agent),
+                                     coding_agent_cmd=coding_agent_cmd),
             assignee=p.get("reviewer", _DEFAULT_PROFILES["reviewer"]),
             idempotency_key=f"reviewer-{n}",
             workspace=workspace_arg,
@@ -1976,7 +2079,9 @@ def _check_completed_pm(
         if not security_first:
             sec_id = kanban.create_task(
                 slug, f"#{n} Security: {issue_title}",
-                body=_security_task_body(repo, issue, workdir, provider_name, profiles=p),
+                body=_security_task_body(repo, issue, workdir, provider_name, profiles=p,
+                                         coding_agent=ra.get("security", coding_agent),
+                                         coding_agent_cmd=coding_agent_cmd),
                 assignee=p.get("security", _DEFAULT_PROFILES["security"]),
                 idempotency_key=f"security-{n}",
                 workspace=workspace_arg,
@@ -1990,7 +2095,9 @@ def _check_completed_pm(
         ] if x]
         kanban.create_task(
             slug, f"#{n} Docs: {issue_title}",
-            body=_docs_task_body(repo, issue, workdir, provider_name, notify_target, profiles=p),
+            body=_docs_task_body(repo, issue, workdir, provider_name, notify_target, profiles=p,
+                                 coding_agent=ra.get("documentation", coding_agent),
+                                 coding_agent_cmd=coding_agent_cmd),
             assignee=p.get("documentation", _DEFAULT_PROFILES["documentation"]),
             idempotency_key=f"docs-{n}",
             workspace=workspace_arg,
@@ -2222,11 +2329,16 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
     coding_agent = _resolve_coding_agent(execution)
     coding_agent_cmd = _resolve_coding_agent_cmd(execution)
-    if coding_agent not in ("none", "hermes"):
-        _dev_skills = list(role_skills.get("developer") or [])
-        if "coding-agents" not in _dev_skills:
-            _dev_skills.append("coding-agents")
-        role_skills = {**role_skills, "developer": _dev_skills}
+    role_agents: Dict[str, str] = {
+        role: _resolve_agent_for_role(execution, role) for role in _DEFAULT_PROFILES
+    }
+    # Inject coding-agents skill for every role that delegates to a cloud agent.
+    for _role, _agent in role_agents.items():
+        if _agent not in ("none", "hermes"):
+            _role_skills = list(role_skills.get(_role) or [])
+            if "coding-agents" not in _role_skills:
+                _role_skills.append("coding-agents")
+            role_skills = {**role_skills, _role: _role_skills}
     _comment_header_tpl: str = (
         execution.get("comment_header_template")
         or notify_templates.DEFAULT_COMMENT_HEADER_TEMPLATE
@@ -2396,7 +2508,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
         profiles=profiles, role_skills=role_skills, coding_agent=coding_agent,
-        coding_agent_cmd=coding_agent_cmd,
+        coding_agent_cmd=coding_agent_cmd, role_agents=role_agents,
         dry_run=dry_run, provider=provider,
     )
     if confirmed_triggered and not dry_run:
@@ -2406,7 +2518,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         slug, repo, issues_map, iterations, workdir, notify_target, base_branch,
         provider.name, _sec_targets, label_overrides=_label_ovr,
         profiles=profiles, role_skills=role_skills, coding_agent=coding_agent,
-        coding_agent_cmd=coding_agent_cmd,
+        coding_agent_cmd=coding_agent_cmd, role_agents=role_agents,
         dry_run=dry_run, provider=provider,
     )
     if pm_triggered and not dry_run:
