@@ -202,18 +202,19 @@ execution:
   #   opencode     — delegate to OpenCode CLI (run mode)
   #   none         — no delegation; developer agent does coding directly
   #
-  # When set to a CLI agent (claude-code/codex/opencode), the dispatcher
-  # injects a delegation instruction telling the developer to use `delegate_task`
-  # with the appropriate CLI command for that agent. The coding-agents skill is
+  # When set to a CLI agent (claude-code/codex/opencode), the developer SOUL.md
+  # instructs the agent to spawn the external coding tool via terminal(background=True)
+  # rather than implementing code directly. The coding-agents skill is
   # automatically attached to the developer profile when delegation is enabled.
   #
   # coding_agent: hermes
 
-  # Custom shell command passed as acp_command to delegate_task when coding_agent
-  # is set to a CLI agent.  Useful when you have multiple accounts or shell aliases
-  # (e.g. cc-rizq, cc-rewst, cc).  Leave blank to use the agent's default command.
+  # Shell command used by the developer agent to spawn the external coding agent
+  # via terminal(background=True). Must be the full command (not a shell alias).
+  # For Claude Code: use the absolute binary path + flags.
+  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions -p"
   #
-  # coding_agent_cmd: "cc"
+  # coding_agent_cmd: ""
 
   # When coding_agent is set to a CLI agent, which model/backend should the
   # coding agent use? Passes through to the agent's --model flag where applicable.

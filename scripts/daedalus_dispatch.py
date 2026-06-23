@@ -138,67 +138,52 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
 def _build_delegation_instructions(agent: str, cmd: str = "") -> str:
     """Return delegation instruction text for the developer task body.
 
-    ``cmd`` is the custom CLI command (e.g. 'cc-rizq', 'cc-rewst'); when
-    empty the agent-specific default command is shown.
+    ``cmd`` is the full CLI command from coding_agent_cmd (must be absolute
+    path, not a shell alias).  When empty, the agent-specific default is used.
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
-    if cmd:
-        acp_note = f"(custom command configured for this project)"
-    else:
-        acp_note = f"(default for {agent} — set coding_agent_cmd to override)"
-
-    acp_line = f"     - acp_command: \"{effective_cmd}\"  {acp_note}\n" if effective_cmd else ""
 
     if agent == "claude-code":
+        run_cmd = effective_cmd or "CLAUDE_CONFIG_DIR=$HOME/.claude /Users/benmarte/.local/bin/claude --dangerously-skip-permissions -p"
         return (
-            "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
-            "  You MUST use `delegate_task` (available via the computer_use tool or\n"
-            "  hermes CLI) to spawn a Claude Code subagent rather than coding directly.\n\n"
+            "\n⚠️  CODING AGENT DELEGATION — DO NOT WRITE CODE YOURSELF:\n"
+            "  Spawn Claude Code via terminal instead of writing code directly.\n\n"
             "  Steps:\n"
-            "  1. Read the task requirements carefully.\n"
-            "  2. Use `delegate_task` with:\n"
-            "     - goal: \"<copy the full task requirements here>\"\n"
-            "     - context: \"<include file paths, error messages, repo structure>\"\n"
-            "     - toolsets: [\"terminal\", \"file\"]  (for code work)\n"
-            + acp_line +
-            "  3. The subagent will run Claude Code in print mode and return results.\n"
-            "  4. Verify the subagent's work before completing your card.\n"
-            "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
-            "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+            "  1. Copy the full task body from this card.\n"
+            "  2. write_file(\"/tmp/cc-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"{run_cmd} \\\"$(cat /tmp/cc-task.txt)\\\" > /tmp/cc-out.txt 2>&1\", background=True)\n"
+            "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
+            "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
+            "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+            "  STOP — do not implement the code yourself.\n"
         )
     if agent == "codex":
+        run_cmd = effective_cmd or "codex exec --full-auto"
         return (
-            "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
-            "  You MUST use `delegate_task` to spawn an OpenAI Codex subagent rather\n"
-            "  than coding directly.\n\n"
+            "\n⚠️  CODING AGENT DELEGATION — DO NOT WRITE CODE YOURSELF:\n"
+            "  Spawn Codex via terminal instead of writing code directly.\n\n"
             "  Steps:\n"
-            "  1. Read the task requirements carefully.\n"
-            "  2. Use `delegate_task` with:\n"
-            "     - goal: \"<copy the full task requirements here>\"\n"
-            "     - context: \"<include file paths, error messages, repo structure>\"\n"
-            "     - toolsets: [\"terminal\", \"file\"]\n"
-            + acp_line +
-            "  3. The subagent will run Codex in exec mode and return results.\n"
-            "  4. Verify the subagent's work before completing your card.\n"
-            "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
-            "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+            "  1. Copy the full task body from this card.\n"
+            "  2. write_file(\"/tmp/codex-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"{run_cmd} < /tmp/codex-task.txt > /tmp/codex-out.txt 2>&1\", background=True)\n"
+            "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
+            "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
+            "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+            "  STOP — do not implement the code yourself.\n"
         )
     if agent == "opencode":
+        run_cmd = effective_cmd or "opencode run"
         return (
-            "\n⚠️  CODING AGENT DELEGATION INSTRUCTIONS:\n"
-            "  You MUST use `delegate_task` to spawn an OpenCode subagent rather than\n"
-            "  coding directly.\n\n"
+            "\n⚠️  CODING AGENT DELEGATION — DO NOT WRITE CODE YOURSELF:\n"
+            "  Spawn OpenCode via terminal instead of writing code directly.\n\n"
             "  Steps:\n"
-            "  1. Read the task requirements carefully.\n"
-            "  2. Use `delegate_task` with:\n"
-            "     - goal: \"<copy the full task requirements here>\"\n"
-            "     - context: \"<include file paths, error messages, repo structure>\"\n"
-            "     - toolsets: [\"terminal\", \"file\"]\n"
-            + acp_line +
-            "  3. The subagent will run OpenCode in one-shot mode and return results.\n"
-            "  4. Verify the subagent's work before completing your card.\n"
-            "  5. IMPORTANT: The `coding-agents` skill is pre-loaded — load it with\n"
-            "     `skill_view(name='coding-agents')` for exact CLI flags.\n"
+            "  1. Copy the full task body from this card.\n"
+            "  2. write_file(\"/tmp/oc-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"{run_cmd} < /tmp/oc-task.txt > /tmp/oc-out.txt 2>&1\", background=True)\n"
+            "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
+            "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
+            "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+            "  STOP — do not implement the code yourself.\n"
         )
     return ""
 

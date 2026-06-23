@@ -765,35 +765,33 @@ def test_coding_agent_defaults_dict_exists():
 
 
 def test_build_delegation_instructions_claude_code_default_cmd():
-    """When coding_agent_cmd is empty, claude-code instructions show 'claude -p'."""
+    """When coding_agent_cmd is empty, claude-code instructions use the built-in default."""
     body = disp._build_delegation_instructions("claude-code", cmd="")
-    assert "CODING AGENT DELEGATION INSTRUCTIONS" in body
-    assert "claude -p" in body, f"expected 'claude -p' in instructions, got:\n{body}"
-    assert "default for claude-code" in body
+    assert "CODING AGENT DELEGATION" in body
+    assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
+    assert "claude" in body.lower(), f"expected claude binary reference in instructions, got:\n{body}"
 
 
 def test_build_delegation_instructions_codex_default_cmd():
-    """When coding_agent_cmd is empty, codex instructions show 'codex exec --full-auto'."""
+    """When coding_agent_cmd is empty, codex instructions use 'codex exec --full-auto'."""
     body = disp._build_delegation_instructions("codex", cmd="")
-    assert "CODING AGENT DELEGATION INSTRUCTIONS" in body
+    assert "CODING AGENT DELEGATION" in body
+    assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
     assert "codex exec --full-auto" in body, f"expected 'codex exec --full-auto' in instructions, got:\n{body}"
-    assert "default for codex" in body
 
 
 def test_build_delegation_instructions_opencode_default_cmd():
-    """When coding_agent_cmd is empty, opencode instructions show 'opencode run'."""
+    """When coding_agent_cmd is empty, opencode instructions use 'opencode run'."""
     body = disp._build_delegation_instructions("opencode", cmd="")
-    assert "CODING AGENT DELEGATION INSTRUCTIONS" in body
+    assert "CODING AGENT DELEGATION" in body
+    assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
     assert "opencode run" in body, f"expected 'opencode run' in instructions, got:\n{body}"
-    assert "default for opencode" in body
 
 
 def test_build_delegation_instructions_custom_cmd_overrides_default():
     """When coding_agent_cmd is set, it overrides the per-agent default."""
-    body = disp._build_delegation_instructions("claude-code", cmd="cc-rizq")
-    assert "cc-rizq" in body, f"expected custom cmd 'cc-rizq' in instructions, got:\n{body}"
-    assert "claude -p" not in body, "default cmd should not appear when custom cmd is set"
-    assert "custom command configured for this project" in body
+    body = disp._build_delegation_instructions("claude-code", cmd="/custom/claude -p")
+    assert "/custom/claude -p" in body, f"expected custom cmd in instructions, got:\n{body}"
 
 
 def test_build_delegation_instructions_custom_cmd_codex():
@@ -801,7 +799,6 @@ def test_build_delegation_instructions_custom_cmd_codex():
     body = disp._build_delegation_instructions("codex", cmd="my-codex")
     assert "my-codex" in body
     assert "codex exec --full-auto" not in body
-    assert "custom command configured for this project" in body
 
 
 def test_build_delegation_instructions_hermes_returns_empty():
@@ -828,23 +825,14 @@ def test_resolve_coding_agent_cmd_strips_whitespace():
     assert disp._resolve_coding_agent_cmd({"coding_agent_cmd": "  cc-rizq  "}) == "cc-rizq"
 
 
-def test_pm_body_delegation_uses_custom_cmd():
-    """_pm_body delegation block includes custom coding_agent_cmd when provided."""
+def test_pm_body_has_no_delegation_instructions():
+    """_pm_body must NOT contain delegation instructions — PM assigns tasks, doesn't code."""
     issue = {"number": 5, "title": "My issue", "body": "desc"}
     body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
                          coding_agent="claude-code", coding_agent_cmd="cc-rewst")
-    assert "CODING AGENT DELEGATION INSTRUCTIONS" in body
-    assert "cc-rewst" in body, f"expected 'cc-rewst' in body, got:\n{body}"
-    assert "claude -p" not in body
-
-
-def test_pm_body_delegation_uses_default_cmd_when_cmd_empty():
-    """_pm_body delegation block shows per-agent default when coding_agent_cmd is empty."""
-    issue = {"number": 5, "title": "My issue", "body": "desc"}
-    body = disp._pm_body("org/repo", issue, "CONFIRMED: ok", "/tmp", "dev", "github",
-                         coding_agent="claude-code", coding_agent_cmd="")
-    assert "CODING AGENT DELEGATION INSTRUCTIONS" in body
-    assert "claude -p" in body, f"expected default 'claude -p' in body, got:\n{body}"
+    assert "CODING AGENT DELEGATION" not in body, (
+        "_pm_body must not inject coding delegation (PM doesn't implement code)"
+    )
 
 
 def test_downstream_body_delegation_uses_custom_cmd():
@@ -854,6 +842,15 @@ def test_downstream_body_delegation_uses_custom_cmd():
                                  coding_agent="opencode", coding_agent_cmd="my-opencode")
     assert "my-opencode" in body
     assert "opencode run" not in body
+
+
+def test_downstream_body_delegation_uses_default_cmd_when_empty():
+    """_downstream_body shows per-agent default when coding_agent_cmd is empty."""
+    issue = {"number": 7, "title": "Fix bug", "body": "repro"}
+    body = disp._downstream_body("org/repo", issue, 3, "/tmp", "", "dev", "github",
+                                 coding_agent="claude-code", coding_agent_cmd="")
+    assert "CODING AGENT DELEGATION" in body
+    assert "terminal(" in body
 
 
 if __name__ == "__main__":
