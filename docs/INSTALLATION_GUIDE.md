@@ -134,7 +134,7 @@ Step 2 opens automatically after Step 1. This is where you set branches, boards,
 
 **VCS section:**
 - **Provider** — auto-detected; change if needed
-- **Target Branch** — the branch PRs are opened against (default: `main`)
+- **Target Branch** — the branch PRs are opened against (default: `dev`)
 - **Branch Prefix** — prefix added to branches created by the developer agent (default: `fix/`)
 - **PR Title Prefix** — prefix added to PR titles (default: `fix:`)
 
