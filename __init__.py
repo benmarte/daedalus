@@ -99,6 +99,79 @@ def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
         logger.debug("daedalus kanban_task_claimed sync failed: %s", exc)
 
 
+def _read_env_value(env_path: str, key: str) -> str | None:
+    """Return the value of ``key`` from a dotenv-style file, or None.
+
+    Parses ``KEY=value`` lines (ignoring blanks, comments, and ``export``
+    prefixes). Surrounding quotes are stripped. Returns the first match.
+    """
+    try:
+        with open(env_path) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
+                name, sep, value = line.partition("=")
+                if sep and name.strip() == key:
+                    value = value.strip()
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                        value = value[1:-1]
+                    return value
+    except OSError:
+        return None
+    return None
+
+
+def _sync_github_token() -> None:
+    """Copy GITHUB_TOKEN from ~/.hermes/.env into every *-daedalus profile .env.
+
+    provision_roster.sh only writes GITHUB_TOKEN into each profile's .env when a
+    token is resolvable at provision time. On a fresh install where the token is
+    only added to ~/.hermes/.env afterwards (or was absent during provisioning),
+    the profiles are left permanently missing the token and agents fail with
+    GitHub auth errors until someone re-provisions (issue #78).
+
+    This runs on every plugin load and, for each ``~/.hermes/profiles/*-daedalus``
+    profile whose .env lacks a ``GITHUB_TOKEN=`` line, appends the token from
+    ~/.hermes/.env. Idempotent — profiles that already have the key are skipped,
+    so the value is never duplicated or overwritten. Never raises.
+    """
+    try:
+        hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        token = _read_env_value(os.path.join(hermes_home, ".env"), "GITHUB_TOKEN")
+        if not token:
+            return
+
+        profiles_dir = os.path.join(hermes_home, "profiles")
+        if not os.path.isdir(profiles_dir):
+            return
+
+        for name in os.listdir(profiles_dir):
+            if not name.endswith("-daedalus"):
+                continue
+            profile_dir = os.path.join(profiles_dir, name)
+            if not os.path.isdir(profile_dir):
+                continue
+            env_file = os.path.join(profile_dir, ".env")
+
+            # Idempotent: skip if a GITHUB_TOKEN line already exists.
+            if _read_env_value(env_file, "GITHUB_TOKEN") is not None:
+                continue
+
+            try:
+                # Match a trailing-newline-safe append, mirroring provision_roster.sh.
+                with open(env_file, "a") as f:
+                    f.write(f"\nGITHUB_TOKEN={token}\n")
+                os.chmod(env_file, 0o600)
+                logger.debug("daedalus: synced GITHUB_TOKEN into profile %s", name)
+            except OSError as exc:
+                logger.debug("daedalus: token sync failed for %s: %s", name, exc)
+    except Exception:
+        logger.debug("daedalus: github token sync failed", exc_info=True)
+
+
 def _ensure_cron_wrapper() -> None:
     """Make sure ~/.hermes/scripts/daedalus-cron.sh exists on every plugin load.
 
@@ -143,7 +216,9 @@ def register(ctx) -> None:
 
     Finally, it (re)installs the daedalus-cron.sh wrapper on every load so
     fresh installs and post-update environments always have the script the
-    dispatcher cron job invokes — Hermes provides no post-install hook.
+    dispatcher cron job invokes — Hermes provides no post-install hook — and
+    syncs GITHUB_TOKEN from ~/.hermes/.env into any *-daedalus profile .env
+    that lacks it, so profiles provisioned before the token was set still work.
     """
     try:
         ctx.register_auxiliary_task(
@@ -157,5 +232,6 @@ def register(ctx) -> None:
     except Exception:
         logger.debug("daedalus register() failed", exc_info=True)
 
-    # Idempotent — runs in its own try/except so it never blocks registration.
+    # Idempotent — each runs in its own try/except so it never blocks registration.
     _ensure_cron_wrapper()
+    _sync_github_token()
