@@ -150,6 +150,61 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     }
   });
 
+  // src/codingAgent.js
+  var require_codingAgent = __commonJS({
+    "src/codingAgent.js"(exports, module) {
+      var CLI_AGENTS = ["claude-code", "codex", "opencode"];
+      var CODING_AGENT_DEFAULTS = {
+        "claude-code": "claude -p",
+        "codex": "codex exec --full-auto",
+        "opencode": "opencode run"
+      };
+      function isCliAgent(agent) {
+        return CLI_AGENTS.indexOf(agent) !== -1;
+      }
+      function defaultCmdFor(agent) {
+        return CODING_AGENT_DEFAULTS[agent] || "";
+      }
+      function shouldResetCmdOnAgentChange(prevAgent, nextAgent) {
+        return prevAgent !== nextAgent;
+      }
+      module.exports = {
+        CLI_AGENTS,
+        CODING_AGENT_DEFAULTS,
+        isCliAgent,
+        defaultCmdFor,
+        shouldResetCmdOnAgentChange
+      };
+    }
+  });
+
+  // src/configDirty.js
+  var require_configDirty = __commonJS({
+    "src/configDirty.js"(exports, module) {
+      function stableStringify(value) {
+        if (value === null || typeof value !== "object") {
+          return JSON.stringify(value);
+        }
+        if (Array.isArray(value)) {
+          return "[" + value.map(stableStringify).join(",") + "]";
+        }
+        var keys = Object.keys(value).sort();
+        var parts = keys.map(function(k) {
+          return JSON.stringify(k) + ":" + stableStringify(value[k]);
+        });
+        return "{" + parts.join(",") + "}";
+      }
+      function isDirty(pristine, current) {
+        if (pristine == null || current == null) return false;
+        return stableStringify(pristine) !== stableStringify(current);
+      }
+      module.exports = {
+        stableStringify,
+        isDirty
+      };
+    }
+  });
+
   // src/App.jsx
   var SDK = window.__HERMES_PLUGIN_SDK__;
   if (!SDK) throw new Error("Hermes Plugin SDK not loaded");
@@ -170,6 +225,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
   var NOTIFY_EVENTS = providerFields.NOTIFY_EVENTS;
   var repoLabelForProvider = providerFields.repoLabelForProvider;
   var repoPlaceholderForProvider = providerFields.repoPlaceholderForProvider;
+  var codingAgent = require_codingAgent();
+  var configDirty = require_configDirty();
   var fetchJSON = SDK.fetchJSON;
   if (!fetchJSON && SDK.authedFetch) {
     fetchJSON = function(url, opts) {
@@ -1177,6 +1234,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var notifications = ns[0], setNotifications = ns[1];
     var sr = useState(false);
     var showRemoveModal = sr[0], setShowRemoveModal = sr[1];
+    var pr = useState(null);
+    var pristine = pr[0], setPristine = pr[1];
     var br = useState([]);
     var branches = br[0], setBranches = br[1];
     var la = useState([]);
@@ -1203,6 +1262,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         if (data.issues.processing.max_issues_per_run == null) data.issues.processing.max_issues_per_run = 20;
         if (data.issues.processing.max_open_prs == null) data.issues.processing.max_open_prs = 5;
         setConfig(data);
+        setPristine(JSON.parse(JSON.stringify(data)));
         setLoading(false);
       }).catch(function(err) {
         setLoadErr(String(err && err.message || err));
@@ -1290,6 +1350,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       fetchJSON(apiProjectConfig(name), { method: "POST", body }).then(function(res) {
         setSaving(false);
         if (res && res.status === "saved") {
+          setPristine(JSON.parse(JSON.stringify(config)));
           if (res.cron) {
             var cr = res.cron;
             var cronMsg = cr.name || "";
@@ -1359,6 +1420,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var sources = config && config.sources ? Object.keys(config.sources).filter(function(k) {
       return k !== "secret";
     }) : [];
+    var dirty = configDirty.isDirty(pristine, config);
     return React.createElement(
       React.Fragment,
       null,
@@ -1726,7 +1788,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                   style: S.select,
                   value: getIn(config, ["execution", "coding_agent"], "hermes"),
                   onChange: function(e2) {
+                    var prevAgent = getIn(config, ["execution", "coding_agent"], "hermes");
                     updateField("execution.coding_agent", e2.target.value);
+                    if (codingAgent.shouldResetCmdOnAgentChange(prevAgent, e2.target.value)) {
+                      updateField("execution.coding_agent_cmd", "");
+                    }
                   }
                 },
                 React.createElement("option", { value: "hermes" }, "Hermes \u2014 delegate via built-in subagent"),
@@ -1741,10 +1807,9 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               )
             )
           ),
-          ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1 ? (function() {
-            var _AGENT_CMD_DEFAULTS = { "claude-code": "claude -p", "codex": "codex exec --full-auto", "opencode": "opencode run" };
+          codingAgent.isCliAgent(getIn(config, ["execution", "coding_agent"], "hermes")) ? (function() {
             var _currentAgent = getIn(config, ["execution", "coding_agent"], "hermes");
-            var _defaultCmd = _AGENT_CMD_DEFAULTS[_currentAgent] || "";
+            var _defaultCmd = codingAgent.defaultCmdFor(_currentAgent);
             return React.createElement(
               "div",
               { style: S.fieldRow },
@@ -1799,6 +1864,10 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
               disabled: saving,
               onClick: props.setupMode ? props.onAbort : props.onClose
             }),
+            dirty && !saving ? React.createElement("span", {
+              style: { color: "#f5a623", fontSize: "12px", alignSelf: "center", marginLeft: "4px" },
+              title: "You have unsaved changes \u2014 click Save before closing or opening this project elsewhere."
+            }, "\u25CF Unsaved changes") : null,
             props.setupMode ? null : React.createElement(
               "div",
               { style: { marginLeft: "auto" } },

@@ -46,6 +46,12 @@ var NOTIFY_EVENTS = providerFields.NOTIFY_EVENTS;
 var repoLabelForProvider = providerFields.repoLabelForProvider;
 var repoPlaceholderForProvider = providerFields.repoPlaceholderForProvider;
 
+// Coding-agent metadata + pure helpers (own module for unit-testing).
+var codingAgent = require("./codingAgent");
+
+// Pure dirty-state helper for the config modal (own module for unit-testing).
+var configDirty = require("./configDirty");
+
 // Resolve a JSON-returning fetch from whatever the SDK exposes.
 var fetchJSON = SDK.fetchJSON;
 if (!fetchJSON && SDK.authedFetch) {
@@ -914,6 +920,8 @@ function ConfigModal(props) {
   var fe = useState(null); var fieldErrors = fe[0], setFieldErrors = fe[1];
   var ns = useState({}); var notifications = ns[0], setNotifications = ns[1];
   var sr = useState(false); var showRemoveModal = sr[0], setShowRemoveModal = sr[1];
+  // Snapshot of the last-saved config, for the unsaved-changes indicator (#66).
+  var pr = useState(null); var pristine = pr[0], setPristine = pr[1];
 
   // Meta data for data-driven fields (branches, labels, statuses, projects)
   var br = useState([]); var branches = br[0], setBranches = br[1];
@@ -941,6 +949,8 @@ function ConfigModal(props) {
       // issues.filters.labels intentionally NOT seeded — defaults handled by TagMultiSelect
       // tracking.ready_statuses intentionally NOT seeded — defaults to ["Ready"] via getIn
       setConfig(data);
+      // Snapshot the loaded config so we can detect unsaved edits (#66).
+      setPristine(JSON.parse(JSON.stringify(data)));
       setLoading(false);
     }).catch(function (err) {
       setLoadErr(String(err && err.message || err));
@@ -1029,6 +1039,8 @@ function ConfigModal(props) {
     fetchJSON(apiProjectConfig(name), { method: "POST", body: body }).then(function (res) {
       setSaving(false);
       if (res && res.status === "saved") {
+        // The current config is now the saved baseline — clear dirty state (#66).
+        setPristine(JSON.parse(JSON.stringify(config)));
         // Surface the cron reconciliation result if present
         if (res.cron) {
           var cr = res.cron;
@@ -1086,6 +1098,7 @@ function ConfigModal(props) {
   );
 
   var sources = config && config.sources ? Object.keys(config.sources).filter(function (k) { return k !== "secret"; }) : [];
+  var dirty = configDirty.isDirty(pristine, config);
 
   return React.createElement(React.Fragment, null,
   React.createElement("div", { style: S.overlay, onClick: props.onClose },
@@ -1364,7 +1377,15 @@ function ConfigModal(props) {
           React.createElement("select", {
             style: S.select,
             value: getIn(config, ["execution", "coding_agent"], "hermes"),
-            onChange: function (e) { updateField("execution.coding_agent", e.target.value); }
+            onChange: function (e) {
+              var prevAgent = getIn(config, ["execution", "coding_agent"], "hermes");
+              updateField("execution.coding_agent", e.target.value);
+              // Clear the previous agent's CLI command so the new agent picks
+              // up its own default instead of inheriting a stale command.
+              if (codingAgent.shouldResetCmdOnAgentChange(prevAgent, e.target.value)) {
+                updateField("execution.coding_agent_cmd", "");
+              }
+            }
           },
             React.createElement("option", { value: "hermes" }, "Hermes — delegate via built-in subagent"),
             React.createElement("option", { value: "claude-code" }, "Claude Code"),
@@ -1376,11 +1397,10 @@ function ConfigModal(props) {
           )
         )
       ),
-      ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1
+      codingAgent.isCliAgent(getIn(config, ["execution", "coding_agent"], "hermes"))
         ? (function() {
-            var _AGENT_CMD_DEFAULTS = {"claude-code": "claude -p", "codex": "codex exec --full-auto", "opencode": "opencode run"};
             var _currentAgent = getIn(config, ["execution", "coding_agent"], "hermes");
-            var _defaultCmd = _AGENT_CMD_DEFAULTS[_currentAgent] || "";
+            var _defaultCmd = codingAgent.defaultCmdFor(_currentAgent);
             return React.createElement("div", { style: S.fieldRow },
               React.createElement("label", { style: Object.assign({}, S.field, { flex: "1 1 100%" }) },
                 React.createElement("span", { style: S.fieldLabel }, "CLI Command"),
@@ -1422,6 +1442,10 @@ function ConfigModal(props) {
           disabled: saving,
           onClick: props.setupMode ? props.onAbort : props.onClose
         }),
+        dirty && !saving ? React.createElement("span", {
+          style: { color: "#f5a623", fontSize: "12px", alignSelf: "center", marginLeft: "4px" },
+          title: "You have unsaved changes — click Save before closing or opening this project elsewhere."
+        }, "● Unsaved changes") : null,
         props.setupMode ? null : React.createElement("div", { style: { marginLeft: "auto" } },
           React.createElement(Button, { label: "Remove Project", variant: "danger", onClick: function () { setShowRemoveModal(true); } })
         )
