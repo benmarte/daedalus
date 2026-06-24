@@ -85,6 +85,31 @@ registers the repo, creates its kanban board + cron). From the terminal:
 - **Azure DevOps:** `vcs.org` / `vcs.project` / `vcs.repo` — board columns map to
   work-item states.
 
+## Configure the coding agent (optional)
+By default every role works with the **local Hermes LLM** (your `default` profile's model).
+To instead delegate the implementation/review to an external CLI coding agent, add an
+`execution` block to `<repo>/.hermes/daedalus.yaml`:
+
+```yaml
+execution:
+  coding_agent: claude-code
+  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
+```
+
+- Supported values: `claude-code`, `codex`, `opencode`, or `hermes` (the default).
+- **Omitting `coding_agent` (or setting it to `hermes`/`none`) keeps everything on the
+  local Hermes LLM** — no external agent is spawned.
+- `coding_agent_cmd` is the full shell command the task body is piped into; omit it to use
+  the per-agent default (`claude --dangerously-skip-permissions -p`, `codex exec
+  --full-auto`, `opencode run`).
+- Per-role override: set `execution.profiles.<role>.agent` (e.g. `developer: claude-code`,
+  `validator: hermes`) to mix delegated and local roles.
+
+When enabled, the dispatcher injects a `⚠️ AGENT DELEGATION` block into the delegating
+role's task and auto-attaches the matching `autonomous-ai-agents/<agent>` skill, so the
+local LLM pipes the task to the coding agent and relays its output as the completion signal.
+See the [README](README.md#delegating-to-claude-code-or-codex) for the full reference.
+
 ## Project conventions the agents MUST follow (example)
 > These are repo-specific. Encode them in the triage-card body (the dispatcher's
 > `vcs.target_branch` drives the base branch) — the roster provisioner stays

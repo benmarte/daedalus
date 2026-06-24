@@ -1961,20 +1961,18 @@ def _completed_pm_tasks(issue_number, summary="SPEC: build the thing", title=Non
 
 
 def test_check_completed_pm_creates_team_tasks():
-    """Normal path: PM done with SPEC: in issues_map → create_triage called."""
+    """Normal path: PM done with SPEC: in issues_map → create_task called for each role."""
     disp = _load_dispatch()
     created = []
-    orig_create_triage = disp.kanban.create_triage
-    orig_decompose = disp.kanban.decompose
+    orig_create_task = disp.kanban.create_task
     orig_list_tasks = disp.kanban.list_tasks
     try:
         disp.kanban.list_tasks = lambda slug, status=None: (
             _completed_pm_tasks(5) if status == "done" else []
         )
-        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
-            created.append(n) or "t_triage"
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            created.append({"title": title, "idempotency_key": idempotency_key}) or "t_task"
         )
-        disp.kanban.decompose = lambda slug, tid: None
         result = disp._check_completed_pm(
             "slug", "O/R",
             {5: {"number": 5, "title": "feature", "body": ""}},
@@ -1982,21 +1980,24 @@ def test_check_completed_pm_creates_team_tasks():
         )
     finally:
         disp.kanban.list_tasks = orig_list_tasks
-        disp.kanban.create_triage = orig_create_triage
-        disp.kanban.decompose = orig_decompose
+        disp.kanban.create_task = orig_create_task
 
     check("check_completed_pm returns triggered list", result == [5])
-    check("check_completed_pm called create_triage for issue", 5 in created)
+    titles = [c["title"] for c in created]
+    check("check_completed_pm creates developer task", "#5 Developer: feature" in titles)
+    check("check_completed_pm creates qa task", "#5 QA: feature" in titles)
+    check("check_completed_pm creates reviewer task", "#5 Reviewer: feature" in titles)
+    check("check_completed_pm creates security task", "#5 Security: feature" in titles)
+    check("check_completed_pm creates docs task", "#5 Docs: feature" in titles)
 
 
 def test_check_completed_pm_provider_fallback():
-    """Issue not in issues_map → provider.get_issue() called and team tasks created."""
+    """Issue not in issues_map → provider.get_issue() called and role tasks created."""
     from core.providers.base import IssueSummary
     disp = _load_dispatch()
     created = []
     fetched = []
-    orig_create_triage = disp.kanban.create_triage
-    orig_decompose = disp.kanban.decompose
+    orig_create_task = disp.kanban.create_task
     orig_list_tasks = disp.kanban.list_tasks
 
     class _Provider:
@@ -2008,10 +2009,9 @@ def test_check_completed_pm_provider_fallback():
         disp.kanban.list_tasks = lambda slug, status=None: (
             _completed_pm_tasks(6) if status == "done" else []
         )
-        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
-            created.append(n) or "t_triage"
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            created.append({"title": title, "idempotency_key": idempotency_key}) or "t_task"
         )
-        disp.kanban.decompose = lambda slug, tid: None
         result = disp._check_completed_pm(
             "slug", "O/R",
             {},  # empty issues_map — forces fallback
@@ -2020,12 +2020,13 @@ def test_check_completed_pm_provider_fallback():
         )
     finally:
         disp.kanban.list_tasks = orig_list_tasks
-        disp.kanban.create_triage = orig_create_triage
-        disp.kanban.decompose = orig_decompose
+        disp.kanban.create_task = orig_create_task
 
     check("provider fallback: get_issue called", fetched == [6])
     check("provider fallback: team tasks created", result == [6])
-    check("provider fallback: create_triage called", 6 in created)
+    titles = [c["title"] for c in created]
+    check("provider fallback: creates developer task", "#6 Developer: feature from provider" in titles)
+    check("provider fallback: creates qa task", "#6 QA: feature from provider" in titles)
 
 
 def test_check_completed_pm_no_issue_found():
@@ -2117,19 +2118,17 @@ def test_check_completed_pm_skips_consultation():
 
 
 def test_pipeline_chain_confirmed_to_team_tasks():
-    """Integration: validator CONFIRMED → PM SPEC: done → team triage created.
+    """Integration: validator CONFIRMED → PM SPEC: done → role tasks created.
 
     Chains _check_confirmed_validators and _check_completed_pm the way the
     dispatcher does each cron tick, proving the hand-off works end-to-end.
     """
     disp = _load_dispatch()
     pm_created = []
-    triage_created = []
+    role_tasks_created = []
     orig_list_tasks = disp.kanban.list_tasks
     orig_show = disp.kanban.show_card
     orig_create_task = disp.kanban.create_task
-    orig_create_triage = disp.kanban.create_triage
-    orig_decompose = disp.kanban.decompose
 
     # Tick 1: validator is done, no PM task yet
     tick1_tasks = [
@@ -2156,15 +2155,14 @@ def test_pipeline_chain_confirmed_to_team_tasks():
             3, "/tmp", "", "main", "github",
         )
 
-        # ── Tick 2: PM done with SPEC: → create team triage ──────────────────
+        # ── Tick 2: PM done with SPEC: → create role tasks ───────────────────
         disp.kanban.list_tasks = lambda slug, status=None: (
             tick2_tasks if status == "done" else []
         )
         disp.kanban.show_card = lambda slug, tid: {"latest_summary": "SPEC: fix auth flow"}
-        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
-            triage_created.append(n) or "t_triage10"
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            role_tasks_created.append({"title": title, "idempotency_key": idempotency_key}) or "t_task10"
         )
-        disp.kanban.decompose = lambda slug, tid: None
         result = disp._check_completed_pm(
             "slug", "O/R",
             {10: {"number": 10, "title": "login bug", "body": ""}},
@@ -2174,11 +2172,10 @@ def test_pipeline_chain_confirmed_to_team_tasks():
         disp.kanban.list_tasks = orig_list_tasks
         disp.kanban.show_card = orig_show
         disp.kanban.create_task = orig_create_task
-        disp.kanban.create_triage = orig_create_triage
-        disp.kanban.decompose = orig_decompose
 
     check("pipeline chain: PM task created on tick 1", any("pm-10" in k for k in pm_created))
-    check("pipeline chain: team triage created on tick 2", triage_created == [10])
+    titles = [t["title"] for t in role_tasks_created]
+    check("pipeline chain: role tasks created on tick 2", "#10 Developer: login bug" in titles and "#10 QA: login bug" in titles)
     check("pipeline chain: _check_completed_pm returns issue", result == [10])
 
 

@@ -448,7 +448,14 @@ def test_get_project_config_unknown_project_returns_404(project_client):
 
 def test_post_project_config_persists_editable_fields(project_client, project_repo_dir):
     """POST /project/{name}/config persists editable fields, not read-only ones."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    # _reconcile_cron must be mocked: the payload carries a cron schedule, so the
+    # endpoint would otherwise route through the real _cron_cli → _hermes_cli →
+    # `hermes cron create test-project-daedalus`, firing a real cron job on every
+    # test run (issue #61). This test only asserts field persistence to YAML, which
+    # happens independently of cron reconciliation.
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+         mock.patch("dashboard.plugin_api._reconcile_cron",
+                    return_value={"cron": "updated"}):
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         payload = {
@@ -765,43 +772,54 @@ _CRON_LIST_NO_MATCH = """\
 
 
 class TestReconcileCron:
-    """Unit tests for _reconcile_cron with mocked subprocess.run."""
+    """Unit tests for _reconcile_cron with mocked _cron_cli.
 
-    def _mock_run_ok(self, stdout="", stderr=""):
-        return mock.Mock(returncode=0, stdout=stdout, stderr=stderr)
+    ``_cron_cli`` — not ``subprocess.run`` — is the seam: ``_hermes_cli`` is
+    resolved to ``core.cli.hermes_cli`` at import time, which carries its own
+    ``subprocess`` reference. Patching ``dashboard.plugin_api.subprocess.run``
+    would be a no-op and let real ``hermes cron create`` commands fire on every
+    test run (issue #61). ``_cron_cli(args)`` takes the cron subcommand args
+    (no ``hermes cron`` prefix) and returns ``(returncode, output)``.
+    """
+
+    def _mock_run_ok(self, stdout=""):
+        return (0, stdout)
 
     def _mock_run_fail(self, returncode=1, stderr="error"):
-        return mock.Mock(returncode=returncode, stdout="", stderr=stderr)
+        return (returncode, stderr)
 
     def _make_dispatcher(self, list_stdout, remove_ok=True, create_ok=True,
                          edit_ok=True, create_stdout="created: job j1"):
-        """Return a callable side_effect that dispatches on command args.
+        """Return a callable side_effect for the patched ``_cron_cli``.
 
-        - ``cron list --all`` → returns list_stdout
-        - ``cron edit <hex_id> ...`` → returns ok or fail
-        - ``cron remove <hex_id>`` → returns ok or fail
-        - ``cron create ...`` → returns ok or fail
+        ``_cron_cli`` receives the cron subcommand args (no ``hermes cron``
+        prefix) and returns ``(returncode, output)``:
+
+        - ``["list", "--all"]`` → returns list_stdout
+        - ``["edit", <hex_id>, ...]`` → returns ok or fail
+        - ``["remove", <hex_id>]`` → returns ok or fail
+        - ``["create", ...]`` → returns ok or fail
         """
         def _dispatch(args, **kwargs):
             cmd = args
-            if cmd[1] == "cron" and cmd[2] == "list" and "--all" in cmd:
+            if cmd[0] == "list" and "--all" in cmd:
                 return self._mock_run_ok(stdout=list_stdout)
-            if cmd[1] == "cron" and cmd[2] == "edit":
-                job_id = cmd[3]
+            if cmd[0] == "edit":
+                job_id = cmd[1]
                 assert re.match(r"^[0-9a-fA-F]{6,}$", job_id), \
                     f"edit called with non-hex-id: {job_id}"
                 if edit_ok:
                     return self._mock_run_ok(stdout="updated")
                 return self._mock_run_fail(returncode=2, stderr="unknown command: edit")
-            if cmd[1] == "cron" and cmd[2] == "remove":
-                # Verify the third arg is a hex job ID (not a name)
-                job_id = cmd[3]
+            if cmd[0] == "remove":
+                # Verify the second arg is a hex job ID (not a name)
+                job_id = cmd[1]
                 assert re.match(r"^[0-9a-fA-F]{6,}$", job_id), \
                     f"remove called with non-hex-id: {job_id}"
                 if remove_ok:
                     return self._mock_run_ok()
                 return self._mock_run_fail()
-            if cmd[1] == "cron" and cmd[2] == "create":
+            if cmd[0] == "create":
                 if create_ok:
                     return self._mock_run_ok(stdout=create_stdout)
                 return self._mock_run_fail(returncode=2, stderr="hermes: schedule invalid")
@@ -814,7 +832,7 @@ class TestReconcileCron:
         """One existing job → `hermes cron edit <id>` updates it; no duplicate."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -827,18 +845,18 @@ class TestReconcileCron:
         assert len(calls) == 2
 
         list_args = calls[0][0][0]
-        assert list_args[1:4] == ["cron", "list", "--all"]
+        assert list_args == ["list", "--all"]
 
         edit_args = calls[1][0][0]
-        assert edit_args[1:3] == ["cron", "edit"]
-        assert edit_args[3] == "99f7d116a95b"  # hex id from list output
+        assert edit_args[0] == "edit"
+        assert edit_args[1] == "99f7d116a95b"  # hex id from list output
         assert "--schedule" in edit_args
         assert "60m" in edit_args
 
     def test_updates_cron_with_deliver(self):
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron(
                 "test-project",
@@ -857,7 +875,7 @@ class TestReconcileCron:
         """Older hermes without `cron edit` → remove by id + create fresh."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(
                 _CRON_LIST_ONE_MATCH, edit_ok=False
             )
@@ -869,11 +887,11 @@ class TestReconcileCron:
         calls = mock_run.call_args_list
         # list + failed edit + remove + create = 4 calls
         assert len(calls) == 4
-        assert calls[1][0][0][1:3] == ["cron", "edit"]
-        assert calls[2][0][0][1:3] == ["cron", "remove"]
-        assert calls[2][0][0][3] == "99f7d116a95b"
+        assert calls[1][0][0][0] == "edit"
+        assert calls[2][0][0][0] == "remove"
+        assert calls[2][0][0][1] == "99f7d116a95b"
         create_args = calls[3][0][0]
-        assert create_args[1:3] == ["cron", "create"]
+        assert create_args[0] == "create"
         assert "--name" in create_args
         assert "test-project-daedalus" in create_args
         assert "--script" in create_args
@@ -884,7 +902,7 @@ class TestReconcileCron:
         """cron.notifications[] → dispatcher self-delivers, cron gets no --deliver."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
             result = _reconcile_cron(
                 "test-project",
@@ -903,7 +921,7 @@ class TestReconcileCron:
         """Two jobs with same name → both removed by hex id, then one created."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_TWO_MATCHES)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -917,8 +935,8 @@ class TestReconcileCron:
         # Both remove calls use hex ids
         remove1_args = calls[1][0][0]
         remove2_args = calls[2][0][0]
-        assert remove1_args[3] == "a1b2c3d4e5f6"
-        assert remove2_args[3] == "99f7d116a95b"
+        assert remove1_args[1] == "a1b2c3d4e5f6"
+        assert remove2_args[1] == "99f7d116a95b"
 
     # ── no match → no remove calls, just create ──────────────────────────
 
@@ -926,7 +944,7 @@ class TestReconcileCron:
         """No matching job in list → no remove calls, still creates."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -936,15 +954,15 @@ class TestReconcileCron:
         calls = mock_run.call_args_list
         # list + create = 2 calls (no remove)
         assert len(calls) == 2
-        assert calls[0][0][0][1:4] == ["cron", "list", "--all"]
-        assert calls[1][0][0][1:3] == ["cron", "create"]
+        assert calls[0][0][0] == ["list", "--all"]
+        assert calls[1][0][0][0] == "create"
 
     # ── empty schedule → remove matches, no create ───────────────────────
 
     def test_removes_cron_when_schedule_empty(self):
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": ""})
 
@@ -956,7 +974,7 @@ class TestReconcileCron:
     def test_removes_cron_when_cron_cfg_none(self):
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {})
 
@@ -970,7 +988,7 @@ class TestReconcileCron:
         """If 'hermes cron list' fails, we still attempt create."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(
                 _CRON_LIST_ONE_MATCH, create_ok=True
             )
@@ -993,7 +1011,7 @@ class TestReconcileCron:
         """A cron create failure is captured, not raised."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(
                 _CRON_LIST_NO_MATCH, create_ok=False
             )
@@ -1005,8 +1023,11 @@ class TestReconcileCron:
     def test_hermes_cli_not_found(self):
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-            mock_run.side_effect = FileNotFoundError("hermes not on PATH")
+        # _hermes_cli (and thus _cron_cli) catches FileNotFoundError internally
+        # and returns (-1, "hermes CLI not found") — it never raises. The
+        # reconcile path must surface that string as the result error.
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.return_value = (-1, "hermes CLI not found")
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
         assert result["error"] == "hermes CLI not found"
@@ -1015,7 +1036,7 @@ class TestReconcileCron:
         """Schedule with leading/trailing whitespace is stripped."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "  60m  "})
 
@@ -1030,13 +1051,13 @@ class TestReconcileCron:
         second job — each save either edits in place or recreates exactly one."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             r1 = _reconcile_cron("test-project", {"schedule": "30m"})
             r2 = _reconcile_cron("test-project", {"schedule": "45m"})
 
         assert r1["cron"] == "updated" and r2["cron"] == "updated"
-        cmds = [c[0][0][2] for c in mock_run.call_args_list]
+        cmds = [c[0][0][0] for c in mock_run.call_args_list]
         assert cmds == ["list", "edit", "list", "edit"]
         assert "create" not in cmds  # no job ever stacked
 
@@ -1107,10 +1128,8 @@ class TestPostProjectConfigCron:
         """POST /project/{name}/config returns cron result in response."""
         with mock.patch("dashboard.plugin_api.registry") as mock_registry:
             mock_registry.list_projects.return_value = [str(cron_project_dir)]
-            with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-                mock_run.return_value = mock.Mock(
-                    returncode=0, stdout="created: job j1", stderr=""
-                )
+            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+                mock_run.return_value = (0, "created: job j1")
 
                 payload = {
                     "cron": {"schedule": "15m", "deliver": "slack:tasks"},
@@ -1132,10 +1151,8 @@ class TestPostProjectConfigCron:
         """Clearing the schedule in the payload removes the cron job."""
         with mock.patch("dashboard.plugin_api.registry") as mock_registry:
             mock_registry.list_projects.return_value = [str(cron_project_dir)]
-            with mock.patch("dashboard.plugin_api.subprocess.run") as mock_run:
-                mock_run.return_value = mock.Mock(
-                    returncode=0, stdout="", stderr=""
-                )
+            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+                mock_run.return_value = (0, "")
 
                 payload = {"cron": {"schedule": ""}}
                 resp = cron_client.post(
@@ -1312,7 +1329,7 @@ class TestNotificationMethods:
 
         assert result == {
             "Slack": [{"value": "slack:tasks", "label": "tasks"}],
-            "Discord": [{"value": "discord:#general", "label": "#general"}],
+            "Discord": [{"value": "discord:general", "label": "#general"}],
         }
 
     def test_returns_empty_dict_on_nonzero_returncode(self):
@@ -1385,7 +1402,7 @@ class TestMetaNotificationsEndpoint:
         data = resp.json()
         assert data == {
             "Slack": [{"value": "slack:tasks", "label": "tasks"}],
-            "Discord": [{"value": "discord:#general", "label": "#general"}],
+            "Discord": [{"value": "discord:general", "label": "#general"}],
         }
 
     def test_get_notifications_empty_on_failure(self, meta_client):
@@ -1852,9 +1869,9 @@ class TestListNotificationMethodsNewShape:
         assert "Discord" in result
         slack_entries = result["Slack"]
         assert len(slack_entries) == 1
-        assert slack_entries[0] == {"value": "slack:tasks", "label": "tasks"}
+        assert slack_entries[0] == {"value": "slack:C0B3P2Q39LN", "label": "tasks"}
         discord_entries = result["Discord"]
-        assert discord_entries[0] == {"value": "discord:#general", "label": "#general"}
+        assert discord_entries[0] == {"value": "discord:general", "label": "#general"}
 
     def test_slack_fallback_labels_when_no_resolution(self):
         """Text-parser fallback: labels are raw target strings."""
@@ -1906,7 +1923,7 @@ class TestMetaNotificationsNewShapeEndpoint:
         slack_entries = data["Slack"]
         assert isinstance(slack_entries, list)
         assert len(slack_entries) == 1
-        assert slack_entries[0]["value"] == "slack:tasks"
+        assert slack_entries[0]["value"] == "slack:C0B3P2Q39LN"
         assert slack_entries[0]["label"] == "tasks"
 
 

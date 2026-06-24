@@ -49,13 +49,65 @@ def _on_session_end(session_id, completed, interrupted, model, platform, **kwarg
     threading.Thread(target=_run, name="daedalus-advance", daemon=True).start()
 
 
+def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
+    """Sync the global Hermes model config into the profile before it runs.
+
+    Fires when any kanban task is claimed. For daedalus profiles (name ends
+    with '-daedalus'), copies model/providers/fallback_providers/custom_providers
+    from ~/.hermes/config.yaml into the profile's config.yaml so the profile
+    always uses whatever model is selected in Hermes — no manual re-provisioning
+    needed after a model switch.
+
+    Per-profile override: set ``_daedalus_model_override: true`` in the
+    profile's config.yaml to opt out and lock that profile to a specific model.
+    """
+    if not assignee or not str(assignee).endswith("-daedalus"):
+        return
+    try:
+        import yaml
+        hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        global_cfg_path = os.path.join(hermes_home, "config.yaml")
+        profile_cfg_path = os.path.join(hermes_home, "profiles", str(assignee), "config.yaml")
+
+        if not os.path.isfile(global_cfg_path) or not os.path.isfile(profile_cfg_path):
+            return
+
+        with open(global_cfg_path) as f:
+            global_cfg = yaml.safe_load(f) or {}
+        with open(profile_cfg_path) as f:
+            profile_cfg = yaml.safe_load(f) or {}
+
+        if profile_cfg.get("_daedalus_model_override"):
+            return
+
+        sync_keys = ("model", "providers", "fallback_providers", "custom_providers")
+        changed = False
+        for key in sync_keys:
+            global_val = global_cfg.get(key)
+            if profile_cfg.get(key) != global_val:
+                if global_val is None:
+                    profile_cfg.pop(key, None)
+                else:
+                    profile_cfg[key] = global_val
+                changed = True
+
+        if changed:
+            with open(profile_cfg_path, "w") as f:
+                yaml.safe_dump(profile_cfg, f, default_flow_style=False, sort_keys=False)
+            logger.debug("daedalus: synced model config into profile %s", assignee)
+    except Exception as exc:
+        logger.debug("daedalus kanban_task_claimed sync failed: %s", exc)
+
+
 def register(ctx) -> None:
     """Hermes plugin entry point — import-safe, never raises.
 
     Registers the daedalus dispatcher as an auxiliary LLM task so users
     can configure its provider/model independently of the main chat model.
     Also registers an on_session_end hook so any worker completion triggers
-    dispatch immediately instead of waiting for the next 60-min cron tick.
+    dispatch immediately instead of waiting for the next 60-min cron tick,
+    and a kanban_task_claimed hook to keep daedalus profile model configs
+    in sync with the global Hermes model selection.
     """
     try:
         ctx.register_auxiliary_task(
@@ -65,5 +117,6 @@ def register(ctx) -> None:
                         "decomposes triage cards, dispatches worker agents.",
         )
         ctx.register_hook("on_session_end", _on_session_end)
+        ctx.register_hook("kanban_task_claimed", _on_kanban_task_claimed)
     except Exception:
         logger.debug("daedalus register() failed", exc_info=True)

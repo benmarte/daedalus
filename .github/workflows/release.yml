@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skip recursive trigger: when we push the version-bump commit back to main,
+    # the workflow fires again — detect that commit message and exit early.
+    # workflow_dispatch always runs (dry-run testing).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && !contains(github.event.head_commit.message, 'chore: bump version to'))
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine mode (real vs dry-run)
+        id: mode
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "MODE: dry-run (workflow_dispatch)"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            echo "MODE: real (push to main)"
+          fi
+
+      - name: Get last tag
+        id: last_tag
+        run: |
+          LAST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LAST_TAG" ]; then
+            echo "No existing tags found — starting from scratch"
+            LAST_TAG="v0.0.0"
+          fi
+          echo "tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Last tag: $LAST_TAG"
+
+      - name: Collect commits since last tag
+        id: commits
+        run: |
+          COMMITS=$(git log "${{ steps.last_tag.outputs.tag }}..HEAD" --oneline --no-merges || true)
+          echo "All commits since ${{ steps.last_tag.outputs.tag }}:"
+          echo "$COMMITS"
+
+          # Filter to feat/fix only for changelog
+          FEAT_FIX=$(echo "$COMMITS" | grep -E '^[a-f0-9]+ (feat|fix)[(:]' || true)
+
+          if [ -z "$FEAT_FIX" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No feat/fix commits — nothing to release"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Feat/fix commits:"
+            echo "$FEAT_FIX"
+
+            # Build changelog markdown
+            CHANGELOG=$(echo "$FEAT_FIX" | while IFS= read -r line; do
+              sha=$(echo "$line" | cut -d' ' -f1)
+              msg=$(echo "$line" | cut -d' ' -f2-)
+              echo "- ${msg} (\`${sha}\`)"
+            done)
+            {
+              echo "changelog<<CHANGELOG_EOF"
+              echo "$CHANGELOG"
+              echo "CHANGELOG_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute next version
+        if: steps.commits.outputs.has_changes == 'true'
+        id: version
+        run: |
+          LAST_TAG="${{ steps.last_tag.outputs.tag }}"
+          # Parse v1.0.0-beta.25 → extract the beta number
+          BETA_NUM=$(echo "$LAST_TAG" | sed -E 's/^v[0-9]+\.[0-9]+\.[0-9]+-beta\.//')
+          # Fallback: if parsing fails (first-ever tag), start at 1
+          if ! [[ "$BETA_NUM" =~ ^[0-9]+$ ]]; then
+            BETA_NUM=0
+          fi
+          NEW_NUM=$((BETA_NUM + 1))
+          NEW_VERSION="v1.0.0-beta.${NEW_NUM}"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Next version: $NEW_VERSION"
+
+      - name: Update plugin.yaml version
+        if: steps.commits.outputs.has_changes == 'true' && steps.mode.outputs.dry_run == 'false'
+        run: |
+          PLUGIN_VERSION="${{ steps.version.outputs.version }}"
+          # plugin.yaml uses 1.0.0-beta.N (no 'v' prefix)
+          PLUGIN_VERSION="${PLUGIN_VERSION#v}"
+          sed -i "s/^version: .*/version: ${PLUGIN_VERSION}/" plugin.yaml
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugin.yaml
+          git commit -m "chore: bump version to ${PLUGIN_VERSION}"
+          git push origin main
+
+      - name: Create git tag
+        if: steps.commits.outputs.has_changes == 'true' && steps.mode.outputs.dry_run == 'false'
+        run: |
+          git tag "${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        if: steps.commits.outputs.has_changes == 'true' && steps.mode.outputs.dry_run == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body: |
+            ## Changes since ${{ steps.last_tag.outputs.tag }}
+
+            ${{ steps.commits.outputs.changelog }}
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+
+      - name: Dry-run summary
+        if: steps.mode.outputs.dry_run == 'true'
+        run: |
+          echo "=============================================="
+          echo "  DRY RUN — no tag or release was created"
+          echo "=============================================="
+          echo ""
+          echo "Last tag:        ${{ steps.last_tag.outputs.tag }}"
+          echo "Has feat/fix:    ${{ steps.commits.outputs.has_changes }}"
+          if [ "${{ steps.commits.outputs.has_changes }}" == "true" ]; then
+            echo "Would bump to:   ${{ steps.version.outputs.version }}"
+            echo ""
+            echo "Would create release with these notes:"
+            echo "${{ steps.commits.outputs.changelog }}"
+          else
+            echo ""
+            echo "No feat/fix commits since last tag — would skip release."
+          fi
+          echo ""
+          echo "=============================================="

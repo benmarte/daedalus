@@ -22,6 +22,8 @@ HERMES="${HERMES_HOME:-$HOME/.hermes}"
 SRC="$HERMES/plugins/agent-skills/skills"
 PROFILES="$HERMES/profiles"
 PLUGIN_DIR="$HERMES/plugins/daedalus"
+# Bundled skills from the hermes-agent core skill library
+BUNDLED_SKILLS_SRC="$HERMES/hermes-agent/skills"
 
 # Self-sync: copy this repo into the installed plugin location so the running
 # version always matches the cloned source (hermes plugins update only works for
@@ -187,23 +189,58 @@ setup_role() {
   hermes profile delete "$name" -y >/dev/null 2>&1 || true
   hermes profile create "$name" --clone --description "$desc" >/dev/null
 
-  # Strip model/provider so profiles inherit from top-level config.yaml defaults.
-  # Users can still override per-profile by adding model: to their config.
-  python3 - "$PROFILES/$name/config.yaml" <<'PY'
+  # Sync model/providers/fallback_providers/custom_providers from the global
+  # ~/.hermes/config.yaml into the profile so the profile uses whatever model
+  # Hermes is currently configured to use. Profiles are self-contained — they
+  # do NOT inherit from the global config at runtime, so we must copy explicitly.
+  # Users can still override by editing the profile config after provisioning.
+  python3 - "$PROFILES/$name/config.yaml" "$HOME/.hermes/config.yaml" <<'PY'
 import sys
 import yaml
 
-path = sys.argv[1]
+profile_path = sys.argv[1]
+global_path = sys.argv[2]
+
 try:
-    with open(path) as f:
+    with open(profile_path) as f:
         cfg = yaml.safe_load(f) or {}
 except FileNotFoundError:
     sys.exit(0)
-cfg.pop("model", None)
-cfg.pop("providers", None)
-cfg.pop("fallback_providers", None)
-with open(path, "w") as f:
+
+try:
+    with open(global_path) as f:
+        global_cfg = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    global_cfg = {}
+
+# Copy model-selection fields from global config into profile.
+# Strip first to remove stale cloned values, then repopulate from global.
+for key in ("model", "providers", "fallback_providers", "custom_providers"):
+    cfg.pop(key, None)
+    if key in global_cfg:
+        cfg[key] = global_cfg[key]
+
+with open(profile_path, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PY
+
+  # Reset the credential_pool in auth.json so cloned provider keys (e.g. OpenRouter)
+  # don't override global model selection. Without this, a profile cloned from a session
+  # with OpenRouter credentials will try to use OpenRouter with no model set → HTTP 400.
+  python3 - "$PROFILES/$name/auth.json" <<'PY'
+import sys, json, os
+
+path = sys.argv[1]
+if not os.path.exists(path):
+    sys.exit(0)
+try:
+    with open(path) as f:
+        auth = json.load(f)
+except (json.JSONDecodeError, FileNotFoundError):
+    sys.exit(0)
+auth["credential_pool"] = {}
+with open(path, "w") as f:
+    json.dump(auth, f, indent=2)
 PY
 
   # Reseed skills to EXACTLY the matrix: nuke the cloned skill set, keep only agent-skills.
@@ -217,6 +254,17 @@ PY
       echo "  WARN: source skill missing: $s" >&2
     fi
   done
+
+  # Install bundled autonomous-ai-agents/claude-code skill so the agent knows
+  # how to delegate work to Claude Code (or Codex/OpenCode) when configured.
+  local cc_skill_src="$BUNDLED_SKILLS_SRC/autonomous-ai-agents/claude-code"
+  local cc_skill_dst="$PROFILES/$name/skills/autonomous-ai-agents/claude-code"
+  if [ -d "$cc_skill_src" ]; then
+    mkdir -p "$(dirname "$cc_skill_dst")"
+    cp -R "$cc_skill_src" "$cc_skill_dst"
+  else
+    echo "  WARN: autonomous-ai-agents/claude-code skill not found at $cc_skill_src" >&2
+  fi
 
   # Make `git push` + provider API calls work inside the worker — WITHOUT the
   # gh CLI. Each worker has an isolated HOME, so we write a per-profile git

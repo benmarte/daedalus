@@ -134,7 +134,7 @@ Step 2 opens automatically after Step 1. This is where you set branches, boards,
 
 **VCS section:**
 - **Provider** — auto-detected; change if needed
-- **Target Branch** — the branch PRs are opened against (default: `main`)
+- **Target Branch** — the branch PRs are opened against (default: `dev`)
 - **Branch Prefix** — prefix added to branches created by the developer agent (default: `fix/`)
 - **PR Title Prefix** — prefix added to PR titles (default: `fix:`)
 
@@ -291,6 +291,55 @@ execution:
       skills:
         - incremental-implementation
 ```
+
+### Delegating to Claude Code (or Codex)
+
+Out of the box, every role does its work with the **local Hermes LLM** (your `default`
+profile's model). You can instead **delegate the implementation and review to an external
+CLI coding agent** — Claude Code, Codex, or OpenCode — while Hermes keeps running the
+issue→PR pipeline (decompose → dispatch → gates → PR).
+
+Enable it in `.hermes/daedalus.yaml`:
+
+```yaml
+execution:
+  coding_agent: claude-code
+  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
+```
+
+| Value | Behavior |
+|---|---|
+| `hermes` | **(default)** No delegation — the role works with the local Hermes LLM. Also the fallback when `coding_agent` is unset, empty, or invalid. |
+| `claude-code` | Delegate to the Claude Code CLI (`-p` one-shot mode). |
+| `codex` | Delegate to the OpenAI Codex CLI (`exec` mode). |
+| `opencode` | Delegate to the OpenCode CLI (`run` mode). |
+| `none` | No delegation (same effect as `hermes`). |
+
+- `coding_agent_cmd` is the full shell command the task body is piped into. Omit it to use
+  the per-agent default (`claude --dangerously-skip-permissions -p`, `codex exec
+  --full-auto`, `opencode run`). Optional: `coding_agent_model` (passed to `--model`) and
+  `coding_agent_max_turns` (default `10`).
+
+**How it works:** when `coding_agent` resolves to a CLI agent, the dispatcher injects a
+`⚠️ AGENT DELEGATION` block into the role's task body and auto-attaches the matching
+`autonomous-ai-agents/<agent>` skill. The role's local Hermes LLM loads that skill, writes
+the task to a temp file, pipes it to the coding agent via `terminal(background=True)`, and
+relays the agent's output back as its completion signal so the pipeline advances.
+
+**Per-role override:** `execution.profiles.<role>.agent` takes precedence over the global
+`coding_agent`, so you can mix delegated and local roles:
+
+```yaml
+execution:
+  coding_agent: hermes        # default for every role…
+  profiles:
+    developer:
+      agent: claude-code      # …developer delegates to Claude Code
+    validator:
+      agent: hermes           # validator stays on the local LLM
+```
+
+See the [README](../README.md#delegating-to-claude-code-or-codex) for the full reference.
 
 ### Profile Fallback Behavior
 

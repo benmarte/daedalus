@@ -166,15 +166,16 @@ def _strip_secrets(obj: Any) -> Any:
 def _channel_target_and_label(platform_name: str, channel: dict) -> tuple[str, str]:
     """Build ``(target, label)`` from a JSON channel object.
 
-    ``target`` is the ``hermes send -t`` string; ``label`` is the human-readable
-    display name shown in the picker. Returns ``('', '')`` when the channel
-    should be skipped (e.g. Slack thread entries).
+    ``target`` is the ``hermes send -t`` string (always uses the stable
+    channel ID when available); ``label`` is the human-readable display
+    name shown in the picker. Returns ``('', '')`` to skip the entry.
 
-    Mirrors Hermes's internal ``_channel_target_name`` logic so all platforms are
-    handled generically — no platform-specific API calls are needed because the
-    JSON already carries channel names.
+    Rule: value = platform:ID (stable, machine-readable)
+          label = friendly name (human-readable)
+    This way the picker shows readable names while configs store IDs that
+    survive channel renames.
     """
-    # Skip Slack per-thread entries — they have a thread_id field
+    # Skip per-thread entries (Slack, Discord) — thread_id marks them
     if channel.get("thread_id"):
         return "", ""
 
@@ -183,15 +184,24 @@ def _channel_target_and_label(platform_name: str, channel: dict) -> tuple[str, s
     guild = (channel.get("guild") or "").strip()
 
     if platform_name == "discord":
-        if not name:
+        # Discord adapter requires a numeric channel ID — name lookup fails
+        if not ch_id:
             return "", ""
-        label = f"#{name}" + (f" ({guild})" if guild else "")
-        return f"discord:#{name}", label
+        label = (f"#{name}" if name else ch_id) + (f" ({guild})" if guild else "")
+        return f"discord:{ch_id}", label
 
     if platform_name == "slack":
-        target = f"slack:{name}" if name else (f"slack:{ch_id}" if ch_id else "")
-        return target, (name or ch_id)
+        # Prefer the C-prefixed channel ID; fall back to name for older Hermes
+        if ch_id:
+            return f"slack:{ch_id}", (name or ch_id)
+        if name:
+            return f"slack:{name}", name
+        return "", ""
 
+    # Generic: prefer ID over name when the channel object carries one.
+    # Most platforms (Teams, Mattermost, Matrix, …) expose either id or name.
+    if ch_id:
+        return f"{platform_name}:{ch_id}", (name or ch_id)
     if not name:
         return "", ""
     return f"{platform_name}:{name}", name
