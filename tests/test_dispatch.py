@@ -139,6 +139,85 @@ def test_schedule_ci_retry_create_swallows_error():
     check("called list and attempted create", mk_run.call_count == 2)
 
 
+# ── _cancel_ci_retry (issue #70) ─────────────────────────────────────────────
+
+
+def test_cancel_ci_retry_happy_path():
+    """CI done → deletes the retry cron via `hermes cron delete <name>`."""
+    del_result = mock.Mock()
+    del_result.returncode = 0
+
+    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
+        cancelled = disp._cancel_ci_retry("my-board")
+
+    check("cancel returns True on success", cancelled is True)
+    check("one subprocess call (delete)", mk_run.call_count == 1)
+    del_args = mk_run.call_args_list[0][0][0]
+    check("uses hermes cron delete", del_args[0:3] == ["hermes", "cron", "delete"])
+    check("deletes the slug's retry cron", "daedalus-ci-retry-my-board" in del_args)
+
+
+def test_cancel_ci_retry_not_found_is_benign():
+    """Missing cron (already fired / never created) → returns False, no crash."""
+    del_result = mock.Mock()
+    del_result.returncode = 1  # "not found"
+
+    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
+        cancelled = disp._cancel_ci_retry("my-board")
+
+    check("not-found returns False", cancelled is False)
+    check("still only one subprocess call", mk_run.call_count == 1)
+
+
+def test_cancel_ci_retry_slug_sanitized():
+    """Unsafe chars in the slug are sanitized to match the scheduled cron name."""
+    del_result = mock.Mock()
+    del_result.returncode = 0
+
+    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
+        disp._cancel_ci_retry("org/repo:special")
+
+    del_args = mk_run.call_args_list[0][0][0]
+    name_idx = len(del_args) - 1  # name is the last positional arg
+    check("cancel slug sanitized", del_args[name_idx] == "daedalus-ci-retry-org-repo-special")
+
+
+def test_cancel_ci_retry_subprocess_failure():
+    """If `hermes cron delete` raises → return False, never crash the dispatcher."""
+    with mock.patch("subprocess.run", side_effect=OSError("hermes not found")):
+        cancelled = disp._cancel_ci_retry("slug")
+    check("cancel failure returns False", cancelled is False)
+
+
+def test_ci_retry_post_fire_recreation_then_cancel():
+    """Regression for issue #70: a `--repeat 1` retry vanishes from the cron
+    list once it fires, so a *still-pending* CI re-creates it on the next tick
+    (expected). When CI finally passes, the leftover cron is cancelled — which
+    is the cleanup that finally stops the accumulation loop.
+    """
+    # Tick 1: retry already fired → list is empty → CI still pending → recreate.
+    list_empty = mock.Mock()
+    list_empty.returncode = 0
+    list_empty.stdout = ""  # fired cron no longer present
+    create_result = mock.Mock()
+
+    with mock.patch("subprocess.run", side_effect=[list_empty, create_result]) as mk_run:
+        recreated = disp._schedule_ci_retry("my-board", 1)
+
+    check("post-fire + still-pending recreates the cron", recreated is True)
+    check("recreation issues list + create", mk_run.call_count == 2)
+
+    # Tick 2: CI now passes → dispatcher cancels the leftover retry cron.
+    del_result = mock.Mock()
+    del_result.returncode = 0
+    with mock.patch("subprocess.run", return_value=del_result) as mk_del:
+        cancelled = disp._cancel_ci_retry("my-board")
+
+    check("CI-done tick cancels the retry cron", cancelled is True)
+    check("cancel uses hermes cron delete", mk_del.call_args_list[0][0][0][0:3]
+          == ["hermes", "cron", "delete"])
+
+
 # ── _parse_follow_ups ────────────────────────────────────────────────────────
 
 
@@ -1112,6 +1191,11 @@ if __name__ == "__main__":
         test_schedule_ci_retry_slug_sanitized,
         test_schedule_ci_retry_subprocess_failure,
         test_schedule_ci_retry_create_swallows_error,
+        test_cancel_ci_retry_happy_path,
+        test_cancel_ci_retry_not_found_is_benign,
+        test_cancel_ci_retry_slug_sanitized,
+        test_cancel_ci_retry_subprocess_failure,
+        test_ci_retry_post_fire_recreation_then_cancel,
     ):
         fn()
     print()
