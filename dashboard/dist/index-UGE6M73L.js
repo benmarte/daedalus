@@ -2421,13 +2421,13 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             marginBottom: "16px",
             display: "flex",
             gap: "12px",
-            alignItems: "flex-start",
+            alignItems: "center",
             background: "rgba(255,255,255,0.02)"
           }
         },
         React.createElement(
           "div",
-          { style: { flex: "1 1 auto" } },
+          { style: { flex: "1 1 auto", minWidth: 0 } },
           React.createElement(
             "div",
             { style: { fontSize: "13px", fontWeight: 600, color: "#ccc", marginBottom: "2px" } },
@@ -2436,17 +2436,22 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           React.createElement(
             "div",
             { style: { fontSize: "12px", color: "#888" } },
-            "Install the 9 specialist profiles (validator, project-manager, planner, developer, qa, reviewer, security-analyst, accessibility, documentation) to enable automated workflow dispatch."
+            "Run postinstall.py to install the 9 specialist agent profiles and enable automated dispatch."
           ),
           rosterResult ? React.createElement("div", {
             style: { fontSize: "11px", marginTop: "4px", color: rosterResult.ok ? "#4ade80" : "#f87171" }
           }, rosterResult.ok ? "Provisioned successfully." : "Error: " + (rosterResult.error || "failed")) : null
         ),
-        React.createElement(Button, {
-          label: provisioningRoster ? "Installing\u2026" : "Install Agents",
-          disabled: !!provisioningRoster,
-          onClick: provisionRoster
-        })
+        React.createElement(
+          "div",
+          { style: { flexShrink: 0 } },
+          React.createElement(Button, {
+            label: provisioningRoster ? "Installing\u2026" : "Install Agents",
+            variant: "small",
+            disabled: !!provisioningRoster,
+            onClick: provisionRoster
+          })
+        )
       ) : null,
       projects.length === 0 ? React.createElement(
         "div",

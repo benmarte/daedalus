@@ -1958,26 +1958,29 @@ function App() {
     rosterStatus && !rosterStatus.all_provisioned ? React.createElement("div", {
       style: {
         border: "1px solid #444", borderRadius: "8px", padding: "12px 16px",
-        marginBottom: "16px", display: "flex", gap: "12px", alignItems: "flex-start",
+        marginBottom: "16px", display: "flex", gap: "12px", alignItems: "center",
         background: "rgba(255,255,255,0.02)",
       },
     },
-      React.createElement("div", { style: { flex: "1 1 auto" } },
+      React.createElement("div", { style: { flex: "1 1 auto", minWidth: 0 } },
         React.createElement("div", { style: { fontSize: "13px", fontWeight: 600, color: "#ccc", marginBottom: "2px" } },
           "Worker Agents not provisioned"
         ),
         React.createElement("div", { style: { fontSize: "12px", color: "#888" } },
-          "Install the 9 specialist profiles (validator, project-manager, planner, developer, qa, reviewer, security-analyst, accessibility, documentation) to enable automated workflow dispatch."
+          "Run postinstall.py to install the 9 specialist agent profiles and enable automated dispatch."
         ),
         rosterResult ? React.createElement("div", {
           style: { fontSize: "11px", marginTop: "4px", color: rosterResult.ok ? "#4ade80" : "#f87171" },
         }, rosterResult.ok ? "Provisioned successfully." : "Error: " + (rosterResult.error || "failed")) : null
       ),
-      React.createElement(Button, {
-        label: provisioningRoster ? "Installing…" : "Install Agents",
-        disabled: !!provisioningRoster,
-        onClick: provisionRoster,
-      })
+      React.createElement("div", { style: { flexShrink: 0 } },
+        React.createElement(Button, {
+          label: provisioningRoster ? "Installing…" : "Install Agents",
+          variant: "small",
+          disabled: !!provisioningRoster,
+          onClick: provisionRoster,
+        })
+      )
     ) : null,
 
     projects.length === 0 ? React.createElement("div", { style: { textAlign: "center", padding: "40px", color: "#666" } },
