@@ -5,12 +5,21 @@ Run:  pytest tests/test_plugin_register.py -v
 
 import importlib.util
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
 
 # Package root (the dir containing __init__.py).
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def isolate_home(tmp_path):
+    """Point HOME at a temp dir so register()'s cron-wrapper install never
+    touches the real ~/.hermes during tests."""
+    with mock.patch.dict("os.environ", {"HOME": str(tmp_path)}):
+        yield tmp_path
 
 
 def _load_package():
@@ -90,11 +99,46 @@ def test_register_never_raises():
     mod.register(BareCtx())
 
 
-def test_register_never_raises_with_none_ctx():
+def test_register_never_raises_with_none_ctx(isolate_home):
     """register() called with None must not raise (just no-op)."""
     mod = _load_package()
     # Must not raise
     mod.register(None)
+
+
+# ── 2b. cron wrapper auto-install (issue #74) ────────────────────────────────
+
+def test_register_installs_cron_wrapper(isolate_home):
+    """register(ctx) writes ~/.hermes/scripts/daedalus-cron.sh on every load.
+
+    Hermes has no post_install hook, so the wrapper must be (re)installed each
+    time the plugin loads — otherwise fresh installs leave the dispatcher cron
+    pointing at a non-existent script (issue #74)."""
+    mod = _load_package()
+    mod.register(FakeCtx())
+
+    wrapper = isolate_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+    assert wrapper.is_file(), "register() did not install daedalus-cron.sh"
+    assert wrapper.stat().st_mode & 0o111, "cron wrapper is not executable"
+    assert "daedalus_dispatch.py" in wrapper.read_text()
+
+
+def test_register_cron_install_is_idempotent(isolate_home):
+    """Calling register() repeatedly is safe — the wrapper write is idempotent."""
+    mod = _load_package()
+    mod.register(FakeCtx())
+    mod.register(FakeCtx())
+
+    wrapper = isolate_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+    assert wrapper.is_file()
+
+
+def test_ensure_cron_wrapper_never_raises(isolate_home, monkeypatch):
+    """_ensure_cron_wrapper swallows failures so registration never breaks."""
+    mod = _load_package()
+    # Force the underlying install to blow up; the wrapper must still not raise.
+    monkeypatch.setattr("os.path.dirname", lambda *_: "/nonexistent/path")
+    mod._ensure_cron_wrapper()  # must not raise
 
 
 # ── 3. plugin.yaml manifest ──────────────────────────────────────────────────

@@ -99,6 +99,38 @@ def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
         logger.debug("daedalus kanban_task_claimed sync failed: %s", exc)
 
 
+def _ensure_cron_wrapper() -> None:
+    """Make sure ~/.hermes/scripts/daedalus-cron.sh exists on every plugin load.
+
+    Hermes has no ``post_install`` hook for plugins — it only clones the repo —
+    so ``scripts/postinstall.py`` is never run automatically by ``hermes plugin
+    add``/``hermes update``. Without this, fresh installs leave the cron job
+    pointing at a script that does not exist, and the cron silently fails.
+
+    We load ``_install_cron_wrapper()`` from ``scripts/postinstall.py`` by file
+    path (the scripts dir is deliberately not on ``sys.path`` — see the module
+    docstring) and run it on every ``register()``. The write is idempotent
+    (writes the file + chmod +x), so repeating it on every load is safe and
+    cheap. Failures are logged, never raised.
+    """
+    try:
+        import importlib.util
+
+        postinstall_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "scripts", "postinstall.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "daedalus_postinstall", postinstall_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        ok, msg = module._install_cron_wrapper()
+        if not ok:
+            logger.warning("daedalus: %s", msg)
+    except Exception:
+        logger.debug("daedalus: cron wrapper install failed", exc_info=True)
+
+
 def register(ctx) -> None:
     """Hermes plugin entry point — import-safe, never raises.
 
@@ -108,6 +140,10 @@ def register(ctx) -> None:
     dispatch immediately instead of waiting for the next 60-min cron tick,
     and a kanban_task_claimed hook to keep daedalus profile model configs
     in sync with the global Hermes model selection.
+
+    Finally, it (re)installs the daedalus-cron.sh wrapper on every load so
+    fresh installs and post-update environments always have the script the
+    dispatcher cron job invokes — Hermes provides no post-install hook.
     """
     try:
         ctx.register_auxiliary_task(
@@ -120,3 +156,6 @@ def register(ctx) -> None:
         ctx.register_hook("kanban_task_claimed", _on_kanban_task_claimed)
     except Exception:
         logger.debug("daedalus register() failed", exc_info=True)
+
+    # Idempotent — runs in its own try/except so it never blocks registration.
+    _ensure_cron_wrapper()

@@ -126,6 +126,15 @@ See the [README](README.md#delegating-to-claude-code-or-codex) for the full refe
 - **Automated (cron):** each project gets its own cron job (created by setup.sh /
   the dashboard); edits update the job in place.
 
+> **If the cron silently does nothing:** the job invokes
+> `~/.hermes/scripts/daedalus-cron.sh`. The plugin now (re)installs that wrapper
+> automatically every time Hermes loads daedalus, so a fresh `hermes plugin add`
+> + gateway restart is enough. If you hit a stale/missing wrapper on an older
+> install (before this fix), re-create it immediately with:
+> ```bash
+> python3 ~/.hermes/plugins/daedalus/scripts/postinstall.py --check
+> ```
+
 ## Pipeline lifecycle
 
 ```
