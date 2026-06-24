@@ -67,6 +67,7 @@ flowchart TD
 - [Quickstart](#quickstart)
 - [Team setup](#team-setup)
 - [Uninstall / reset](#uninstall--reset)
+- [Release pipeline](#release-pipeline)
 - [Known limitations](#known-limitations)
 
 ---
@@ -717,6 +718,7 @@ on its board.
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
 | `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |
 | `dashboard/` | Dashboard tab: project grid, add/edit project modals, notifications editor (`plugin_api.py` + React `src/App.jsx`). |
+| `.github/workflows/release.yml` | Automated release pipeline: triggers on push to `main`, bumps version, generates changelog from conventional commits, creates git tag and GitHub Release. |
 | `tests/` | Unit tests — config, providers (mocked HTTP), dispatcher, dashboard API, installers. |
 
 The **ship-gate hook**, **cron wrapper**, and **roster profiles** live in the Hermes
@@ -962,6 +964,61 @@ bash "$HERMES_HOME/plugins/daedalus/scripts/uninstall.sh" -y
 
 The uninstall script is idempotent — safe to re-run; absent items are skipped
 without error.
+
+---
+
+## Release pipeline
+
+When a PR is merged from `dev` → `main`, a GitHub Actions workflow
+(`.github/workflows/release.yml`) automatically creates a new release:
+
+1. **Trigger:** push to `main` (fires after a PR merge) or manual `workflow_dispatch`.
+2. **Recursive guard:** the workflow detects its own version-bump commit message
+   (`chore: bump version to`) and skips, preventing infinite re-trigger loops.
+3. **Tag parsing:** reads the last `v*` tag (e.g. `v1.0.0-beta.25`) and increments
+   the beta number by 1 → `v1.0.0-beta.26`.
+4. **Changelog generation:** collects conventional commits between the last tag and
+   HEAD, filters to `feat` and `fix` only (excludes `chore`, `docs`, `refactor`,
+   `test`), and formats them as a markdown list with commit SHAs.
+5. **Version bump:** updates `plugin.yaml` version inline, commits the change, and
+   pushes back to `main`.
+6. **Git tag:** creates the new tag and pushes it.
+7. **GitHub Release:** publishes via `softprops/action-gh-release@v2` with the
+   generated changelog, marked as **prerelease** (beta series).
+
+### Dry-run mode
+
+Trigger the workflow manually from the **Actions** tab → "Release" → "Run workflow".
+The dry-run step logs what it *would* do — last tag, collected commits, would-be
+version — without creating a tag, release, or committing any changes.
+
+### Conventional commit format
+
+The changelog generator expects commits in this format:
+
+```
+<type>(<scope>): <description>
+```
+
+| Prefix | Included in changelog? | Version bump effect |
+|--------|------------------------|---------------------|
+| `feat` | Yes | — |
+| `fix`  | Yes | — |
+| `chore` | No | — |
+| `docs` | No | — |
+| `refactor` | No | — |
+| `test` | No | — |
+
+### Tag format
+
+All releases use the format `v1.0.0-beta.N` where N is an incrementing integer.
+The workflow parses the last tag's beta number and adds 1. If no tags exist, it
+starts from `v1.0.0-beta.1`.
+
+### No package registry publishing
+
+The workflow does **not** publish to npm, PyPI, or any package registry. It only
+creates a git tag and a GitHub Release with changelog notes.
 
 ---
 
