@@ -872,7 +872,7 @@ def test_coding_agent_defaults_dict_exists():
     """_CODING_AGENT_DEFAULTS maps each CLI agent to its preferred command."""
     defaults = disp._CODING_AGENT_DEFAULTS
     assert isinstance(defaults, dict), "_CODING_AGENT_DEFAULTS must be a dict"
-    assert defaults.get("claude-code") == "claude -p", f"claude-code default wrong: {defaults.get('claude-code')!r}"
+    assert defaults.get("claude-code") == "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p", f"claude-code default wrong: {defaults.get('claude-code')!r}"
     assert defaults.get("codex") == "codex exec --full-auto", f"codex default wrong: {defaults.get('codex')!r}"
     assert defaults.get("opencode") == "opencode run", f"opencode default wrong: {defaults.get('opencode')!r}"
 

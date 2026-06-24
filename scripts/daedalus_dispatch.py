@@ -129,7 +129,7 @@ def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
 
 
 _CODING_AGENT_DEFAULTS: Dict[str, str] = {
-    "claude-code": "claude -p",
+    "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
     "codex": "codex exec --full-auto",
     "opencode": "opencode run",
 }

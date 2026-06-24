@@ -1379,11 +1379,14 @@ function ConfigModal(props) {
             value: getIn(config, ["execution", "coding_agent"], "hermes"),
             onChange: function (e) {
               var prevAgent = getIn(config, ["execution", "coding_agent"], "hermes");
-              updateField("execution.coding_agent", e.target.value);
-              // Clear the previous agent's CLI command so the new agent picks
-              // up its own default instead of inheriting a stale command.
-              if (codingAgent.shouldResetCmdOnAgentChange(prevAgent, e.target.value)) {
-                updateField("execution.coding_agent_cmd", "");
+              var nextAgent = e.target.value;
+              updateField("execution.coding_agent", nextAgent);
+              // Auto-fill the CLI command with the new agent's default so the
+              // user doesn't have to look it up (Hermes/no-default clears it).
+              // null means the agent didn't change — leave a typed command alone.
+              var nextCmd = codingAgent.cmdForAgentChange(prevAgent, nextAgent);
+              if (nextCmd !== null) {
+                updateField("execution.coding_agent_cmd", nextCmd);
               }
             }
           },
