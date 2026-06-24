@@ -727,7 +727,9 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
 
 def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch: str,
                     provider_name: str,
-                    security_notify_targets: Optional[List[str]] = None) -> str:
+                    security_notify_targets: Optional[List[str]] = None,
+                    coding_agent: str = "none",
+                    coding_agent_cmd: str = "") -> str:
     """Phase-1 task body: VALIDATOR only. No other agent sees this task."""
     n = issue.get("number")
     title = issue.get("title", "")
@@ -828,7 +830,8 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
         f"     → Post a comment on issue #{n} listing exactly what info is needed.\n"
         f"     → Block your card with summary starting 'BLOCKED: needs more info'.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
-    )
+    ) + (_build_delegation_instructions(coding_agent, coding_agent_cmd, role="validator") + "\n\n"
+         if coding_agent != "none" else "")
 
 
 def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: str,
@@ -1872,7 +1875,8 @@ def _check_confirmed_validators(
                             n_nr, retry_count, _MAX_VALIDATOR_RETRIES)
                 triggered.append(n_nr)
                 continue
-            vbody = _validator_body(repo, issue_nr, workdir, base_branch, provider_name)
+            vbody = _validator_body(repo, issue_nr, workdir, base_branch, provider_name,
+                                    coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd)
             vid = kanban.create_task(
                 slug, f"#validate: #{n_nr} {issue_nr.get('title', '')}",
                 body=vbody,
@@ -2700,7 +2704,9 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         vid = kanban.create_task(
             slug, f"#{n} {issue.get('title', '')}",
             body=_validator_body(repo, issue, workdir, base_branch, provider.name,
-                                 _notify_targets(resolved, "security-escalation")),
+                                 _notify_targets(resolved, "security-escalation"),
+                                 coding_agent=_resolve_agent_for_role(execution, "validator"),
+                                 coding_agent_cmd=coding_agent_cmd),
             assignee=profiles["validator"],
             idempotency_key=f"validator-{n}",
             workspace=f"dir:{workdir}" if workdir else "",
