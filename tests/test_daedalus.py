@@ -5,6 +5,7 @@ and doc-report delivery.
 
 Run: python3 tests/test_daedalus.py
 """
+import re
 import sys
 from pathlib import Path
 from unittest import mock
@@ -1964,16 +1965,17 @@ def test_check_completed_pm_creates_team_tasks():
     """Normal path: PM done with SPEC: in issues_map → create_triage called."""
     disp = _load_dispatch()
     created = []
-    orig_create_triage = disp.kanban.create_triage
+    orig_create_task = disp.kanban.create_task
     orig_decompose = disp.kanban.decompose
     orig_list_tasks = disp.kanban.list_tasks
     try:
         disp.kanban.list_tasks = lambda slug, status=None: (
             _completed_pm_tasks(5) if status == "done" else []
         )
-        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
-            created.append(n) or "t_triage"
-        )
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            (n_match := re.search(r"#(\d+)", title)) and created.append(int(n_match.group(1))),
+            "t_task"
+        )[1]
         disp.kanban.decompose = lambda slug, tid: None
         result = disp._check_completed_pm(
             "slug", "O/R",
@@ -1982,11 +1984,11 @@ def test_check_completed_pm_creates_team_tasks():
         )
     finally:
         disp.kanban.list_tasks = orig_list_tasks
-        disp.kanban.create_triage = orig_create_triage
+        disp.kanban.create_task = orig_create_task
         disp.kanban.decompose = orig_decompose
 
     check("check_completed_pm returns triggered list", result == [5])
-    check("check_completed_pm called create_triage for issue", 5 in created)
+    check("check_completed_pm called create_task for issue", 5 in created)
 
 
 def test_check_completed_pm_provider_fallback():
@@ -1995,7 +1997,7 @@ def test_check_completed_pm_provider_fallback():
     disp = _load_dispatch()
     created = []
     fetched = []
-    orig_create_triage = disp.kanban.create_triage
+    orig_create_task = disp.kanban.create_task
     orig_decompose = disp.kanban.decompose
     orig_list_tasks = disp.kanban.list_tasks
 
@@ -2008,9 +2010,10 @@ def test_check_completed_pm_provider_fallback():
         disp.kanban.list_tasks = lambda slug, status=None: (
             _completed_pm_tasks(6) if status == "done" else []
         )
-        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
-            created.append(n) or "t_triage"
-        )
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            (n_match := re.search(r"#(\d+)", title)) and created.append(int(n_match.group(1))),
+            "t_task"
+        )[1]
         disp.kanban.decompose = lambda slug, tid: None
         result = disp._check_completed_pm(
             "slug", "O/R",
@@ -2020,12 +2023,12 @@ def test_check_completed_pm_provider_fallback():
         )
     finally:
         disp.kanban.list_tasks = orig_list_tasks
-        disp.kanban.create_triage = orig_create_triage
+        disp.kanban.create_task = orig_create_task
         disp.kanban.decompose = orig_decompose
 
     check("provider fallback: get_issue called", fetched == [6])
     check("provider fallback: team tasks created", result == [6])
-    check("provider fallback: create_triage called", 6 in created)
+    check("provider fallback: create_task called for issue", 6 in created)
 
 
 def test_check_completed_pm_no_issue_found():
@@ -2124,7 +2127,7 @@ def test_pipeline_chain_confirmed_to_team_tasks():
     """
     disp = _load_dispatch()
     pm_created = []
-    triage_created = []
+    team_created = []
     orig_list_tasks = disp.kanban.list_tasks
     orig_show = disp.kanban.show_card
     orig_create_task = disp.kanban.create_task
@@ -2161,9 +2164,10 @@ def test_pipeline_chain_confirmed_to_team_tasks():
             tick2_tasks if status == "done" else []
         )
         disp.kanban.show_card = lambda slug, tid: {"latest_summary": "SPEC: fix auth flow"}
-        disp.kanban.create_triage = lambda slug, n, title, body, idempotency_key="", **kw: (
-            triage_created.append(n) or "t_triage10"
-        )
+        disp.kanban.create_task = lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+            (m := re.search(r"#(\d+)", title)) and team_created.append(int(m.group(1))) or team_created,
+            "t_task"
+        )[1]
         disp.kanban.decompose = lambda slug, tid: None
         result = disp._check_completed_pm(
             "slug", "O/R",
@@ -2178,7 +2182,7 @@ def test_pipeline_chain_confirmed_to_team_tasks():
         disp.kanban.decompose = orig_decompose
 
     check("pipeline chain: PM task created on tick 1", any("pm-10" in k for k in pm_created))
-    check("pipeline chain: team triage created on tick 2", triage_created == [10])
+    check("pipeline chain: team triage created on tick 2", 10 in team_created)
     check("pipeline chain: _check_completed_pm returns issue", result == [10])
 
 
