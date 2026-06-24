@@ -326,6 +326,43 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
         return False
 
 
+def _cancel_ci_retry(slug: str) -> bool:
+    """Delete the CI-retry cron for ``slug`` once CI is no longer pending.
+
+    Because ``_schedule_ci_retry`` creates a ``--repeat 1`` cron, the job is
+    removed from ``hermes cron list`` the moment it fires. The idempotency
+    guard there only suppresses duplicates while the job is still scheduled,
+    so a fired-but-still-pending retry would be re-created on every dispatch
+    tick — an unbounded accumulation loop (issue #70). Calling this whenever
+    CI is done closes the loop: the next dispatch deletes the retry cron and
+    stops the cycle.
+
+    Idempotent: a missing cron (already fired/never created) is not an error.
+
+    Returns True if a delete was attempted and succeeded, False otherwise.
+    """
+    try:
+        slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
+        cron_name = f"daedalus-ci-retry-{slug_safe}"
+        result = subprocess.run(
+            ["hermes", "cron", "delete", cron_name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info("dispatch: CI done — cancelled retry cron (%s)", cron_name)
+            return True
+        # Non-zero almost always means "not found" — that's the common, benign
+        # case (the cron already fired or was never scheduled). Log at debug.
+        logger.debug(
+            "dispatch: no retry cron to cancel for %s (rc=%d)",
+            cron_name, result.returncode,
+        )
+        return False
+    except Exception as exc:
+        logger.warning("dispatch: failed to cancel CI retry cron: %s", exc)
+        return False
+
+
 def _hermes_profile_exists(name: str) -> bool:
     """Check whether a Hermes profile exists via filesystem (fast, no subprocess).
 
@@ -2436,8 +2473,15 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     # When one or more cards were skipped because CI was still PENDING, schedule
     # a one-shot retry so the dispatcher re-runs after CI has likely finished.
     # Idempotent: skips creation if a retry job for this slug already exists.
+    #
+    # When CI is *no longer* pending, cancel any leftover retry cron. The retry
+    # uses ``--repeat 1`` and so vanishes from `hermes cron list` once it fires;
+    # without this cleanup a still-pending CI would re-create a fresh retry on
+    # every dispatch tick, accumulating crons without bound (issue #70).
     if pending_ci_cards and not dry_run:
         _schedule_ci_retry(slug, len(pending_ci_cards))
+    elif not dry_run:
+        _cancel_ci_retry(slug)
 
     # ── doc-report delivery ──────────────────────────────────────────────────
     # The dispatcher delivers documentation reports (PR comments prefixed
