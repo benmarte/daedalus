@@ -155,7 +155,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     "src/codingAgent.js"(exports, module) {
       var CLI_AGENTS = ["claude-code", "codex", "opencode"];
       var CODING_AGENT_DEFAULTS = {
-        "claude-code": "claude -p",
+        "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
         "codex": "codex exec --full-auto",
         "opencode": "opencode run"
       };
@@ -165,15 +165,16 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
       function defaultCmdFor(agent) {
         return CODING_AGENT_DEFAULTS[agent] || "";
       }
-      function shouldResetCmdOnAgentChange(prevAgent, nextAgent) {
-        return prevAgent !== nextAgent;
+      function cmdForAgentChange(prevAgent, nextAgent) {
+        if (prevAgent === nextAgent) return null;
+        return defaultCmdFor(nextAgent);
       }
       module.exports = {
         CLI_AGENTS,
         CODING_AGENT_DEFAULTS,
         isCliAgent,
         defaultCmdFor,
-        shouldResetCmdOnAgentChange
+        cmdForAgentChange
       };
     }
   });
@@ -1789,9 +1790,11 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                   value: getIn(config, ["execution", "coding_agent"], "hermes"),
                   onChange: function(e2) {
                     var prevAgent = getIn(config, ["execution", "coding_agent"], "hermes");
-                    updateField("execution.coding_agent", e2.target.value);
-                    if (codingAgent.shouldResetCmdOnAgentChange(prevAgent, e2.target.value)) {
-                      updateField("execution.coding_agent_cmd", "");
+                    var nextAgent = e2.target.value;
+                    updateField("execution.coding_agent", nextAgent);
+                    var nextCmd = codingAgent.cmdForAgentChange(prevAgent, nextAgent);
+                    if (nextCmd !== null) {
+                      updateField("execution.coding_agent_cmd", nextCmd);
                     }
                   }
                 },
