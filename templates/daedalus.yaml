@@ -34,7 +34,7 @@ vcs:
   provider: "github"                    # github | gitlab | azuredevops
   #                                     # setup.sh and the dashboard auto-detect
   #                                     # this from the repo's origin remote
-  target_branch: "main"                 # Base branch for PRs (dev, main, master…)
+  target_branch: "dev"                  # Base branch for PRs (dev, main, master…)
 
   # token_env: "GITHUB_TOKEN"           # Override the env var holding the API token.
   #                                     # Defaults: GITHUB_TOKEN/GH_TOKEN (github),
