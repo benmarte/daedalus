@@ -751,6 +751,41 @@ def test_resolve_coding_agent_no_skill_when_none():
           not any("autonomous-ai-agents" in s for s in role_skills.get("developer", [])))
 
 
+# ── delegation gate wires the claude-code skill (issue #57) ──────────────────
+
+_SOUL_NAMES = (
+    "accessibility-daedalus.md",
+    "developer-daedalus.md",
+    "documentation-daedalus.md",
+    "planner-daedalus.md",
+    "project-manager-daedalus.md",
+    "qa-daedalus.md",
+    "reviewer-daedalus.md",
+    "security-analyst-daedalus.md",
+    "validator-daedalus.md",
+)
+
+_STEP0_LINE = "0. Load the delegation skill: `skill_view(name='autonomous-ai-agents/claude-code')`"
+
+
+def test_all_souls_wire_claude_code_skill_as_step0():
+    """Every delegation gate loads the claude-code skill as step 0 before kanban_show (issue #57)."""
+    souls_dir = Path(__file__).resolve().parent.parent / "config" / "souls"
+    missing = []
+    for name in _SOUL_NAMES:
+        content = (souls_dir / name).read_text()
+        gate = "If it does, you MUST follow these steps and NOTHING ELSE:"
+        # step 0 must exist, and appear before step 1 (kanban_show) inside the gate
+        if (_STEP0_LINE not in content
+                or gate not in content
+                or content.index(_STEP0_LINE) < content.index(gate)
+                or content.index(_STEP0_LINE) > content.index(
+                    "1. Read the task body from your kanban card using `kanban_show`.")):
+            missing.append(name)
+    assert not missing, f"souls missing step-0 skill_view before kanban_show: {missing}"
+    check("all 9 souls wire claude-code skill as step 0", not missing)
+
+
 # ── _CODING_AGENT_DEFAULTS and per-agent default commands ────────────────────
 
 
@@ -1142,6 +1177,7 @@ if __name__ == "__main__":
         test_resolve_coding_agent_auto_attach_skill,
         test_resolve_coding_agent_skill_no_duplicate,
         test_resolve_coding_agent_no_skill_when_none,
+        test_all_souls_wire_claude_code_skill_as_step0,
     ):
         fn()
     print("-" * 60)
