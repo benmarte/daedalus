@@ -1,0 +1,40 @@
+name: daedalus
+repo: benmarte/daedalus
+workdir: /Users/benmarte/Documents/github/ai/daedalus
+tracking:
+  github_project_number: 2
+vcs:
+  provider: github
+  token_env: GITHUB_TOKEN
+  target_branch: dev
+  status_map:
+    ready: Ready
+    in_progress: In progress
+    in_review: In review
+    done: Done
+  branch_prefix: fix
+  pr_title_prefix: 'fix:'
+sources:
+  github_issues:
+    enabled: true
+  local_specs:
+    enabled: true
+  kanban_triage:
+    enabled: true
+cron:
+  schedule: 60m
+  deliver: ''
+  notifications:
+  - platform: Slack
+    target: slack:C0B97QVF6UX
+    events: []
+  - platform: Discord
+    target: discord:1512810543172554877
+    events: []
+issues:
+  processing:
+    max_issues_per_run: 20
+    max_open_prs: 5
+execution:
+  coding_agent: claude-code
+  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude /Users/benmarte/.local/bin/claude --dangerously-skip-permissions -p"
