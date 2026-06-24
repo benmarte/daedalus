@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node build.js",
     "dev": "node build.js",
-    "test": "node test-cronSchedule.js && node test-derive.js && node test-build.js"
+    "test": "node test-cronSchedule.js && node test-derive.js && node test-codingAgent.js && node test-configDirty.js && node test-build.js"
   },
   "devDependencies": {
     "esbuild": "^0.28.0"
