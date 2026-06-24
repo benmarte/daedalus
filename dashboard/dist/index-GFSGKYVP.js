@@ -1718,7 +1718,7 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
             { style: S.fieldRow },
             React.createElement(
               "label",
-              { style: S.field },
+              { style: Object.assign({}, S.field, { flex: "1 1 100%" }) },
               React.createElement("span", { style: S.fieldLabel }, "Agent"),
               React.createElement(
                 "select",
@@ -1739,14 +1739,18 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                 { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
                 "When set, the developer agent uses delegate_task to hand off coding work to a CLI agent subagent."
               )
-            ),
-            ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1 ? (function() {
-              var _AGENT_CMD_DEFAULTS = { "claude-code": "claude -p", "codex": "codex exec --full-auto", "opencode": "opencode run" };
-              var _currentAgent = getIn(config, ["execution", "coding_agent"], "hermes");
-              var _defaultCmd = _AGENT_CMD_DEFAULTS[_currentAgent] || "";
-              return React.createElement(
+            )
+          ),
+          ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1 ? (function() {
+            var _AGENT_CMD_DEFAULTS = { "claude-code": "claude -p", "codex": "codex exec --full-auto", "opencode": "opencode run" };
+            var _currentAgent = getIn(config, ["execution", "coding_agent"], "hermes");
+            var _defaultCmd = _AGENT_CMD_DEFAULTS[_currentAgent] || "";
+            return React.createElement(
+              "div",
+              { style: S.fieldRow },
+              React.createElement(
                 "label",
-                { style: S.field },
+                { style: Object.assign({}, S.field, { flex: "1 1 100%" }) },
                 React.createElement("span", { style: S.fieldLabel }, "CLI Command"),
                 React.createElement("input", {
                   style: S.input,
@@ -1761,9 +1765,9 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                   { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
                   "Custom shell command passed as acp_command to delegate_task. Leave blank to use the default above."
                 )
-              );
-            })() : null
-          ),
+              )
+            );
+          })() : null,
           // Errors
           fieldErrors && fieldErrors.length > 0 ? React.createElement(
             "div",
