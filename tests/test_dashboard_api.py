@@ -448,7 +448,14 @@ def test_get_project_config_unknown_project_returns_404(project_client):
 
 def test_post_project_config_persists_editable_fields(project_client, project_repo_dir):
     """POST /project/{name}/config persists editable fields, not read-only ones."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    # _reconcile_cron must be mocked: the payload carries a cron schedule, so the
+    # endpoint would otherwise route through the real _cron_cli → _hermes_cli →
+    # `hermes cron create test-project-daedalus`, firing a real cron job on every
+    # test run (issue #61). This test only asserts field persistence to YAML, which
+    # happens independently of cron reconciliation.
+    with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+         mock.patch("dashboard.plugin_api._reconcile_cron",
+                    return_value={"cron": "updated"}):
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         payload = {
