@@ -52,6 +52,7 @@ flowchart TD
 - [Customizing agents](#customizing-agents)
   - [Custom profiles](#custom-profiles)
   - [Skills per agent](#skills-per-agent)
+  - [Delegating to Claude Code (or Codex)](#delegating-to-claude-code-or-codex)
   - [Profile fallback behavior](#profile-fallback-behavior)
   - [Comment attribution template](#comment-attribution-template)
 - [Autonomous pipeline advancement](#autonomous-pipeline-advancement)
@@ -355,6 +356,82 @@ execution:
 
 The built-in profile skills installed by `postinstall.py` are always present.
 `skills:` in the config adds **on top of** those — it never removes the built-in set.
+
+### Delegating to Claude Code (or Codex)
+
+By default every pipeline role does its own work using the **local Hermes LLM** (whatever
+model your `default` profile is configured with). For coding-heavy roles you can instead
+**delegate the actual work to an external CLI coding agent** — Claude Code, Codex, or
+OpenCode — while Hermes stays in charge of orchestration (decompose → dispatch → review →
+PR). This is the primary differentiator of running Daedalus **with** Claude Code versus
+Daedalus alone: Hermes runs the pipeline, the coding agent writes the code.
+
+**When to use it:** delegate when you want a frontier coding agent (Claude Code) doing the
+implementation and review, but you still want Hermes managing the issue→PR lifecycle,
+kanban board, gates, and notifications. Skip it (use the default `hermes`) when your
+`default` profile's model is already strong enough and you'd rather keep everything in one
+process.
+
+**Supported values** for `execution.coding_agent`:
+
+| Value | Behavior |
+|---|---|
+| `hermes` | **(default)** No external delegation. The role works directly with the local Hermes LLM. Used whenever `coding_agent` is unset, empty, or invalid. |
+| `claude-code` | Delegate to the Claude Code CLI (one-shot `-p` mode). |
+| `codex` | Delegate to the OpenAI Codex CLI (`exec` mode). |
+| `opencode` | Delegate to the OpenCode CLI (`run` mode). |
+| `none` | No delegation — same as `hermes`, the role codes directly. |
+
+**Enable it project-wide** in `.hermes/daedalus.yaml`:
+
+```yaml
+execution:
+  coding_agent: claude-code
+  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
+```
+
+- `coding_agent_cmd` is the **full shell command** the agent pipes the task body into (not a
+  shell alias). Use the absolute binary path + flags. When omitted, sensible per-agent
+  defaults are used (`claude --dangerously-skip-permissions -p`, `codex exec --full-auto`,
+  `opencode run`).
+- Optional: `coding_agent_model` passes through to the agent's `--model` flag, and
+  `coding_agent_max_turns` (default `10`) caps runaway loops.
+
+**How it works:**
+
+1. The **dispatcher** reads `execution.coding_agent`. When it resolves to a CLI agent
+   (anything other than `hermes`/`none`), it **injects a `⚠️ AGENT DELEGATION` block** into
+   each delegating role's task body with the exact steps to pipe the task into the agent.
+2. The matching skill is **auto-attached** to the role's profile —
+   `autonomous-ai-agents/claude-code` for `claude-code`, `…/codex` for `codex`,
+   `…/opencode` for `opencode`. The role doesn't need to call `skill_view()` itself.
+3. The role's **local Hermes LLM** loads that skill, writes the task body to a temp file,
+   and **pipes it to the coding agent** via `terminal(..., background=True)`.
+4. The coding agent does the work (writes code, opens the PR), and its output is **relayed
+   back as the role's completion signal** so the pipeline advances to the next phase.
+
+**Per-role override.** Each role can choose its own agent via
+`execution.profiles.<role>.agent`, which takes precedence over the global
+`execution.coding_agent`. This lets you, e.g., have the developer delegate to Claude Code
+while the validator stays on the local Hermes LLM:
+
+```yaml
+execution:
+  coding_agent: hermes            # default for every role…
+  profiles:
+    developer:
+      profile: my-senior-dev-profile
+      agent: claude-code          # …but the developer delegates to Claude Code
+      skills:
+        - incremental-implementation
+    reviewer:
+      agent: codex                # the reviewer uses Codex
+    validator:
+      agent: hermes               # the validator stays on the local LLM
+```
+
+Any role key works: `validator`, `pm`, `developer`, `qa`, `reviewer`, `security`,
+`accessibility`, `documentation`.
 
 ### Profile fallback behavior
 
