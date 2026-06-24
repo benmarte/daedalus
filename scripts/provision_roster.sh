@@ -22,6 +22,8 @@ HERMES="${HERMES_HOME:-$HOME/.hermes}"
 SRC="$HERMES/plugins/agent-skills/skills"
 PROFILES="$HERMES/profiles"
 PLUGIN_DIR="$HERMES/plugins/daedalus"
+# Bundled skills from the hermes-agent core skill library
+BUNDLED_SKILLS_SRC="$HERMES/hermes-agent/skills"
 
 # Self-sync: copy this repo into the installed plugin location so the running
 # version always matches the cloned source (hermes plugins update only works for
@@ -252,6 +254,17 @@ PY
       echo "  WARN: source skill missing: $s" >&2
     fi
   done
+
+  # Install bundled autonomous-ai-agents/claude-code skill so the agent knows
+  # how to delegate work to Claude Code (or Codex/OpenCode) when configured.
+  local cc_skill_src="$BUNDLED_SKILLS_SRC/autonomous-ai-agents/claude-code"
+  local cc_skill_dst="$PROFILES/$name/skills/autonomous-ai-agents/claude-code"
+  if [ -d "$cc_skill_src" ]; then
+    mkdir -p "$(dirname "$cc_skill_dst")"
+    cp -R "$cc_skill_src" "$cc_skill_dst"
+  else
+    echo "  WARN: autonomous-ai-agents/claude-code skill not found at $cc_skill_src" >&2
+  fi
 
   # Make `git push` + provider API calls work inside the worker — WITHOUT the
   # gh CLI. Each worker has an isolated HOME, so we write a per-profile git
