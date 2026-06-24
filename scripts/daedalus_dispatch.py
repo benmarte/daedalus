@@ -146,10 +146,9 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
 
 _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "developer": (
-        "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
-        "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
-        "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-        "  STOP — do not implement the code yourself.\n"
+        "  4. Immediately block: kanban_block(\"review-required: awaiting-pr — Claude Code spawned, PR pending\")\n"
+        "  5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not poll, do not wait for the PR. Block immediately after spawning.\n"
     ),
     "pm": (
         "  4. Wait: terminal(\"cat /tmp/pm-out.txt\")\n"
