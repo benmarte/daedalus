@@ -77,7 +77,7 @@ sources:
 # ── Cron + Notifications ──────────────────────────────────────────────────────
 cron:
   schedule: "every 60m"                 # How often the daedalus polls (every 60m, every 2h, 0 9 * * *)
-  deliver: ""                           # Legacy single target: slack:C123, discord:#general, …
+  deliver: ""                           # Legacy single target: slack:C123, discord:1234567890123456789, …
 
   # Multi-target notifications (takes precedence over `deliver` when set).
   # Targets are `hermes send` strings for ANY configured Hermes platform
@@ -89,7 +89,7 @@ cron:
   #     target: "slack:C0CHANNEL1"
   #     events: ["doc-report", "pipeline-failure"]
   #   - platform: "Discord"
-  #     target: "discord:#daedalus"
+  #     target: "discord:1234567890123456789"  # numeric channel ID (not name)
   #     events: ["dispatch-summary", "pr-ready"]
 
 # ── Execution tunables ────────────────────────────────────────────────────────
@@ -192,8 +192,8 @@ execution:
   # delegated: the dispatcher injects delegation instructions into task bodies
   # so the developer agent knows how to use the configured coding agent.
   #
-  # Options:
-  #   hermes       (default) — use Hermes delegate_task to spawn a subagent
+  # Options (default: hermes):
+  #   hermes       — use Hermes delegate_task to spawn a subagent
   #                    with the coding-agents skill pre-loaded. The subagent
   #                    runs the configured coding agent CLI (claude-code, codex,
   #                    or opencode) in one-shot mode.
@@ -202,12 +202,19 @@ execution:
   #   opencode     — delegate to OpenCode CLI (run mode)
   #   none         — no delegation; developer agent does coding directly
   #
-  # When set to a CLI agent (claude-code/codex/opencode), the dispatcher
-  # injects a delegation instruction telling the developer to use `delegate_task`
-  # with the appropriate CLI command for that agent. The coding-agents skill is
+  # When set to a CLI agent (claude-code/codex/opencode), the developer SOUL.md
+  # instructs the agent to spawn the external coding tool via terminal(background=True)
+  # rather than implementing code directly. The coding-agents skill is
   # automatically attached to the developer profile when delegation is enabled.
   #
   # coding_agent: hermes
+
+  # Shell command used by the developer agent to spawn the external coding agent
+  # via terminal(background=True). Must be the full command (not a shell alias).
+  # For Claude Code: use the absolute binary path + flags.
+  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions -p"
+  #
+  # coding_agent_cmd: ""
 
   # When coding_agent is set to a CLI agent, which model/backend should the
   # coding agent use? Passes through to the agent's --model flag where applicable.

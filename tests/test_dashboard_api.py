@@ -1312,7 +1312,7 @@ class TestNotificationMethods:
 
         assert result == {
             "Slack": [{"value": "slack:tasks", "label": "tasks"}],
-            "Discord": [{"value": "discord:#general", "label": "#general"}],
+            "Discord": [{"value": "discord:general", "label": "#general"}],
         }
 
     def test_returns_empty_dict_on_nonzero_returncode(self):
@@ -1385,7 +1385,7 @@ class TestMetaNotificationsEndpoint:
         data = resp.json()
         assert data == {
             "Slack": [{"value": "slack:tasks", "label": "tasks"}],
-            "Discord": [{"value": "discord:#general", "label": "#general"}],
+            "Discord": [{"value": "discord:general", "label": "#general"}],
         }
 
     def test_get_notifications_empty_on_failure(self, meta_client):
@@ -1852,9 +1852,9 @@ class TestListNotificationMethodsNewShape:
         assert "Discord" in result
         slack_entries = result["Slack"]
         assert len(slack_entries) == 1
-        assert slack_entries[0] == {"value": "slack:tasks", "label": "tasks"}
+        assert slack_entries[0] == {"value": "slack:C0B3P2Q39LN", "label": "tasks"}
         discord_entries = result["Discord"]
-        assert discord_entries[0] == {"value": "discord:#general", "label": "#general"}
+        assert discord_entries[0] == {"value": "discord:general", "label": "#general"}
 
     def test_slack_fallback_labels_when_no_resolution(self):
         """Text-parser fallback: labels are raw target strings."""
@@ -1906,7 +1906,7 @@ class TestMetaNotificationsNewShapeEndpoint:
         slack_entries = data["Slack"]
         assert isinstance(slack_entries, list)
         assert len(slack_entries) == 1
-        assert slack_entries[0]["value"] == "slack:tasks"
+        assert slack_entries[0]["value"] == "slack:C0B3P2Q39LN"
         assert slack_entries[0]["label"] == "tasks"
 
 

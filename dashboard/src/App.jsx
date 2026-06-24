@@ -1024,6 +1024,7 @@ function ConfigModal(props) {
     }
     if (config.sources) body.sources = config.sources;
     if (config.issues) body.issues = config.issues;
+    if (config.execution) body.execution = config.execution;
 
     fetchJSON(apiProjectConfig(name), { method: "POST", body: body }).then(function (res) {
       setSaving(false);
@@ -1235,21 +1236,7 @@ function ConfigModal(props) {
           })()
         : null,
 
-      // Editable: Cron
-      React.createElement("div", { style: S.section }, "Cron"),
-      React.createElement(CronSchedule, {
-        value: getIn(config, ["cron", "schedule"], ""),
-        onChange: function (v) { updateField("cron.schedule", v); }
-      }),
-      // Multi-target notifications (any Hermes messaging platform + channel + events)
-      React.createElement("div", { style: S.section }, "Notifications"),
-      React.createElement(NotificationsEditor, {
-        targets: getIn(config, ["cron", "notifications"], []),
-        methods: notifications,
-        onChange: function (arr) { updateField("cron.notifications", arr); }
-      }),
-
-      // Editable: Source toggles with human-readable labels and enabled/disabled status
+      // ── Sources ───────────────────────────────────────────────────────────────
       sources.length > 0 ? React.createElement("div", { style: S.section }, "Sources") : null,
       sources.length > 0 ? React.createElement("div", { style: { marginBottom: "12px" } },
         sources.map(function (key) {
@@ -1261,7 +1248,7 @@ function ConfigModal(props) {
         })
       ) : null,
 
-      // ── Issue Labels ────────────────────────────────────────────────────────
+      // ── Issue Labels ──────────────────────────────────────────────────────────
       React.createElement("div", { style: S.section }, "Issue Labels"),
       React.createElement("div", { style: { marginBottom: "12px" } },
         React.createElement(TagMultiSelect, {
@@ -1273,7 +1260,7 @@ function ConfigModal(props) {
         })
       ),
 
-      // Throughput caps
+      // ── Throughput ────────────────────────────────────────────────────────────
       React.createElement("div", { style: S.section }, "Throughput"),
       React.createElement("div", { style: S.fieldRow },
         React.createElement("label", { style: S.field },
@@ -1304,7 +1291,6 @@ function ConfigModal(props) {
             onChange: function (e) {
               var v = e.target.value.trim();
               if (v === "") {
-                // Remove the key entirely when cleared
                 setConfig(function (prev) {
                   var next = JSON.parse(JSON.stringify(prev));
                   var proc = (next.issues || {}).processing;
@@ -1319,6 +1305,21 @@ function ConfigModal(props) {
           })
         )
       ),
+
+      // ── Cron ──────────────────────────────────────────────────────────────────
+      React.createElement("div", { style: S.section }, "Cron"),
+      React.createElement(CronSchedule, {
+        value: getIn(config, ["cron", "schedule"], ""),
+        onChange: function (v) { updateField("cron.schedule", v); }
+      }),
+
+      // ── Notifications ─────────────────────────────────────────────────────────
+      React.createElement("div", { style: S.section }, "Notifications"),
+      React.createElement(NotificationsEditor, {
+        targets: getIn(config, ["cron", "notifications"], []),
+        methods: notifications,
+        onChange: function (arr) { updateField("cron.notifications", arr); }
+      }),
 
       // ── Auto-Merge ────────────────────────────────────────────────────────────
       React.createElement("div", { style: S.section }, "Auto-Merge"),
@@ -1354,6 +1355,46 @@ function ConfigModal(props) {
             )
           )
         : null,
+
+      // ── Coding Agent ──────────────────────────────────────────────────────────
+      React.createElement("div", { style: S.section }, "Coding Agent"),
+      React.createElement("div", { style: S.fieldRow },
+        React.createElement("label", { style: S.field },
+          React.createElement("span", { style: S.fieldLabel }, "Agent"),
+          React.createElement("select", {
+            style: S.select,
+            value: getIn(config, ["execution", "coding_agent"], "hermes"),
+            onChange: function (e) { updateField("execution.coding_agent", e.target.value); }
+          },
+            React.createElement("option", { value: "hermes" }, "Hermes — delegate via built-in subagent"),
+            React.createElement("option", { value: "claude-code" }, "Claude Code"),
+            React.createElement("option", { value: "codex" }, "Codex"),
+            React.createElement("option", { value: "opencode" }, "OpenCode")
+          ),
+          React.createElement("div", { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
+            "When set, the developer agent uses delegate_task to hand off coding work to a CLI agent subagent."
+          )
+        ),
+        ["claude-code", "codex", "opencode"].indexOf(getIn(config, ["execution", "coding_agent"], "hermes")) !== -1
+          ? (function() {
+              var _AGENT_CMD_DEFAULTS = {"claude-code": "claude -p", "codex": "codex exec --full-auto", "opencode": "opencode run"};
+              var _currentAgent = getIn(config, ["execution", "coding_agent"], "hermes");
+              var _defaultCmd = _AGENT_CMD_DEFAULTS[_currentAgent] || "";
+              return React.createElement("label", { style: S.field },
+                React.createElement("span", { style: S.fieldLabel }, "CLI Command"),
+                React.createElement("input", {
+                  style: S.input,
+                  value: getIn(config, ["execution", "coding_agent_cmd"], ""),
+                  placeholder: _defaultCmd ? ("default: " + _defaultCmd + " — override e.g. cc-rizq") : "e.g. cc, cc-rizq, cc-rewst",
+                  onChange: function (e) { updateField("execution.coding_agent_cmd", e.target.value); }
+                }),
+                React.createElement("div", { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
+                  "Custom shell command passed as acp_command to delegate_task. Leave blank to use the default above."
+                )
+              );
+            })()
+          : null
+      ),
 
       // Errors
       fieldErrors && fieldErrors.length > 0 ? React.createElement("div", { style: { marginBottom: "8px" } },
