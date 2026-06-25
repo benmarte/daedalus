@@ -2867,6 +2867,24 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         state = provider.get_issue_state(n)
         if state != "closed":
             continue  # still open (filtered by label/limit) or unknown — leave it
+
+        # Guard: if there are still active (non-done) kanban tasks for this issue,
+        # the close is likely accidental (bot close, manual mis-click). Skip cleanup
+        # so a human reopen can resume the pipeline without data loss.
+        active_tasks = [
+            t for t in kanban.list_tasks(slug)
+            if re.search(r"#(\d+)", t.get("title") or "") and
+            int(re.search(r"#(\d+)", t.get("title") or "").group(1)) == n and
+            t.get("status") not in ("done", "cancelled")
+        ]
+        if active_tasks:
+            logger.warning(
+                "dispatch: #%s is closed on VCS but has %d active kanban task(s) — "
+                "skipping bulk-complete (likely accidental close; reopen the issue to resume)",
+                n, len(active_tasks),
+            )
+            continue
+
         if dry_run:
             dry_closed = kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed", dry_run=True)
             logger.info("[dry-run] #%s closed externally → would archive kanban tasks + Done (%d task(s))", n, len(dry_closed))
