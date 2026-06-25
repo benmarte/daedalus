@@ -1424,6 +1424,16 @@ def test_classify_blocked_accessibility_na():
     check("accessibility-na → advance", result == iterate.ADVANCE)
 
 
+def test_classify_blocked_accessibility_skipped():
+    """Accessibility card with a11y-skipped (no UI changes) → ADVANCE."""
+    result = iterate.classify_blocked(
+        "accessibility-daedalus",
+        "a11y-skipped: no UI changes in PR #7",
+        ci_green=False,
+    )
+    check("a11y-skipped → advance", result == iterate.ADVANCE)
+
+
 def test_classify_blocked_accessibility_changes_requested():
     """Accessibility card with 'changes requested' → PM_ROUTE."""
     result = iterate.classify_blocked(
