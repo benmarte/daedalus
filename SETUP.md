@@ -96,6 +96,8 @@ execution:
   coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
 ```
 
+![.hermes/daedalus.yaml showing the execution block with coding_agent: claude-code and a per-role override](docs/screenshots/guide/14-coding-agent-config.png)
+
 - Supported values: `claude-code`, `codex`, `opencode`, or `hermes` (the default).
 - **Omitting `coding_agent` (or setting it to `hermes`/`none`) keeps everything on the
   local Hermes LLM** — no external agent is spawned.
@@ -125,6 +127,15 @@ See the [README](README.md#delegating-to-claude-code-or-codex) for the full refe
   worktree-pinned triage card → dispatcher decomposes → roster works it → PR.
 - **Automated (cron):** each project gets its own cron job (created by setup.sh /
   the dashboard); edits update the job in place.
+
+> **If the cron silently does nothing:** the job invokes
+> `~/.hermes/scripts/daedalus-cron.sh`. The plugin now (re)installs that wrapper
+> automatically every time Hermes loads daedalus, so a fresh `hermes plugin add`
+> + gateway restart is enough. If you hit a stale/missing wrapper on an older
+> install (before this fix), re-create it immediately with:
+> ```bash
+> python3 ~/.hermes/plugins/daedalus/scripts/postinstall.py --check
+> ```
 
 ## Pipeline lifecycle
 

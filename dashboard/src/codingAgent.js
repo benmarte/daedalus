@@ -12,10 +12,11 @@
 // "CLI Command" override field. "hermes" (and any other value) hides it.
 var CLI_AGENTS = ["claude-code", "codex", "opencode"];
 
-// Default CLI command per agent — shown as the input placeholder and used by
-// the dispatcher when coding_agent_cmd is left blank.
+// Default CLI command per agent — shown as the input placeholder, auto-filled
+// into coding_agent_cmd when the agent is selected, and used by the dispatcher
+// when coding_agent_cmd is left blank.
 var CODING_AGENT_DEFAULTS = {
-  "claude-code": "claude -p",
+  "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
   "codex": "codex exec --full-auto",
   "opencode": "opencode run",
 };
@@ -30,14 +31,15 @@ function defaultCmdFor(agent) {
   return CODING_AGENT_DEFAULTS[agent] || "";
 }
 
-// Whether coding_agent_cmd must be cleared when the agent changes from
-// prevAgent to nextAgent. Clearing on every real change lets the new agent
-// pick up its own default (the dispatcher falls back to CODING_AGENT_DEFAULTS)
-// instead of inheriting the previous agent's stale command. Returns false when
-// the agent did not actually change, so a no-op selection never wipes a command
-// the user just typed.
-function shouldResetCmdOnAgentChange(prevAgent, nextAgent) {
-  return prevAgent !== nextAgent;
+// The value coding_agent_cmd should take when the agent changes from prevAgent
+// to nextAgent: the new agent's default command, which auto-fills the CLI
+// Command field (issue #73) so the user doesn't have to look it up. Hermes (and
+// any agent without a default) yields "", which clears the field. Returns null
+// when the agent did not actually change, so a no-op selection never overwrites
+// a command the user just typed (issue #66).
+function cmdForAgentChange(prevAgent, nextAgent) {
+  if (prevAgent === nextAgent) return null;
+  return defaultCmdFor(nextAgent);
 }
 
 module.exports = {
@@ -45,5 +47,5 @@ module.exports = {
   CODING_AGENT_DEFAULTS: CODING_AGENT_DEFAULTS,
   isCliAgent: isCliAgent,
   defaultCmdFor: defaultCmdFor,
-  shouldResetCmdOnAgentChange: shouldResetCmdOnAgentChange,
+  cmdForAgentChange: cmdForAgentChange,
 };

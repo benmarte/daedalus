@@ -129,7 +129,7 @@ def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
 
 
 _CODING_AGENT_DEFAULTS: Dict[str, str] = {
-    "claude-code": "claude -p",
+    "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
     "codex": "codex exec --full-auto",
     "opencode": "opencode run",
 }
@@ -138,6 +138,7 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
 _ROLE_TMP_PREFIX: Dict[str, str] = {
     "pm": "pm",
     "developer": "cc",
+    "validator": "validator",
     "qa": "qa",
     "reviewer": "rev",
     "security": "sec",
@@ -146,10 +147,16 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
 
 _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "developer": (
-        "  4. Poll for PR: terminal(\"gh pr list --state open --limit 5\") every 2min\n"
-        "  5. When PR found: kanban_block(summary=\"review-required: PR #N — branch\")\n"
-        "  6. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-        "  STOP — do not implement the code yourself.\n"
+        "  4. Immediately block: kanban_block(\"review-required: awaiting-pr — Claude Code spawned, PR pending\")\n"
+        "  5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do not poll, do not wait for the PR. Block immediately after spawning.\n"
+    ),
+    "validator": (
+        "  4. Wait: terminal(\"cat /tmp/validator-out.txt\")\n"
+        "  5. The agent will have posted the validation report to GitHub and output its verdict.\n"
+        "  6. Complete your card with the exact verdict line: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block. Output CONFIRMED/BLOCKED as plain text only.\n"
     ),
     "pm": (
         "  4. Wait: terminal(\"cat /tmp/pm-out.txt\")\n"
@@ -214,7 +221,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"cat /tmp/{pfx}-task.txt | {run_cmd} > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-task.txt | {run_cmd} > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "codex":
@@ -225,7 +232,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "opencode":
@@ -236,7 +243,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     return ""
@@ -281,31 +288,47 @@ def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
     return agent
 
 
+# Shared lock directory for CI retry — visible to all Hermes profiles so that
+# one profile's retry cron suppresses duplicates from other profiles (issue #79).
+_RETRY_LOCK_DIR = Path.home() / ".hermes" / "daedalus"
+# How long a lock is considered "recent" (seconds). After this TTL the lock is
+# stale and a still-pending CI re-arms the retry.
+_RETRY_LOCK_TTL = 600  # 10 minutes
+
+
 def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
     """Schedule a one-shot retry dispatch when CI is still pending.
 
-    Idempotent: if a retry cron named ``daedalus-ci-retry-<slug>`` already
-    exists, it is NOT recreated.
+    Idempotent via a shared lock file under ``_RETRY_LOCK_DIR``.  The lock is
+    visible to every Hermes profile, so a retry scheduled by one profile
+    suppresses duplicates from all others (issue #79).  A stale lock (older
+    than ``_RETRY_LOCK_TTL``) is treated as expired and a new retry is created.
 
     Returns True if a new cron was actually created, False if skipped.
     """
     try:
         slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
         cron_name = f"daedalus-ci-retry-{slug_safe}"
-        existing_jobs = subprocess.run(
-            ["hermes", "cron", "list", "--all"],
-            capture_output=True, text=True, timeout=10,
-        )
-        # If the list command itself fails, bail out rather than spawn a duplicate.
-        if existing_jobs.returncode != 0:
-            logger.warning(
-                "dispatch: could not list cron jobs (rc=%d) — skipping CI retry schedule",
-                existing_jobs.returncode,
+        lock_path = _RETRY_LOCK_DIR / f".ci-retry-{slug_safe}.lock"
+
+        # Check the shared lock file (profile-agnostic).
+        if lock_path.exists():
+            age = time.time() - lock_path.stat().st_mtime
+            if age < _RETRY_LOCK_TTL:
+                logger.debug(
+                    "dispatch: retry lock %s is recent (%.0fs old) — skipping",
+                    lock_path.name, age,
+                )
+                return False
+            logger.debug(
+                "dispatch: retry lock %s is stale (%.0fs old) — re-arming",
+                lock_path.name, age,
             )
-            return False
-        if cron_name in (existing_jobs.stdout or ""):
-            logger.debug("dispatch: retry cron %s already exists — skipping", cron_name)
-            return False
+
+        # Force --profile default so the cron lands in the same bucket regardless
+        # of which role agent (qa-daedalus, accessibility-daedalus, etc.) triggered
+        # the dispatch. Without this, same-named crons from different profiles are
+        # distinct jobs in Hermes and the dedup-by-name guard is bypassed.
         subprocess.run(
             [
                 "hermes", "cron", "create", "3m",
@@ -313,9 +336,13 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
                 "--no-agent",
                 "--script", "daedalus-cron.sh",
                 "--repeat", "1",
+                "--profile", "default",
             ],
             capture_output=True, text=True, timeout=10,
         )
+        # Write the shared lock file.
+        _RETRY_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(cron_name)
         logger.info(
             "dispatch: CI pending on %d card(s) — scheduled retry in 3m (%s)",
             pending_count, cron_name,
@@ -328,6 +355,9 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
 
 def _cancel_ci_retry(slug: str) -> bool:
     """Delete the CI-retry cron for ``slug`` once CI is no longer pending.
+
+    Also removes the shared lock file so the next CI-pending tick can
+    re-arm the retry cleanly.
 
     Because ``_schedule_ci_retry`` creates a ``--repeat 1`` cron, the job is
     removed from ``hermes cron list`` the moment it fires. The idempotency
@@ -344,11 +374,14 @@ def _cancel_ci_retry(slug: str) -> bool:
     try:
         slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
         cron_name = f"daedalus-ci-retry-{slug_safe}"
+        lock_path = _RETRY_LOCK_DIR / f".ci-retry-{slug_safe}.lock"
         result = subprocess.run(
             ["hermes", "cron", "delete", cron_name],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
+            # Remove the shared lock file.
+            lock_path.unlink(missing_ok=True)
             logger.info("dispatch: CI done — cancelled retry cron (%s)", cron_name)
             return True
         # Non-zero almost always means "not found" — that's the common, benign
@@ -1351,10 +1384,12 @@ def _has_pm_tasks(slug: str, issue_number: int,
 
 def _has_active_pm_consultation(slug: str, issue_number: int,
                                 pm_profile: str = "project-manager-daedalus") -> bool:
-    """Return True if there is a non-done PM consultation task for issue_number.
+    """Return True if there is already a PM consultation task for issue_number.
 
-    Used to prevent creating duplicate consultation tasks when a team blocker
-    is still awaiting PM response.
+    Counts any non-archived consultation (including done) to prevent the
+    runaway loop where a completed consultation triggers a new one every tick.
+    The idempotency key on create_task is the primary guard; this check is a
+    fast in-memory pre-flight that avoids the subprocess call entirely.
     """
     pattern = f"#{issue_number}"
     for t in kanban.list_tasks(slug):
@@ -1365,9 +1400,10 @@ def _has_active_pm_consultation(slug: str, issue_number: int,
             continue
         if not title.lower().startswith("consult:"):
             continue
-        status = (t.get("status") or "").lower()
-        if status != "done":
-            return True
+        # Any status (including done) blocks a new consultation.
+        # Archived consultations are not returned by list_tasks, so they are
+        # excluded automatically — archiving a consultation re-opens the door.
+        return True
     return False
 
 
@@ -2263,9 +2299,12 @@ def _check_team_blockers(
         assignee = (card.get("assignee") or "").strip()
         if assignee in pipeline_profiles:
             continue  # validator/PM blocks handled elsewhere
-        summary = (card.get("summary") or card.get("last_summary") or "").lower()
+        # list --json never populates summary/last_summary; fetch it via show --json
+        summary = kanban.get_latest_summary(slug, card["id"]).lower()
         if summary.startswith("escalate:"):
             continue  # security escalation — not a PM blocker
+        if summary.startswith("review-required:"):
+            continue  # PR in review or awaiting-pr — iterate handles this, PM can't unblock it
         m = re.search(r"#(\d+)", card.get("title") or "")
         if not m:
             continue
@@ -2276,7 +2315,12 @@ def _check_team_blockers(
         if not issue:
             logger.debug("dispatch: team blocked #%s but issue not in current scope", n)
             continue
-        blocker_raw = card.get("summary") or card.get("last_summary") or "no details provided"
+        blocker_raw = summary or "no details provided"
+        # Idempotency key: one PM consultation per (issue, blocked-card) pair.
+        # hermes kanban create returns the existing task id when the key already
+        # exists in any non-archived state, so this prevents the runaway loop
+        # where each tick re-creates a consultation once the previous one is done.
+        consult_key = f"consult-{n}-{card['id']}"
         if dry_run:
             logger.info("[dry-run] team blocked #%s — would create PM consultation task", n)
             triggered.append(n)
@@ -2287,6 +2331,7 @@ def _check_team_blockers(
             assignee=p["pm"],
             workspace=f"dir:{workdir}" if workdir else "",
             skills=rs.get("pm") or None,
+            idempotency_key=consult_key,
         )
         if cid:
             logger.info("dispatch: team blocked #%s — PM consultation task %s created", n, cid)

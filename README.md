@@ -44,6 +44,11 @@ flowchart TD
 
 ---
 
+> **New here?** The step-by-step setup guide with live screenshots is in
+> [`docs/INSTALLATION_GUIDE.md`](docs/INSTALLATION_GUIDE.md).
+
+---
+
 ## Table of contents
 
 - [Why this exists](#why-this-exists-read-this-part)
@@ -390,6 +395,8 @@ execution:
   coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
 ```
 
+![.hermes/daedalus.yaml showing the execution block with coding_agent: claude-code and a per-role override (developer delegates to Claude Code, validator stays on the local Hermes LLM)](docs/screenshots/guide/14-coding-agent-config.png)
+
 - `coding_agent_cmd` is the **full shell command** the agent pipes the task body into (not a
   shell alias). Use the absolute binary path + flags. When omitted, sensible per-agent
   defaults are used (`claude --dangerously-skip-permissions -p`, `codex exec --full-auto`,
@@ -406,7 +413,8 @@ execution:
    `autonomous-ai-agents/claude-code` for `claude-code`, `…/codex` for `codex`,
    `…/opencode` for `opencode`. The role doesn't need to call `skill_view()` itself.
 3. The role's **local Hermes LLM** loads that skill, writes the task body to a temp file,
-   and **pipes it to the coding agent** via `terminal(..., background=True)`.
+   and **pipes it to the coding agent** via `nohup bash -c '...' &` (fully daemonized so
+   the spawned agent survives the Hermes session exit).
 4. The coding agent does the work (writes code, opens the PR), and its output is **relayed
    back as the role's completion signal** so the pipeline advances to the next phase.
 
@@ -980,7 +988,7 @@ configured chat channels. You merge (agents never merge `main`).
 project with live status (kanban counts, open PRs + CI, needs-attention, cron), and an
 editor for each project's config (`repo`/`workdir` are read-only).
 
-![Hermes kanban board for a Daedalus project — columns ready for work](docs/screenshots/guide/10-kanban-board.png)
+![Hermes kanban board for a Daedalus project showing a live pipeline — cards spread across Todo, Blocked, and Done columns](docs/screenshots/guide/10-kanban-board.png)
 
 **6. Automate** — schedule the dispatcher so advancing/onboarding run unattended:
 ```bash

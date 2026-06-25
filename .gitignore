@@ -36,7 +36,13 @@ dashboard/dist/*.map
 
 # ── Hermes state ─────────────────────────────────────────────────────────────
 .hermes/
+# Documentation agent's doc-sweep cursor (runtime state — issue #98).
+# Covered by .hermes/ above, but listed explicitly so the intent is unambiguous.
+.hermes/doc_sweep_state.json
 
 # ── Tooling artifacts ────────────────────────────────────────────────────────
 .playwright-mcp/
 .claude/
+
+# ── Local runtime state ──────────────────────────────────────────────────────
+kanban.db

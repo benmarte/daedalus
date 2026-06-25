@@ -1,15 +1,25 @@
-"""Tests for CI retry scheduling (issue #24).
+"""Tests for CI retry scheduling (issues #24, #70, #79).
 
 Exercises ``scripts/daedalus_dispatch._schedule_ci_retry`` directly:
-  - happy path creates a one-shot 3‑minute cron
-  - idempotent guard skips creation if the job already exists
+  - happy path creates a one-shot 3‑minute cron and writes a shared lock file
+  - a recent lock skips creation — including across profiles (issue #79)
+  - a stale lock (> TTL) re-arms the retry
   - slug is sanitized (unsafe chars become '-')
   - subprocess failures are caught and return False (never crash dispatcher)
+  - ``_cancel_ci_retry`` clears the shared lock and deletes the cron (issue #70)
+
+``hermes cron`` is profile-scoped, so the old ``cron list`` guard could not see
+other profiles' jobs and every profile created its own duplicate. The fix gates
+on a lock file under ``~/.hermes/daedalus/`` that every profile shares; these
+tests redirect ``_RETRY_LOCK_DIR`` to a temp dir so they never touch real state.
 """
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -43,111 +53,134 @@ def check(name, cond):
 # ── _schedule_ci_retry ───────────────────────────────────────────────────────
 
 
-def test_schedule_ci_retry_happy_path():
-    """No existing job → creates a cron with --name and --repeat 1."""
-    list_result = mock.Mock()
-    list_result.returncode = 0
-    list_result.stdout = ""
-    create_result = mock.Mock()
-    create_result.stdout = "daedalus-ci-retry-my-board"
+def _fresh_lock_dir():
+    """A unique temp dir to stand in for the shared ``_RETRY_LOCK_DIR``.
 
-    with mock.patch("subprocess.run", side_effect=[list_result, create_result]) as mk_run:
+    Each test patches ``disp._RETRY_LOCK_DIR`` to one of these so the file-lock
+    logic runs against throwaway state instead of real ``~/.hermes/daedalus/``.
+    """
+    return Path(tempfile.mkdtemp(prefix="daed-ci-retry-"))
+
+
+def test_schedule_ci_retry_happy_path():
+    """No existing lock → one `cron create` call and a lock file is written."""
+    create_result = mock.Mock()
+    d = _fresh_lock_dir()
+
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=create_result) as mk_run:
         created = disp._schedule_ci_retry("my-board", 2)
 
     check("happy path returns True", created is True)
-    check("two subprocess calls (list + create)", mk_run.call_count == 2)
-    # The list call must use --all (not the nonexistent --quiet)
-    list_args = mk_run.call_args_list[0][0][0]
-    check("list uses --all flag", "--all" in list_args)
-    check("list does not use --quiet", "--quiet" not in list_args)
-    # The create call arguments
-    create_args = mk_run.call_args_list[1][0][0]
+    check("one subprocess call (create only, no list)", mk_run.call_count == 1)
+    create_args = mk_run.call_args_list[0][0][0]
     check("create uses hermes cron create", create_args[0:3] == ["hermes", "cron", "create"])
     check("schedule is 3m", "3m" in create_args)
     check("--repeat 1 set", "--repeat" in create_args and "1" in create_args)
     check("--no-agent set", "--no-agent" in create_args)
     check("--script daedalus-cron.sh", "daedalus-cron.sh" in create_args)
     check("job name in create", "daedalus-ci-retry-my-board" in create_args)
+    check("shared lock file written", (d / ".ci-retry-my-board.lock").exists())
 
 
-def test_schedule_ci_retry_idempotent():
-    """If job name already in `hermes cron list` output → no creation call."""
-    list_result = mock.Mock()
-    list_result.returncode = 0
-    list_result.stdout = "daedalus-ci-retry-my-board\nother-job\n"
+def test_schedule_ci_retry_idempotent_recent_lock():
+    """A recent lock file → no `cron create` call (idempotent within a profile)."""
+    d = _fresh_lock_dir()
+    (d / ".ci-retry-my-board.lock").write_text("daedalus-ci-retry-my-board")
 
-    with mock.patch("subprocess.run", return_value=list_result) as mk_run:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run") as mk_run:
         created = disp._schedule_ci_retry("my-board", 1)
 
-    check("idempotent returns False", created is False)
-    check("only one subprocess call (no create)", mk_run.call_count == 1)
+    check("recent lock returns False", created is False)
+    check("no subprocess call (no create)", mk_run.call_count == 0)
 
 
-def test_schedule_ci_retry_list_nonzero_rc():
-    """If `hermes cron list` exits non-zero → bail out, don't spawn a duplicate."""
-    list_result = mock.Mock()
-    list_result.returncode = 1
-    list_result.stdout = ""
+def test_schedule_ci_retry_cross_profile_dedup():
+    """Issue #79: a second profile sees the first profile's shared lock and does
+    NOT create a duplicate cron. The old `cron list` guard could not see other
+    profiles' jobs, so every profile spawned its own copy."""
+    d = _fresh_lock_dir()  # the shared ~/.hermes/daedalus dir, visible to all profiles
+    create_result = mock.Mock()
 
-    with mock.patch("subprocess.run", return_value=list_result) as mk_run:
-        created = disp._schedule_ci_retry("slug", 1)
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=create_result) as mk_run:
+        first = disp._schedule_ci_retry("my-board", 1)   # developer-daedalus
+        second = disp._schedule_ci_retry("my-board", 1)  # qa-daedalus, same shared dir
 
-    check("non-zero list rc returns False", created is False)
-    check("no create call attempted", mk_run.call_count == 1)
+    check("first profile creates the cron", first is True)
+    check("second profile skips via shared lock", second is False)
+    check("only ONE cron create across profiles", mk_run.call_count == 1)
+
+
+def test_schedule_ci_retry_stale_lock_recreates():
+    """A lock older than the TTL → recreate, so a still-pending CI can re-arm."""
+    d = _fresh_lock_dir()
+    lock = d / ".ci-retry-my-board.lock"
+    lock.write_text("daedalus-ci-retry-my-board")
+    old = time.time() - 660  # 11 minutes ago, past the 600s TTL
+    os.utime(lock, (old, old))
+    create_result = mock.Mock()
+
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=create_result) as mk_run:
+        created = disp._schedule_ci_retry("my-board", 1)
+
+    check("stale lock re-arms the retry", created is True)
+    check("create call issued for stale lock", mk_run.call_count == 1)
 
 
 def test_schedule_ci_retry_slug_sanitized():
-    """Unsafe chars in the slug become '-' so the cron name is safe."""
-    list_result = mock.Mock()
-    list_result.returncode = 0
-    list_result.stdout = ""
+    """Unsafe chars in the slug become '-' in both the cron name and lock file."""
+    d = _fresh_lock_dir()
     create_result = mock.Mock()
 
-    with mock.patch("subprocess.run", side_effect=[list_result, create_result]) as mk_run:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=create_result) as mk_run:
         disp._schedule_ci_retry("org/repo:special", 1)
 
-    create_args = mk_run.call_args_list[1][0][0]
-    # The name passed to --name should have unsafe chars replaced
+    create_args = mk_run.call_args_list[0][0][0]
     name_idx = create_args.index("--name") + 1
-    job_name = create_args[name_idx]
-    check("slug sanitized", job_name == "daedalus-ci-retry-org-repo-special")
+    check("cron name sanitized", create_args[name_idx] == "daedalus-ci-retry-org-repo-special")
+    check("lock filename sanitized", (d / ".ci-retry-org-repo-special.lock").exists())
 
 
 def test_schedule_ci_retry_subprocess_failure():
-    """If hermes cron list/create fails → return False, don't crash."""
-    with mock.patch("subprocess.run", side_effect=OSError("hermes not found")):
+    """If `hermes cron create` raises → return False, don't crash."""
+    d = _fresh_lock_dir()
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", side_effect=OSError("hermes not found")):
         created = disp._schedule_ci_retry("slug", 1)
     check("failure returns False", created is False)
 
 
 def test_schedule_ci_retry_create_swallows_error():
-    """The creation step failing is handled — still returns True if list succeeded."""
-    list_result = mock.Mock()
-    list_result.returncode = 0
-    list_result.stdout = ""
+    """The creation step raising is caught by the outer try/except → False."""
+    d = _fresh_lock_dir()
 
     def fake_run(cmd, *a, **kw):
-        if cmd[0:3] == ["hermes", "cron", "create"]:
-            raise OSError("create failed")
-        return list_result
+        raise OSError("create failed")
 
-    with mock.patch("subprocess.run", side_effect=fake_run) as mk_run:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", side_effect=fake_run) as mk_run:
         created = disp._schedule_ci_retry("slug", 1)
 
-    # Outer try/except catches the OSError from create and returns False.
     check("create failure returns False", created is False)
-    check("called list and attempted create", mk_run.call_count == 2)
+    check("attempted the create call", mk_run.call_count == 1)
 
 
 # ── _cancel_ci_retry (issue #70) ─────────────────────────────────────────────
 
 
 def test_cancel_ci_retry_happy_path():
-    """CI done → deletes the retry cron via `hermes cron delete <name>`."""
+    """CI done → removes the shared lock AND deletes the cron."""
     del_result = mock.Mock()
     del_result.returncode = 0
+    d = _fresh_lock_dir()
+    (d / ".ci-retry-my-board.lock").write_text("daedalus-ci-retry-my-board")
 
-    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=del_result) as mk_run:
         cancelled = disp._cancel_ci_retry("my-board")
 
     check("cancel returns True on success", cancelled is True)
@@ -155,14 +188,17 @@ def test_cancel_ci_retry_happy_path():
     del_args = mk_run.call_args_list[0][0][0]
     check("uses hermes cron delete", del_args[0:3] == ["hermes", "cron", "delete"])
     check("deletes the slug's retry cron", "daedalus-ci-retry-my-board" in del_args)
+    check("shared lock file removed", not (d / ".ci-retry-my-board.lock").exists())
 
 
 def test_cancel_ci_retry_not_found_is_benign():
     """Missing cron (already fired / never created) → returns False, no crash."""
     del_result = mock.Mock()
     del_result.returncode = 1  # "not found"
+    d = _fresh_lock_dir()
 
-    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=del_result) as mk_run:
         cancelled = disp._cancel_ci_retry("my-board")
 
     check("not-found returns False", cancelled is False)
@@ -173,8 +209,10 @@ def test_cancel_ci_retry_slug_sanitized():
     """Unsafe chars in the slug are sanitized to match the scheduled cron name."""
     del_result = mock.Mock()
     del_result.returncode = 0
+    d = _fresh_lock_dir()
 
-    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=del_result) as mk_run:
         disp._cancel_ci_retry("org/repo:special")
 
     del_args = mk_run.call_args_list[0][0][0]
@@ -184,39 +222,41 @@ def test_cancel_ci_retry_slug_sanitized():
 
 def test_cancel_ci_retry_subprocess_failure():
     """If `hermes cron delete` raises → return False, never crash the dispatcher."""
-    with mock.patch("subprocess.run", side_effect=OSError("hermes not found")):
+    d = _fresh_lock_dir()
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", side_effect=OSError("hermes not found")):
         cancelled = disp._cancel_ci_retry("slug")
     check("cancel failure returns False", cancelled is False)
 
 
-def test_ci_retry_post_fire_recreation_then_cancel():
-    """Regression for issue #70: a `--repeat 1` retry vanishes from the cron
-    list once it fires, so a *still-pending* CI re-creates it on the next tick
-    (expected). When CI finally passes, the leftover cron is cancelled — which
-    is the cleanup that finally stops the accumulation loop.
-    """
-    # Tick 1: retry already fired → list is empty → CI still pending → recreate.
-    list_empty = mock.Mock()
-    list_empty.returncode = 0
-    list_empty.stdout = ""  # fired cron no longer present
-    create_result = mock.Mock()
+def test_ci_retry_post_fire_recent_lock_skips_then_cancel():
+    """Regression for issues #70 + #79: after a `--repeat 1` retry fires it
+    disappears from `hermes cron list`, but the shared lock is still recent — so
+    a still-pending CI does NOT spam a fresh cron every tick (the old list guard
+    did). When CI finally passes, `_cancel_ci_retry` clears the lock AND the cron,
+    closing the loop."""
+    d = _fresh_lock_dir()
+    # The original schedule wrote this lock; the --repeat 1 cron has since fired.
+    (d / ".ci-retry-my-board.lock").write_text("daedalus-ci-retry-my-board")
 
-    with mock.patch("subprocess.run", side_effect=[list_empty, create_result]) as mk_run:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run") as mk_run:
         recreated = disp._schedule_ci_retry("my-board", 1)
 
-    check("post-fire + still-pending recreates the cron", recreated is True)
-    check("recreation issues list + create", mk_run.call_count == 2)
+    check("post-fire recent lock suppresses re-create", recreated is False)
+    check("no cron create while the lock is recent", mk_run.call_count == 0)
 
-    # Tick 2: CI now passes → dispatcher cancels the leftover retry cron.
+    # CI now passes → cancel removes the lock and deletes the leftover cron.
     del_result = mock.Mock()
     del_result.returncode = 0
-    with mock.patch("subprocess.run", return_value=del_result) as mk_del:
+    with mock.patch.object(disp, "_RETRY_LOCK_DIR", d), \
+         mock.patch("subprocess.run", return_value=del_result) as mk_del:
         cancelled = disp._cancel_ci_retry("my-board")
 
     check("CI-done tick cancels the retry cron", cancelled is True)
     check("cancel uses hermes cron delete", mk_del.call_args_list[0][0][0][0:3]
           == ["hermes", "cron", "delete"])
-
+    check("lock cleared on cancel", not (d / ".ci-retry-my-board.lock").exists())
 
 # ── _parse_follow_ups ────────────────────────────────────────────────────────
 
@@ -865,6 +905,28 @@ def test_all_souls_wire_claude_code_skill_as_step0():
     check("all 9 souls wire claude-code skill as step 0", not missing)
 
 
+# ── documentation SOUL proactive doc-health audit (issue #98) ────────────────
+
+
+def test_documentation_soul_has_proactive_doc_audit():
+    """documentation SOUL audits all docs vs PRs merged since last_doc_sweep_sha (issue #98)."""
+    soul = (Path(__file__).resolve().parent.parent
+            / "config" / "souls" / "documentation-daedalus.md").read_text()
+    checks = {
+        "proactive audit step": "Proactive doc-health audit" in soul,
+        "doc_sweep_state.json": ".hermes/doc_sweep_state.json" in soul,
+        "last_doc_sweep_sha cursor": "last_doc_sweep_sha" in soul,
+        "lightweight / bounded by PRs": "lightweight" in soul.lower(),
+        "Docs Health report section": "Docs Health" in soul,
+        "project-agnostic workdir": "workdir" in soul.lower(),
+        "enumerate root + docs markdown": "git ls-files" in soul,
+        "separate PR if already merged": "separate small PR" in soul,
+    }
+    missing = [k for k, ok in checks.items() if not ok]
+    assert not missing, f"documentation SOUL missing doc-audit pieces: {missing}"
+    check("documentation SOUL wires proactive doc-health audit", not missing)
+
+
 # ── _CODING_AGENT_DEFAULTS and per-agent default commands ────────────────────
 
 
@@ -872,7 +934,7 @@ def test_coding_agent_defaults_dict_exists():
     """_CODING_AGENT_DEFAULTS maps each CLI agent to its preferred command."""
     defaults = disp._CODING_AGENT_DEFAULTS
     assert isinstance(defaults, dict), "_CODING_AGENT_DEFAULTS must be a dict"
-    assert defaults.get("claude-code") == "claude -p", f"claude-code default wrong: {defaults.get('claude-code')!r}"
+    assert defaults.get("claude-code") == "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p", f"claude-code default wrong: {defaults.get('claude-code')!r}"
     assert defaults.get("codex") == "codex exec --full-auto", f"codex default wrong: {defaults.get('codex')!r}"
     assert defaults.get("opencode") == "opencode run", f"opencode default wrong: {defaults.get('opencode')!r}"
 
@@ -1181,13 +1243,123 @@ def test_role_delegation_uses_role_specific_tmp_file():
     assert "/tmp/qa-task.txt" not in rev_body
 
 
+# ── _check_team_blockers loop-prevention (issue #87) ─────────────────────────
+
+
+def _make_blocked_card(tid, assignee, summary, title=None):
+    return {
+        "id": tid,
+        "assignee": assignee,
+        "summary": summary,
+        "last_summary": summary,
+        "title": title or f"#{tid[-4:]} {assignee} task",
+        "status": "blocked",
+    }
+
+
+def test_check_team_blockers_skips_review_required_awaiting_pr():
+    """review-required: awaiting-pr must NOT create a PM consultation (iterate handles it)."""
+    card = _make_blocked_card(
+        "t_dev1", "developer-daedalus",
+        "review-required: awaiting-pr — Claude Code spawned, PR pending",
+        title="#75 Developer: fix bug",
+    )
+    issue = {"number": 75, "title": "fix bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {75: issue}, "/w", "dev", "github",
+        )
+    check("review-required awaiting-pr skipped — no PM consultation", mk_create.call_count == 0)
+    check("triggered list is empty", triggered == [])
+
+
+def test_check_team_blockers_skips_review_required_pr_number():
+    """review-required: PR #N — ... must NOT create a PM consultation."""
+    card = _make_blocked_card(
+        "t_dev2", "developer-daedalus",
+        "review-required: PR #91 — fix/issue-75-requirements-txt-httpx",
+        title="#75 Developer: fix bug",
+    )
+    issue = {"number": 75, "title": "fix bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {75: issue}, "/w", "dev", "github",
+        )
+    check("review-required PR #N skipped — no PM consultation", mk_create.call_count == 0)
+    check("triggered list is empty", triggered == [])
+
+
+def test_check_team_blockers_creates_consult_for_genuine_blocker():
+    """A genuinely blocked card (non review-required) does create a PM consultation."""
+    card = _make_blocked_card(
+        "t_dev3", "developer-daedalus",
+        "cannot determine VCS provider credentials",
+        title="#76 Developer: fix auth bug",
+    )
+    issue = {"number": 76, "title": "fix auth bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task", return_value="t_consult") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {76: issue}, "/w", "dev", "github",
+        )
+    check("genuine blocker creates PM consultation", mk_create.call_count == 1)
+    check("issue number in triggered list", 76 in triggered)
+
+
+def test_check_team_blockers_skips_escalate():
+    """escalate: summary must still be skipped (existing guard)."""
+    card = _make_blocked_card(
+        "t_dev4", "developer-daedalus",
+        "ESCALATE: exceeded max fix attempts",
+        title="#77 Developer: fix retry bug",
+    )
+    issue = {"number": 77, "title": "fix retry bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {77: issue}, "/w", "dev", "github",
+        )
+    check("escalate: summary skipped — no PM consultation", mk_create.call_count == 0)
+
+
+def test_check_team_blockers_skips_when_active_consultation_exists():
+    """If a non-done PM consultation already exists, do not create another."""
+    card = _make_blocked_card(
+        "t_dev5", "developer-daedalus",
+        "cannot find module httpx",
+        title="#78 Developer: fix dep bug",
+    )
+    existing_consult = {
+        "id": "t_consult1",
+        "assignee": "project-manager-daedalus",
+        "title": "consult: #78 fix dep bug",
+        "status": "todo",
+    }
+    issue = {"number": 78, "title": "fix dep bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[existing_consult]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {78: issue}, "/w", "dev", "github",
+        )
+    check("active consultation prevents duplicate", mk_create.call_count == 0)
+    check("triggered list is empty when consult already open", triggered == [])
+
+
 if __name__ == "__main__":
     print("CI retry scheduling tests")
     print("-" * 60)
     for fn in (
         test_schedule_ci_retry_happy_path,
-        test_schedule_ci_retry_idempotent,
-        test_schedule_ci_retry_list_nonzero_rc,
+        test_schedule_ci_retry_idempotent_recent_lock,
+        test_schedule_ci_retry_cross_profile_dedup,
+        test_schedule_ci_retry_stale_lock_recreates,
         test_schedule_ci_retry_slug_sanitized,
         test_schedule_ci_retry_subprocess_failure,
         test_schedule_ci_retry_create_swallows_error,
@@ -1195,7 +1367,7 @@ if __name__ == "__main__":
         test_cancel_ci_retry_not_found_is_benign,
         test_cancel_ci_retry_slug_sanitized,
         test_cancel_ci_retry_subprocess_failure,
-        test_ci_retry_post_fire_recreation_then_cancel,
+        test_ci_retry_post_fire_recent_lock_skips_then_cancel,
     ):
         fn()
     print()
@@ -1218,16 +1390,16 @@ if __name__ == "__main__":
     print("PM assignee profile injection tests")
     print("-" * 60)
     for fn in (
-        test_pm_body_uses_resolved_profile_names,
-        test_pm_body_respects_custom_profiles,
-        test_pm_body_includes_issue_number_in_every_template_example,
+        test_pm_body_has_no_task_creation,
+        test_pm_body_has_spec_completion_signal,
+        test_pm_body_has_delegation_for_cloud_agents,
         test_remap_generic_developer_to_daedalus_profile,
         test_remap_generic_all_roles,
         test_remap_noop_for_explicit_profile_name,
         test_remap_unknown_role_ignored,
         test_remap_logs_all_changes,
-        test_pm_soul_mentions_assignee_flag_and_dashed_profiles,
-        test_pm_soul_mentions_title_prefix_rule,
+        test_pm_soul_has_no_task_creation,
+        test_pm_body_includes_issue_number,
     ):
         fn()
     print()
@@ -1252,9 +1424,8 @@ if __name__ == "__main__":
         test_resolve_coding_agent_missing_config,
         test_resolve_coding_agent_invalid_value,
         test_resolve_coding_agent_whitespace,
-        test_pm_body_injects_delegation_claude_code,
-        test_pm_body_no_delegation_when_none,
-        test_pm_body_no_delegation_when_hermes,
+        test_pm_body_delegation_for_cloud_agents,
+        test_pm_body_has_no_delegation_instructions,
         test_downstream_body_injects_delegation_codex,
         test_downstream_body_injects_delegation_opencode,
         test_downstream_body_no_delegation_when_none,
@@ -1262,6 +1433,18 @@ if __name__ == "__main__":
         test_resolve_coding_agent_skill_no_duplicate,
         test_resolve_coding_agent_no_skill_when_none,
         test_all_souls_wire_claude_code_skill_as_step0,
+        test_documentation_soul_has_proactive_doc_audit,
+    ):
+        fn()
+    print()
+    print("_check_team_blockers loop-prevention tests (issue #87)")
+    print("-" * 60)
+    for fn in (
+        test_check_team_blockers_skips_review_required_awaiting_pr,
+        test_check_team_blockers_skips_review_required_pr_number,
+        test_check_team_blockers_creates_consult_for_genuine_blocker,
+        test_check_team_blockers_skips_escalate,
+        test_check_team_blockers_skips_when_active_consultation_exists,
     ):
         fn()
     print("-" * 60)

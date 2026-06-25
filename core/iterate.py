@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core import kanban
-from core.providers.base import CIStatus
+from core.providers.base import CIStatus, issue_linked_to_pr
 
 logger = logging.getLogger("daedalus.iterate")
 
@@ -26,6 +26,7 @@ logger = logging.getLogger("daedalus.iterate")
 ADVANCE = "advance"            # dev card with green CI → complete, advance chain
 DEV_FIX_CI = "dev_fix_ci"     # dev card with red CI → create fix card
 PENDING_CI = "pending_ci"     # dev card with CI still pending → wait (cron handles retry)
+PENDING_PR = "pending_pr"     # dev card with awaiting-pr block → search VCS for PR, update when found
 PM_ROUTE = "pm_route"         # reviewer flagged changes → create PM routing card
 APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
 ESCALATE = "escalate"         # max iterations exceeded → log + notify
@@ -141,6 +142,10 @@ def classify_blocked(
                 return PENDING_CI
             else:
                 return DEV_FIX_CI
+        # Awaiting-PR block: Claude Code was spawned but hasn't opened a PR yet.
+        # The executor will search VCS for a matching PR and update the block reason.
+        if handoff["is_review_required"] and "awaiting-pr" in (handoff_text or "").lower():
+            return PENDING_PR
         # No PR or not review-required → PM route (was: silent drop returning "")
         return PM_ROUTE
 
@@ -179,6 +184,14 @@ def classify_blocked(
         if "changes requested" in summary:
             return PM_ROUTE
         return PENDING_CI
+
+    # ── validator-daedalus card ───────────────────────────────────────────
+    # Validators should only ever complete (CONFIRMED/BLOCKED/ALREADY_FIXED).
+    # If one is blocked with awaiting-pr the delegated CC agent used the
+    # developer protocol by mistake — escalate so a human can manually
+    # complete it with the correct verdict.
+    if assignee == "validator-daedalus":
+        return ESCALATE
 
     # ── unknown assignee ─────────────────────────────────────────────────
     return ""
@@ -538,6 +551,64 @@ def _execute_dev_fix_ci(
     return False
 
 
+def _execute_pending_pr(
+    slug: str,
+    card: dict,
+    repo: str,
+    handoff_text: str,
+    *,
+    provider=None,
+    dry_run: bool = False,
+    **_kwargs: Any,
+) -> bool:
+    """Search VCS for a PR linked to this card's issue number; update block reason when found.
+
+    Called when a developer card is blocked with 'review-required: awaiting-pr'.
+    Searches open PRs for one that references the issue number in its title,
+    body, or branch name. If found, updates the block reason so the next cron
+    tick can advance the pipeline normally. If not found, does nothing (stays
+    blocked until Claude Code opens the PR).
+    """
+    tid = card.get("id")
+    if provider is None:
+        logger.debug("iterate: pending_pr %s — no provider, skipping", tid)
+        return False
+
+    issue_n = _extract_issue_number_from_card(card)
+    if issue_n is None:
+        logger.debug("iterate: pending_pr %s — no issue number, skipping", tid)
+        return False
+
+    try:
+        open_prs = provider.list_prs(state="open", limit=50)
+    except Exception as exc:
+        logger.warning("iterate: pending_pr %s — list_prs failed: %s", tid, exc)
+        return False
+
+    found_pr = None
+    for pr in open_prs:
+        if issue_linked_to_pr(pr, issue_n):
+            found_pr = pr.number
+            break
+
+    if found_pr is None:
+        logger.debug("iterate: pending_pr %s — no PR found yet for issue #%s", tid, issue_n)
+        return False
+
+    new_handoff = f"review-required: PR #{found_pr} — awaiting CI"
+    if dry_run:
+        logger.info("[dry-run] pending_pr %s — would update block reason to '%s'", tid, new_handoff)
+        return True
+
+    # hermes kanban block refuses to re-block an already-blocked card ("cannot block").
+    # Unblock first so the new reason takes effect.
+    kanban.unblock_task(slug, tid, "pending-pr: PR found, updating block reason")
+    kanban.block_task(slug, tid, new_handoff)
+    logger.info("iterate: pending_pr %s — PR #%s found for issue #%s, updated block reason",
+                tid, found_pr, issue_n)
+    return True
+
+
 def _execute_pm_route(
     slug: str,
     card: dict,
@@ -564,6 +635,11 @@ def _execute_pm_route(
     - The configured profile is absent (CLI create fails)
     """
     tid = card.get("id")
+    # Guard: awaiting-pr means Claude Code was spawned but hasn't opened a PR yet.
+    # The PENDING_PR executor handles this — PM routing cannot unblock it (issue #87).
+    if "awaiting-pr" in (handoff_text or "").lower():
+        logger.info("iterate: %s blocked awaiting-pr — skipping PM route", tid)
+        return False
     pr = pr_number or _parse_pr_number(handoff_text)
     fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
     if fix_attempts > MAX_FIX_ATTEMPTS:
@@ -751,6 +827,7 @@ def _execute_escalate(
 _ACTION_EXECUTORS = {
     ADVANCE: _execute_advance,
     DEV_FIX_CI: _execute_dev_fix_ci,
+    PENDING_PR: _execute_pending_pr,
     PM_ROUTE: _execute_pm_route,
     APPROVE_ADVANCE: _execute_approve_advance,
     ESCALATE: _execute_escalate,
@@ -792,6 +869,7 @@ def run_iterate(
         ADVANCE: 0,
         DEV_FIX_CI: 0,
         PENDING_CI: 0,
+        PENDING_PR: 0,
         PM_ROUTE: 0,
         APPROVE_ADVANCE: 0,
         ESCALATE: 0,
@@ -907,6 +985,15 @@ def run_iterate(
             pending_ci_cards.append({"tid": tid, "pr": pr, "card": card})
             counts[PENDING_CI] += 1
             logger.info("iterate: %s CI still pending — deferred to retry cron", tid)
+            continue
+
+        # PENDING_PR: run the executor inline (it updates the block reason when
+        # a PR is found; if no PR yet it's a no-op). Count and continue.
+        if action == PENDING_PR:
+            _execute_pending_pr(slug, card, repo, handoff, provider=provider, dry_run=dry_run)
+            counts[PENDING_PR] += 1
+            logger.info("iterate: %s awaiting PR for issue #%s", tid,
+                        _extract_issue_number_from_card(card))
             continue
 
         if not action:

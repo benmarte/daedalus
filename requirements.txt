@@ -1,0 +1,15 @@
+# Daedalus plugin runtime dependencies.
+#
+# In a real Hermes install these are already provided by Hermes core
+# (httpx + fastapi ship with the platform; pyyaml is ubiquitous). This file
+# exists so a *fresh, isolated* environment — CI, a contributor's venv, or a
+# minimal Hermes host — can resolve every import the plugin makes without
+# guessing. Regression guard for issue #75 (deps were undocumented).
+#
+# Keep this list to ACTUAL third-party imports under core/, scripts/,
+# config/, dashboard/ and __init__.py. Test-only tooling (pytest, ruff) is
+# intentionally NOT here — see requirements-dev.txt / pyproject if added later.
+
+pyyaml>=6.0      # config + daedalus.yaml parsing (core, config, scripts)
+httpx>=0.24      # VCS provider HTTP calls (core/providers)
+fastapi>=0.100   # dashboard plugin_api router (dashboard/plugin_api.py)

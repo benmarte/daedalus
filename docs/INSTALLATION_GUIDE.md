@@ -20,11 +20,12 @@ This guide walks you through every step: installing the plugin, provisioning the
 10. [Autonomous Pipeline Advancement](#10-autonomous-pipeline-advancement)
 11. [Add Your VCS Token](#11-add-your-vcs-token)
 12. [Triggering Work](#12-triggering-work)
-13. [Update the Plugin](#13-update-the-plugin)
-14. [Remove a Project](#14-remove-a-project)
-15. [Uninstall Daedalus](#15-uninstall-daedalus)
-16. [Troubleshooting](#16-troubleshooting)
-17. [What's Next](#17-whats-next)
+13. [Your First Issue — End to End](#13-your-first-issue--end-to-end)
+14. [Update the Plugin](#14-update-the-plugin)
+15. [Remove a Project](#15-remove-a-project)
+16. [Uninstall Daedalus](#16-uninstall-daedalus)
+17. [Troubleshooting](#17-troubleshooting)
+18. [What's Next](#18-whats-next)
 
 ---
 
@@ -196,9 +197,9 @@ Every Daedalus project gets its own **kanban board** inside Hermes. Cards move t
    role posts a summary comment on the GitHub issue.
 6. When you **merge the PR**, the card moves to **Done** and the original issue is closed.
 
-View the board at any time from the Hermes **Kanban** page:
+View the board at any time from the Hermes **Kanban** page. Here is a live board mid-pipeline — the developer card sits in **Blocked** (awaiting its PR/CI), the downstream QA, Reviewer, Security, and Docs cards wait in **Todo**, and the validator and PM cards have already moved to **Done**:
 
-![Hermes Kanban board for the Daedalus project — empty columns ready for work](screenshots/guide/10-kanban-board.png)
+![Hermes Kanban board for a Daedalus project showing a live pipeline — cards spread across Todo, In Progress, Blocked, and Done columns](screenshots/guide/10-kanban-board.png)
 
 > **Why does Daedalus maintain its own kanban board?** Because tracking must be deterministic. The dispatcher (plain Python, not an agent) updates the board on every tick, so the board always reflects reality — you always know exactly where each issue is in the pipeline.
 
@@ -307,6 +308,8 @@ execution:
   coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
 ```
 
+![.hermes/daedalus.yaml showing the execution block with coding_agent: claude-code and a per-role override (developer delegates to Claude Code, validator stays on the local Hermes LLM)](screenshots/guide/14-coding-agent-config.png)
+
 | Value | Behavior |
 |---|---|
 | `hermes` | **(default)** No delegation — the role works with the local Hermes LLM. Also the fallback when `coding_agent` is unset, empty, or invalid. |
@@ -320,11 +323,33 @@ execution:
   --full-auto`, `opencode run`). Optional: `coding_agent_model` (passed to `--model`) and
   `coding_agent_max_turns` (default `10`).
 
+> **Where does this value live?** Whether you type it into the project's config modal
+> (**Execution** settings) in the dashboard or edit the file by hand, the value is written to
+> `<your-repo>/.hermes/daedalus.yaml`. That file is **local and gitignored**, so the setting
+> persists across gateway restarts and reboots without ever being committed to your repo. The
+> dashboard UI and the YAML file are two views of the same config — edits in one are reflected
+> in the other after the next save/reload.
+
+> **Using a custom `CLAUDE_CONFIG_DIR`?** If your Claude Code config lives somewhere other than
+> `~/.claude` (for example `$HOME/.claude-rizq`), put the override **inside the
+> `coding_agent_cmd` field**, not in the terminal environment that started the gateway:
+>
+> ```yaml
+> execution:
+>   coding_agent: claude-code
+>   coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude-rizq claude --dangerously-skip-permissions -p"
+> ```
+>
+> The dispatcher spawns the coding agent as a fresh subprocess, so an export in your login shell
+> won't reach it — but a prefix on `coding_agent_cmd` always will. This is the reliable way to
+> point a delegated role at a non-default Claude config directory.
+
 **How it works:** when `coding_agent` resolves to a CLI agent, the dispatcher injects a
 `⚠️ AGENT DELEGATION` block into the role's task body and auto-attaches the matching
 `autonomous-ai-agents/<agent>` skill. The role's local Hermes LLM loads that skill, writes
-the task to a temp file, pipes it to the coding agent via `terminal(background=True)`, and
-relays the agent's output back as its completion signal so the pipeline advances.
+the task to a temp file, pipes it to the coding agent via `nohup bash -c '...' &` (fully
+daemonized so it survives the Hermes session exit), and relays the agent's output back as
+its completion signal so the pipeline advances.
 
 **Per-role override:** `execution.profiles.<role>.agent` takes precedence over the global
 `coding_agent`, so you can mix delegated and local roles:
@@ -486,7 +511,15 @@ hermes gateway restart
 | Metadata | Read | Required baseline |
 | Projects *(org permission)* | Read and write | Projects v2 board sync |
 
-> Use a **classic PAT** with `repo` + `project` scopes if your org hasn't enabled fine-grained PATs.
+**GitHub — Classic PAT** (Settings → Developer settings → Tokens (classic) → Generate new token) if your org hasn't enabled fine-grained PATs. Check these scope boxes:
+
+| Scope | Why Daedalus needs it |
+|---|---|
+| **`repo`** (full control of private repositories) | Poll issues, push branches, open PRs, read commit/CI status, close issues on merge |
+| **`workflow`** | Required only if a PR touches files under `.github/workflows/` — GitHub rejects pushes that modify workflow files unless the token carries this scope |
+| **`project`** (read & write) | Sync card status to/from your Projects v2 board (move cards to **Blocked**/**Done**) |
+
+> **`project` vs `read:project`:** `read:project` only lets Daedalus *read* the board. Board-status sync **writes** to the board (moving cards as the pipeline advances), so you need the full **`project`** scope. Use `read:project` alone only if you don't link a Projects v2 board and trigger work some other way (e.g. the `Ready` column read-only, spec drops, or manual triage cards).
 
 **GitLab — Personal Access Token** (Preferences → Access tokens):
 - `api` — issues, boards/labels, MRs, notes, pipelines
@@ -531,7 +564,65 @@ hermes kanban create --triage --workspace dir:$PWD --body "$(cat spec.md)"
 
 ---
 
-## 13. Update the Plugin
+## 13. Your First Issue — End to End
+
+This is the whole point of Daedalus: you mark an issue **Ready**, walk away, and come back to a reviewed, mergeable PR. Here is exactly what happens, step by step, the first time you run it.
+
+### Step 1 — Create a GitHub issue
+
+Open a normal issue on your repo describing the work. Write it the way you'd write a ticket for a teammate: a clear problem statement and, ideally, acceptance criteria. The validator reads this to decide whether the issue is real, and the planner uses it to build the implementation plan — so the more concrete the issue, the better the result.
+
+> No special title or label format is required. A plain, well-scoped issue is enough.
+
+### Step 2 — Mark it Ready
+
+Tell Daedalus the issue is ready to work:
+
+- **GitHub:** drag the issue card into the **`Ready`** column of your Projects v2 board.
+- **GitLab:** apply the `Ready` label.
+- **Azure DevOps:** set the work item state to `Ready`.
+
+Nothing else to do — the next cron tick (or the next time the dispatcher runs) picks it up automatically. To start immediately instead of waiting for the schedule, run `bash ~/.hermes/scripts/daedalus-cron.sh`.
+
+### Step 3 — Tasks appear on the kanban board (triage → decompose)
+
+On the next tick, Daedalus creates **one validator task** for the issue — and nothing else yet. The validator confirms the issue is real, reproducible, not already fixed, and free of security red flags, then completes with `CONFIRMED: <note>`.
+
+The tick **after** CONFIRMED, the project-manager decomposes the work into the full pipeline: a developer card, then QA, then reviewer + security-analyst (+ accessibility for UI work), then documentation. This is the two-phase design — downstream cards literally do not exist until the validator approves, so the pipeline can never run on an issue that isn't real work.
+
+### Step 4 — Watch the developer task run
+
+The developer card moves into work: it writes the code, runs your project's tests and lint/format tools, and opens a PR. While it's working (and after it opens the PR, while CI runs), the board shows the developer card in **Blocked** and the downstream QA/Reviewer/Security/Docs cards waiting in **Todo**:
+
+![Kanban board during an active run — developer card in Blocked awaiting its PR/CI, QA/Reviewer/Security/Docs queued in Todo, PM card in progress](screenshots/guide/17-pipeline-in-progress.png)
+
+You don't need to do anything here. Each agent fires the dispatcher the moment it reaches a terminal state, so phases advance within seconds rather than waiting for the next cron tick (see [Autonomous Pipeline Advancement](#10-autonomous-pipeline-advancement)).
+
+### Step 5 — PR opens → QA, Reviewer, Security, and Docs become ready
+
+Once the developer's PR is open and CI turns green, the dispatcher releases the next phase:
+
+1. **QA** runs the full test suite and reports `qa-passed` or `qa-failed`.
+2. On `qa-passed`, **reviewer** and **security-analyst** start in parallel (plus **accessibility** for UI/frontend issues).
+3. When those clear, **documentation** writes the completion report and posts it to the PR and your notification channels.
+
+Each role posts a summary comment on the GitHub issue as it finishes, so the issue thread becomes a running log of the pipeline.
+
+### Step 6 — Merge the PR (the human gate)
+
+**This is the one step Daedalus deliberately leaves to you.** Review the PR and the agents' findings, and when you're satisfied, **merge it**. Daedalus never merges on its own — a human always makes the final call to ship.
+
+### Step 7 — The issue closes automatically
+
+After the merge, the next dispatcher run detects it, **closes the original issue**, and moves every card for that issue to **Done**:
+
+![Kanban board after a completed cycle — developer, reviewer, security-analyst, and documentation cards all in the Done column for the finished issue](screenshots/guide/18-pipeline-complete.png)
+
+That's the full loop: **Ready → validate → plan → build → QA → review + security (+ a11y) → document → you merge → closed**. From here, every issue you mark Ready runs the same way.
+
+---
+
+## 14. Update the Plugin
 
 When a new version is available, the dashboard footer shows an **Update Plugin** button:
 
@@ -549,7 +640,7 @@ Then reload the browser tab.
 
 ---
 
-## 14. Remove a Project
+## 15. Remove a Project
 
 To stop Daedalus from managing a project without uninstalling the plugin:
 
@@ -563,7 +654,7 @@ The project's `.hermes/daedalus.yaml` config file is intentionally **left on dis
 
 ---
 
-## 15. Uninstall Daedalus
+## 16. Uninstall Daedalus
 
 **Option A — Dashboard button (recommended):**
 
@@ -595,7 +686,47 @@ bash ~/.hermes/plugins/daedalus/scripts/uninstall.sh -y
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
+
+### Start here: logs and `hermes doctor`
+
+Two diagnostics resolve most issues before you touch anything else.
+
+**1. The gateway logs panel.** Open the **Logs** tab in the Hermes dashboard (or run `hermes logs` in a terminal). Filter by `AGENT`, `GATEWAY`, or log level to see exactly what the dispatcher and each agent did on the last tick — failed API calls, profile-fallback warnings, and pipeline-advance decisions all surface here:
+
+![Hermes gateway logs panel — agent and gateway log stream with level and source filters](screenshots/guide/19-hermes-logs.png)
+
+**2. `hermes doctor`.** Run it in a terminal to verify your environment — Python deps, SSL certs, profile config, and auth providers. A healthy install shows green checks; anything that needs attention is flagged with `⚠` and a suggested fix:
+
+```text
+$ hermes doctor
+┌─────────────────────────────────────────────────────────┐
+│                 🩺 Hermes Doctor                        │
+└─────────────────────────────────────────────────────────┘
+
+◆ Python Environment
+  ✓ Python 3.11.15
+  ✓ Virtual environment active
+  ✓ Version files consistent (0.17.0)
+
+◆ Required Packages
+  ✓ OpenAI SDK
+  ✓ PyYAML
+  ✓ HTTPX
+  ✓ Croniter (cron expressions) (optional)
+
+◆ Configuration Files
+  ✓ ~/.hermes/profiles/developer-daedalus/.env file exists
+  ✓ API key or custom endpoint configured
+  ✓ ~/.hermes/profiles/developer-daedalus/config.yaml exists
+  ✓ Config version up to date (v30)
+
+◆ Directory Structure
+  ✓ ~/.hermes/profiles/developer-daedalus directory exists
+  ✓ ~/.hermes/profiles/developer-daedalus/cron/ exists
+```
+
+> **Daedalus tab shows "Couldn't load this plugin's script"?** The gateway is serving a stale dashboard-bundle reference (a `404` on `/dashboard-plugins/daedalus/dist/index-*.js`). Run `hermes gateway restart` and reload the tab — the gateway re-resolves the current bundle on startup.
 
 ### "Plugin not active — restart the Hermes gateway" in the dashboard
 
@@ -669,7 +800,7 @@ git config --global credential.helper ""
 
 ---
 
-## 17. What's Next
+## 18. What's Next
 
 - **Multi-user team setup:** See [SETUP.md](../SETUP.md) for sharing configuration across teammates without sharing tokens, and for how each person provisions their own roster from the same repo.
 
@@ -679,7 +810,8 @@ git config --global credential.helper ""
 
 - **Multiple repos:** Add as many projects as you like — each gets its own kanban board, cron job, and notification config. One Daedalus plugin drives all of them.
 
-- **Re-run screenshots:** The screenshot script lives at `scripts/take_screenshots.py`. Run it any time from a fresh state to regenerate the guide images:
+- **Re-run screenshots:** The install-flow screenshots (`00`–`14`) are regenerated by the screenshot script, which runs from a clean state:
   ```bash
   python3 scripts/take_screenshots.py
   ```
+  The live-pipeline images (`10-kanban-board`, `17-pipeline-in-progress`, `18-pipeline-complete`) and the `19-hermes-logs` panel are captured against a board that has actually run an issue end to end, so re-shoot those from a real project once you have a pipeline in flight.

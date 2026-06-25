@@ -14,7 +14,7 @@ Usage:
 Screenshots produced (docs/screenshots/guide/):
   00-plugins-page.png          Plugins page — Daedalus installed
   01-install-agents-banner.png Empty dashboard — Install Agents banner
-  02-profiles-page.png         Profiles page — 6 agent profiles
+  02-profiles-page.png         Profiles page — 9 agent profiles
   03-empty-dashboard.png       Empty dashboard — agents ready, no projects
   04-add-project-step1-empty   Add Project Step 1 — empty form
   05-add-project-step1-filled  Step 1 — auto-detected fields
@@ -50,6 +50,9 @@ PROFILES = [
     "documentation-daedalus",
     "planner-daedalus",
     "project-manager-daedalus",
+    "validator-daedalus",
+    "qa-daedalus",
+    "accessibility-daedalus",
 ]
 
 
@@ -185,7 +188,8 @@ async def restore_state(created_project_name, board_slug, original_board):
         PROJECTS_FILE.write_text("")
 
     print("  Re-provisioning agent profiles...")
-    r = run(["python3", str(POSTINSTALL)])
+    import sys
+    r = run([sys.executable, str(POSTINSTALL)])
     print(f"  Profiles {'provisioned ✓' if r.returncode == 0 else 'FAILED: ' + r.stderr[:120]}")
     print("  Done\n")
 
@@ -212,6 +216,18 @@ async def main():
             )
             page = await ctx.new_page()
 
+            # Trigger dashboard plugin rescan so Hermes picks up the latest
+            # manifest (it caches the entry hash in-memory at startup).
+            await go(page, "/daedalus")
+            token = await page.evaluate("window.__HERMES_SESSION_TOKEN__ || ''")
+            if token:
+                await page.evaluate(f"""
+                    fetch('/api/dashboard/plugins/rescan', {{
+                        headers: {{'Authorization': 'Bearer {token}'}}
+                    }}).then(r => r.json())
+                """)
+                await pause(page, 600)
+
             # ── 00: Plugins page ──────────────────────────────────────────────
             print("00 — Plugins page")
             await go(page, "/plugins")
@@ -223,16 +239,15 @@ async def main():
             await ss(page, "01-install-agents-banner.png",
                      "Clean dashboard: Install Agents banner, no projects")
 
-            # ── 02: Provision roster via API → Profiles page ──────────────────
+            # ── 02: Provision roster via postinstall → Profiles page ──────────
             print("02 — Provision roster → Profiles page")
-            result = await api_call(page, "POST",
-                                    "/api/plugins/daedalus/meta/provision-roster")
-            ok = (result or {}).get("ok")
-            print(f"     provision-roster: {'ok' if ok else result}")
+            r = run(["python3", str(POSTINSTALL)])
+            ok = r.returncode == 0
+            print(f"     provision-roster: {'ok' if ok else 'FAILED: ' + r.stderr[:120]}")
             await pause(page, 1000)
             await go(page, "/profiles")
             await ss(page, "02-profiles-page.png",
-                     "Profiles page — 6 Daedalus agent profiles installed")
+                     "Profiles page — 9 Daedalus agent profiles installed")
 
             # ── 03: Empty dashboard (agents ready) ────────────────────────────
             print("03 — Empty dashboard (agents ready)")

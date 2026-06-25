@@ -1379,11 +1379,14 @@ function ConfigModal(props) {
             value: getIn(config, ["execution", "coding_agent"], "hermes"),
             onChange: function (e) {
               var prevAgent = getIn(config, ["execution", "coding_agent"], "hermes");
-              updateField("execution.coding_agent", e.target.value);
-              // Clear the previous agent's CLI command so the new agent picks
-              // up its own default instead of inheriting a stale command.
-              if (codingAgent.shouldResetCmdOnAgentChange(prevAgent, e.target.value)) {
-                updateField("execution.coding_agent_cmd", "");
+              var nextAgent = e.target.value;
+              updateField("execution.coding_agent", nextAgent);
+              // Auto-fill the CLI command with the new agent's default so the
+              // user doesn't have to look it up (Hermes/no-default clears it).
+              // null means the agent didn't change — leave a typed command alone.
+              var nextCmd = codingAgent.cmdForAgentChange(prevAgent, nextAgent);
+              if (nextCmd !== null) {
+                updateField("execution.coding_agent_cmd", nextCmd);
               }
             }
           },
@@ -1955,26 +1958,29 @@ function App() {
     rosterStatus && !rosterStatus.all_provisioned ? React.createElement("div", {
       style: {
         border: "1px solid #444", borderRadius: "8px", padding: "12px 16px",
-        marginBottom: "16px", display: "flex", gap: "12px", alignItems: "flex-start",
+        marginBottom: "16px", display: "flex", gap: "12px", alignItems: "center",
         background: "rgba(255,255,255,0.02)",
       },
     },
-      React.createElement("div", { style: { flex: "1 1 auto" } },
+      React.createElement("div", { style: { flex: "1 1 auto", minWidth: 0 } },
         React.createElement("div", { style: { fontSize: "13px", fontWeight: 600, color: "#ccc", marginBottom: "2px" } },
           "Worker Agents not provisioned"
         ),
         React.createElement("div", { style: { fontSize: "12px", color: "#888" } },
-          "Install the 9 specialist profiles (validator, project-manager, planner, developer, qa, reviewer, security-analyst, accessibility, documentation) to enable automated workflow dispatch."
+          "Run postinstall.py to install the 9 specialist agent profiles and enable automated dispatch."
         ),
         rosterResult ? React.createElement("div", {
           style: { fontSize: "11px", marginTop: "4px", color: rosterResult.ok ? "#4ade80" : "#f87171" },
         }, rosterResult.ok ? "Provisioned successfully." : "Error: " + (rosterResult.error || "failed")) : null
       ),
-      React.createElement(Button, {
-        label: provisioningRoster ? "Installing…" : "Install Agents",
-        disabled: !!provisioningRoster,
-        onClick: provisionRoster,
-      })
+      React.createElement("div", { style: { flexShrink: 0 } },
+        React.createElement(Button, {
+          label: provisioningRoster ? "Installing…" : "Install Agents",
+          variant: "small",
+          disabled: !!provisioningRoster,
+          onClick: provisionRoster,
+        })
+      )
     ) : null,
 
     projects.length === 0 ? React.createElement("div", { style: { textAlign: "center", padding: "40px", color: "#666" } },
