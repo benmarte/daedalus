@@ -1371,10 +1371,12 @@ def _has_pm_tasks(slug: str, issue_number: int,
 
 def _has_active_pm_consultation(slug: str, issue_number: int,
                                 pm_profile: str = "project-manager-daedalus") -> bool:
-    """Return True if there is a non-done PM consultation task for issue_number.
+    """Return True if there is already a PM consultation task for issue_number.
 
-    Used to prevent creating duplicate consultation tasks when a team blocker
-    is still awaiting PM response.
+    Counts any non-archived consultation (including done) to prevent the
+    runaway loop where a completed consultation triggers a new one every tick.
+    The idempotency key on create_task is the primary guard; this check is a
+    fast in-memory pre-flight that avoids the subprocess call entirely.
     """
     pattern = f"#{issue_number}"
     for t in kanban.list_tasks(slug):
@@ -1385,9 +1387,10 @@ def _has_active_pm_consultation(slug: str, issue_number: int,
             continue
         if not title.lower().startswith("consult:"):
             continue
-        status = (t.get("status") or "").lower()
-        if status != "done":
-            return True
+        # Any status (including done) blocks a new consultation.
+        # Archived consultations are not returned by list_tasks, so they are
+        # excluded automatically — archiving a consultation re-opens the door.
+        return True
     return False
 
 
@@ -2300,6 +2303,11 @@ def _check_team_blockers(
             logger.debug("dispatch: team blocked #%s but issue not in current scope", n)
             continue
         blocker_raw = summary or "no details provided"
+        # Idempotency key: one PM consultation per (issue, blocked-card) pair.
+        # hermes kanban create returns the existing task id when the key already
+        # exists in any non-archived state, so this prevents the runaway loop
+        # where each tick re-creates a consultation once the previous one is done.
+        consult_key = f"consult-{n}-{card['id']}"
         if dry_run:
             logger.info("[dry-run] team blocked #%s — would create PM consultation task", n)
             triggered.append(n)
@@ -2310,6 +2318,7 @@ def _check_team_blockers(
             assignee=p["pm"],
             workspace=f"dir:{workdir}" if workdir else "",
             skills=rs.get("pm") or None,
+            idempotency_key=consult_key,
         )
         if cid:
             logger.info("dispatch: team blocked #%s — PM consultation task %s created", n, cid)

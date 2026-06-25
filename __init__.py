@@ -207,8 +207,32 @@ def _ensure_cron_wrapper() -> None:
         logger.debug("daedalus: cron wrapper install failed", exc_info=True)
 
 
+def _schedule_to_crontab(schedule: str) -> str:
+    """Convert interval schedules to crontab syntax so recreated crons run forever (Repeat: ∞).
+
+    Hermes treats interval syntax like '60m' or 'every 2h' as one-shot jobs.
+    Crontab syntax ('0 * * * *') is inherently infinite. If the schedule is
+    already in crontab format it is returned unchanged.
+    """
+    s = re.sub(r"^every\s+", "", schedule.strip().lower())
+    if re.match(r"^[\d*/,\-]+(\s+[\d*/,\-]+){4}$", s):
+        return schedule.strip()
+    m = re.match(r"^(\d+)m$", s)
+    if m:
+        minutes = int(m.group(1))
+        if minutes >= 60 and minutes % 60 == 0:
+            hours = minutes // 60
+            return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
+        return f"*/{minutes} * * * *"
+    m = re.match(r"^(\d+)h$", s)
+    if m:
+        hours = int(m.group(1))
+        return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
+    return schedule.strip()
+
+
 def _ensure_dispatch_crons() -> None:
-    """Recreate any missing ``<name>-daedalus`` dispatch crons on every load.
+    """Recreate any missing or dead ``<name>-daedalus`` dispatch crons on every load.
 
     The main dispatch cron lives in the global Hermes cron store
     (``~/.hermes/cron/jobs.json``). ``hermes update`` snapshots then migrates
@@ -226,18 +250,20 @@ def _ensure_dispatch_crons() -> None:
     - schedule resolves the repo's ``cron.schedule``; when that key is absent we
       fall back to the packaged template default, mirroring ConfigLoader's
       deep-merge. An *explicit empty* schedule means "dispatch disabled" and is
-      never resurrected.
+      never resurrected. Interval schedules like "60m" are converted to crontab
+      syntax so the recreated job repeats forever (Repeat: ∞).
     - ``--deliver`` is passed only when the repo sets a non-empty ``deliver`` and
       has no ``notifications`` (which self-deliver), matching ``_reconcile_cron``.
+    - Jobs in ``[completed]`` state (timed-out or one-shot) are treated as dead:
+      the old job is deleted and a fresh one is created with crontab syntax.
 
     A cross-process file lock (fcntl.flock) serialises simultaneous plugin loads
     so that only one process runs the check+create per cron name at a time —
     preventing the TOCTOU race that caused duplicate crons when multiple Hermes
     worker processes started up concurrently (issue #95).
 
-    Idempotent — a job that already exists is left untouched. Best-effort: every
-    failure is logged at DEBUG/WARNING and never raised, so a broken ``hermes``
-    binary or malformed config can't break plugin registration.
+    Best-effort: every failure is logged at DEBUG/WARNING and never raised, so a
+    broken ``hermes`` binary or malformed config can't break plugin registration.
     """
     try:
         import fcntl
@@ -289,11 +315,23 @@ def _ensure_dispatch_crons() -> None:
             if res.returncode != 0:
                 logger.debug("daedalus: cron list returned %s during self-heal", res.returncode)
                 return
-            existing_names = {
-                m.group(1).strip()
-                for line in res.stdout.splitlines()
-                if (m := re.match(r"^\s*Name:\s+(.+)$", line))
-            }
+            # Parse name AND status so we can detect dead [completed] crons.
+            # Only active (non-completed) crons block recreation.
+            cron_info: dict[str, tuple[str, str]] = {}  # name -> (cron_id, status)
+            _cur_id: str | None = None
+            _cur_status: str | None = None
+            for line in res.stdout.splitlines():
+                id_m = re.match(r"^\s+([0-9a-f]{8,})\s+\[(\w+)\]", line)
+                if id_m:
+                    _cur_id, _cur_status = id_m.group(1), id_m.group(2)
+                    continue
+                name_m = re.match(r"^\s*Name:\s+(.+)$", line)
+                if name_m and _cur_id:
+                    cron_info[name_m.group(1).strip()] = (_cur_id, _cur_status or "")
+            # Active crons: name is present and status is not "completed"
+            existing_names = {n for n, (_, s) in cron_info.items() if s != "completed"}
+            # Dead crons: [completed] — must delete before recreating
+            dead_crons = {n: cid for n, (cid, s) in cron_info.items() if s == "completed"}
 
             for raw in registry_file.read_text().splitlines():
                 repo_path = raw.strip()
@@ -323,8 +361,24 @@ def _ensure_dispatch_crons() -> None:
                 if cron_name in existing_names:
                     continue
 
+                # Delete the dead completed job so hermes lets us recreate the name.
+                if cron_name in dead_crons:
+                    try:
+                        subprocess.run(
+                            ["hermes", "cron", "delete", dead_crons[cron_name]],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        logger.info(
+                            "daedalus: deleted dead dispatch cron: %s (%s)",
+                            cron_name, dead_crons[cron_name],
+                        )
+                    except Exception as exc:
+                        logger.debug("daedalus: could not delete dead cron %s: %s", cron_name, exc)
+
+                # Convert interval syntax to crontab so the job repeats forever.
+                crontab_schedule = _schedule_to_crontab(schedule)
                 cmd = [
-                    "hermes", "cron", "create", schedule,
+                    "hermes", "cron", "create", crontab_schedule,
                     "--name", cron_name,
                     "--script", "daedalus-cron.sh",
                     "--no-agent",
