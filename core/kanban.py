@@ -311,7 +311,7 @@ def block_task(slug: str, task_id: str, reason: str = "") -> bool:
     """Block a task. Returns True on success."""
     args = ["--board", slug, "block", task_id]
     if reason:
-        args += ["--reason", reason]
+        args += [reason]  # hermes kanban block uses positional reason, not --reason
     rc, out, err = _hk(args)
     if rc != 0:
         logger.warning("kanban: block %s failed: %s", task_id, (err or out or "").strip())
