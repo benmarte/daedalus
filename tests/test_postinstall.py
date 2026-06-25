@@ -214,6 +214,63 @@ class TestRunProvision:
         assert profiles == ["project-manager-daedalus", "developer-daedalus"]
 
 
+# ── requirements install tests (issue #75) ───────────────────────────────────
+
+
+class TestInstallRequirements:
+    """_install_requirements pip-installs httpx from requirements.txt."""
+
+    def test_install_success(self, postinstall):
+        """pip returns 0 → success message naming requirements.txt."""
+        ok_result = mock.Mock(returncode=0, stdout="installed", stderr="")
+        with mock.patch.object(postinstall.subprocess, "run", return_value=ok_result) as run:
+            ok, msg = postinstall._install_requirements()
+        assert ok is True
+        assert "OK:" in msg
+        # Invoked pip with -r requirements.txt against the current interpreter.
+        argv = run.call_args[0][0]
+        assert argv[:4] == [postinstall.sys.executable, "-m", "pip", "install"]
+        assert argv[-2] == "-r"
+        assert argv[-1].endswith("requirements.txt")
+
+    def test_install_failure_reports_detail(self, postinstall):
+        """pip returns non-zero → FAIL with manual-fix guidance."""
+        bad = mock.Mock(returncode=1, stdout="", stderr="No matching distribution")
+        with mock.patch.object(postinstall.subprocess, "run", return_value=bad):
+            ok, msg = postinstall._install_requirements()
+        assert ok is False
+        assert "FAIL" in msg
+        assert "No matching distribution" in msg
+        assert "Manual fix" in msg
+
+    def test_install_timeout(self, postinstall):
+        """A pip timeout is reported, never raised."""
+        with mock.patch.object(postinstall.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("pip", 120)):
+            ok, msg = postinstall._install_requirements()
+        assert ok is False
+        assert "timed out" in msg
+
+    def test_install_missing_requirements_is_noop(self, postinstall, tmp_path):
+        """No requirements.txt → benign success, pip never called."""
+        # Load a copy of postinstall whose repo root (parent of scripts/) has no
+        # requirements.txt, so _install_requirements hits the missing-file branch.
+        fake_scripts = tmp_path / "scripts"
+        fake_scripts.mkdir()
+        fake_postinstall = fake_scripts / "postinstall.py"
+        fake_postinstall.write_text((_repo_root / "scripts" / "postinstall.py").read_text())
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("postinstall_noreq", str(fake_postinstall))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with mock.patch.object(mod.subprocess, "run") as run:
+            ok, msg = mod._install_requirements()
+        assert ok is True
+        assert "nothing to install" in msg
+        run.assert_not_called()
+
+
 # ── main() integration tests ─────────────────────────────────────────────────
 
 class TestMain:
@@ -254,8 +311,9 @@ class TestMain:
         # Easier approach: mock _run_provision and _check_* directly
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
             with mock.patch.object(postinstall, "_check_vcs_tokens", return_value=(True, "OK")):
-                with mock.patch.object(postinstall, "_run_provision", return_value=(True, "=== dev ===\ndone\n")):
-                    rc = postinstall.main()
+                with mock.patch.object(postinstall, "_install_requirements", return_value=(True, "OK")):
+                    with mock.patch.object(postinstall, "_run_provision", return_value=(True, "=== dev ===\ndone\n")):
+                        rc = postinstall.main()
         assert rc == 0
 
     def test_one_prereq_fails(self, postinstall, tmp_path):
@@ -276,8 +334,9 @@ class TestMain:
 
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
             with mock.patch.object(postinstall, "_check_vcs_tokens", return_value=(True, "OK")):
-                with mock.patch.object(postinstall, "_run_provision") as mock_prov:
-                    rc = postinstall.main(check_only=True)
+                with mock.patch.object(postinstall, "_install_requirements", return_value=(True, "OK")):
+                    with mock.patch.object(postinstall, "_run_provision") as mock_prov:
+                        rc = postinstall.main(check_only=True)
         assert rc == 0
         mock_prov.assert_not_called()
 
@@ -290,9 +349,10 @@ class TestMain:
 
         with mock.patch.object(postinstall, "_HERMES_HOME", home):
             with mock.patch.object(postinstall, "_check_vcs_tokens", return_value=(True, "OK")):
-                with mock.patch.object(postinstall, "_run_provision",
-                                       return_value=(False, "Provision failed")):
-                    rc = postinstall.main()
+                with mock.patch.object(postinstall, "_install_requirements", return_value=(True, "OK")):
+                    with mock.patch.object(postinstall, "_run_provision",
+                                           return_value=(False, "Provision failed")):
+                        rc = postinstall.main()
         assert rc == 2
 
     def test_import_safe(self, postinstall):
