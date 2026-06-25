@@ -154,7 +154,7 @@ with open(os.path.join(specs_dir, f"issue-{issue_number}.md"), "w") as f:
 
 This gives users an offline copy. The GitHub comment is the authoritative source; this file is a local mirror.
 
-### 5. Complete your kanban task
+### 4. Complete your kanban task
 Complete with summary starting **EXACTLY**:
 ```
 spec: <one-line summary of what to implement>
@@ -162,7 +162,7 @@ spec: <one-line summary of what to implement>
 
 The dispatcher detects the `spec:` prefix to trigger team creation. Any other prefix and the pipeline stalls.
 
-### 6. Run the dispatcher
+### 5. Run the dispatcher
 ```
 bash ~/.hermes/scripts/daedalus-cron.sh
 ```
