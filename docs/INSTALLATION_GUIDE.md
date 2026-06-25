@@ -543,6 +543,8 @@ Click it to update in place. After the update, restart the gateway so the new co
 hermes gateway restart
 ```
 
+> **What happens during update:** `hermes update` wipes the global Hermes cron store, which removes the daedalus dispatch cron. Daedalus auto-recovers on the next plugin load — `_ensure_dispatch_crons()` in `__init__.py` reads every registered project from `~/.hermes/daedalus/projects` and recreates any missing `<name>-daedalus` cron. The cron wrapper script (`~/.hermes/scripts/daedalus-cron.sh`) is also re-installed. No manual recovery needed.
+
 Then reload the browser tab.
 
 > **Important:** Hermes loads each plugin's backend code once at startup. Skipping the restart means the dashboard will keep running the old version's API code even though the files on disk are updated.

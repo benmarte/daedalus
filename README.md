@@ -620,6 +620,43 @@ re-dispatched by the next polling tick (the card already exists on the board).
 
 ## Self-healing loop
 
+### Plugin-load self-healing (runs on every `register()`)
+
+Four recovery mechanisms in `__init__.py` fire on every plugin load (gateway
+restart, `hermes update`, or any Hermes startup that loads the plugin). They
+are **idempotent** — safe to re-run, no-op when nothing is missing.
+
+1. **Model config auto-sync** (`_on_kanban_task_claimed`) — when a kanban task
+   is claimed by a `*-daedalus` profile, the global Hermes model config
+   (`model`, `providers`, `fallback_providers`, `custom_providers`) is copied
+   into the profile's `config.yaml`. After a model switch in Hermes, every
+   daedalus agent picks up the new model on its next task — no manual
+   re-provisioning needed. Opt out per profile by setting
+   `_daedalus_model_override: true` in the profile's `config.yaml`.
+
+2. **GITHUB_TOKEN auto-sync** (`_sync_github_token`) — copies `GITHUB_TOKEN`
+   from `~/.hermes/.env` into every `*-daedalus` profile's `.env` that lacks
+   one. Fixes issue #78: on a fresh install where the token is added to
+   `~/.hermes/.env` after provisioning, profiles were left permanently missing
+   the token until someone re-ran `provision_roster.sh`. Idempotent — profiles
+   that already have the key are skipped.
+
+3. **Cron wrapper auto-install** (`_ensure_cron_wrapper`) — ensures
+   `~/.hermes/scripts/daedalus-cron.sh` exists on every plugin load. Hermes
+   has no `post_install` hook for plugins, so `postinstall.py` never runs
+   automatically after `hermes plugin add` / `hermes update`. Without this,
+   fresh installs leave the cron job pointing at a script that does not exist,
+   and the cron silently fails.
+
+4. **Dispatch cron auto-recovery** (`_ensure_dispatch_crons`) — recreates any
+   missing `<name>-daedalus` dispatch crons from project configs. `hermes update`
+   wipes the global Hermes cron store (`~/.hermes/cron/jobs.json`), which
+   removes the daedalus dispatch cron. This function reads every registered
+   project from `~/.hermes/daedalus/projects`, checks whether its cron exists
+   in `hermes cron list --all`, and recreates it if missing. Fixes issue #80.
+
+### Tick-level self-healing
+
 `core/iterate.py` runs on every cron tick after the main dispatch. It scans every
 blocked card and routes it to the agent that can clear it — the pipeline never
 stalls waiting for a human unless it has already retried 3 times.
@@ -793,6 +830,7 @@ on its board.
 | `core/providers/` | VCS provider layer: GitHub (REST + GraphQL Projects v2), GitLab (REST), Azure DevOps (REST/WIQL) — token-authenticated HTTPS APIs, extensible via `register_provider()`. |
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
 | `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |
+| `__init__.py` | Plugin entrypoint — registers dashboard routes, hooks, and four self-healing mechanisms that run on every plugin load (model config sync, GITHUB_TOKEN sync, cron wrapper install, dispatch cron recovery). |
 | `dashboard/` | Dashboard tab: project grid, add/edit project modals, notifications editor (`plugin_api.py` + React `src/App.jsx`). |
 | `tests/` | Unit tests — config, providers (mocked HTTP), dispatcher, dashboard API, installers. |
 
