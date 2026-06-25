@@ -147,9 +147,11 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
 
 _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "developer": (
-        "  4. Immediately block: kanban_block(\"review-required: awaiting-pr — Claude Code spawned, PR pending\")\n"
-        "  5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-        "  STOP — do not poll, do not wait for the PR. Block immediately after spawning.\n"
+        "  4. Wait for CC to finish: terminal(\"until [ -s /tmp/cc-out.txt ]; do sleep 30; done; cat /tmp/cc-out.txt\")\n"
+        "  5. The agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
+        "  6. Block your card: kanban_block(\"review-required: PR #<n> — <branch>\")\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do NOT open the PR yourself. Wait for CC output then block with the real PR number.\n"
     ),
     "validator": (
         "  4. Wait: terminal(\"cat /tmp/validator-out.txt\")\n"
