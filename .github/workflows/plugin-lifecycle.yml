@@ -1,0 +1,43 @@
+name: Plugin Lifecycle
+
+# Exercises the full Hermes + Daedalus plugin lifecycle (install → dispatch →
+# upgrade → uninstall → reinstall) so install-path regressions (#75 missing deps,
+# #79 per-profile cron, #80 cron lost after `hermes update`) are caught before they
+# reach users. Hermes is private/not pip-installable, so a lightweight `hermes` CLI
+# stub (tests/ci/hermes) backs the plugin's REAL scripts against an isolated
+# HERMES_HOME — see tests/ci/lifecycle_smoke.sh.
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 7 * * *'   # nightly 07:00 UTC
+  workflow_dispatch:
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Pre-seed deps into the interpreter the lifecycle scripts shell out to as
+      # `python3` (provision_roster.sh parses YAML with bare `python3 -c`).
+      - name: Install plugin runtime deps
+        run: python -m pip install --quiet -r requirements.txt
+
+      - name: Full plugin lifecycle smoke (5 stages, isolated HERMES_HOME)
+        run: bash tests/ci/lifecycle_smoke.sh
+
+      - name: Lifecycle harness self-test guard
+        run: python -m pytest tests/test_plugin_lifecycle_workflow.py -q
+
+  # Single required status check to gate merges to main — keep the branch
+  # protection rule pointed at this job, not each matrix leg.
+  lifecycle-complete:
+    needs: [lifecycle]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "plugin lifecycle passed — safe to merge"
