@@ -580,7 +580,6 @@ def test_remap_unknown_role_ignored():
 
 def test_remap_logs_all_changes():
     """Remap logs a summary line that contains all remapped task IDs."""
-    import logging
     tasks = [
         {"id": "t_dev", "assignee": "developer", "status": "todo"},
         {"id": "t_qa", "assignee": "qa", "status": "ready"},
@@ -1352,6 +1351,47 @@ def test_check_team_blockers_skips_when_active_consultation_exists():
     check("triggered list is empty when consult already open", triggered == [])
 
 
+# ── _count_active_issue_tasks (issue #109: accidental-close guard) ────────────
+
+
+def test_count_active_issue_tasks_counts_non_done_tasks():
+    """Active (todo/in-progress) tasks for the issue are counted → guard fires."""
+    tasks = [
+        {"id": "t1", "title": "#105 QA: verify fix", "status": "todo"},
+        {"id": "t2", "title": "#105 Reviewer: review PR", "status": "in-progress"},
+        {"id": "t3", "title": "#105 Developer: implement", "status": "done"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        active = disp._count_active_issue_tasks("slug", 105)
+    check("counts only non-done tasks for the issue", active == 2)
+    assert active == 2, "accidental mid-pipeline close must report active tasks"
+
+
+def test_count_active_issue_tasks_all_done_returns_zero():
+    """All tasks done/cancelled → 0, so legitimate-close cleanup proceeds as before."""
+    tasks = [
+        {"id": "t1", "title": "#105 QA: verify fix", "status": "done"},
+        {"id": "t2", "title": "#105 Reviewer: review PR", "status": "cancelled"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        active = disp._count_active_issue_tasks("slug", 105)
+    check("zero active when all tasks done/cancelled", active == 0)
+    assert active == 0, "legitimate close (all tasks done) must not be guarded"
+
+
+def test_count_active_issue_tasks_ignores_other_issues():
+    """Active tasks belonging to a different issue number must not be counted."""
+    tasks = [
+        {"id": "t1", "title": "#106 QA: verify fix", "status": "todo"},
+        {"id": "t2", "title": "no issue number here", "status": "todo"},
+        {"id": "t3", "title": "#105 Developer: implement", "status": "todo"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        active = disp._count_active_issue_tasks("slug", 105)
+    check("only matches tasks for the target issue", active == 1)
+    assert active == 1, "guard must scope active-task count to the closed issue only"
+
+
 if __name__ == "__main__":
     print("CI retry scheduling tests")
     print("-" * 60)
@@ -1445,6 +1485,15 @@ if __name__ == "__main__":
         test_check_team_blockers_creates_consult_for_genuine_blocker,
         test_check_team_blockers_skips_escalate,
         test_check_team_blockers_skips_when_active_consultation_exists,
+    ):
+        fn()
+    print()
+    print("_count_active_issue_tasks (issue #109 accidental-close guard) tests")
+    print("-" * 60)
+    for fn in (
+        test_count_active_issue_tasks_counts_non_done_tasks,
+        test_count_active_issue_tasks_all_done_returns_zero,
+        test_count_active_issue_tasks_ignores_other_issues,
     ):
         fn()
     print("-" * 60)

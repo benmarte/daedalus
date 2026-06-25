@@ -1743,6 +1743,22 @@ def _find_issue_n_from_parents(slug: str, task_id: str) -> Optional[str]:
     return None
 
 
+def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
+    """Count active (non-done, non-cancelled) kanban tasks for issue #N.
+
+    A task "belongs" to an issue when its title references ``#<issue_number>``.
+    Used to guard orphaned-issue cleanup: an issue closed on VCS while active
+    kanban tasks remain is likely an accidental close (bot mis-fire, manual
+    mis-click mid-pipeline), so the dispatcher must NOT bulk-complete its tasks.
+    """
+    active = 0
+    for t in kanban.list_tasks(slug):
+        m = re.search(r"#(\d+)", t.get("title") or "")
+        if m and int(m.group(1)) == issue_number and t.get("status") not in ("done", "cancelled"):
+            active += 1
+    return active
+
+
 def _repair_orphan_tasks(
     slug: str, profiles: Dict[str, str], *, dry_run: bool = False,
 ) -> int:
@@ -2871,17 +2887,12 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # Guard: if there are still active (non-done) kanban tasks for this issue,
         # the close is likely accidental (bot close, manual mis-click). Skip cleanup
         # so a human reopen can resume the pipeline without data loss.
-        active_tasks = [
-            t for t in kanban.list_tasks(slug)
-            if re.search(r"#(\d+)", t.get("title") or "") and
-            int(re.search(r"#(\d+)", t.get("title") or "").group(1)) == n and
-            t.get("status") not in ("done", "cancelled")
-        ]
-        if active_tasks:
+        active_count = _count_active_issue_tasks(slug, n)
+        if active_count:
             logger.warning(
                 "dispatch: #%s is closed on VCS but has %d active kanban task(s) — "
                 "skipping bulk-complete (likely accidental close; reopen the issue to resume)",
-                n, len(active_tasks),
+                n, active_count,
             )
             continue
 
