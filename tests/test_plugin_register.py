@@ -290,17 +290,24 @@ def test_read_env_value_strips_quotes_and_export(isolate_home):
 class _FakeCron:
     """Fake ``subprocess.run`` for ``hermes cron`` calls.
 
-    Returns a configurable ``cron list --all`` listing and records every
-    ``cron create`` command so tests can assert what was (re)created.
+    Returns a configurable ``cron list --all`` listing in the real Hermes format
+    (id [status] / Name: lines) and records every ``cron create``/``delete``
+    command so tests can assert what was (re)created.
     """
 
-    def __init__(self, existing_names=(), list_rc=0, create_rc=0, raise_on=None):
-        # `cron list --all` output is parsed for `Name: <cron>` lines only.
-        self.list_output = "".join(f"  Name: {n}\n" for n in existing_names)
+    def __init__(self, existing_names=(), list_rc=0, create_rc=0, raise_on=None,
+                 dead_names=()):
+        lines = []
+        for i, n in enumerate(existing_names):
+            lines.append(f"  abc{i:012x} [active]\n    Name: {n}\n")
+        for i, n in enumerate(dead_names):
+            lines.append(f"  def{i:012x} [completed]\n    Name: {n}\n")
+        self.list_output = "".join(lines)
         self.list_rc = list_rc
         self.create_rc = create_rc
         self.raise_on = raise_on  # optional callable(cmd) -> bool
         self.creates: list[list[str]] = []
+        self.deletes: list[list[str]] = []
 
     def __call__(self, cmd, *args, **kwargs):
         if self.raise_on and self.raise_on(cmd):
@@ -310,6 +317,9 @@ class _FakeCron:
         if cmd[:3] == ["hermes", "cron", "create"]:
             self.creates.append(cmd)
             return subprocess.CompletedProcess(cmd, self.create_rc, "created", "")
+        if cmd[:3] == ["hermes", "cron", "delete"]:
+            self.deletes.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "Removed job", "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
@@ -338,7 +348,8 @@ def test_ensure_dispatch_crons_recreates_missing(isolate_home):
     assert len(fake.creates) == 1, "expected exactly one cron create"
     cmd = fake.creates[0]
     assert cmd[:3] == ["hermes", "cron", "create"]
-    assert "every 30m" in cmd
+    # "every 30m" is converted to crontab syntax so the job repeats forever
+    assert "*/30 * * * *" in cmd
     assert "--name" in cmd and "alpha-daedalus" in cmd
     assert "--script" in cmd and "daedalus-cron.sh" in cmd
     assert "--no-agent" in cmd
@@ -354,6 +365,25 @@ def test_ensure_dispatch_crons_idempotent_when_present(isolate_home):
         mod._ensure_dispatch_crons()
 
     assert fake.creates == [], "must not recreate an already-present cron"
+
+
+def test_ensure_dispatch_crons_recreates_dead_completed_cron(isolate_home):
+    """A [completed] (timed-out/dead) cron is deleted then recreated with crontab syntax."""
+    mod = _load_package()
+    _register_repo(isolate_home, "sigma", {"name": "sigma", "cron": {"schedule": "every 60m"}})
+    fake = _FakeCron(existing_names=(), dead_names=("sigma-daedalus",))
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    # The dead cron must be deleted first
+    assert any("def000000000000" in d for d in fake.deletes), \
+        "expected dead cron to be deleted before recreating"
+    # Then a fresh one must be created with crontab syntax (Repeat: ∞)
+    assert len(fake.creates) == 1
+    cmd = fake.creates[0]
+    assert "sigma-daedalus" in cmd
+    assert "0 * * * *" in cmd, "60m must be converted to crontab for infinite repeat"
 
 
 def test_ensure_dispatch_crons_skips_disabled_empty_schedule(isolate_home):
@@ -378,8 +408,8 @@ def test_ensure_dispatch_crons_falls_back_to_template_schedule(isolate_home):
         mod._ensure_dispatch_crons()
 
     assert len(fake.creates) == 1
-    # Template default is "every 60m" (templates/daedalus.yaml).
-    assert "every 60m" in fake.creates[0]
+    # Template default converted to crontab syntax for infinite repeat.
+    assert "0 * * * *" in fake.creates[0]
 
 
 def test_ensure_dispatch_crons_passes_deliver(isolate_home):
@@ -499,7 +529,10 @@ def test_ensure_dispatch_crons_no_duplicates_concurrent_loads(isolate_home):
     def _stateful_run(cmd, *args, **kwargs):
         if cmd[:4] == ["hermes", "cron", "list", "--all"]:
             with state_lock:
-                output = "".join(f"  Name: {n}\n" for n in created_names)
+                output = "".join(
+                    f"  abc{i:012x} [active]\n    Name: {n}\n"
+                    for i, n in enumerate(created_names)
+                )
             return subprocess.CompletedProcess(cmd, 0, output, "")
         if cmd[:3] == ["hermes", "cron", "create"]:
             with state_lock:

@@ -154,7 +154,7 @@ def test_config_loader_resolve():
     check("resolve_repo_config lets the repo override template defaults",
           r1["vcs"]["target_branch"] == "release")
     check("resolve_repo_config inherits template defaults",
-          r1["vcs"]["provider"] == "github" and r1["cron"]["schedule"] == "every 60m")
+          r1["vcs"]["provider"] == "github" and r1["cron"]["schedule"] == "0 * * * *")
 
 
 # ── kanban: ls parsing ───────────────────────────────────────────────────────
@@ -2186,6 +2186,48 @@ def test_pipeline_chain_confirmed_to_team_tasks():
 
 
 
+# ── _schedule_to_crontab ─────────────────────────────────────────────────────
+
+def _load_init():
+    import importlib.util
+    p = Path(__file__).resolve().parent.parent / "__init__.py"
+    spec = importlib.util.spec_from_file_location("daedalus_init", str(p))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_schedule_to_crontab_60m():
+    """60m → every-hour crontab (Repeat: ∞ in Hermes)."""
+    init = _load_init()
+    check("60m → '0 * * * *'", init._schedule_to_crontab("60m") == "0 * * * *")
+
+
+def test_schedule_to_crontab_every_60m():
+    """'every 60m' prefix is stripped before conversion."""
+    init = _load_init()
+    check("every 60m → '0 * * * *'", init._schedule_to_crontab("every 60m") == "0 * * * *")
+
+
+def test_schedule_to_crontab_30m():
+    """30m → */30 crontab."""
+    init = _load_init()
+    check("30m → '*/30 * * * *'", init._schedule_to_crontab("30m") == "*/30 * * * *")
+
+
+def test_schedule_to_crontab_2h():
+    """2h → every-2-hours crontab."""
+    init = _load_init()
+    check("2h → '0 */2 * * *'", init._schedule_to_crontab("2h") == "0 */2 * * *")
+
+
+def test_schedule_to_crontab_passthrough_crontab():
+    """Already-crontab schedules pass through unchanged."""
+    init = _load_init()
+    check("0 * * * * passthrough", init._schedule_to_crontab("0 * * * *") == "0 * * * *")
+    check("0 9 * * * passthrough", init._schedule_to_crontab("0 9 * * *") == "0 9 * * *")
+
+
 # ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
 # (Patch _FakeProvider at module level to avoid test-isolation issues)
 
@@ -2270,7 +2312,12 @@ if __name__ == "__main__":
                test_check_completed_pm_no_issue_found,
                test_check_completed_pm_idempotent,
                test_check_completed_pm_skips_consultation,
-               test_pipeline_chain_confirmed_to_team_tasks):
+               test_pipeline_chain_confirmed_to_team_tasks,
+               test_schedule_to_crontab_60m,
+               test_schedule_to_crontab_every_60m,
+               test_schedule_to_crontab_30m,
+               test_schedule_to_crontab_2h,
+               test_schedule_to_crontab_passthrough_crontab):
         fn()
     print("-" * 60)
     print(f"Results: {_passed} passed, {_failed} failed")

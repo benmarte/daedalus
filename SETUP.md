@@ -96,6 +96,8 @@ execution:
   coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
 ```
 
+![.hermes/daedalus.yaml showing the execution block with coding_agent: claude-code and a per-role override](docs/screenshots/guide/14-coding-agent-config.png)
+
 - Supported values: `claude-code`, `codex`, `opencode`, or `hermes` (the default).
 - **Omitting `coding_agent` (or setting it to `hermes`/`none`) keeps everything on the
   local Hermes LLM** — no external agent is spawned.

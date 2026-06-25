@@ -307,6 +307,8 @@ execution:
   coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
 ```
 
+![.hermes/daedalus.yaml showing the execution block with coding_agent: claude-code and a per-role override (developer delegates to Claude Code, validator stays on the local Hermes LLM)](screenshots/guide/14-coding-agent-config.png)
+
 | Value | Behavior |
 |---|---|
 | `hermes` | **(default)** No delegation — the role works with the local Hermes LLM. Also the fallback when `coding_agent` is unset, empty, or invalid. |
