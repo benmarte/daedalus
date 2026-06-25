@@ -230,11 +230,17 @@ def _ensure_dispatch_crons() -> None:
     - ``--deliver`` is passed only when the repo sets a non-empty ``deliver`` and
       has no ``notifications`` (which self-deliver), matching ``_reconcile_cron``.
 
+    A cross-process file lock (fcntl.flock) serialises simultaneous plugin loads
+    so that only one process runs the check+create per cron name at a time —
+    preventing the TOCTOU race that caused duplicate crons when multiple Hermes
+    worker processes started up concurrently (issue #95).
+
     Idempotent — a job that already exists is left untouched. Best-effort: every
     failure is logged at DEBUG/WARNING and never raised, so a broken ``hermes``
     binary or malformed config can't break plugin registration.
     """
     try:
+        import fcntl
         import yaml
         from pathlib import Path
 
@@ -246,86 +252,105 @@ def _ensure_dispatch_crons() -> None:
         if not registry_file.exists():
             return
 
-        # Packaged template default — used only when a repo config omits
-        # cron.schedule entirely (mirrors ConfigLoader's deep-merge over defaults).
-        default_schedule = ""
-        template_path = Path(__file__).resolve().parent / "templates" / "daedalus.yaml"
+        # Acquire a cross-process exclusive lock so simultaneous plugin loads
+        # don't each see the cron as missing and create duplicates.
+        lock_path = Path(hermes_home) / "daedalus" / ".cron-heal.lock"
         try:
-            tpl = yaml.safe_load(template_path.read_text()) or {}
-            tpl = tpl.get("defaults", tpl)
-            default_schedule = ((tpl.get("cron") or {}).get("schedule") or "").strip()
-        except Exception:
-            pass
-
-        # List existing cron job NAMES once (a single subprocess for all projects).
-        # Without the list we can't tell what's missing, so bail rather than risk
-        # creating duplicates.
-        try:
-            res = subprocess.run(
-                ["hermes", "cron", "list", "--all"],
-                capture_output=True, text=True, timeout=10,
-            )
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_fd = open(lock_path, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
         except Exception as exc:
-            logger.debug("daedalus: cron list failed during self-heal: %s", exc)
+            logger.debug("daedalus: could not acquire cron-heal lock: %s", exc)
             return
-        if res.returncode != 0:
-            logger.debug("daedalus: cron list returned %s during self-heal", res.returncode)
-            return
-        existing_names = {
-            m.group(1).strip()
-            for line in res.stdout.splitlines()
-            if (m := re.match(r"^\s*Name:\s+(.+)$", line))
-        }
 
-        for raw in registry_file.read_text().splitlines():
-            repo_path = raw.strip()
-            if not repo_path or repo_path.startswith("#"):
-                continue
-            cfg_file = Path(repo_path) / ".hermes" / "daedalus.yaml"
-            if not cfg_file.exists():
-                continue
+        try:
+            # Packaged template default — used only when a repo config omits
+            # cron.schedule entirely (mirrors ConfigLoader's deep-merge over defaults).
+            default_schedule = ""
+            template_path = Path(__file__).resolve().parent / "templates" / "daedalus.yaml"
             try:
-                cfg = yaml.safe_load(cfg_file.read_text()) or {}
+                tpl = yaml.safe_load(template_path.read_text()) or {}
+                tpl = tpl.get("defaults", tpl)
+                default_schedule = ((tpl.get("cron") or {}).get("schedule") or "").strip()
             except Exception:
-                continue
+                pass
 
-            name = (cfg.get("name") or "").strip()
-            if not name:
-                continue
-            cron_cfg = cfg.get("cron") or {}
-            schedule = (
-                (cron_cfg.get("schedule") or "").strip()
-                if "schedule" in cron_cfg
-                else default_schedule
-            )
-            if not schedule:
-                continue  # intentionally disabled — do not resurrect
-
-            cron_name = f"{name}-daedalus"
-            if cron_name in existing_names:
-                continue
-
-            cmd = [
-                "hermes", "cron", "create", schedule,
-                "--name", cron_name,
-                "--script", "daedalus-cron.sh",
-                "--no-agent",
-            ]
-            deliver = (cron_cfg.get("deliver") or "").strip()
-            if deliver and not cron_cfg.get("notifications"):
-                cmd += ["--deliver", deliver]
-
+            # List existing cron job NAMES once (a single subprocess for all projects).
+            # Without the list we can't tell what's missing, so bail rather than risk
+            # creating duplicates.
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                if res.returncode == 0:
-                    logger.info("daedalus: recreated missing dispatch cron: %s", cron_name)
-                else:
-                    logger.warning(
-                        "daedalus: failed to recreate cron %s: %s",
-                        cron_name, (res.stderr or res.stdout).strip()[:200],
-                    )
+                res = subprocess.run(
+                    ["hermes", "cron", "list", "--all"],
+                    capture_output=True, text=True, timeout=10,
+                )
             except Exception as exc:
-                logger.debug("daedalus: cron create failed for %s: %s", cron_name, exc)
+                logger.debug("daedalus: cron list failed during self-heal: %s", exc)
+                return
+            if res.returncode != 0:
+                logger.debug("daedalus: cron list returned %s during self-heal", res.returncode)
+                return
+            existing_names = {
+                m.group(1).strip()
+                for line in res.stdout.splitlines()
+                if (m := re.match(r"^\s*Name:\s+(.+)$", line))
+            }
+
+            for raw in registry_file.read_text().splitlines():
+                repo_path = raw.strip()
+                if not repo_path or repo_path.startswith("#"):
+                    continue
+                cfg_file = Path(repo_path) / ".hermes" / "daedalus.yaml"
+                if not cfg_file.exists():
+                    continue
+                try:
+                    cfg = yaml.safe_load(cfg_file.read_text()) or {}
+                except Exception:
+                    continue
+
+                name = (cfg.get("name") or "").strip()
+                if not name:
+                    continue
+                cron_cfg = cfg.get("cron") or {}
+                schedule = (
+                    (cron_cfg.get("schedule") or "").strip()
+                    if "schedule" in cron_cfg
+                    else default_schedule
+                )
+                if not schedule:
+                    continue  # intentionally disabled — do not resurrect
+
+                cron_name = f"{name}-daedalus"
+                if cron_name in existing_names:
+                    continue
+
+                cmd = [
+                    "hermes", "cron", "create", schedule,
+                    "--name", cron_name,
+                    "--script", "daedalus-cron.sh",
+                    "--no-agent",
+                ]
+                deliver = (cron_cfg.get("deliver") or "").strip()
+                if deliver and not cron_cfg.get("notifications"):
+                    cmd += ["--deliver", deliver]
+
+                try:
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if res.returncode == 0:
+                        logger.info("daedalus: recreated missing dispatch cron: %s", cron_name)
+                        existing_names.add(cron_name)  # prevent double-create within same load
+                    else:
+                        logger.warning(
+                            "daedalus: failed to recreate cron %s: %s",
+                            cron_name, (res.stderr or res.stdout).strip()[:200],
+                        )
+                except Exception as exc:
+                    logger.debug("daedalus: cron create failed for %s: %s", cron_name, exc)
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            except Exception:
+                pass
     except Exception:
         logger.debug("daedalus: _ensure_dispatch_crons failed", exc_info=True)
 

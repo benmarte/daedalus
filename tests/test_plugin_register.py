@@ -478,6 +478,62 @@ def test_register_runs_ensure_dispatch_crons(isolate_home):
         "register() did not recreate the missing dispatch cron"
 
 
+def test_ensure_dispatch_crons_no_duplicates_concurrent_loads(isolate_home):
+    """Concurrent plugin loads must not create duplicate cron jobs (issue #95).
+
+    Simulates two threads calling _ensure_dispatch_crons() simultaneously with a
+    stateful fake: the cron list reflects creates that have already happened.  The
+    fcntl.flock serialises the threads so the second one sees the first one's create
+    and skips — exactly one create fires.
+    """
+    import threading
+
+    mod = _load_package()
+    _register_repo(isolate_home, "kappa", {"name": "kappa", "cron": {"schedule": "every 60m"}})
+
+    # Stateful fake: cron list reflects creates that have already happened.
+    state_lock = threading.Lock()
+    created_names: set = set()
+    all_creates: list = []
+
+    def _stateful_run(cmd, *args, **kwargs):
+        if cmd[:4] == ["hermes", "cron", "list", "--all"]:
+            with state_lock:
+                output = "".join(f"  Name: {n}\n" for n in created_names)
+            return subprocess.CompletedProcess(cmd, 0, output, "")
+        if cmd[:3] == ["hermes", "cron", "create"]:
+            with state_lock:
+                name_idx = cmd.index("--name") + 1
+                created_names.add(cmd[name_idx])
+                all_creates.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "created", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    errors: list = []
+
+    def _load():
+        try:
+            with mock.patch.object(mod.subprocess, "run", _stateful_run):
+                mod._ensure_dispatch_crons()
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_load)
+    t2 = threading.Thread(target=_load)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert not errors, f"threads raised: {errors}"
+    assert not t1.is_alive() and not t2.is_alive(), "threads timed out"
+
+    kappa_creates = [c for c in all_creates if "kappa-daedalus" in c]
+    assert len(kappa_creates) == 1, (
+        f"expected 1 cron create, got {len(kappa_creates)} — duplicate cron bug regressed"
+    )
+
+
 # ── 2e. httpx dependency self-heal (issue #75) ───────────────────────────────
 
 
