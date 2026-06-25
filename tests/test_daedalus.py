@@ -154,7 +154,7 @@ def test_config_loader_resolve():
     check("resolve_repo_config lets the repo override template defaults",
           r1["vcs"]["target_branch"] == "release")
     check("resolve_repo_config inherits template defaults",
-          r1["vcs"]["provider"] == "github" and r1["cron"]["schedule"] == "every 60m")
+          r1["vcs"]["provider"] == "github" and r1["cron"]["schedule"] == "0 * * * *")
 
 
 # ── kanban: ls parsing ───────────────────────────────────────────────────────
