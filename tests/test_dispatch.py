@@ -145,7 +145,7 @@ def test_extract_follow_ups_idempotency():
 1. Wire walkAncestorChain
 """
     marker_comment = _make_comment(
-        "Agent: dispatcher\n\n<!-- daedalus:follow-up-extracted PR #10 issue #101 -->",
+        "**Agent: dispatcher**\n\n<!-- daedalus:follow-up-extracted PR #10 issue #101 -->",
         author="dispatcher",
         cid="99",
     )
@@ -876,6 +876,43 @@ def test_security_task_body_has_role_instructions():
     assert "#55" in body
     assert "security" in body.lower()
     assert "security: cleared" in body or "security:" in body
+
+
+def test_qa_task_body_comment_targets_pr_not_issue():
+    """_qa_task_body comment instruction targets the PR, not the issue (#115)."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "Post a QA summary comment on the PR (not the issue)" in body
+    assert "Post a QA summary comment on GitHub issue #" not in body
+
+
+def test_reviewer_task_body_comment_targets_pr_not_issue():
+    """_reviewer_task_body comment instruction targets the PR, not the issue (#115)."""
+    body = disp._reviewer_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "Post review findings on the PR (not the issue)" in body
+    assert "Post review findings on GitHub issue #" not in body
+
+
+def test_security_task_body_comment_targets_pr_not_issue():
+    """_security_task_body comment instruction targets the PR, not the issue (#115)."""
+    body = disp._security_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "Post findings or sign-off on the PR (not the issue)" in body
+    assert "Post findings or sign-off on GitHub issue #" not in body
+
+
+def test_dispatcher_followup_header_is_bold():
+    """_extract_follow_ups summary uses the bold **Agent: dispatcher** header (#115)."""
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "daedalus_dispatch.py").read_text()
+    assert '"**Agent: dispatcher**\\n\\n"' in src
+    assert '"Agent: dispatcher\\n\\n"' not in src
+
+
+def test_documentation_soul_posts_on_pr_not_issue():
+    """documentation SOUL instructs posting the completion comment on the PR (#115)."""
+    soul = (Path(__file__).resolve().parent.parent
+            / "config" / "souls" / "documentation-daedalus.md").read_text()
+    assert "Post a comment on the GitHub **PR** (not the issue)" in soul
+    assert "Post a comment on the GitHub **issue** (not the PR)" not in soul
 
 
 def test_docs_task_body_has_role_instructions():

@@ -1048,7 +1048,7 @@ def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"2. Read the PR diff and issue #{n}.\n"
         f"3. Run the test suite and verify the fix resolves the issue.\n"
         f"4. Write any missing tests.\n"
-        f"5. Post a QA summary comment on GitHub issue #{n} using: {comment_howto}\n"
+        f"5. Post a QA summary comment on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"6. Complete your kanban card:\n"
         f"   - Tests pass: summary 'qa-passed: PR #N'\n"
         f"   - Tests fail: block with 'qa-failed: <reason>' — developer will fix\n"
@@ -1073,7 +1073,7 @@ def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"QA has passed. Review the developer's PR for correctness, quality, and performance.\n"
         f"1. Find the PR linked to issue #{n}.\n"
         f"2. Review: correctness, edge cases, error handling, performance, readability.\n"
-        f"3. Post review findings on GitHub issue #{n} using: {comment_howto}\n"
+        f"3. Post review findings on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"4. Complete your kanban card:\n"
         f"   - 'reviewed: approved' if ready to merge\n"
         f"   - 'reviewed: changes-requested: <reason>' if fixes needed\n"
@@ -1100,7 +1100,7 @@ def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"input validation, path traversal, SSRF, dependency vulnerabilities.\n"
         f"1. Find the PR linked to issue #{n}.\n"
         f"2. Audit the diff.\n"
-        f"3. Post findings or sign-off on GitHub issue #{n} using: {comment_howto}\n"
+        f"3. Post findings or sign-off on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"4. Complete your kanban card:\n"
         f"   - 'security: cleared' if no issues\n"
         f"   - 'security: flagged: <finding>' if human review needed\n"
@@ -1502,7 +1502,7 @@ def _extract_follow_ups_from_pr_comment(
         )
         issue_refs = "\n".join(f"- #{n}" for n in created)
         summary = (
-            f"Agent: dispatcher\n\n"
+            f"**Agent: dispatcher**\n\n"
             f"Follow-up items extracted from reviewer/QA comments:\n\n"
             f"{issue_refs}\n\n"
             f"{markers}"

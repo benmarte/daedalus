@@ -179,7 +179,7 @@ def classify_blocked(
     # route back to the PM for re-routing, otherwise pending.
     if assignee == "accessibility-daedalus":
         summary = (handoff_text or "").lower()
-        if "approved" in summary or "accessibility-na" in summary:
+        if "approved" in summary or "accessibility-na" in summary or "a11y-skipped" in summary:
             return ADVANCE
         if "changes requested" in summary:
             return PM_ROUTE
