@@ -227,6 +227,63 @@ def test_register_syncs_github_token(isolate_home):
     assert "GITHUB_TOKEN=ghp_viaregister" in env_file.read_text()
 
 
+def test_sync_github_token_syncs_multiple_profiles_in_one_pass(isolate_home):
+    """Every *-daedalus profile lacking the token is healed in a single call."""
+    mod = _load_package()
+    (isolate_home / ".hermes").mkdir(parents=True, exist_ok=True)
+    (isolate_home / ".hermes" / ".env").write_text("GITHUB_TOKEN=ghp_multi\n")
+    a = _make_profile(isolate_home, "developer-daedalus", "")
+    b = _make_profile(isolate_home, "reviewer-daedalus", "OTHER=1\n")
+    c = _make_profile(isolate_home, "planner-daedalus", "GITHUB_TOKEN=ghp_keep\n")
+
+    mod._sync_github_token()
+
+    assert "GITHUB_TOKEN=ghp_multi" in a.read_text()
+    assert "GITHUB_TOKEN=ghp_multi" in b.read_text()
+    # Profile that already had a token keeps its own value.
+    assert "ghp_keep" in c.read_text()
+    assert "ghp_multi" not in c.read_text()
+
+
+def test_sync_github_token_prefers_hermes_home_env(isolate_home, monkeypatch):
+    """HERMES_HOME overrides the ~/.hermes default for the source and profiles."""
+    mod = _load_package()
+    alt_home = isolate_home / "custom-hermes"
+    (alt_home).mkdir(parents=True, exist_ok=True)
+    (alt_home / ".env").write_text("GITHUB_TOKEN=ghp_fromenv\n")
+    profile_dir = alt_home / "profiles" / "developer-daedalus"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    env_file = profile_dir / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("HERMES_HOME", str(alt_home))
+
+    mod._sync_github_token()
+
+    assert "GITHUB_TOKEN=ghp_fromenv" in env_file.read_text()
+
+
+def test_sync_github_token_sets_secure_permissions(isolate_home):
+    """A synced profile .env must be chmod 0o600 (token is a secret)."""
+    mod = _load_package()
+    (isolate_home / ".hermes").mkdir(parents=True, exist_ok=True)
+    (isolate_home / ".hermes" / ".env").write_text("GITHUB_TOKEN=ghp_secret\n")
+    env_file = _make_profile(isolate_home, "developer-daedalus", "")
+    os.chmod(env_file, 0o644)
+
+    mod._sync_github_token()
+
+    assert (os.stat(env_file).st_mode & 0o777) == 0o600
+
+
+def test_read_env_value_strips_quotes_and_export(isolate_home):
+    """_read_env_value handles `export KEY="quoted"` dotenv lines."""
+    mod = _load_package()
+    env = isolate_home / "sample.env"
+    env.write_text('# comment\nexport GITHUB_TOKEN="ghp_quoted"\n')
+
+    assert mod._read_env_value(str(env), "GITHUB_TOKEN") == "ghp_quoted"
+
+
 # ── 3. plugin.yaml manifest ──────────────────────────────────────────────────
 
 def test_plugin_yaml_exists_and_parses():
