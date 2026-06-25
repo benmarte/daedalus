@@ -511,19 +511,22 @@ def test_ensure_dispatch_crons_no_duplicates_concurrent_loads(isolate_home):
 
     errors: list = []
 
-    def _load():
+    def _run():
         try:
-            with mock.patch.object(mod.subprocess, "run", _stateful_run):
-                mod._ensure_dispatch_crons()
+            mod._ensure_dispatch_crons()
         except Exception as exc:
             errors.append(exc)
 
-    t1 = threading.Thread(target=_load)
-    t2 = threading.Thread(target=_load)
-    t1.start()
-    t2.start()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
+    # Patch once outside the threads — patching inside concurrent threads causes a
+    # save/restore race where Thread 2 restores Thread 1's mock instead of the
+    # original, leaving subprocess.run globally mocked after the test.
+    with mock.patch.object(mod.subprocess, "run", _stateful_run):
+        t1 = threading.Thread(target=_run)
+        t2 = threading.Thread(target=_run)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
 
     assert not errors, f"threads raised: {errors}"
     assert not t1.is_alive() and not t2.is_alive(), "threads timed out"
