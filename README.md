@@ -771,7 +771,7 @@ workdir: /path/to/app-one
 vcs: { provider: github, target_branch: dev }
 tracking: { github_project_number: 1 }
 cron:
-  schedule: "every 5m"
+  schedule: "every 60m"
   notifications:
     - { platform: Slack, target: "slack:C0CHANNEL1", events: [doc-report, pipeline-failure] }
 

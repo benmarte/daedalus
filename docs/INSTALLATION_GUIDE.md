@@ -143,7 +143,7 @@ Step 2 opens automatically after Step 1. This is where you set branches, boards,
 - Link to a Projects v2 board number (GitHub), GitLab label board, or Azure DevOps board. Daedalus syncs card status to/from your VCS board.
 
 **Cron section:**
-- How often the dispatch loop runs (default: every 5 minutes). Pick minutes, hours, or enter a raw cron expression.
+- How often the dispatch loop runs (default: every 60 minutes). Pick minutes, hours, or enter a raw cron expression.
 
 ![Step 2 scrolled — cron frequency settings](screenshots/guide/07-add-project-step2-cron.png)
 
@@ -442,7 +442,7 @@ This means each phase transition happens within seconds. For example:
 
 **Error recovery:** If the state-transition call returns "already terminal" (a known Hermes platform behavior where tasks are sometimes marked done prematurely), agents are instructed to run the dispatcher anyway. The pipeline recovers immediately instead of stalling.
 
-**2. Cron job (last-resort safety net):** The scheduled cron job (default: every 5 minutes) catches anything the terminal-state trigger misses — for example, if an agent crashed before its final step. When the dispatcher runs on a cron tick, it also detects PM tasks that completed without a `SPEC:` summary (premature completion) and re-creates them with a new retry key — up to 3 attempts.
+**2. Cron job (last-resort safety net):** The scheduled cron job (configured per project) catches anything the terminal-state trigger misses — for example, if an agent crashed before its final step. When the dispatcher runs on a cron tick, it also detects PM tasks that completed without a `SPEC:` summary (premature completion) and re-creates them with a new retry key — up to 3 attempts.
 
 Together these make the pipeline fully autonomous: once an issue is marked Ready, the entire chain runs end-to-end without any manual intervention between phases.
 
