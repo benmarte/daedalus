@@ -2286,6 +2286,8 @@ def _check_team_blockers(
         summary = (card.get("summary") or card.get("last_summary") or "").lower()
         if summary.startswith("escalate:"):
             continue  # security escalation — not a PM blocker
+        if summary.startswith("review-required:"):
+            continue  # PR in review or awaiting-pr — iterate handles this, PM can't unblock it
         m = re.search(r"#(\d+)", card.get("title") or "")
         if not m:
             continue

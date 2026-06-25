@@ -1748,6 +1748,50 @@ def test_extract_issue_number_from_card_none():
     check("empty body → None", iterate._extract_issue_number_from_card(card) is None)
 
 
+# ── _execute_pm_route awaiting-pr guard (issue #87) ──────────────────────────
+
+
+def test_execute_pm_route_skips_awaiting_pr():
+    """_execute_pm_route must return False and create nothing when block is awaiting-pr."""
+    with mock.patch.object(kanban, "create_task") as mk_create:
+        card = {"id": "t_dev", "runs": [], "workspace": "dir:/w"}
+        ok = iterate._execute_pm_route(
+            "slug", card, "org/repo",
+            "review-required: awaiting-pr — Claude Code spawned, PR pending",
+            router_profile="project-manager-daedalus",
+        )
+    check("awaiting-pr → pm_route returns False", ok is False)
+    check("awaiting-pr → no task created", mk_create.call_count == 0)
+
+
+def test_execute_pm_route_skips_awaiting_pr_case_insensitive():
+    """awaiting-pr guard is case-insensitive."""
+    with mock.patch.object(kanban, "create_task") as mk_create:
+        card = {"id": "t_dev", "runs": [], "workspace": "dir:/w"}
+        ok = iterate._execute_pm_route(
+            "slug", card, "org/repo",
+            "review-required: AWAITING-PR — Claude Code spawned",
+            router_profile="project-manager-daedalus",
+        )
+    check("AWAITING-PR uppercase skipped", ok is False)
+    check("no task created for uppercase variant", mk_create.call_count == 0)
+
+
+def test_execute_pm_route_proceeds_for_changes_requested():
+    """pm_route still fires when handoff is changes-requested (not awaiting-pr)."""
+    with mock.patch.object(kanban, "create_task", return_value="t_pm") as mk_create:
+        with mock.patch.object(kanban, "comment", return_value=True):
+            with mock.patch.object(kanban, "block_task", return_value=True):
+                card = {"id": "t_rev", "runs": [], "workspace": "dir:/w"}
+                ok = iterate._execute_pm_route(
+                    "slug", card, "org/repo",
+                    "review-required: PR #91 — CHANGES REQUESTED: improve test coverage",
+                    router_profile="project-manager-daedalus",
+                )
+    check("changes-requested still creates PM card", ok is True)
+    check("PM card was created", mk_create.call_count == 1)
+
+
 if __name__ == "__main__":
     print("Iterate (CI-aware auto-advance) tests")
     print("-" * 60)
@@ -1854,6 +1898,15 @@ if __name__ == "__main__":
         test_escalation_different_issues_independent,
         test_execute_escalate_stamps_card,
         test_execute_escalate_no_stamp_without_issue_number,
+    ):
+        fn()
+    print()
+    print("_execute_pm_route awaiting-pr guard tests (issue #87)")
+    print("-" * 60)
+    for fn in (
+        test_execute_pm_route_skips_awaiting_pr,
+        test_execute_pm_route_skips_awaiting_pr_case_insensitive,
+        test_execute_pm_route_proceeds_for_changes_requested,
     ):
         fn()
     print("-" * 60)
