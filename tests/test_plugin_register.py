@@ -478,6 +478,70 @@ def test_register_runs_ensure_dispatch_crons(isolate_home):
         "register() did not recreate the missing dispatch cron"
 
 
+# ── 2e. httpx dependency self-heal (issue #75) ───────────────────────────────
+
+
+def test_ensure_dependencies_noop_when_httpx_present(isolate_home, monkeypatch):
+    """When httpx is already importable, no pip install is spawned."""
+    mod = _load_package()
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: calls.append((a, k)))
+
+    mod._ensure_dependencies()
+
+    assert calls == [], "pip install should not run when httpx is present"
+
+
+def test_ensure_dependencies_installs_when_httpx_missing(isolate_home, monkeypatch):
+    """When httpx is missing, pip install -r requirements.txt is invoked."""
+    mod = _load_package()
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: calls.append((a, k)))
+
+    mod._ensure_dependencies()
+
+    assert len(calls) == 1, "expected exactly one pip install call"
+    argv = calls[0][0][0]
+    assert argv[:5] == [mod.sys.executable, "-m", "pip", "install", "-q"]
+    assert argv[-1].endswith("requirements.txt")
+
+
+def test_ensure_dependencies_never_raises(isolate_home, monkeypatch):
+    """A pip/subprocess failure must be swallowed — registration never breaks."""
+    mod = _load_package()
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+    def _boom(*a, **k):
+        raise RuntimeError("pip exploded")
+
+    monkeypatch.setattr(mod.subprocess, "run", _boom)
+    mod._ensure_dependencies()  # must not raise
+
+
+def test_register_ensures_dependencies(isolate_home, monkeypatch):
+    """register() runs the dependency self-heal as part of plugin load."""
+    mod = _load_package()
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: calls.append((a, k)))
+
+    mod.register(FakeCtx())
+
+    assert any(
+        "pip" in c[0][0] and "install" in c[0][0] for c in calls
+    ), "register() did not trigger the httpx dependency install"
+
+
+def test_requirements_txt_exists_and_pins_httpx():
+    """requirements.txt must exist at the repo root and declare httpx>=0.24."""
+    req = ROOT / "requirements.txt"
+    assert req.is_file(), f"requirements.txt not found at {req}"
+    text = req.read_text()
+    assert "httpx>=0.24" in text, "requirements.txt must pin httpx>=0.24"
+
+
 # ── 3. plugin.yaml manifest ──────────────────────────────────────────────────
 
 def test_plugin_yaml_exists_and_parses():
