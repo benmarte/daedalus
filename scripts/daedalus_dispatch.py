@@ -142,53 +142,58 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
     "reviewer": "rev",
     "security": "sec",
     "documentation": "docs",
+    "accessibility": "a11y",
+    "planner": "planner",
 }
 
+# Templates keyed by role. ``{pfx}`` and ``{issue_number}`` are filled in by
+# ``_build_delegation_instructions`` so each concurrent task reads/writes an
+# isolated /tmp pair (issue #114).
 _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "developer": (
-        "  4. Wait for coding agent to finish: terminal(\"until [ -s /tmp/dev-out.txt ]; do sleep 30; done; cat /tmp/dev-out.txt\")\n"
+        "  4. Wait for coding agent to finish: terminal(\"until [ -s /tmp/{pfx}-{issue_number}-out.txt ]; do sleep 30; done; cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
         "  6. Block your card: kanban_block(\"review-required: PR #<n> — <branch>\")\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do NOT open the PR yourself. Wait for coding agent output then block with the real PR number.\n"
     ),
     "validator": (
-        "  4. Wait: terminal(\"cat /tmp/validator-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted the validation report to GitHub and output its verdict.\n"
         "  6. Complete your card with the exact verdict line: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block. Output CONFIRMED/BLOCKED as plain text only.\n"
     ),
     "pm": (
-        "  4. Wait: terminal(\"cat /tmp/pm-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted the spec to GitHub and output \"spec: <summary>\".\n"
         "  6. Complete your card with: 'spec: <one-line summary from the output>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not write the spec yourself.\n"
     ),
     "qa": (
-        "  4. Wait: terminal(\"cat /tmp/qa-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted a QA report to GitHub and output its verdict.\n"
         "  6. Complete your card: 'qa-passed: PR #N' or block with 'qa-failed: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not run the tests yourself.\n"
     ),
     "reviewer": (
-        "  4. Wait: terminal(\"cat /tmp/rev-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted review findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'reviewed: approved' or 'reviewed: changes-requested: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not review the PR yourself.\n"
     ),
     "security": (
-        "  4. Wait: terminal(\"cat /tmp/sec-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted security findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'security: cleared' or 'security: flagged: <finding>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not audit the PR yourself.\n"
     ),
     "documentation": (
-        "  4. Wait: terminal(\"cat /tmp/docs-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted the completion report to GitHub.\n"
         "  6. Complete your card: 'docs: posted completion report for PR #N'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
@@ -203,15 +208,19 @@ _CLOUD_AGENT_LABELS: Dict[str, str] = {
 }
 
 
-def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "developer") -> str:
+def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "developer",
+                                   issue_number: int = 0) -> str:
     """Return delegation instruction text to inject into any role's task body.
 
     ``cmd`` is the full CLI command from coding_agent_cmd.
     ``role`` selects role-specific post-spawn steps (what to do with the output).
+    ``issue_number`` scopes the /tmp task/out filenames so concurrent tasks for
+    different issues never clobber each other's files (issue #114).
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
     pfx = _ROLE_TMP_PREFIX.get(role, role)
-    after = _ROLE_AFTER_SPAWN.get(role, _ROLE_AFTER_SPAWN["developer"])
+    after = _ROLE_AFTER_SPAWN.get(role, _ROLE_AFTER_SPAWN["developer"]).format(
+        pfx=pfx, issue_number=issue_number)
     label = _CLOUD_AGENT_LABELS.get(agent, agent)
 
     if agent == "claude-code":
@@ -221,8 +230,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-task.txt | {run_cmd} > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-{issue_number}-task.txt | {run_cmd} > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "codex":
@@ -232,8 +241,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "opencode":
@@ -243,8 +252,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     return ""
@@ -686,7 +695,7 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"--- Issue #{n} ---\n{body}\n"
     )
     if coding_agent != "none":
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n)
     return _body
 
 
@@ -795,7 +804,7 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
         f"     → Post a comment on issue #{n} listing exactly what info is needed.\n"
         f"     → Block your card with summary starting 'BLOCKED: needs more info'.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
-    ) + (_build_delegation_instructions(coding_agent, coding_agent_cmd, role="validator") + "\n\n"
+    ) + (_build_delegation_instructions(coding_agent, coding_agent_cmd, role="validator", issue_number=n) + "\n\n"
          if coding_agent != "none" else "")
 
 
@@ -812,7 +821,7 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="pm") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="pm", issue_number=n) + "\n\n"
     _body += (
         f"You are the PROJECT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
@@ -968,7 +977,7 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"\n--- Issue #{n} ---\n{body}\n"
     )
     if coding_agent != "none":
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n)
     return _body
 
 
@@ -987,7 +996,7 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd) + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n) + "\n\n"
     _body += (
         f"You are the DEVELOPER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
@@ -1030,7 +1039,7 @@ def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="qa") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="qa", issue_number=n) + "\n\n"
     _body += (
         f"You are the QA for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
@@ -1057,7 +1066,7 @@ def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="reviewer") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="reviewer", issue_number=n) + "\n\n"
     _body += (
         f"You are the REVIEWER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
@@ -1082,7 +1091,7 @@ def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="security") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="security", issue_number=n) + "\n\n"
     _body += (
         f"You are the SECURITY-ANALYST for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
@@ -1111,7 +1120,7 @@ def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="documentation") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="documentation", issue_number=n) + "\n\n"
     _body += (
         f"You are the DOCUMENTATION agent for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"

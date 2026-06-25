@@ -10,11 +10,11 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 1. Read the task body from your kanban card using `kanban_show`.
 2. Save it to a temp file:
    ```
-   write_file("/tmp/cc-task.txt", "<full task body>")
+   write_file("/tmp/dev-<issue_number>-task.txt", "<full task body>")
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("cat /tmp/cc-task.txt | <command from delegation block> > /tmp/cc-out.txt 2>&1", background=True)
+   terminal("cat /tmp/dev-<issue_number>-task.txt | <command from delegation block> > /tmp/dev-<issue_number>-out.txt 2>&1", background=True)
    ```
 4. Wait for the agent to open a PR. Poll every 2 minutes until a PR appears:
    ```

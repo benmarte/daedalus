@@ -1008,14 +1008,30 @@ def test_local_agent_roles_have_no_delegation():
 
 
 def test_role_delegation_uses_role_specific_tmp_file():
-    """Each role uses a distinct tmp file prefix to avoid conflicts."""
+    """Each role uses a distinct, issue-scoped tmp file pair to avoid conflicts."""
     issue = {"number": 7, "title": "T", "body": "B"}
     qa_body = disp._qa_task_body("o/r", issue, "/tmp", "github", coding_agent="claude-code")
     rev_body = disp._reviewer_task_body("o/r", issue, "/tmp", "github",
                                         coding_agent="claude-code")
-    assert "/tmp/qa-task.txt" in qa_body
-    assert "/tmp/rev-task.txt" in rev_body
-    assert "/tmp/qa-task.txt" not in rev_body
+    assert "/tmp/qa-7-task.txt" in qa_body
+    assert "/tmp/qa-7-out.txt" in qa_body
+    assert "/tmp/rev-7-task.txt" in rev_body
+    assert "/tmp/qa-7-task.txt" not in rev_body
+
+
+def test_role_delegation_tmp_file_scoped_by_issue_number():
+    """Concurrent tasks for different issues get isolated /tmp pairs (issue #114)."""
+    issue_a = {"number": 112, "title": "A", "body": "B"}
+    issue_b = {"number": 113, "title": "C", "body": "D"}
+    body_a = disp._qa_task_body("o/r", issue_a, "/tmp", "github", coding_agent="claude-code")
+    body_b = disp._qa_task_body("o/r", issue_b, "/tmp", "github", coding_agent="claude-code")
+    assert "/tmp/qa-112-task.txt" in body_a
+    assert "/tmp/qa-112-out.txt" in body_a
+    assert "/tmp/qa-113-task.txt" in body_b
+    assert "/tmp/qa-113-out.txt" in body_b
+    # Neither issue's files leak into the other's delegation instructions.
+    assert "/tmp/qa-112-task.txt" not in body_b
+    assert "/tmp/qa-113-task.txt" not in body_a
 
 
 # ── _check_team_blockers loop-prevention (issue #87) ─────────────────────────

@@ -10,13 +10,13 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 1. Read the task body from your kanban card using `kanban_show`.
 2. Save it to a temp file:
    ```
-   write_file("/tmp/validator-task.txt", "<full task body>")
+   write_file("/tmp/validator-<issue_number>-task.txt", "<full task body>")
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("cat /tmp/validator-task.txt | <command from delegation block> > /tmp/validator-out.txt 2>&1", background=True)
+   terminal("cat /tmp/validator-<issue_number>-task.txt | <command from delegation block> > /tmp/validator-<issue_number>-out.txt 2>&1", background=True)
    ```
-4. Wait for it to finish: `terminal("cat /tmp/validator-out.txt")`
+4. Wait for it to finish: `terminal("cat /tmp/validator-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the validation report to GitHub and printed a verdict like `CONFIRMED: <reason>` or `ALREADY_FIXED: <reason>`.
 6. Complete YOUR kanban card with: `<verdict line from the output>`
 7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`

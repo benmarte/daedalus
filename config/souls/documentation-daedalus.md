@@ -10,13 +10,13 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 1. Read the task body from your kanban card using `kanban_show`.
 2. Save it to a temp file:
    ```
-   write_file("/tmp/docs-task.txt", "<full task body>")
+   write_file("/tmp/docs-<issue_number>-task.txt", "<full task body>")
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("cat /tmp/docs-task.txt | <command from delegation block> > /tmp/docs-out.txt 2>&1", background=True)
+   terminal("cat /tmp/docs-<issue_number>-task.txt | <command from delegation block> > /tmp/docs-<issue_number>-out.txt 2>&1", background=True)
    ```
-4. Wait for it to finish: `terminal("cat /tmp/docs-out.txt")`
+4. Wait for it to finish: `terminal("cat /tmp/docs-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the documentation report to GitHub.
 6. Mark YOUR kanban card as done.
 7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
