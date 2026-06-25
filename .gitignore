@@ -34,13 +34,8 @@ dashboard/dist/*.map
 *.swo
 *~
 
-# ── Hermes runtime state (project-local) ─────────────────────────────────────
-# daedalus.yaml IS tracked — it is shared project config (repo, VCS, cron settings).
-# Only ignore generated runtime artefacts that are instance-specific.
-.hermes/*_state.json
-.hermes/*-fix-attempts.json
-.hermes/tmp_*
-.hermes/post_spec_comment.py
+# ── Hermes state ─────────────────────────────────────────────────────────────
+.hermes/
 
 # ── Tooling artifacts ────────────────────────────────────────────────────────
 .playwright-mcp/
