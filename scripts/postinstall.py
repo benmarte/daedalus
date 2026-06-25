@@ -143,39 +143,6 @@ def _install_webhook_handler() -> tuple[bool, str]:
         return False, f"FAIL: could not install webhook handler at {target}: {exc}"
 
 
-# ── python dependencies ──────────────────────────────────────────────────────
-
-
-def _install_requirements() -> tuple[bool, str]:
-    """Install Python deps from requirements.txt via pip (idempotent).
-
-    The plugin's only third-party import is httpx (core/providers/http.py).
-    Fresh installs may not expose it to the interpreter that runs the
-    dispatcher, causing ModuleNotFoundError at dispatch time (issue #75).
-    requirements.txt lives at the repo root (one level up from scripts/).
-    Missing file is a benign no-op; pip already-satisfied is a fast success.
-    """
-    req = Path(__file__).resolve().parent.parent / "requirements.txt"
-    if not req.is_file():
-        return True, f"OK: no requirements.txt at {req} (nothing to install)"
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", str(req)],
-            capture_output=True, text=True, timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "FAIL: pip install -r requirements.txt timed out after 120s"
-    except Exception as exc:
-        return False, f"FAIL: pip install crashed: {exc}"
-    if result.returncode == 0:
-        return True, f"OK: Python dependencies installed from {req}"
-    detail = (result.stderr or result.stdout or "").strip()[:200]
-    return False, (
-        f"FAIL: pip install -r requirements.txt failed:\n  {detail}\n"
-        f"  Manual fix: {sys.executable} -m pip install -r {req}"
-    )
-
-
 # ── provision ────────────────────────────────────────────────────────────────
 
 def _run_provision(script_dir: Path) -> tuple[bool, str]:
@@ -239,13 +206,6 @@ def main(check_only: bool = False) -> int:
 
     if not all_ok:
         print("\u2717 Prerequisites NOT met. Fix the issues above and re-run.")
-        return 1
-
-    # Install Python dependencies (httpx) so the dispatcher can import them.
-    ok, msg = _install_requirements()
-    print(msg)
-    print()
-    if not ok:
         return 1
 
     # Install the cron wrapper script (idempotent, non-fatal)
