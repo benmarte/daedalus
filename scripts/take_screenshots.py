@@ -153,7 +153,8 @@ async def setup_clean_state():
     print("  Clean state ready\n")
 
 
-async def restore_state(created_project_name, board_slug, original_board):
+async def restore_state(created_project_name, board_slug, original_board,
+                        pre_test_cron_ids: set | None = None):
     print("\n── Restoring state ─────────────────────────────────────────────")
 
     if created_project_name:
@@ -166,8 +167,12 @@ async def restore_state(created_project_name, board_slug, original_board):
                 current_id = parts[0]
             if line.strip().startswith("Name:") and cron_name.lower() in line.lower():
                 if current_id:
-                    run(["hermes", "cron", "delete", current_id])
-                    print(f"  Deleted cron job {current_id} ({cron_name})")
+                    # Only delete crons that didn't exist before the test ran.
+                    if pre_test_cron_ids is None or current_id not in pre_test_cron_ids:
+                        run(["hermes", "cron", "delete", current_id])
+                        print(f"  Deleted cron job {current_id} ({cron_name})")
+                    else:
+                        print(f"  Kept pre-existing cron job {current_id} ({cron_name})")
                     current_id = None
 
         if board_slug:
@@ -203,6 +208,14 @@ async def main():
     # Save the currently active kanban board so we can restore it
     r = run(["hermes", "kanban", "boards", "current"])
     original_board = r.stdout.strip() if r.returncode == 0 else "default"
+
+    # Snapshot existing cron IDs so restore_state only removes crons it creates.
+    pre_test_cron_ids: set = set()
+    r_cron = run(["hermes", "cron", "list"])
+    for line in r_cron.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[1].startswith("[") and len(parts[0]) == 12:
+            pre_test_cron_ids.add(parts[0])
 
     await setup_clean_state()
 
@@ -413,7 +426,7 @@ async def main():
             await browser.close()
 
     finally:
-        await restore_state(created_project_name, board_slug, original_board)
+        await restore_state(created_project_name, board_slug, original_board, pre_test_cron_ids)
 
 
 if __name__ == "__main__":
