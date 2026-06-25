@@ -44,6 +44,11 @@ flowchart TD
 
 ---
 
+> **New here?** The step-by-step setup guide with live screenshots is in
+> [`docs/INSTALLATION_GUIDE.md`](docs/INSTALLATION_GUIDE.md).
+
+---
+
 ## Table of contents
 
 - [Why this exists](#why-this-exists-read-this-part)
@@ -408,7 +413,8 @@ execution:
    `autonomous-ai-agents/claude-code` for `claude-code`, `…/codex` for `codex`,
    `…/opencode` for `opencode`. The role doesn't need to call `skill_view()` itself.
 3. The role's **local Hermes LLM** loads that skill, writes the task body to a temp file,
-   and **pipes it to the coding agent** via `terminal(..., background=True)`.
+   and **pipes it to the coding agent** via `nohup bash -c '...' &` (fully daemonized so
+   the spawned agent survives the Hermes session exit).
 4. The coding agent does the work (writes code, opens the PR), and its output is **relayed
    back as the role's completion signal** so the pipeline advances to the next phase.
 

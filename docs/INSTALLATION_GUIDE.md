@@ -347,8 +347,9 @@ execution:
 **How it works:** when `coding_agent` resolves to a CLI agent, the dispatcher injects a
 `⚠️ AGENT DELEGATION` block into the role's task body and auto-attaches the matching
 `autonomous-ai-agents/<agent>` skill. The role's local Hermes LLM loads that skill, writes
-the task to a temp file, pipes it to the coding agent via `terminal(background=True)`, and
-relays the agent's output back as its completion signal so the pipeline advances.
+the task to a temp file, pipes it to the coding agent via `nohup bash -c '...' &` (fully
+daemonized so it survives the Hermes session exit), and relays the agent's output back as
+its completion signal so the pipeline advances.
 
 **Per-role override:** `execution.profiles.<role>.agent` takes precedence over the global
 `coding_agent`, so you can mix delegated and local roles:
