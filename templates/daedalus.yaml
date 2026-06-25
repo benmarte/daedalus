@@ -76,7 +76,7 @@ sources:
 
 # ── Cron + Notifications ──────────────────────────────────────────────────────
 cron:
-  schedule: "0 * * * *"                 # How often daedalus polls — crontab syntax preferred (Repeat: ∞)
+  schedule: "*/5 * * * *"               # How often daedalus polls — crontab syntax preferred (Repeat: ∞)
   deliver: ""                           # Legacy single target: slack:C123, discord:1234567890123456789, …
 
   # Multi-target notifications (takes precedence over `deliver` when set).
