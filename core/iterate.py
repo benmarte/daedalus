@@ -185,6 +185,14 @@ def classify_blocked(
             return PM_ROUTE
         return PENDING_CI
 
+    # ── validator-daedalus card ───────────────────────────────────────────
+    # Validators should only ever complete (CONFIRMED/BLOCKED/ALREADY_FIXED).
+    # If one is blocked with awaiting-pr the delegated CC agent used the
+    # developer protocol by mistake — escalate so a human can manually
+    # complete it with the correct verdict.
+    if assignee == "validator-daedalus":
+        return ESCALATE
+
     # ── unknown assignee ─────────────────────────────────────────────────
     return ""
 
