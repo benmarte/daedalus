@@ -2216,6 +2216,8 @@ def _check_team_blockers(
             continue  # security escalation — not a PM blocker
         if summary.startswith("review-required:"):
             continue  # PR in review or awaiting-pr — iterate handles this, PM can't unblock it
+        if summary.startswith("a11y-skipped:"):
+            continue  # accessibility skipped (no UI changes) — not a real blocker
         m = re.search(r"#(\d+)", card.get("title") or "")
         if not m:
             continue
