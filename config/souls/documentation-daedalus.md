@@ -145,8 +145,8 @@ Keep this **lightweight** — it is bounded by the number of recent PRs, not the
    state_path.write_text(json.dumps({"last_doc_sweep_sha": head}, indent=2))
    ```
 
-### 4. Write and post a completion report to the GitHub issue
-Post a comment on the GitHub **issue** (not the PR) using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl — markdown with backticks breaks shell escaping.
+### 4. Write and post a completion report to the GitHub PR
+Post a comment on the GitHub **PR** (not the issue) using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl — markdown with backticks breaks shell escaping.
 
 ```python
 import os, urllib.request, json
@@ -203,7 +203,7 @@ Expected result: <what should happen>
 <Caveats, known limitations, follow-up issues filed, or "None.">
 """
 req = urllib.request.Request(
-    'https://api.github.com/repos/<org>/<repo>/issues/<number>/comments',
+    'https://api.github.com/repos/<org>/<repo>/issues/<pr_number>/comments',
     data=json.dumps({'body': body}).encode(),
     headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
              'Accept': 'application/vnd.github+json'}, method='POST')
