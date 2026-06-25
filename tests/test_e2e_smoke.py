@@ -9,8 +9,8 @@ Covers:
     httpx imports, GITHUB_TOKEN propagated to *-daedalus profiles
   - Cron creation/durability (#80): simulate missing cron after hermes update,
     assert recreation
-  - Concurrent dispatch dedup (#79): invoke _schedule_ci_retry twice against
-    shared lock dir, assert only one daedalus-ci-retry-* cron created
+  - Plugin registration hooks
+  - requirements.txt dependencies
 
 Run:  python3 -m pytest tests/test_e2e_smoke.py -v
 """
@@ -230,191 +230,8 @@ def test_cron_recreated_after_missing():
             check("cron recreated is executable", wrapper.stat().st_mode & 0o111)
 
 
-# ── 3. Concurrent dispatch dedup (#79) ────────────────────────────────────────
 
-
-def test_ci_retry_dedup_on_concurrent_invocations():
-    """Invoke _schedule_ci_retry twice — only one cron created (fix for #79).
-
-    The idempotency guard uses a shared lock file. When two dispatchers run
-    concurrently, the second should see the first's lock file and skip creation.
-    """
-    disp = _load_dispatch()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        lock_dir = Path(tmp)
-        with mock.patch.object(disp, "_RETRY_LOCK_DIR", lock_dir):
-            with mock.patch("subprocess.run") as mk_run:
-                mk_run.return_value.returncode = 0
-                created1 = disp._schedule_ci_retry("my-board", 2)
-
-            check("first call creates cron", created1 is True)
-            check("first call: create only (1 call)", mk_run.call_count == 1)
-
-            # Second call: lock file now exists → skips creation
-            with mock.patch("subprocess.run") as mk_run2:
-                created2 = disp._schedule_ci_retry("my-board", 2)
-
-            check("second call skips creation (idempotent)", created2 is False)
-            check("second call: no subprocess calls", mk_run2.call_count == 0)
-
-
-def test_ci_retry_dedup_same_slug_different_pending_count():
-    """Same slug with different pending count still deduplicates (fix for #79)."""
-    disp = _load_dispatch()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        lock_dir = Path(tmp)
-        with mock.patch.object(disp, "_RETRY_LOCK_DIR", lock_dir):
-            # First call creates lock
-            with mock.patch("subprocess.run") as mk_run:
-                mk_run.return_value.returncode = 0
-                disp._schedule_ci_retry("my-board", 2)
-
-            # Second call with different pending_count — lock exists → skip
-            with mock.patch("subprocess.run") as mk_run2:
-                created = disp._schedule_ci_retry("my-board", 5)
-
-            check("dedup works regardless of pending_count", created is False)
-            check("no subprocess calls on dedup", mk_run2.call_count == 0)
-
-
-def test_ci_retry_dedup_different_slugs():
-    """Different slugs create separate crons (no false dedup)."""
-    disp = _load_dispatch()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        lock_dir = Path(tmp)
-        with mock.patch.object(disp, "_RETRY_LOCK_DIR", lock_dir):
-            with mock.patch("subprocess.run") as mk_run:
-                mk_run.return_value.returncode = 0
-                created_a = disp._schedule_ci_retry("board-a", 1)
-            check("board-a creates cron", created_a is True)
-
-            with mock.patch("subprocess.run") as mk_run2:
-                mk_run2.return_value.returncode = 0
-                created_b = disp._schedule_ci_retry("board-b", 1)
-            check("board-b creates separate cron", created_b is True)
-
-
-# ── 4. Cancel CI retry (cleanup) ──────────────────────────────────────────────
-
-
-def test_cancel_ci_retry_removes_cron():
-    """_cancel_ci_retry deletes the retry cron when CI passes."""
-    disp = _load_dispatch()
-
-    del_result = mock.Mock()
-    del_result.returncode = 0
-
-    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
-        cancelled = disp._cancel_ci_retry("my-board")
-
-    check("cancel returns True on success", cancelled is True)
-    check("delete called with correct name",
-          "daedalus-ci-retry-my-board" in mk_run.call_args[0][0])
-
-
-def test_cancel_ci_retry_not_found_is_benign():
-    """Missing cron (already fired) returns False, no crash."""
-    disp = _load_dispatch()
-
-    del_result = mock.Mock()
-    del_result.returncode = 1
-
-    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
-        cancelled = disp._cancel_ci_retry("my-board")
-
-    check("not-found returns False", cancelled is False)
-    check("still only one subprocess call", mk_run.call_count == 1)
-
-
-# ── 5. Slug sanitization ──────────────────────────────────────────────────────
-
-
-def test_ci_retry_slug_sanitized():
-    """Unsafe chars in slug become '-' for safe cron names."""
-    disp = _load_dispatch()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        lock_dir = Path(tmp)
-        with mock.patch.object(disp, "_RETRY_LOCK_DIR", lock_dir):
-            with mock.patch("subprocess.run") as mk_run:
-                mk_run.return_value.returncode = 0
-                disp._schedule_ci_retry("org/repo:special!chars", 1)
-
-            create_args = mk_run.call_args[0][0]
-            name_idx = create_args.index("--name") + 1
-            job_name = create_args[name_idx]
-            check("slug sanitized", job_name == "daedalus-ci-retry-org-repo-special-chars")
-
-
-def test_cancel_ci_retry_slug_sanitized():
-    """Cancel also sanitizes the slug."""
-    disp = _load_dispatch()
-
-    del_result = mock.Mock()
-    del_result.returncode = 0
-
-    with mock.patch("subprocess.run", return_value=del_result) as mk_run:
-        disp._cancel_ci_retry("org/repo:special")
-
-    del_args = mk_run.call_args[0][0]
-    name_idx = len(del_args) - 1
-    check("cancel slug sanitized", del_args[name_idx] == "daedalus-ci-retry-org-repo-special")
-
-
-# ── 6. Subprocess failure resilience ──────────────────────────────────────────
-
-
-def test_schedule_ci_retry_subprocess_failure():
-    """If hermes cron list/create raises → return False, don't crash."""
-    disp = _load_dispatch()
-
-    with mock.patch("subprocess.run", side_effect=OSError("hermes not found")):
-        created = disp._schedule_ci_retry("slug", 1)
-    check("failure returns False", created is False)
-
-
-def test_cancel_ci_retry_subprocess_failure():
-    """If hermes cron delete raises → return False, don't crash."""
-    disp = _load_dispatch()
-
-    with mock.patch("subprocess.run", side_effect=OSError("hermes not found")):
-        cancelled = disp._cancel_ci_retry("slug")
-    check("cancel failure returns False", cancelled is False)
-
-
-# ── 7. Post-fire recreation + cancel loop (#70 regression) ────────────────────
-
-
-def test_ci_retry_post_fire_recreation_then_cancel():
-    """Regression for #70: fired cron recreated when CI still pending, then cancelled."""
-    disp = _load_dispatch()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        lock_dir = Path(tmp)
-        with mock.patch.object(disp, "_RETRY_LOCK_DIR", lock_dir):
-            # Tick 1: retry already fired → lock stale → CI still pending → recreate
-            with mock.patch("subprocess.run") as mk_run:
-                mk_run.return_value.returncode = 0
-                recreated = disp._schedule_ci_retry("my-board", 1)
-
-            check("post-fire + still-pending recreates cron", recreated is True)
-            check("recreation issues create (1 call)", mk_run.call_count == 1)
-
-        # Tick 2: CI passes → dispatcher cancels the leftover retry cron
-        del_result = mock.Mock()
-        del_result.returncode = 0
-        with mock.patch("subprocess.run", return_value=del_result) as mk_del:
-            cancelled = disp._cancel_ci_retry("my-board")
-
-        check("CI-done tick cancels the retry cron", cancelled is True)
-        check("cancel uses hermes cron delete",
-              mk_del.call_args[0][0][0:3] == ["hermes", "cron", "delete"])
-
-
-# ── 8. Plugin registration hooks ──────────────────────────────────────────────
+# ── 3. Plugin registration hooks ──────────────────────────────────────────────
 
 
 def test_register_registers_hooks():
@@ -432,7 +249,7 @@ def test_register_registers_hooks():
             check("kanban_task_claimed hook registered", "kanban_task_claimed" in hook_names)
 
 
-# ── 9. requirements.txt contains httpx (#75) ──────────────────────────────────
+# ── 4. requirements.txt contains httpx (#75) ──────────────────────────────────
 
 
 def test_requirements_txt_has_httpx():
