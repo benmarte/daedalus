@@ -148,6 +148,17 @@ def list_blocked(slug: str) -> List[dict]:
         return []
 
 
+def get_latest_summary(slug: str, task_id: str) -> str:
+    """Return the latest_summary for a task (from show --json), or empty string."""
+    rc, out, _ = _hk(["--board", slug, "show", task_id, "--json"])
+    if rc != 0 or not out:
+        return ""
+    try:
+        return json.loads(out).get("latest_summary") or ""
+    except Exception:
+        return ""
+
+
 def review_handoff_pr(slug: str, task_id: str) -> Optional[int]:
     """If task_id is a 'review-required' handoff, return the PR number it opened.
 

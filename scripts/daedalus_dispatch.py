@@ -2283,7 +2283,8 @@ def _check_team_blockers(
         assignee = (card.get("assignee") or "").strip()
         if assignee in pipeline_profiles:
             continue  # validator/PM blocks handled elsewhere
-        summary = (card.get("summary") or card.get("last_summary") or "").lower()
+        # list --json never populates summary/last_summary; fetch it via show --json
+        summary = kanban.get_latest_summary(slug, card["id"]).lower()
         if summary.startswith("escalate:"):
             continue  # security escalation — not a PM blocker
         if summary.startswith("review-required:"):
@@ -2298,7 +2299,7 @@ def _check_team_blockers(
         if not issue:
             logger.debug("dispatch: team blocked #%s but issue not in current scope", n)
             continue
-        blocker_raw = card.get("summary") or card.get("last_summary") or "no details provided"
+        blocker_raw = summary or "no details provided"
         if dry_run:
             logger.info("[dry-run] team blocked #%s — would create PM consultation task", n)
             triggered.append(n)

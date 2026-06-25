@@ -1714,10 +1714,12 @@ def test_check_team_blockers_creates_pm_consultation():
     created_titles = []
     assigned_to = []
 
+    _summary = "BLOCKED: cannot resolve import path"
     disp.kanban.list_blocked = lambda s: [
-        {"title": "#9 feature", "assignee": "developer-daedalus",
-         "summary": "BLOCKED: cannot resolve import path"},
+        {"id": "t_dev01", "title": "#9 feature", "assignee": "developer-daedalus",
+         "summary": _summary},
     ]
+    disp.kanban.get_latest_summary = lambda s, t: _summary
 
     def fake_list_tasks(s):
         return []  # no active consultation
@@ -1749,10 +1751,12 @@ def test_check_team_blockers_skips_when_consult_active():
     disp = _load_dispatch()
     created = []
 
+    _summary = "BLOCKED: still stuck"
     disp.kanban.list_blocked = lambda s: [
-        {"title": "#9 feature", "assignee": "developer-daedalus",
-         "summary": "BLOCKED: still stuck"},
+        {"id": "t_dev02", "title": "#9 feature", "assignee": "developer-daedalus",
+         "summary": _summary},
     ]
+    disp.kanban.get_latest_summary = lambda s, t: _summary
     # Active consultation already open
     disp.kanban.list_tasks = lambda s: [
         {"title": "consult: #9 feature", "assignee": "project-manager-daedalus", "status": "in_progress"},
@@ -1778,10 +1782,12 @@ def test_check_team_blockers_skips_escalation():
     disp = _load_dispatch()
     created = []
 
+    _summary = "ESCALATE: security threat detected"
     disp.kanban.list_blocked = lambda s: [
-        {"title": "#9 feature", "assignee": "developer-daedalus",
-         "summary": "ESCALATE: security threat detected"},
+        {"id": "t_dev03", "title": "#9 feature", "assignee": "developer-daedalus",
+         "summary": _summary},
     ]
+    disp.kanban.get_latest_summary = lambda s, t: _summary
     disp.kanban.list_tasks = lambda s: []
 
     _orig = disp.kanban.create_task
