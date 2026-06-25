@@ -13,6 +13,7 @@ Entrypoints (scripts/, dashboard/plugin_api.py) set up their own path locally.
 import logging
 import os
 import subprocess
+import sys
 import threading
 
 logger = logging.getLogger(__name__)
@@ -204,6 +205,42 @@ def _ensure_cron_wrapper() -> None:
         logger.debug("daedalus: cron wrapper install failed", exc_info=True)
 
 
+def _ensure_dependencies() -> None:
+    """Self-heal missing third-party deps (httpx) on every plugin load.
+
+    ``core/providers/http.py`` imports ``httpx`` — the plugin's only
+    third-party dependency. On a fresh OS, or a machine where the Hermes venv
+    doesn't expose ``httpx`` to the interpreter running the dispatcher, the
+    import fails at dispatch time with ``ModuleNotFoundError`` (issue #75).
+
+    We check for ``httpx`` cheaply with ``importlib.util.find_spec`` first: in
+    the common case it's already importable and we return immediately, adding
+    zero pip overhead to the hot plugin-load path. Only when it's genuinely
+    missing do we ``pip install`` ``requirements.txt``. Failures are logged at
+    DEBUG, never raised — registration must never break on a dependency hiccup.
+    """
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("httpx") is not None:
+            return
+
+        req = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "requirements.txt"
+        )
+        if not os.path.isfile(req):
+            return
+
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "-r", req],
+            check=False,
+            capture_output=True,
+            timeout=120,
+        )
+    except Exception:
+        logger.debug("daedalus: dependency install failed", exc_info=True)
+
+
 def register(ctx) -> None:
     """Hermes plugin entry point — import-safe, never raises.
 
@@ -214,11 +251,13 @@ def register(ctx) -> None:
     and a kanban_task_claimed hook to keep daedalus profile model configs
     in sync with the global Hermes model selection.
 
-    Finally, it (re)installs the daedalus-cron.sh wrapper on every load so
-    fresh installs and post-update environments always have the script the
-    dispatcher cron job invokes — Hermes provides no post-install hook — and
-    syncs GITHUB_TOKEN from ~/.hermes/.env into any *-daedalus profile .env
-    that lacks it, so profiles provisioned before the token was set still work.
+    Finally, it self-heals the host environment on every load: installs the
+    httpx dependency if it's missing (Hermes provides no post-install hook —
+    issue #75), (re)installs the daedalus-cron.sh wrapper so fresh installs and
+    post-update environments always have the script the dispatcher cron job
+    invokes, and syncs GITHUB_TOKEN from ~/.hermes/.env into any *-daedalus
+    profile .env that lacks it, so profiles provisioned before the token was
+    set still work.
     """
     try:
         ctx.register_auxiliary_task(
@@ -233,5 +272,6 @@ def register(ctx) -> None:
         logger.debug("daedalus register() failed", exc_info=True)
 
     # Idempotent — each runs in its own try/except so it never blocks registration.
+    _ensure_dependencies()
     _ensure_cron_wrapper()
     _sync_github_token()
