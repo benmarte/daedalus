@@ -40,3 +40,6 @@ dashboard/dist/*.map
 # ── Tooling artifacts ────────────────────────────────────────────────────────
 .playwright-mcp/
 .claude/
+
+# ── Local runtime state ──────────────────────────────────────────────────────
+kanban.db
