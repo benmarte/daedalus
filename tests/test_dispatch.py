@@ -1008,14 +1008,52 @@ def test_local_agent_roles_have_no_delegation():
 
 
 def test_role_delegation_uses_role_specific_tmp_file():
-    """Each role uses a distinct tmp file prefix to avoid conflicts."""
+    """Each role uses a distinct, issue-scoped tmp file pair to avoid conflicts."""
     issue = {"number": 7, "title": "T", "body": "B"}
     qa_body = disp._qa_task_body("o/r", issue, "/tmp", "github", coding_agent="claude-code")
     rev_body = disp._reviewer_task_body("o/r", issue, "/tmp", "github",
                                         coding_agent="claude-code")
-    assert "/tmp/qa-task.txt" in qa_body
-    assert "/tmp/rev-task.txt" in rev_body
-    assert "/tmp/qa-task.txt" not in rev_body
+    assert "/tmp/qa-7-task.txt" in qa_body
+    assert "/tmp/qa-7-out.txt" in qa_body
+    assert "/tmp/rev-7-task.txt" in rev_body
+    assert "/tmp/qa-7-task.txt" not in rev_body
+
+
+def test_role_delegation_tmp_file_scoped_by_issue_number():
+    """Concurrent tasks for different issues get isolated /tmp pairs (issue #114)."""
+    issue_a = {"number": 112, "title": "A", "body": "B"}
+    issue_b = {"number": 113, "title": "C", "body": "D"}
+    body_a = disp._qa_task_body("o/r", issue_a, "/tmp", "github", coding_agent="claude-code")
+    body_b = disp._qa_task_body("o/r", issue_b, "/tmp", "github", coding_agent="claude-code")
+    assert "/tmp/qa-112-task.txt" in body_a
+    assert "/tmp/qa-112-out.txt" in body_a
+    assert "/tmp/qa-113-task.txt" in body_b
+    assert "/tmp/qa-113-out.txt" in body_b
+    # Neither issue's files leak into the other's delegation instructions.
+    assert "/tmp/qa-112-task.txt" not in body_b
+    assert "/tmp/qa-113-task.txt" not in body_a
+
+
+def test_role_tmp_prefix_has_explicit_accessibility_and_planner():
+    """a11y/planner entries are explicit, not falling through to get(role, role) (issue #114)."""
+    assert disp._ROLE_TMP_PREFIX["accessibility"] == "a11y"
+    assert disp._ROLE_TMP_PREFIX["planner"] == "planner"
+
+
+def test_role_delegation_wait_command_is_issue_scoped():
+    """The _ROLE_AFTER_SPAWN wait command also embeds the issue number (issue #114)."""
+    issue = {"number": 42, "title": "T", "body": "B"}
+    # developer uses an `until [ -s ... ]` poll loop; assert both refs are scoped.
+    dev_body = disp._dev_task_body("o/r", issue, 1, "/tmp", "main", "github",
+                                   coding_agent="claude-code")
+    assert "until [ -s /tmp/dev-42-out.txt ]" in dev_body
+    assert "cat /tmp/dev-42-out.txt" in dev_body
+    assert "/tmp/dev-out.txt" not in dev_body
+    # validator uses a plain `cat` wait; confirm it is scoped too.
+    val_body = disp._validator_body("o/r", issue, "/tmp", "main", "github",
+                                    coding_agent="claude-code")
+    assert "cat /tmp/validator-42-out.txt" in val_body
+    assert "/tmp/validator-out.txt" not in val_body
 
 
 # ── _check_team_blockers loop-prevention (issue #87) ─────────────────────────
