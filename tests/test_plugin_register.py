@@ -5,6 +5,7 @@ Run:  pytest tests/test_plugin_register.py -v
 
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -284,7 +285,200 @@ def test_read_env_value_strips_quotes_and_export(isolate_home):
     assert mod._read_env_value(str(env), "GITHUB_TOKEN") == "ghp_quoted"
 
 
-# ── 2d. httpx dependency self-heal (issue #75) ───────────────────────────────
+# ── 2d. dispatch cron self-heal (issue #80) ──────────────────────────────────
+
+class _FakeCron:
+    """Fake ``subprocess.run`` for ``hermes cron`` calls.
+
+    Returns a configurable ``cron list --all`` listing and records every
+    ``cron create`` command so tests can assert what was (re)created.
+    """
+
+    def __init__(self, existing_names=(), list_rc=0, create_rc=0, raise_on=None):
+        # `cron list --all` output is parsed for `Name: <cron>` lines only.
+        self.list_output = "".join(f"  Name: {n}\n" for n in existing_names)
+        self.list_rc = list_rc
+        self.create_rc = create_rc
+        self.raise_on = raise_on  # optional callable(cmd) -> bool
+        self.creates: list[list[str]] = []
+
+    def __call__(self, cmd, *args, **kwargs):
+        if self.raise_on and self.raise_on(cmd):
+            raise OSError("boom")
+        if cmd[:4] == ["hermes", "cron", "list", "--all"]:
+            return subprocess.CompletedProcess(cmd, self.list_rc, self.list_output, "")
+        if cmd[:3] == ["hermes", "cron", "create"]:
+            self.creates.append(cmd)
+            return subprocess.CompletedProcess(cmd, self.create_rc, "created", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+def _register_repo(home, repo_name, cfg):
+    """Scaffold ``<home>/<repo_name>/.hermes/daedalus.yaml`` from *cfg* and add
+    the repo to the default daedalus registry. Returns the repo path."""
+    repo = home / repo_name
+    (repo / ".hermes").mkdir(parents=True, exist_ok=True)
+    (repo / ".hermes" / "daedalus.yaml").write_text(yaml.safe_dump(cfg))
+    reg = home / ".hermes" / "daedalus" / "projects"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    with open(reg, "a") as fh:
+        fh.write(str(repo) + "\n")
+    return repo
+
+
+def test_ensure_dispatch_crons_recreates_missing(isolate_home):
+    """A registered project with no live cron gets its job recreated."""
+    mod = _load_package()
+    _register_repo(isolate_home, "alpha", {"name": "alpha", "cron": {"schedule": "every 30m"}})
+    fake = _FakeCron(existing_names=())  # nothing exists yet
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    assert len(fake.creates) == 1, "expected exactly one cron create"
+    cmd = fake.creates[0]
+    assert cmd[:3] == ["hermes", "cron", "create"]
+    assert "every 30m" in cmd
+    assert "--name" in cmd and "alpha-daedalus" in cmd
+    assert "--script" in cmd and "daedalus-cron.sh" in cmd
+    assert "--no-agent" in cmd
+
+
+def test_ensure_dispatch_crons_idempotent_when_present(isolate_home):
+    """An existing ``<name>-daedalus`` job is left untouched (no duplicate)."""
+    mod = _load_package()
+    _register_repo(isolate_home, "beta", {"name": "beta", "cron": {"schedule": "every 60m"}})
+    fake = _FakeCron(existing_names=("beta-daedalus",))
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    assert fake.creates == [], "must not recreate an already-present cron"
+
+
+def test_ensure_dispatch_crons_skips_disabled_empty_schedule(isolate_home):
+    """An explicit empty schedule means 'disabled' — never resurrected."""
+    mod = _load_package()
+    _register_repo(isolate_home, "gamma", {"name": "gamma", "cron": {"schedule": ""}})
+    fake = _FakeCron(existing_names=())
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    assert fake.creates == [], "empty schedule must not be recreated"
+
+
+def test_ensure_dispatch_crons_falls_back_to_template_schedule(isolate_home):
+    """A config omitting cron.schedule uses the packaged template default."""
+    mod = _load_package()
+    _register_repo(isolate_home, "delta", {"name": "delta"})  # no cron key at all
+    fake = _FakeCron(existing_names=())
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    assert len(fake.creates) == 1
+    # Template default is "every 60m" (templates/daedalus.yaml).
+    assert "every 60m" in fake.creates[0]
+
+
+def test_ensure_dispatch_crons_passes_deliver(isolate_home):
+    """A non-empty deliver (and no notifications) is forwarded as --deliver."""
+    mod = _load_package()
+    _register_repo(isolate_home, "epsilon", {
+        "name": "epsilon",
+        "cron": {"schedule": "every 15m", "deliver": "slack:C123"},
+    })
+    fake = _FakeCron(existing_names=())
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    cmd = fake.creates[0]
+    assert "--deliver" in cmd and "slack:C123" in cmd
+
+
+def test_ensure_dispatch_crons_omits_deliver_with_notifications(isolate_home):
+    """When notifications[] is set the cron must NOT double-deliver via --deliver."""
+    mod = _load_package()
+    _register_repo(isolate_home, "zeta", {
+        "name": "zeta",
+        "cron": {
+            "schedule": "every 15m",
+            "deliver": "slack:C123",
+            "notifications": [{"target": "slack:C999"}],
+        },
+    })
+    fake = _FakeCron(existing_names=())
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    assert "--deliver" not in fake.creates[0]
+
+
+def test_ensure_dispatch_crons_noop_without_registry(isolate_home):
+    """No registry file → no cron calls at all, and no crash."""
+    mod = _load_package()
+    fake = _FakeCron(existing_names=())
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()  # must not raise
+
+    assert fake.creates == []
+
+
+def test_ensure_dispatch_crons_bails_when_list_fails(isolate_home):
+    """If `cron list` fails we can't tell what's missing — create nothing."""
+    mod = _load_package()
+    _register_repo(isolate_home, "eta", {"name": "eta", "cron": {"schedule": "every 60m"}})
+    fake = _FakeCron(existing_names=(), list_rc=1)
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    assert fake.creates == [], "must not create when the cron list is unavailable"
+
+
+def test_ensure_dispatch_crons_never_raises_on_subprocess_error(isolate_home):
+    """A subprocess that raises must be swallowed — registration never breaks."""
+    mod = _load_package()
+    _register_repo(isolate_home, "theta", {"name": "theta", "cron": {"schedule": "every 60m"}})
+    fake = _FakeCron(raise_on=lambda cmd: True)
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()  # must not raise
+
+
+def test_ensure_dispatch_crons_heals_only_missing_of_many(isolate_home):
+    """With several projects, only the ones lacking a live cron are recreated."""
+    mod = _load_package()
+    _register_repo(isolate_home, "p1", {"name": "p1", "cron": {"schedule": "every 60m"}})
+    _register_repo(isolate_home, "p2", {"name": "p2", "cron": {"schedule": "every 60m"}})
+    _register_repo(isolate_home, "p3", {"name": "p3", "cron": {"schedule": "every 60m"}})
+    fake = _FakeCron(existing_names=("p2-daedalus",))  # only p2 is alive
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    created_names = {c[c.index("--name") + 1] for c in fake.creates}
+    assert created_names == {"p1-daedalus", "p3-daedalus"}
+
+
+def test_register_runs_ensure_dispatch_crons(isolate_home):
+    """register() self-heals missing dispatch crons as part of plugin load."""
+    mod = _load_package()
+    _register_repo(isolate_home, "iota", {"name": "iota", "cron": {"schedule": "every 60m"}})
+    fake = _FakeCron(existing_names=())
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod.register(FakeCtx())
+
+    assert any("iota-daedalus" in c for c in fake.creates), \
+        "register() did not recreate the missing dispatch cron"
+
+
+# ── 2e. httpx dependency self-heal (issue #75) ───────────────────────────────
 
 
 def test_ensure_dependencies_noop_when_httpx_present(isolate_home, monkeypatch):
