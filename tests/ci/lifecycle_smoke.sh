@@ -169,4 +169,22 @@ echo "$REOUT"
 [ "$RC" -eq 0 ] && pass "reinstall dispatch --dry-run exit 0" || fail "reinstall dispatch exit $RC"
 assert_contains "$REOUT" "DRY RUN"
 
-printf '\n\033[1;32m✓ Plugin lifecycle smoke test passed — all 5 stages green.\033[0m\n'
+# ══════════════════════════════════════════════════════════════════════════════
+stage "Stage 6 — Spec-to-disk (PM soul behavior)"
+echo "→ simulate PM agent writing spec for issue #99"
+SPEC_DIR="$SAMPLE/.hermes/specs"
+mkdir -p "$SPEC_DIR"
+echo "## Spec — Issue #99: e2e lifecycle test spec" > "$SPEC_DIR/issue-99.md"
+assert_file "$SPEC_DIR/issue-99.md"
+grep -q "e2e lifecycle test spec" "$SPEC_DIR/issue-99.md" && pass "spec content correct" || fail "spec content mismatch"
+
+echo "→ spec file must survive plugin reload (register must not delete .hermes/specs)"
+run_register
+assert_file "$SPEC_DIR/issue-99.md"
+pass "spec file persists across plugin reload"
+
+echo "→ idempotent overwrite: second write wins"
+echo "## Updated spec content" > "$SPEC_DIR/issue-99.md"
+grep -q "Updated spec content" "$SPEC_DIR/issue-99.md" && pass "spec overwrite idempotent" || fail "spec overwrite failed"
+
+printf '\n\033[1;32m✓ Plugin lifecycle smoke test passed — all 6 stages green.\033[0m\n'

@@ -70,13 +70,14 @@ def test_driver_and_stub_executable() -> None:
         assert mode & stat.S_IXUSR, f"not executable: {path} (chmod +x)"
 
 
-def test_driver_covers_all_five_stages() -> None:
+def test_driver_covers_all_six_stages() -> None:
     body = _driver.read_text()
-    for stage in ("Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5"):
+    for stage in ("Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5", "Stage 6"):
         assert stage in body, f"driver missing {stage}"
     # The regression each upgrade/uninstall stage guards must stay wired up.
     assert "--dry-run" in body, "dispatch smoke must use --dry-run"
     assert "ci-sample-daedalus" in body, "upgrade stage must assert cron self-heal (#80)"
+    assert ".hermes/specs" in body, "Stage 6 must verify spec-to-disk behavior"
 
 
 def test_self_test_guard_has_pytest_installed() -> None:

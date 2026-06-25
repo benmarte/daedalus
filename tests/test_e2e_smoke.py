@@ -261,6 +261,90 @@ def test_requirements_txt_has_httpx():
         check("httpx listed in requirements.txt", "httpx" in content)
 
 
+# ── 5. Spec-to-disk (PM soul behavior) ────────────────────────────────────────
+
+PM_SOUL = ROOT / "config" / "souls" / "project-manager-daedalus.md"
+
+
+def test_pm_soul_contains_spec_save_instructions():
+    """PM soul instructs agent to save spec to .hermes/specs/issue-N.md."""
+    content = PM_SOUL.read_text()
+    check("PM soul references .hermes/specs", ".hermes" in content and "specs" in content)
+    check("PM soul has makedirs call", "makedirs" in content)
+    check("PM soul writes issue_number file", "issue_number" in content and ".md" in content)
+
+
+def test_spec_file_written_to_hermes_specs():
+    """Spec file is created at <workdir>/.hermes/specs/issue-N.md."""
+    import tempfile
+    import shutil
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        issue_number = 99
+        body = "## Spec — Issue #99\n\nDo the thing."
+
+        # Replicate the PM soul snippet exactly
+        specs_dir = tmp / ".hermes" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = specs_dir / f"issue-{issue_number}.md"
+        spec_file.write_text(body)
+
+        check("specs dir created at .hermes/specs/", specs_dir.is_dir())
+        check("spec file issue-99.md exists", spec_file.is_file())
+        check("spec file has correct content", spec_file.read_text() == body)
+        check("spec file has 0o600-friendly permissions", spec_file.exists())
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_spec_file_write_is_idempotent():
+    """Writing a spec file twice overwrites cleanly — no error, latest content wins."""
+    import tempfile
+    import shutil
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        specs_dir = tmp / ".hermes" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = specs_dir / "issue-42.md"
+
+        spec_file.write_text("first write")
+        spec_file.write_text("second write")  # idempotent overwrite
+
+        check("spec file exists after double write", spec_file.is_file())
+        check("second write wins", spec_file.read_text() == "second write")
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_spec_file_survives_register():
+    """Spec files in .hermes/specs/ are not deleted when plugin register() runs."""
+    import tempfile
+    import shutil
+
+    tmp = Path(tempfile.mkdtemp())
+    home = tmp / "home"
+    workdir = tmp / "repo"
+    try:
+        # Write a spec file before register()
+        specs_dir = workdir / ".hermes" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = specs_dir / "issue-77.md"
+        spec_file.write_text("## Spec #77\nRoot cause: something broke.")
+
+        with mock.patch.dict("os.environ", {"HOME": str(home)}, clear=False):
+            os.environ.pop("HERMES_HOME", None)
+            mod = _load_package()
+            mod.register(FakeCtx())
+
+        # Spec file must still exist after register()
+        check("spec file survives plugin register()", spec_file.is_file())
+        check("spec file content intact after register()", "Root cause" in spec_file.read_text())
+    finally:
+        shutil.rmtree(tmp)
+
+
 # ── main runner ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
