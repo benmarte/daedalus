@@ -138,6 +138,7 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
 _ROLE_TMP_PREFIX: Dict[str, str] = {
     "pm": "pm",
     "developer": "cc",
+    "validator": "validator",
     "qa": "qa",
     "reviewer": "rev",
     "security": "sec",
@@ -149,6 +150,13 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4. Immediately block: kanban_block(\"review-required: awaiting-pr — Claude Code spawned, PR pending\")\n"
         "  5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not poll, do not wait for the PR. Block immediately after spawning.\n"
+    ),
+    "validator": (
+        "  4. Wait: terminal(\"cat /tmp/validator-out.txt\")\n"
+        "  5. The agent will have posted the validation report to GitHub and output its verdict.\n"
+        "  6. Complete your card with the exact verdict line: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block. Output CONFIRMED/BLOCKED as plain text only.\n"
     ),
     "pm": (
         "  4. Wait: terminal(\"cat /tmp/pm-out.txt\")\n"
