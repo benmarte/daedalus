@@ -67,10 +67,6 @@ _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
 _DEFAULT_FORBIDDEN = [".env", "*.pem", "*.key", "*.p12", "*.pfx", ".env.*",
                       "*.secrets", "secrets.*"]
 
-# Shared lock directory for CI retry idempotency (issue #79).
-# All profiles share ~/.hermes/daedalus/ so the lock is visible across profiles.
-_RETRY_LOCK_DIR = Path.home() / ".hermes" / "daedalus"
-
 # Default Hermes profile names for each pipeline role.  Users can override any
 # of these via ``execution.profiles`` in daedalus.yaml.
 _DEFAULT_PROFILES: Dict[str, str] = {
