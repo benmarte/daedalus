@@ -136,7 +136,7 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
 
 _ROLE_TMP_PREFIX: Dict[str, str] = {
     "pm": "pm",
-    "developer": "cc",
+    "developer": "dev",
     "validator": "validator",
     "qa": "qa",
     "reviewer": "rev",
@@ -146,11 +146,11 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
 
 _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "developer": (
-        "  4. Wait for CC to finish: terminal(\"until [ -s /tmp/cc-out.txt ]; do sleep 30; done; cat /tmp/cc-out.txt\")\n"
+        "  4. Wait for coding agent to finish: terminal(\"until [ -s /tmp/dev-out.txt ]; do sleep 30; done; cat /tmp/dev-out.txt\")\n"
         "  5. The agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
         "  6. Block your card: kanban_block(\"review-required: PR #<n> — <branch>\")\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-        "  STOP — do NOT open the PR yourself. Wait for CC output then block with the real PR number.\n"
+        "  STOP — do NOT open the PR yourself. Wait for coding agent output then block with the real PR number.\n"
     ),
     "validator": (
         "  4. Wait: terminal(\"cat /tmp/validator-out.txt\")\n"
