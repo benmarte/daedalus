@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import threading
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
         logger.debug("daedalus kanban_task_claimed sync failed: %s", exc)
 
 
-def _read_env_value(env_path: str, key: str) -> str | None:
+def _read_env_value(env_path: str, key: str) -> Optional[str]:
     """Return the value of ``key`` from a dotenv-style file, or None.
 
     Parses ``KEY=value`` lines (ignoring blanks, comments, and ``export``
