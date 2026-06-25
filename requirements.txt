@@ -1,0 +1,6 @@
+# Daedalus plugin Python dependencies.
+# httpx is the only third-party import (core/providers/http.py). On a fresh
+# install it may not be exposed to the interpreter running the dispatcher,
+# which causes ModuleNotFoundError at dispatch time (issue #75). postinstall.py
+# and __init__.py install this on setup / plugin load so the plugin self-heals.
+httpx>=0.24
