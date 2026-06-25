@@ -280,31 +280,43 @@ def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
     return agent
 
 
+# Shared lock directory for CI retry — visible to all Hermes profiles so that
+# one profile's retry cron suppresses duplicates from other profiles (issue #79).
+_RETRY_LOCK_DIR = Path.home() / ".hermes" / "daedalus"
+# How long a lock is considered "recent" (seconds). After this TTL the lock is
+# stale and a still-pending CI re-arms the retry.
+_RETRY_LOCK_TTL = 600  # 10 minutes
+
+
 def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
     """Schedule a one-shot retry dispatch when CI is still pending.
 
-    Idempotent: if a retry cron named ``daedalus-ci-retry-<slug>`` already
-    exists, it is NOT recreated.
+    Idempotent via a shared lock file under ``_RETRY_LOCK_DIR``.  The lock is
+    visible to every Hermes profile, so a retry scheduled by one profile
+    suppresses duplicates from all others (issue #79).  A stale lock (older
+    than ``_RETRY_LOCK_TTL``) is treated as expired and a new retry is created.
 
     Returns True if a new cron was actually created, False if skipped.
     """
     try:
         slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
         cron_name = f"daedalus-ci-retry-{slug_safe}"
-        existing_jobs = subprocess.run(
-            ["hermes", "cron", "list", "--all"],
-            capture_output=True, text=True, timeout=10,
-        )
-        # If the list command itself fails, bail out rather than spawn a duplicate.
-        if existing_jobs.returncode != 0:
-            logger.warning(
-                "dispatch: could not list cron jobs (rc=%d) — skipping CI retry schedule",
-                existing_jobs.returncode,
+        lock_path = _RETRY_LOCK_DIR / f".ci-retry-{slug_safe}.lock"
+
+        # Check the shared lock file (profile-agnostic).
+        if lock_path.exists():
+            age = time.time() - lock_path.stat().st_mtime
+            if age < _RETRY_LOCK_TTL:
+                logger.debug(
+                    "dispatch: retry lock %s is recent (%.0fs old) — skipping",
+                    lock_path.name, age,
+                )
+                return False
+            logger.debug(
+                "dispatch: retry lock %s is stale (%.0fs old) — re-arming",
+                lock_path.name, age,
             )
-            return False
-        if cron_name in (existing_jobs.stdout or ""):
-            logger.debug("dispatch: retry cron %s already exists — skipping", cron_name)
-            return False
+
         subprocess.run(
             [
                 "hermes", "cron", "create", "3m",
@@ -315,6 +327,9 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
             ],
             capture_output=True, text=True, timeout=10,
         )
+        # Write the shared lock file.
+        _RETRY_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(cron_name)
         logger.info(
             "dispatch: CI pending on %d card(s) — scheduled retry in 3m (%s)",
             pending_count, cron_name,
@@ -327,6 +342,9 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
 
 def _cancel_ci_retry(slug: str) -> bool:
     """Delete the CI-retry cron for ``slug`` once CI is no longer pending.
+
+    Also removes the shared lock file so the next CI-pending tick can
+    re-arm the retry cleanly.
 
     Because ``_schedule_ci_retry`` creates a ``--repeat 1`` cron, the job is
     removed from ``hermes cron list`` the moment it fires. The idempotency
@@ -343,11 +361,14 @@ def _cancel_ci_retry(slug: str) -> bool:
     try:
         slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
         cron_name = f"daedalus-ci-retry-{slug_safe}"
+        lock_path = _RETRY_LOCK_DIR / f".ci-retry-{slug_safe}.lock"
         result = subprocess.run(
             ["hermes", "cron", "delete", cron_name],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
+            # Remove the shared lock file.
+            lock_path.unlink(missing_ok=True)
             logger.info("dispatch: CI done — cancelled retry cron (%s)", cron_name)
             return True
         # Non-zero almost always means "not found" — that's the common, benign
