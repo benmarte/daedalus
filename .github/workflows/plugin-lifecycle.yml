@@ -24,9 +24,11 @@ jobs:
         with:
           python-version: '3.12'
       # Pre-seed deps into the interpreter the lifecycle scripts shell out to as
-      # `python3` (provision_roster.sh parses YAML with bare `python3 -c`).
+      # `python3` (provision_roster.sh parses YAML with bare `python3 -c`). pytest
+      # is test-only (kept out of requirements.txt) but needed by the self-test
+      # guard step below, so install it explicitly here.
       - name: Install plugin runtime deps
-        run: python -m pip install --quiet -r requirements.txt
+        run: python -m pip install --quiet -r requirements.txt pytest
 
       - name: Full plugin lifecycle smoke (5 stages, isolated HERMES_HOME)
         run: bash tests/ci/lifecycle_smoke.sh
