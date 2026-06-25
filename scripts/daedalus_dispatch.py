@@ -221,7 +221,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"cat /tmp/{pfx}-task.txt | {run_cmd} > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-task.txt | {run_cmd} > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "codex":
@@ -232,7 +232,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "opencode":
@@ -243,7 +243,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1\", background=True)\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     return ""
