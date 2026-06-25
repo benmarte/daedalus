@@ -44,6 +44,11 @@ flowchart TD
 
 ---
 
+> **New here?** The step-by-step setup guide with live screenshots is in
+> [`docs/INSTALLATION_GUIDE.md`](docs/INSTALLATION_GUIDE.md).
+
+---
+
 ## Table of contents
 
 - [Why this exists](#why-this-exists-read-this-part)
