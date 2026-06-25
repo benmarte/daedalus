@@ -317,6 +317,10 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
                 lock_path.name, age,
             )
 
+        # Force --profile default so the cron lands in the same bucket regardless
+        # of which role agent (qa-daedalus, accessibility-daedalus, etc.) triggered
+        # the dispatch. Without this, same-named crons from different profiles are
+        # distinct jobs in Hermes and the dedup-by-name guard is bypassed.
         subprocess.run(
             [
                 "hermes", "cron", "create", "3m",
@@ -324,6 +328,7 @@ def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
                 "--no-agent",
                 "--script", "daedalus-cron.sh",
                 "--repeat", "1",
+                "--profile", "default",
             ],
             capture_output=True, text=True, timeout=10,
         )
