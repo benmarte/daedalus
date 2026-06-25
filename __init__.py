@@ -204,34 +204,155 @@ def _ensure_cron_wrapper() -> None:
         logger.debug("daedalus: cron wrapper install failed", exc_info=True)
 
 
-def register(ctx) -> None:
-    """Hermes plugin entry point — import-safe, never raises.
+def _ensure_dispatch_crons() -> None:
+    """Recreate any missing daedalus-<name> dispatch crons from project configs.
 
-    Registers the daedalus dispatcher as an auxiliary LLM task so users
-    can configure its provider/model independently of the main chat model.
-    Also registers an on_session_end hook so any worker completion triggers
-    dispatch immediately instead of waiting for the next 60-min cron tick,
-    and a kanban_task_claimed hook to keep daedalus profile model configs
-    in sync with the global Hermes model selection.
+    ``hermes update`` wipes the global Hermes cron store
+    (``~/.hermes/cron/jobs.json``), which removes the daedalus dispatch cron
+    job.  This function reads every registered project from
+    ``~/.hermes/daedalus/projects``, checks whether its ``<name>-daedalus``
+    cron exists in ``hermes cron list --all``, and recreates it if missing.
 
-    Finally, it (re)installs the daedalus-cron.sh wrapper on every load so
-    fresh installs and post-update environments always have the script the
-    dispatcher cron job invokes — Hermes provides no post-install hook — and
-    syncs GITHUB_TOKEN from ~/.hermes/.env into any *-daedalus profile .env
-    that lacks it, so profiles provisioned before the token was set still work.
+    Runs on every plugin load (called from ``register()``) so the cron is
+    self-healed without user action.  All exceptions are caught and logged at
+    DEBUG — never raises.
     """
     try:
-        ctx.register_auxiliary_task(
-            key="daedalus_dispatch",
-            display_name="Daedalus Dispatch",
-            description="Issue/spec → reviewed-PR: scans GitHub Projects boards and kanban queues, "
-                        "decomposes triage cards, dispatches worker agents.",
-        )
-        ctx.register_hook("on_session_end", _on_session_end)
-        ctx.register_hook("kanban_task_claimed", _on_kanban_task_claimed)
-    except Exception:
-        logger.debug("daedalus register() failed", exc_info=True)
+        from pathlib import Path
+        import yaml
 
-    # Idempotent — each runs in its own try/except so it never blocks registration.
-    _ensure_cron_wrapper()
-    _sync_github_token()
+        registry_file = Path.home() / ".hermes" / "daedalus" / "projects"
+        if not registry_file.exists():
+            return
+
+        result = subprocess.run(
+            ["hermes", "cron", "list", "--all"],
+            capture_output=True, text=True, timeout=10,
+        )
+        existing = result.stdout if result.returncode == 0 else ""
+
+        for repo_path in registry_file.read_text().splitlines():
+            repo_path = repo_path.strip()
+            if not repo_path or repo_path.startswith("#"):
+                continue
+
+            cfg_file = Path(repo_path) / ".hermes" / "daedalus.yaml"
+            if not cfg_file.exists():
+                continue
+
+            cfg = yaml.safe_load(cfg_file.read_text()) or {}
+            name = cfg.get("name", "")
+            schedule = (cfg.get("cron") or {}).get("schedule", "")
+            if not name or not schedule:
+                continue
+
+            cron_name = f"{name}-daedalus"
+            if cron_name not in existing:
+                subprocess.run(
+                    [
+                        "hermes", "cron", "create", schedule,
+                        "--name", cron_name,
+                        "--no-agent",
+                        "--script", "daedalus-cron.sh",
+                    ],
+                    capture_output=True, text=True, timeout=10,
+                )
+                logger.info("daedalus: recreated missing dispatch cron: %s", cron_name)
+    except Exception as exc:
+        logger.debug("daedalus: _ensure_dispatch_crons failed: %s", exc)
+
+
+def register(ctx) -> None:
+    """Hermes plugin entry point — import-safe, never raises.
+    def _ensure_dispatch_crons() -> None:
+        """Recreate any missing daedalus-<name> dispatch crons from project configs.
+
+        After ``hermes update`` the global Hermes cron store (``~/.hermes/cron/``)
+        is wiped/migrated, and the ``daedalus-<name>`` dispatch cron is lost with
+        no auto-recovery (issue #80).  This function runs on every plugin load and
+        recreates any missing dispatch crons.
+
+        For each registered project (from ``core.registry.list_projects()``), it
+        resolves the per-repo config via ``ConfigLoader``, checks whether a cron
+        named ``{name}-daedalus`` already exists via ``hermes cron list --all``,
+        and creates it with ``hermes cron create`` if missing.
+
+        Create-only — existing crons are never modified.  Import-safe — all
+        failures are logged at DEBUG and never raised.
+        """
+        try:
+            from daedalus.core.registry import list_projects
+            from daedalus.config import ConfigLoader
+
+            projects = list_projects()
+            if not projects:
+                return
+
+            result = subprocess.run(
+                ["hermes", "cron", "list", "--all"],
+                capture_output=True, text=True, timeout=10,
+            )
+            existing = result.stdout if result.returncode == 0 else ""
+
+            loader = ConfigLoader()
+            for repo_path in projects:
+                try:
+                    cfg = loader.resolve_repo_config(repo_path)
+                except (FileNotFoundError, RuntimeError):
+                    continue
+
+                name = cfg.get("name", "")
+                schedule = (cfg.get("cron") or {}).get("schedule", "")
+                if not name or not schedule:
+                    continue
+
+                cron_name = f"{name}-daedalus"
+                if cron_name in existing:
+                    continue
+
+                subprocess.run(
+                    ["hermes", "cron", "create", schedule,
+                     "--name", cron_name,
+                     "--no-agent",
+                     "--script", "daedalus-cron.sh"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                logger.info("daedalus: recreated missing dispatch cron: %s", cron_name)
+        except Exception:
+            logger.debug("daedalus: _ensure_dispatch_crons failed", exc_info=True)
+
+
+    def register(ctx) -> None:
+        """Hermes plugin entry point — import-safe, never raises.
+
+        Registers the daedalus dispatcher as an auxiliary LLM task so users
+        can configure its provider/model independently of the main chat model.
+        Also registers an on_session_end hook so any worker completion triggers
+        dispatch immediately instead of waiting for the next 60-min cron tick,
+        and a kanban_task_claimed hook to keep daedalus profile model configs
+        in sync with the global Hermes model selection.
+
+        Finally, it self-heals the host environment on every load: (re)installs
+        the daedalus-cron.sh wrapper so fresh installs and post-update environments
+        always have the script the dispatcher cron job invokes (Hermes provides no
+        post-install hook), syncs GITHUB_TOKEN from ~/.hermes/.env into any
+        *-daedalus profile .env that lacks it, and recreates any missing dispatch
+        crons that were lost after ``hermes update``.
+        """
+        try:
+            ctx.register_auxiliary_task(
+                key="daedalus_dispatch",
+                display_name="Daedalus Dispatch",
+                description="Issue/spec → reviewed-PR: scans GitHub Projects boards and kanban queues, "
+                            "decomposes triage cards, dispatches worker agents.",
+            )
+            ctx.register_hook("on_session_end", _on_session_end)
+            ctx.register_hook("kanban_task_claimed", _on_kanban_task_claimed)
+        except Exception:
+            logger.debug("daedalus register() failed", exc_info=True)
+
+        # Idempotent — each runs in its own try/except so it never blocks registration.
+        _ensure_cron_wrapper()
+        _sync_github_token()
+        _ensure_dispatch_crons()
+    _ensure_dispatch_crons()

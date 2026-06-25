@@ -219,12 +219,12 @@ def test_register_syncs_github_token(isolate_home):
     """register() runs the token sync as part of plugin load."""
     mod = _load_package()
     (isolate_home / ".hermes").mkdir(parents=True, exist_ok=True)
-    (isolate_home / ".hermes" / ".env").write_text("GITHUB_TOKEN=ghp_viaregister\n")
+    (isolate_home / ".hermes" / ".env").write_text("GITHUB_TOKEN=***\n")
     env_file = _make_profile(isolate_home, "validator-daedalus", "")
 
     mod.register(FakeCtx())
 
-    assert "GITHUB_TOKEN=ghp_viaregister" in env_file.read_text()
+    assert "GITHUB_TOKEN=***" in env_file.read_text()
 
 
 def test_sync_github_token_syncs_multiple_profiles_in_one_pass(isolate_home):
@@ -282,6 +282,215 @@ def test_read_env_value_strips_quotes_and_export(isolate_home):
     env.write_text('# comment\nexport GITHUB_TOKEN="ghp_quoted"\n')
 
     assert mod._read_env_value(str(env), "GITHUB_TOKEN") == "ghp_quoted"
+
+
+# ── 2d. Dispatch cron auto-recovery (issue #80) ──────────────────────────────
+
+
+def _make_project(home, name, schedule="60m"):
+    """Create a fake daedalus project with .hermes/daedalus.yaml and return the
+    repo path and the daedalus.yaml path."""
+    repo_path = home / "repos" / name
+    (repo_path / ".hermes").mkdir(parents=True, exist_ok=True)
+    cfg = {
+        "name": name,
+        "cron": {"schedule": schedule},
+    }
+    cfg_file = repo_path / ".hermes" / "daedalus.yaml"
+    cfg_file.write_text(yaml.safe_dump(cfg))
+    return str(repo_path), cfg_file
+
+
+def _make_registry(home, *repo_paths):
+    """Create ~/.hermes/daedalus/projects with the given repo paths."""
+    registry_dir = home / ".hermes" / "daedalus"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    registry_file = registry_dir / "projects"
+    registry_file.write_text("\n".join(repo_paths) + "\n")
+    return registry_file
+
+
+def test_ensure_dispatch_crons_noop_without_registry(isolate_home):
+    """No ~/.hermes/daedalus/projects → no-op, never raises."""
+    mod = _load_package()
+    mod._ensure_dispatch_crons()  # must not raise
+
+
+def test_ensure_dispatch_crons_creates_missing_cron(isolate_home, monkeypatch):
+    """A project whose <name>-daedalus cron is missing gets created."""
+    mod = _load_package()
+    repo_path, _ = _make_project(isolate_home, "daedalus", "60m")
+    _make_registry(isolate_home, repo_path)
+
+    # Mock hermes cron list to show no existing crons.
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["hermes", "cron", "list"]:
+            return mock.Mock(stdout="", returncode=0)
+        if cmd[:3] == ["hermes", "cron", "create"]:
+            return mock.Mock(stdout="", returncode=0)
+        return mock.Mock(stdout="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    mod._ensure_dispatch_crons()
+
+    # Should have called list then create.
+    create_calls = [c for c in calls if c[:3] == ["hermes", "cron", "create"]]
+    assert len(create_calls) == 1
+    assert create_calls[0][3] == "60m"
+    assert "--name" in create_calls[0]
+    assert "daedalus-daedalus" in create_calls[0]
+    assert "--no-agent" in create_calls[0]
+    assert "--script" in create_calls[0]
+    assert "daedalus-cron.sh" in create_calls[0]
+
+
+def test_ensure_dispatch_crons_skips_existing_cron(isolate_home, monkeypatch):
+    """A project whose cron already exists is not recreated."""
+    mod = _load_package()
+    repo_path, _ = _make_project(isolate_home, "daedalus", "60m")
+    _make_registry(isolate_home, repo_path)
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["hermes", "cron", "list"]:
+            return mock.Mock(stdout="daedalus-daedalus", returncode=0)
+        return mock.Mock(stdout="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    mod._ensure_dispatch_crons()
+
+    create_calls = [c for c in calls if c[:3] == ["hermes", "cron", "create"]]
+    assert len(create_calls) == 0
+
+
+def test_ensure_dispatch_crons_skips_project_without_name(isolate_home, monkeypatch):
+    """A project whose daedalus.yaml lacks 'name' is skipped."""
+    mod = _load_package()
+    repo_path = str(isolate_home / "repos" / "unnamed")
+    (Path(repo_path) / ".hermes").mkdir(parents=True, exist_ok=True)
+    cfg_file = Path(repo_path) / ".hermes" / "daedalus.yaml"
+    cfg_file.write_text(yaml.safe_dump({"cron": {"schedule": "60m"}}))
+    _make_registry(isolate_home, repo_path)
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return mock.Mock(stdout="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    mod._ensure_dispatch_crons()
+
+    create_calls = [c for c in calls if c[:3] == ["hermes", "cron", "create"]]
+    assert len(create_calls) == 0
+
+
+def test_ensure_dispatch_crons_skips_project_without_schedule(isolate_home, monkeypatch):
+    """A project whose daedalus.yaml lacks cron.schedule is skipped."""
+    mod = _load_package()
+    repo_path = str(isolate_home / "repos" / "nosched")
+    (Path(repo_path) / ".hermes").mkdir(parents=True, exist_ok=True)
+    cfg_file = Path(repo_path) / ".hermes" / "daedalus.yaml"
+    cfg_file.write_text(yaml.safe_dump({"name": "nosched"}))
+    _make_registry(isolate_home, repo_path)
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return mock.Mock(stdout="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    mod._ensure_dispatch_crons()
+
+    create_calls = [c for c in calls if c[:3] == ["hermes", "cron", "create"]]
+    assert len(create_calls) == 0
+
+
+def test_ensure_dispatch_crons_skips_missing_daedalus_yaml(isolate_home, monkeypatch):
+    """A project without .hermes/daedalus.yaml is skipped."""
+    mod = _load_package()
+    repo_path = str(isolate_home / "repos" / "noconfig")
+    (Path(repo_path) / ".hermes").mkdir(parents=True, exist_ok=True)
+    _make_registry(isolate_home, repo_path)
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return mock.Mock(stdout="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    mod._ensure_dispatch_crons()
+
+    create_calls = [c for c in calls if c[:3] == ["hermes", "cron", "create"]]
+    assert len(create_calls) == 0
+
+
+def test_ensure_dispatch_crons_skips_blank_and_comment_lines(isolate_home, monkeypatch):
+    """Blank lines and comment lines in the registry are ignored."""
+    mod = _load_package()
+    repo_path, _ = _make_project(isolate_home, "daedalus", "60m")
+    registry_dir = isolate_home / ".hermes" / "daedalus"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    registry_file = registry_dir / "projects"
+    registry_file.write_text(f"\n# this is a comment\n\n{repo_path}\n\n")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["hermes", "cron", "list"]:
+            return mock.Mock(stdout="", returncode=0)
+        return mock.Mock(stdout="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    mod._ensure_dispatch_crons()
+
+    create_calls = [c for c in calls if c[:3] == ["hermes", "cron", "create"]]
+    assert len(create_calls) == 1
+
+
+def test_ensure_dispatch_crons_never_raises(isolate_home, monkeypatch):
+    """Any exception is caught and logged, never propagated."""
+    mod = _load_package()
+
+    def fake_run(cmd, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    mod._ensure_dispatch_crons()  # must not raise
+
+
+def test_register_ensures_dispatch_crons(isolate_home, monkeypatch):
+    """register() calls _ensure_dispatch_crons as part of plugin load."""
+    mod = _load_package()
+    (isolate_home / ".hermes").mkdir(parents=True, exist_ok=True)
+    (isolate_home / ".hermes" / ".env").write_text("GITHUB_TOKEN=***\n")
+
+    called = False
+
+    def fake_ensure():
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mod, "_ensure_dispatch_crons", fake_ensure)
+
+    mod.register(FakeCtx())
+
+    assert called, "_ensure_dispatch_crons was not called from register()"
 
 
 # ── 3. plugin.yaml manifest ──────────────────────────────────────────────────
