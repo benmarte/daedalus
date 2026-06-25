@@ -511,7 +511,7 @@ bash ~/.hermes/scripts/daedalus-cron.sh
 ```
 
 This means each phase transition starts within seconds rather than waiting for the
-hourly cron tick. For example, as soon as the developer blocks with `review-required`,
+next cron tick. For example, as soon as the developer blocks with `review-required`,
 the dispatcher fires, detects CI green, and promotes the reviewer task — all within
 seconds.
 
