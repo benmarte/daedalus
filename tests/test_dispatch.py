@@ -905,6 +905,28 @@ def test_all_souls_wire_claude_code_skill_as_step0():
     check("all 9 souls wire claude-code skill as step 0", not missing)
 
 
+# ── documentation SOUL proactive doc-health audit (issue #98) ────────────────
+
+
+def test_documentation_soul_has_proactive_doc_audit():
+    """documentation SOUL audits all docs vs PRs merged since last_doc_sweep_sha (issue #98)."""
+    soul = (Path(__file__).resolve().parent.parent
+            / "config" / "souls" / "documentation-daedalus.md").read_text()
+    checks = {
+        "proactive audit step": "Proactive doc-health audit" in soul,
+        "doc_sweep_state.json": ".hermes/doc_sweep_state.json" in soul,
+        "last_doc_sweep_sha cursor": "last_doc_sweep_sha" in soul,
+        "lightweight / bounded by PRs": "lightweight" in soul.lower(),
+        "Docs Health report section": "Docs Health" in soul,
+        "project-agnostic workdir": "workdir" in soul.lower(),
+        "enumerate root + docs markdown": "git ls-files" in soul,
+        "separate PR if already merged": "separate small PR" in soul,
+    }
+    missing = [k for k, ok in checks.items() if not ok]
+    assert not missing, f"documentation SOUL missing doc-audit pieces: {missing}"
+    check("documentation SOUL wires proactive doc-health audit", not missing)
+
+
 # ── _CODING_AGENT_DEFAULTS and per-agent default commands ────────────────────
 
 
@@ -1411,6 +1433,7 @@ if __name__ == "__main__":
         test_resolve_coding_agent_skill_no_duplicate,
         test_resolve_coding_agent_no_skill_when_none,
         test_all_souls_wire_claude_code_skill_as_step0,
+        test_documentation_soul_has_proactive_doc_audit,
     ):
         fn()
     print()
