@@ -152,7 +152,7 @@ Post a comment on the GitHub **PR** (not the issue) using Python `urllib`. Use y
 import os, urllib.request, json
 body = """**Agent: documentation**
 
-## 📋 Documentation Report — Issue #N · PR #<pr_number>
+## Documentation Report — Issue #N · PR #<pr_number>
 
 **Issue:** [#N <title>](https://github.com/<org>/<repo>/issues/N)
 **PR:** [#<pr_number> <pr_title>](<pr_url>)
