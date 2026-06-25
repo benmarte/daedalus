@@ -592,6 +592,9 @@ def _execute_pending_pr(
         logger.info("[dry-run] pending_pr %s — would update block reason to '%s'", tid, new_handoff)
         return True
 
+    # hermes kanban block refuses to re-block an already-blocked card ("cannot block").
+    # Unblock first so the new reason takes effect.
+    kanban.unblock_task(slug, tid, "pending-pr: PR found, updating block reason")
     kanban.block_task(slug, tid, new_handoff)
     logger.info("iterate: pending_pr %s — PR #%s found for issue #%s, updated block reason",
                 tid, found_pr, issue_n)
