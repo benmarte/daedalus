@@ -140,7 +140,21 @@ print(urllib.request.urlopen(req).read())
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 
-### 3. Complete your kanban task
+### 3. Save the spec to disk
+
+After posting to GitHub, write the same spec body to `.hermes/specs/issue-N.md` (where N is the issue number) inside the project's working directory:
+
+```python
+import os
+specs_dir = os.path.join("<workdir>", ".hermes", "specs")
+os.makedirs(specs_dir, exist_ok=True)
+with open(os.path.join(specs_dir, f"issue-{issue_number}.md"), "w") as f:
+    f.write(body)
+```
+
+This gives users an offline copy. The GitHub comment is the authoritative source; this file is a local mirror.
+
+### 5. Complete your kanban task
 Complete with summary starting **EXACTLY**:
 ```
 spec: <one-line summary of what to implement>
@@ -148,7 +162,7 @@ spec: <one-line summary of what to implement>
 
 The dispatcher detects the `spec:` prefix to trigger team creation. Any other prefix and the pipeline stalls.
 
-### 4. Run the dispatcher
+### 6. Run the dispatcher
 ```
 bash ~/.hermes/scripts/daedalus-cron.sh
 ```
