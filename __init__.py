@@ -12,6 +12,7 @@ Entrypoints (scripts/, dashboard/plugin_api.py) set up their own path locally.
 
 import logging
 import os
+import re
 import subprocess
 import threading
 
@@ -204,6 +205,129 @@ def _ensure_cron_wrapper() -> None:
         logger.debug("daedalus: cron wrapper install failed", exc_info=True)
 
 
+def _ensure_dispatch_crons() -> None:
+    """Recreate any missing ``<name>-daedalus`` dispatch crons on every load.
+
+    The main dispatch cron lives in the global Hermes cron store
+    (``~/.hermes/cron/jobs.json``). ``hermes update`` snapshots then migrates
+    that store and does NOT restore the daedalus job afterwards, so the
+    dispatcher silently stops running — the only recovery was a dashboard
+    **Save** (which calls ``_reconcile_cron``) or a manual ``hermes cron
+    create`` (issue #80).
+
+    On every plugin load we list the existing cron jobs once, then for each repo
+    in the daedalus registry (``~/.hermes/daedalus/projects``) recreate its
+    ``<name>-daedalus`` job if it is missing — using the same schedule/deliver
+    semantics the dashboard Save would (see ``dashboard.plugin_api._reconcile_cron``).
+
+    Self-healing rules:
+    - schedule resolves the repo's ``cron.schedule``; when that key is absent we
+      fall back to the packaged template default, mirroring ConfigLoader's
+      deep-merge. An *explicit empty* schedule means "dispatch disabled" and is
+      never resurrected.
+    - ``--deliver`` is passed only when the repo sets a non-empty ``deliver`` and
+      has no ``notifications`` (which self-deliver), matching ``_reconcile_cron``.
+
+    Idempotent — a job that already exists is left untouched. Best-effort: every
+    failure is logged at DEBUG/WARNING and never raised, so a broken ``hermes``
+    binary or malformed config can't break plugin registration.
+    """
+    try:
+        import yaml
+        from pathlib import Path
+
+        hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        registry_file = Path(
+            os.environ.get("HERMES_ORCH_REGISTRY")
+            or os.path.join(hermes_home, "daedalus", "projects")
+        )
+        if not registry_file.exists():
+            return
+
+        # Packaged template default — used only when a repo config omits
+        # cron.schedule entirely (mirrors ConfigLoader's deep-merge over defaults).
+        default_schedule = ""
+        template_path = Path(__file__).resolve().parent / "templates" / "daedalus.yaml"
+        try:
+            tpl = yaml.safe_load(template_path.read_text()) or {}
+            tpl = tpl.get("defaults", tpl)
+            default_schedule = ((tpl.get("cron") or {}).get("schedule") or "").strip()
+        except Exception:
+            pass
+
+        # List existing cron job NAMES once (a single subprocess for all projects).
+        # Without the list we can't tell what's missing, so bail rather than risk
+        # creating duplicates.
+        try:
+            res = subprocess.run(
+                ["hermes", "cron", "list", "--all"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception as exc:
+            logger.debug("daedalus: cron list failed during self-heal: %s", exc)
+            return
+        if res.returncode != 0:
+            logger.debug("daedalus: cron list returned %s during self-heal", res.returncode)
+            return
+        existing_names = {
+            m.group(1).strip()
+            for line in res.stdout.splitlines()
+            if (m := re.match(r"^\s*Name:\s+(.+)$", line))
+        }
+
+        for raw in registry_file.read_text().splitlines():
+            repo_path = raw.strip()
+            if not repo_path or repo_path.startswith("#"):
+                continue
+            cfg_file = Path(repo_path) / ".hermes" / "daedalus.yaml"
+            if not cfg_file.exists():
+                continue
+            try:
+                cfg = yaml.safe_load(cfg_file.read_text()) or {}
+            except Exception:
+                continue
+
+            name = (cfg.get("name") or "").strip()
+            if not name:
+                continue
+            cron_cfg = cfg.get("cron") or {}
+            schedule = (
+                (cron_cfg.get("schedule") or "").strip()
+                if "schedule" in cron_cfg
+                else default_schedule
+            )
+            if not schedule:
+                continue  # intentionally disabled — do not resurrect
+
+            cron_name = f"{name}-daedalus"
+            if cron_name in existing_names:
+                continue
+
+            cmd = [
+                "hermes", "cron", "create", schedule,
+                "--name", cron_name,
+                "--script", "daedalus-cron.sh",
+                "--no-agent",
+            ]
+            deliver = (cron_cfg.get("deliver") or "").strip()
+            if deliver and not cron_cfg.get("notifications"):
+                cmd += ["--deliver", deliver]
+
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if res.returncode == 0:
+                    logger.info("daedalus: recreated missing dispatch cron: %s", cron_name)
+                else:
+                    logger.warning(
+                        "daedalus: failed to recreate cron %s: %s",
+                        cron_name, (res.stderr or res.stdout).strip()[:200],
+                    )
+            except Exception as exc:
+                logger.debug("daedalus: cron create failed for %s: %s", cron_name, exc)
+    except Exception:
+        logger.debug("daedalus: _ensure_dispatch_crons failed", exc_info=True)
+
+
 def register(ctx) -> None:
     """Hermes plugin entry point — import-safe, never raises.
 
@@ -216,9 +340,11 @@ def register(ctx) -> None:
 
     Finally, it (re)installs the daedalus-cron.sh wrapper on every load so
     fresh installs and post-update environments always have the script the
-    dispatcher cron job invokes — Hermes provides no post-install hook — and
-    syncs GITHUB_TOKEN from ~/.hermes/.env into any *-daedalus profile .env
-    that lacks it, so profiles provisioned before the token was set still work.
+    dispatcher cron job invokes — Hermes provides no post-install hook — syncs
+    GITHUB_TOKEN from ~/.hermes/.env into any *-daedalus profile .env that lacks
+    it, so profiles provisioned before the token was set still work, and
+    recreates any missing ``<name>-daedalus`` dispatch cron so the pipeline
+    self-recovers after ``hermes update`` wipes the global cron store (#80).
     """
     try:
         ctx.register_auxiliary_task(
@@ -235,3 +361,4 @@ def register(ctx) -> None:
     # Idempotent — each runs in its own try/except so it never blocks registration.
     _ensure_cron_wrapper()
     _sync_github_token()
+    _ensure_dispatch_crons()
