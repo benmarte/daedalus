@@ -982,7 +982,7 @@ configured chat channels. You merge (agents never merge `main`).
 project with live status (kanban counts, open PRs + CI, needs-attention, cron), and an
 editor for each project's config (`repo`/`workdir` are read-only).
 
-![Hermes kanban board for a Daedalus project — columns ready for work](docs/screenshots/guide/10-kanban-board.png)
+![Hermes kanban board for a Daedalus project showing a live pipeline — cards spread across Todo, Blocked, and Done columns](docs/screenshots/guide/10-kanban-board.png)
 
 **6. Automate** — schedule the dispatcher so advancing/onboarding run unattended:
 ```bash
