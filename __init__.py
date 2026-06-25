@@ -319,6 +319,14 @@ def _ensure_dispatch_crons() -> None:
                 if not schedule:
                     continue  # intentionally disabled — do not resurrect
 
+                # Normalise bare intervals (e.g. "60m", "2h") to "every X" so
+                # Hermes creates a repeating cron (Repeat: ∞) rather than a
+                # one-shot that vanishes after one run and leaves the pipeline
+                # dark until the next gateway restart.
+                import re as _re
+                if _re.match(r"^\d+[mhd]$", schedule):
+                    schedule = f"every {schedule}"
+
                 cron_name = f"{name}-daedalus"
                 if cron_name in existing_names:
                     continue
