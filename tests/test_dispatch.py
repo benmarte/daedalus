@@ -1221,6 +1221,115 @@ def test_role_delegation_uses_role_specific_tmp_file():
     assert "/tmp/qa-task.txt" not in rev_body
 
 
+# ── _check_team_blockers loop-prevention (issue #87) ─────────────────────────
+
+
+def _make_blocked_card(tid, assignee, summary, title=None):
+    return {
+        "id": tid,
+        "assignee": assignee,
+        "summary": summary,
+        "last_summary": summary,
+        "title": title or f"#{tid[-4:]} {assignee} task",
+        "status": "blocked",
+    }
+
+
+def test_check_team_blockers_skips_review_required_awaiting_pr():
+    """review-required: awaiting-pr must NOT create a PM consultation (iterate handles it)."""
+    card = _make_blocked_card(
+        "t_dev1", "developer-daedalus",
+        "review-required: awaiting-pr — Claude Code spawned, PR pending",
+        title="#75 Developer: fix bug",
+    )
+    issue = {"number": 75, "title": "fix bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {75: issue}, "/w", "dev", "github",
+        )
+    check("review-required awaiting-pr skipped — no PM consultation", mk_create.call_count == 0)
+    check("triggered list is empty", triggered == [])
+
+
+def test_check_team_blockers_skips_review_required_pr_number():
+    """review-required: PR #N — ... must NOT create a PM consultation."""
+    card = _make_blocked_card(
+        "t_dev2", "developer-daedalus",
+        "review-required: PR #91 — fix/issue-75-requirements-txt-httpx",
+        title="#75 Developer: fix bug",
+    )
+    issue = {"number": 75, "title": "fix bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {75: issue}, "/w", "dev", "github",
+        )
+    check("review-required PR #N skipped — no PM consultation", mk_create.call_count == 0)
+    check("triggered list is empty", triggered == [])
+
+
+def test_check_team_blockers_creates_consult_for_genuine_blocker():
+    """A genuinely blocked card (non review-required) does create a PM consultation."""
+    card = _make_blocked_card(
+        "t_dev3", "developer-daedalus",
+        "cannot determine VCS provider credentials",
+        title="#76 Developer: fix auth bug",
+    )
+    issue = {"number": 76, "title": "fix auth bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task", return_value="t_consult") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {76: issue}, "/w", "dev", "github",
+        )
+    check("genuine blocker creates PM consultation", mk_create.call_count == 1)
+    check("issue number in triggered list", 76 in triggered)
+
+
+def test_check_team_blockers_skips_escalate():
+    """escalate: summary must still be skipped (existing guard)."""
+    card = _make_blocked_card(
+        "t_dev4", "developer-daedalus",
+        "ESCALATE: exceeded max fix attempts",
+        title="#77 Developer: fix retry bug",
+    )
+    issue = {"number": 77, "title": "fix retry bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {77: issue}, "/w", "dev", "github",
+        )
+    check("escalate: summary skipped — no PM consultation", mk_create.call_count == 0)
+
+
+def test_check_team_blockers_skips_when_active_consultation_exists():
+    """If a non-done PM consultation already exists, do not create another."""
+    card = _make_blocked_card(
+        "t_dev5", "developer-daedalus",
+        "cannot find module httpx",
+        title="#78 Developer: fix dep bug",
+    )
+    existing_consult = {
+        "id": "t_consult1",
+        "assignee": "project-manager-daedalus",
+        "title": "consult: #78 fix dep bug",
+        "status": "todo",
+    }
+    issue = {"number": 78, "title": "fix dep bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[existing_consult]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {78: issue}, "/w", "dev", "github",
+        )
+    check("active consultation prevents duplicate", mk_create.call_count == 0)
+    check("triggered list is empty when consult already open", triggered == [])
+
+
 if __name__ == "__main__":
     print("CI retry scheduling tests")
     print("-" * 60)
@@ -1302,6 +1411,17 @@ if __name__ == "__main__":
         test_resolve_coding_agent_skill_no_duplicate,
         test_resolve_coding_agent_no_skill_when_none,
         test_all_souls_wire_claude_code_skill_as_step0,
+    ):
+        fn()
+    print()
+    print("_check_team_blockers loop-prevention tests (issue #87)")
+    print("-" * 60)
+    for fn in (
+        test_check_team_blockers_skips_review_required_awaiting_pr,
+        test_check_team_blockers_skips_review_required_pr_number,
+        test_check_team_blockers_creates_consult_for_genuine_blocker,
+        test_check_team_blockers_skips_escalate,
+        test_check_team_blockers_skips_when_active_consultation_exists,
     ):
         fn()
     print("-" * 60)

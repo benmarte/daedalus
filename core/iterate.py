@@ -624,6 +624,11 @@ def _execute_pm_route(
     - The configured profile is absent (CLI create fails)
     """
     tid = card.get("id")
+    # Guard: awaiting-pr means Claude Code was spawned but hasn't opened a PR yet.
+    # The PENDING_PR executor handles this — PM routing cannot unblock it (issue #87).
+    if "awaiting-pr" in (handoff_text or "").lower():
+        logger.info("iterate: %s blocked awaiting-pr — skipping PM route", tid)
+        return False
     pr = pr_number or _parse_pr_number(handoff_text)
     fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
     if fix_attempts > MAX_FIX_ATTEMPTS:
