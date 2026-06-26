@@ -6,24 +6,14 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-# Make the package root importable (config/, core/).
+# Make the package root importable (config/, core/) and the tests dir (conftest).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import conftest  # noqa: E402
+from conftest import check  # noqa: E402,F401
 from core import source_specs  # noqa: E402
 from core import kanban  # noqa: E402
-
-_passed = 0
-_failed = 0
-
-
-def check(name, cond):
-    global _passed, _failed
-    if cond:
-        _passed += 1
-        print(f"  PASS  {name}")
-    else:
-        _failed += 1
-        print(f"  FAIL  {name}")
 
 
 # ── list_spec_files ─────────────────────────────────────────────────────────
@@ -244,5 +234,5 @@ if __name__ == "__main__":
     ):
         fn()
     print("-" * 60)
-    print(f"Results: {_passed} passed, {_failed} failed")
-    sys.exit(1 if _failed else 0)
+    print(f"Results: {conftest._passed} passed, {conftest._failed} failed")
+    sys.exit(1 if conftest._failed else 0)

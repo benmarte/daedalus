@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from core import kanban
 from core.providers.base import CIStatus, issue_linked_to_pr
+from core.util import extract_issue_number
 
 logger = logging.getLogger("daedalus.iterate")
 
@@ -294,15 +295,7 @@ def _extract_issue_number_from_card(card: dict) -> Optional[int]:
     Prefers the repo-qualified form (e.g. ``benmarte/daedalus#21``) to avoid
     false matches on PR numbers embedded in prose.
     """
-    body = (card.get("body") or "")
-    # Prefer repo-qualified: org/repo#N
-    m = re.search(r"[\w\-]+/[\w\-]+#(\d+)", body)
-    if m:
-        return int(m.group(1))
-    # Fallback: bare #N (skip if it looks like a PR reference)
-    for m in re.finditer(r"(?<!\w)#(\d+)", body):
-        return int(m.group(1))
-    return None
+    return extract_issue_number(card.get("body") or "", prefer_qualified=True)
 
 
 _ESCALATION_STAMP_PREFIX = "escalated: issue #"

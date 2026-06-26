@@ -104,15 +104,17 @@ The dispatcher owns all task creation. You own the spec.
 - Understand the root cause, acceptance criteria, and any constraints the validator identified.
 
 ### 2. Write and post the spec as a comment on the issue
-Post a comment on the GitHub **issue** using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl.
+Post a comment on the GitHub **issue** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
 
 ```python
-import os, urllib.request, json
-body = """**Agent: project-manager**
+import os, sys
+_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
+from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
 
-## Spec — Issue #N: <title>
-
-### Root Cause
+post_comment("<org>/<repo>", <issue_number>, "project-manager",
+             "Spec — Issue #N: <title>",
+             """### Root Cause
 <What is broken and why>
 
 ### Fix Strategy
@@ -127,15 +129,8 @@ body = """**Agent: project-manager**
 `fix/issue-N-<slug>` → `<base_branch>`
 
 ### PR Target
-`<base_branch>`
-"""
-issue_number = <get from task body>
-req = urllib.request.Request(
-    f'https://api.github.com/repos/<org>/<repo>/issues/{issue_number}/comments',
-    data=json.dumps({'body': body}).encode(),
-    headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
-             'Accept': 'application/vnd.github+json'}, method='POST')
-print(urllib.request.urlopen(req).read())
+`<base_branch>`""",
+             token=os.environ["GITHUB_TOKEN"])
 ```
 
 Replace every `<placeholder>` with the real value. Do not leave template text.

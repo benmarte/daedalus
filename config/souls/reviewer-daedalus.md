@@ -111,17 +111,19 @@ Evaluate every changed file against these five dimensions:
 5. **Performance** — Are there N+1 queries, unnecessary allocations, or blocking calls in hot paths?
 
 ### 3. Post a review comment on the PR
-Post a comment on the GitHub **PR** using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl.
+Post a comment on the GitHub **PR** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
 
 Note: GitHub treats PR comments the same as issue comments via the `/issues/{pr_number}/comments` endpoint.
 
 ```python
-import os, urllib.request, json
-body = """**Agent: reviewer**
+import os, sys
+_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
+from agent_comment import post_pr_comment  # helper prepends the mandatory **Agent:** header
 
-## Review Summary — PR #<pr_number>
-
-**Verdict:** approved (or changes-requested)
+post_pr_comment("<org>/<repo>", <pr_number>, "reviewer",
+                "Review Summary — PR #<pr_number>",
+                """**Verdict:** approved (or changes-requested)
 
 ### Correctness
 <Findings or "No issues found.">
@@ -139,15 +141,8 @@ body = """**Agent: reviewer**
 <Findings or "No issues found.">
 
 ### Required Changes
-<List specific changes required before this can be approved, or "None — approved as-is.">
-"""
-pr_number = <get from task body or developer's comment>
-req = urllib.request.Request(
-    f'https://api.github.com/repos/<org>/<repo>/issues/{pr_number}/comments',
-    data=json.dumps({'body': body}).encode(),
-    headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
-             'Accept': 'application/vnd.github+json'}, method='POST')
-print(urllib.request.urlopen(req).read())
+<List specific changes required before this can be approved, or "None — approved as-is.">""",
+                token=os.environ["GITHUB_TOKEN"])
 ```
 
 Replace every `<placeholder>` with the real value. Do not leave template text.

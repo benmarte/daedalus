@@ -7,7 +7,29 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
+
+
+def extract_issue_number(text: str, *, prefer_qualified: bool = False) -> Optional[int]:
+    """Parse an issue number from free text.
+
+    Default mode mirrors the bare ``re.search(r"#(\\d+)", text)`` used throughout
+    the dispatcher: the first ``#<n>`` anywhere in the string.
+
+    With ``prefer_qualified=True`` (used by ``core.iterate`` for card bodies), a
+    repo-qualified ``org/repo#<n>`` match is preferred over a bare ``#<n>`` so a
+    PR number embedded in prose does not win over the issue reference.
+    """
+    text = text or ""
+    if prefer_qualified:
+        m = re.search(r"[\w\-]+/[\w\-]+#(\d+)", text)
+        if m:
+            return int(m.group(1))
+        for m in re.finditer(r"(?<!\w)#(\d+)", text):
+            return int(m.group(1))
+        return None
+    m = re.search(r"#(\d+)", text)
+    return int(m.group(1)) if m else None
 
 
 def board_slug(repo: str, name: str = "") -> str:

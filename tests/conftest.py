@@ -36,6 +36,27 @@ def _load_dispatch():
     return mod
 
 
+# ── shared hand-rolled assertion printer ──────────────────────────────────────
+# Several legacy suites double as standalone scripts (``python tests/test_x.py``)
+# and print PASS/FAIL via ``check`` while tallying ``_passed``/``_failed``. This
+# is the single source of truth; the suites import it from here. The counters are
+# module-level so a standalone ``__main__`` block can read ``conftest._failed``.
+
+_passed = 0
+_failed = 0
+
+
+def check(name, cond):
+    """Record and print a PASS/FAIL line; tally into module-level counters."""
+    global _passed, _failed
+    if cond:
+        _passed += 1
+        print(f"  PASS  {name}")
+    else:
+        _failed += 1
+        print(f"  FAIL  {name}")
+
+
 # ── in-memory kanban double ───────────────────────────────────────────────────
 
 
