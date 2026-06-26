@@ -70,6 +70,7 @@ flowchart TD
 - [VCS providers](#vcs-providers)
   - [Creating the tokens (PAT scopes)](#creating-the-tokens-pat-scopes)
 - [Notifications](#notifications)
+  - [Comment threading](#comment-threading)
 - [Quickstart](#quickstart)
 - [Team setup](#team-setup)
 - [Uninstall / reset](#uninstall--reset)
@@ -905,7 +906,7 @@ modes per project:
 - **Multi-target** (`cron.notifications`) — a list of `{platform, target,
   events}` entries; each channel picks which events it receives
   (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`,
-  `security-escalation`; omit `events` to receive everything).
+  `security-escalation`, `comment-mirror`; omit `events` to receive everything).
   Route `security-escalation` to a high-visibility channel (e.g. `#security-alerts`)
   — it fires on SECURITY_THREAT and BLOCK_FOR_REVIEW for immediate human review.
   Configure it in the dashboard's **Notifications** editor — channels are discovered
@@ -918,6 +919,55 @@ includes per-project sections for dispatched issues, completions, advanced PRs,
 auto-remediation actions, and delivered doc reports. Documentation reports are
 wrapped in a structured envelope with a header, navigation links, and issue
 cross-reference before delivery.
+
+### Comment threading
+
+Since **beta.30**, every daedalus-managed issue gets **one persistent thread per
+notification target**. Agent comments — spec posts, progress updates, review
+feedback — on the issue *and* its linked PR are mirrored into that thread as
+replies, alongside PR-open and merge events. The whole pipeline conversation is
+readable in chat without opening GitHub.
+
+> ⚠️ **Behavior change for existing users.** Threading is delivered as a new
+> `comment-mirror` event, and any **catch-all** notification entry (one with no
+> `events` filter, or `events: []`) receives it **automatically — no opt-in**.
+> If you have existing Slack/Discord targets without an `events` filter, they
+> will start receiving threaded comment mirrors. On an active board this can be a
+> noticeable jump in message volume. To exclude it, list the events you *do* want
+> on that entry and leave `comment-mirror` out.
+
+How it works:
+
+- **No new config keys.** Threading runs automatically against your existing
+  `cron.notifications` entries (and the legacy single `deliver` target).
+- **Per-platform anchor.** The first event for a target posts a *root* message;
+  every later event replies under it. Slack anchors on `thread_ts`, Discord on
+  `message_id` — both captured automatically via `hermes send --json`.
+- **Cross-tick dedup.** Each event has a stable key; once mirrored to a target it
+  is never resent, so repeated cron ticks don't repost the same comment.
+- **Self-healing anchor.** If a thread's root message is deleted, the next event
+  posts a fresh root and updates the stored anchor.
+- **Agent header.** Mirrored comments always begin with the mandatory
+  `**Agent: <name>**` header (enforced in beta.30), so it's clear which agent
+  spoke — handy if you parse or filter the thread.
+
+State lives in `daedalus_dispatch_state.json`, which gains a `threads` key per
+issue:
+
+```json
+{
+  "127": {
+    "threads":       { "slack:C0CHANNEL1": "1718900000.001200" },
+    "thread_events": { "slack:C0CHANNEL1": ["root", "comment:issue:456", "pr-opened:99"] }
+  }
+}
+```
+
+**Caveat — per-tick API cost.** On every tick, each open issue's issue and PR
+comments are fetched before dedup decides what to mirror. This is fine for small
+boards; on large boards with many open issues it adds VCS API calls per tick.
+See [docs/notification-threading.md](docs/notification-threading.md) for the full
+reference.
 
 ## Troubleshooting
 
