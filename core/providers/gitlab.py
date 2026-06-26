@@ -11,8 +11,15 @@ sent as the PRIVATE-TOKEN header.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+
+# Allowlist for path_with_namespace values returned by the GitLab API.
+# GitLab constrains slugs to alphanumerics, dots, hyphens, and underscores,
+# separated by exactly one "/" per level.  Reject anything else before
+# interpolating into notification URLs.
+_WEB_PATH_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.\-]*)+$')
 
 from .base import (CIStatus, Comment, IssueSummary, LabelDef, PRSummary,
                    ProviderConfigError, VCSProvider, resolve_token)
@@ -53,9 +60,12 @@ class GitLabProvider(VCSProvider):
         self._http = HTTPClient(f"{base_url}/api/v4", headers, token=token,
                                  verify_ssl=vcs.get("verify_ssl", True))
         self.supports_boards = bool((self._cfg.get("tracking") or {}).get("label_board"))
-        # Stored for URL building — populated only when project_path (not numeric ID) is known.
         self._web_base = base_url
-        self._project_web_path = project_path if "/" in project_path else ""
+        # None = "not yet fetched"; "" = "fetched but unavailable". Distinguishing
+        # the two prevents repeated API retries after a permanent failure.
+        self._project_web_path: Optional[str] = (
+            project_path if "/" in project_path else None
+        )
 
     @property
     def _proj(self) -> str:
@@ -263,15 +273,41 @@ class GitLabProvider(VCSProvider):
         return created
 
     # ── URL builders ─────────────────────────────────────────────────────────
+    def _resolve_web_path(self) -> str:
+        """Return path_with_namespace, fetching it once when only project_id is set.
+
+        When the project is configured with a numeric ``vcs.project_id`` the
+        web path is unknown at init time.  This method fetches the project's
+        ``path_with_namespace`` from the API on first call and caches the result.
+        Failures are also cached (as ``""``) so a permanent error (bad token,
+        wrong ID) does not cause a fresh API call on every URL request.
+        """
+        if self._project_web_path is None:
+            raw = ""
+            try:
+                data = self._http.get_json(self._proj)
+                raw = (data or {}).get("path_with_namespace") or ""
+            except ProviderError as e:
+                self._log.warning("_resolve_web_path failed: %s", e)
+            if raw and _WEB_PATH_RE.match(raw):
+                self._project_web_path = raw
+            else:
+                if raw:
+                    self._log.warning("_resolve_web_path: unexpected path_with_namespace %r", raw)
+                self._project_web_path = ""  # cache the failure — don't retry
+        return self._project_web_path
+
     def issue_url(self, issue_number: int) -> str:
-        if not self._project_web_path:
+        path = self._resolve_web_path()
+        if not path:
             return ""
-        return f"{self._web_base}/{self._project_web_path}/-/issues/{issue_number}"
+        return f"{self._web_base}/{path}/-/issues/{issue_number}"
 
     def pr_url(self, pr_number: int) -> str:
-        if not self._project_web_path:
+        path = self._resolve_web_path()
+        if not path:
             return ""
-        return f"{self._web_base}/{self._project_web_path}/-/merge_requests/{pr_number}"
+        return f"{self._web_base}/{path}/-/merge_requests/{pr_number}"
 
     @property
     def display_repo(self) -> str:
@@ -285,6 +321,10 @@ class GitLabProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("get_default_branch failed: %s", e)
             return None
+        if self._project_web_path is None:
+            # Also caches path_with_namespace for URL builders — free side effect.
+            raw = (data or {}).get("path_with_namespace") or ""
+            self._project_web_path = raw if (raw and _WEB_PATH_RE.match(raw)) else ""
         return (data or {}).get("default_branch") or None
 
     def list_branches(self) -> List[str]:
