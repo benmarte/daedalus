@@ -298,7 +298,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-{issue_number}-task.txt | {run_cmd} > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt' > /dev/null 2>&1 & echo $! > /tmp/{pfx}-{issue_number}-pid.txt\", background=False)\n"
+            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
             + after
         )
     if agent == "codex":
@@ -309,7 +309,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt' > /dev/null 2>&1 & echo $! > /tmp/{pfx}-{issue_number}-pid.txt\", background=False)\n"
+            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
             + after
         )
     if agent == "opencode":
@@ -320,7 +320,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt' > /dev/null 2>&1 & echo $! > /tmp/{pfx}-{issue_number}-pid.txt\", background=False)\n"
+            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
             + after
         )
     return ""

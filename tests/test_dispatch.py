@@ -779,8 +779,17 @@ def test_delegation_spawn_captures_pid_and_separate_stderr():
     """Spawn line must record the agent PID and route stderr to its own log."""
     for agent in ("claude-code", "codex", "opencode"):
         body = disp._build_delegation_instructions(agent, cmd="", issue_number=141)
-        assert "echo $! > /tmp/dev-141-pid.txt" in body, (
+        assert "echo $$ > /tmp/dev-141-pid.txt" in body, (
             f"{agent}: spawn must capture the PID for the liveness check, got:\n{body}"
+        )
+        # The current Hermes terminal tool rejects nohup/&/disown/setsid in a
+        # foreground call, so the agent must spawn via terminal(background=True);
+        # otherwise the coding agent never launches and the card hangs (#141).
+        assert "background=True" in body, (
+            f"{agent}: spawn must use terminal(background=True); nohup/& is rejected by Hermes"
+        )
+        assert "nohup" not in body and "background=False" not in body, (
+            f"{agent}: must not use the Hermes-rejected nohup/& foreground spawn"
         )
         assert "2> /tmp/dev-141-err.txt" in body, (
             f"{agent}: stderr must go to its own log, not merged into out.txt"
