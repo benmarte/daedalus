@@ -374,6 +374,42 @@ def _resolve_coding_agent_cmd(execution: Dict[str, Any]) -> str:
     return cmd.strip()
 
 
+_DEFAULT_CODING_AGENT_MAX_TURNS = 100
+
+
+def _resolve_coding_agent_max_turns(execution: Dict[str, Any]) -> int:
+    """Turn budget for the spawned claude-code agent (``execution.coding_agent_max_turns``).
+
+    ``claude -p`` defaults to only 25 turns, which is too few for substantial
+    tasks (e.g. designing a schema returns ``Error: Reached max turns (25)`` with
+    no usable output). A sane default is applied so a fresh project works without
+    a per-project ``coding_agent_cmd`` override (#143); the #142
+    ``coding_agent_max_wait`` wall-clock ceiling remains the runaway backstop.
+    """
+    raw = (execution or {}).get("coding_agent_max_turns")
+    try:
+        n = int(raw)
+        return n if n > 0 else _DEFAULT_CODING_AGENT_MAX_TURNS
+    except (TypeError, ValueError):
+        return _DEFAULT_CODING_AGENT_MAX_TURNS
+
+
+def _apply_coding_agent_max_turns(agent: str, cmd: str, execution: Dict[str, Any]) -> str:
+    """Append ``--max-turns N`` to a claude-code invocation when not already set.
+
+    Operates on the *effective* command (explicit ``cmd`` or the claude-code
+    default) so a project never silently runs on claude's 25-turn default (#143).
+    No-op for non-claude agents (codex/opencode use different turn flags) and when
+    ``--max-turns`` is already present in the command.
+    """
+    if agent != "claude-code":
+        return cmd
+    base = cmd or _CODING_AGENT_DEFAULTS.get("claude-code", "")
+    if not base or "--max-turns" in base:
+        return base
+    return f"{base} --max-turns {_resolve_coding_agent_max_turns(execution)}"
+
+
 def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
     """Return the configured coding agent from execution.coding_agent.
 
@@ -2509,6 +2545,9 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
     coding_agent = _resolve_coding_agent(execution)
     coding_agent_cmd = _resolve_coding_agent_cmd(execution)
+    # Ensure a sane turn budget so substantial tasks don't silently hit claude's
+    # 25-turn default; respects an explicit --max-turns and non-claude agents (#143).
+    coding_agent_cmd = _apply_coding_agent_max_turns(coding_agent, coding_agent_cmd, execution)
     # Resolve the per-project coding-agent wait ceiling once per tick. run() is
     # single-threaded per process, so the body builders (called below) read this
     # module global rather than threading it through every signature (issue #141).
