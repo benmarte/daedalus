@@ -1736,7 +1736,7 @@ def _repair_orphan_tasks(
                 )
 
         # ── Bug 2: missing issue-number prefix in title ────────────────────
-        if re.search(r"#\d+", title):
+        if extract_issue_number(title) is not None:
             continue  # already has issue number, nothing to do
 
         # Body not included in list_tasks output — fetch via show_card.

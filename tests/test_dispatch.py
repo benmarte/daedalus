@@ -1119,6 +1119,7 @@ def test_check_team_blockers_skips_review_required_awaiting_pr():
     )
     issue = {"number": 75, "title": "fix bug", "body": ""}
     with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
          mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
          mock.patch.object(disp.kanban, "create_task") as mk_create:
         triggered = disp._check_team_blockers(
@@ -1137,6 +1138,7 @@ def test_check_team_blockers_skips_review_required_pr_number():
     )
     issue = {"number": 75, "title": "fix bug", "body": ""}
     with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
          mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
          mock.patch.object(disp.kanban, "create_task") as mk_create:
         triggered = disp._check_team_blockers(
@@ -1155,6 +1157,7 @@ def test_check_team_blockers_creates_consult_for_genuine_blocker():
     )
     issue = {"number": 76, "title": "fix auth bug", "body": ""}
     with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
          mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
          mock.patch.object(disp.kanban, "create_task", return_value="t_consult") as mk_create:
         triggered = disp._check_team_blockers(
@@ -1173,6 +1176,7 @@ def test_check_team_blockers_skips_escalate():
     )
     issue = {"number": 77, "title": "fix retry bug", "body": ""}
     with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
          mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
          mock.patch.object(disp.kanban, "create_task") as mk_create:
         triggered = disp._check_team_blockers(
@@ -1196,6 +1200,7 @@ def test_check_team_blockers_skips_when_active_consultation_exists():
     }
     issue = {"number": 78, "title": "fix dep bug", "body": ""}
     with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
          mock.patch.object(disp.kanban, "list_tasks", return_value=[existing_consult]), \
          mock.patch.object(disp.kanban, "create_task") as mk_create:
         triggered = disp._check_team_blockers(
@@ -1330,24 +1335,6 @@ def test_get_task_summary_no_id_no_fallback():
 
 
 if __name__ == "__main__":
-    print("CI retry scheduling tests")
-    print("-" * 60)
-    for fn in (
-        test_schedule_ci_retry_happy_path,
-        test_schedule_ci_retry_idempotent_recent_lock,
-        test_schedule_ci_retry_cross_profile_dedup,
-        test_schedule_ci_retry_stale_lock_recreates,
-        test_schedule_ci_retry_slug_sanitized,
-        test_schedule_ci_retry_subprocess_failure,
-        test_schedule_ci_retry_create_swallows_error,
-        test_cancel_ci_retry_happy_path,
-        test_cancel_ci_retry_not_found_is_benign,
-        test_cancel_ci_retry_slug_sanitized,
-        test_cancel_ci_retry_subprocess_failure,
-        test_ci_retry_post_fire_recent_lock_skips_then_cancel,
-    ):
-        fn()
-    print()
     print("Follow-up extraction tests")
     print("-" * 60)
     for fn in (
