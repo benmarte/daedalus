@@ -1441,6 +1441,44 @@ class TestMetaNotificationsEndpoint:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# GET /meta/version endpoint tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMetaVersionEndpoint:
+    """HTTP-level tests for GET /meta/version (the released-version surface)."""
+
+    @pytest.fixture
+    def meta_client(self):
+        """Create a FastAPI TestClient with the meta router mounted."""
+        from dashboard.plugin_api import meta_router
+
+        app = FastAPI()
+        app.include_router(meta_router, prefix="/api/plugins/daedalus")
+        return TestClient(app)
+
+    def test_version_matches_plugin_yaml(self, meta_client):
+        """The endpoint reports the version pinned in plugin.yaml (version-agnostic)."""
+        import yaml as _yaml
+        from dashboard import plugin_api
+
+        plugin_yaml = Path(plugin_api.__file__).resolve().parent.parent / "plugin.yaml"
+        with open(plugin_yaml) as f:
+            expected = (_yaml.safe_load(f) or {}).get("version")
+
+        resp = meta_client.get("/api/plugins/daedalus/meta/version")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"version": expected}
+
+    def test_version_unknown_on_read_failure(self, meta_client):
+        """A read error degrades gracefully to version 'unknown'."""
+        with mock.patch("builtins.open", side_effect=OSError("boom")):
+            resp = meta_client.get("/api/plugins/daedalus/meta/version")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"version": "unknown"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # POST /meta/test-deliver endpoint tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
