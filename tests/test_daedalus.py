@@ -373,7 +373,7 @@ def test_main_registry_sweep():
 
     run_calls = []
 
-    def fake_run(resolved, *, dry_run=False):
+    def fake_run(resolved, *, dry_run=False, max_dispatch=5):
         run_calls.append(resolved)
         return {"board": resolved.get("name", "?"), "mode": "kanban",
                 "created": [], "reconciled": [], "completed": [], "advanced": [],
@@ -410,7 +410,7 @@ def test_main_single_repo():
 
         called = []
 
-        def fake_run(resolved, *, dry_run=False):
+        def fake_run(resolved, *, dry_run=False, max_dispatch=5):
             called.append(resolved)
             return {"board": "solo", "mode": "kanban",
                     "created": [], "reconciled": [], "completed": [], "advanced": [],
