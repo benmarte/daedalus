@@ -413,6 +413,21 @@ def _notify_targets(resolved: Dict[str, Any], event: str) -> List[str]:
     return [deliver] if deliver else []
 
 
+def _all_notify_targets(resolved: Dict[str, Any]) -> List[str]:
+    """Every distinct ``hermes send`` target across all notification events.
+
+    Used to open a per-issue conversation thread on *each* configured platform
+    (issue #121) — the thread anchors before any single event has fired, so we
+    union the targets every event could reach.
+    """
+    out: List[str] = []
+    for event in NOTIFY_EVENTS:
+        for t in _notify_targets(resolved, event):
+            if t not in out:
+                out.append(t)
+    return out
+
+
 
 def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Open issues matching the configured label filter (ANY label), deduped."""
@@ -2450,7 +2465,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     # because agents run in isolated profile HOMEs without messaging config.
     # Idempotent via a hidden PR comment sentinel.
     slack_delivered = _deliver_doc_reports(
-        slug, provider, _notify_targets(resolved, "doc-report"), dry_run=dry_run,
+        slug, provider, _notify_targets(resolved, "doc-report"),
+        workdir=workdir, dry_run=dry_run,
     )
 
     created, reconciled, completed = [], [], []
@@ -2721,6 +2737,16 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             created.append(n)
             existing.add(n)
             dispatch_state.record_dispatch(workdir, n)
+            # Open a conversation thread for this issue on every configured
+            # notification platform; the returned message id anchors all later
+            # agent-comment replies (issue #121).
+            _root = notify_templates.render_issue_thread_root(
+                slug, n, issue.get("title", ""),
+                issue_url=provider.issue_url(n), repo=provider.display_repo,
+            )
+            _deliver_to_issue_thread(
+                workdir, n, "dispatched", _all_notify_targets(resolved), _root,
+            )
 
     if created and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)  # nudge (gateway also auto-dispatches)
@@ -2834,18 +2860,27 @@ def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False,
 # ── Slack delivery (dispatcher context, NOT agent) ──────────────────────────
 
 
-def _send_via_hermes(notify_target: str, report_body: str) -> bool:
-    """Send a report to Slack via `hermes send` from the dispatcher's root context.
+def _hermes_send(notify_target: str, report_body: str, *,
+                 thread_id: Optional[str] = None) -> Optional[str]:
+    """Send *report_body* via `hermes send` from the dispatcher's root context.
 
-    Runs ``hermes send -t <notify_target> --file <tmpfile>`` via subprocess
-    (list-args, no shell). A temporary file is created for the body and cleaned
-    up afterwards. Returns True on success; False is logged gracefully.
+    Runs ``hermes send -t <target> --file <tmpfile> --json`` via subprocess
+    (list-args, no shell). When *thread_id* is given the message is posted as a
+    reply inside that platform thread (target becomes ``platform:chat:thread``);
+    Hermes maps the anchor to each platform's native threading (Slack
+    ``thread_ts``, Discord/Telegram message id, …).
+
+    Returns the platform message id on success (the thread anchor for replies),
+    ``""`` on success without a capturable id (e.g. a deduped/skipped send), or
+    ``None`` on failure. Failures are logged gracefully, never raised.
     """
+    import json as _json
     import tempfile
 
     if not notify_target or not report_body.strip():
-        return False
+        return None
 
+    target = f"{notify_target}:{thread_id}" if thread_id else notify_target
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
@@ -2853,20 +2888,29 @@ def _send_via_hermes(notify_target: str, report_body: str) -> bool:
             tf.write(report_body)
             tmp = tf.name
         r = subprocess.run(
-            ["hermes", "send", "-t", notify_target, "--file", tmp, "-q"],
+            ["hermes", "send", "-t", target, "--file", tmp, "--json"],
             capture_output=True, text=True, timeout=30,
         )
         if r.returncode != 0:
             logger.warning(
                 "dispatch: hermes send to %s failed (rc=%s): %s",
-                notify_target, r.returncode, (r.stderr or "").strip(),
+                target, r.returncode, (r.stderr or "").strip(),
             )
-            return False
-        logger.info("dispatch: delivered doc report to %s", notify_target)
-        return True
+            return None
+        try:
+            payload = _json.loads(getattr(r, "stdout", "") or "{}")
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("error"):
+            logger.warning("dispatch: hermes send to %s reported error: %s",
+                           target, payload.get("error"))
+            return None
+        logger.info("dispatch: delivered to %s", target)
+        msg_id = payload.get("message_id") if isinstance(payload, dict) else None
+        return str(msg_id) if msg_id else ""
     except Exception as e:
-        logger.warning("dispatch: hermes send to %s raised: %s", notify_target, e)
-        return False
+        logger.warning("dispatch: hermes send to %s raised: %s", target, e)
+        return None
     finally:
         if tmp:
             try:
@@ -2875,9 +2919,77 @@ def _send_via_hermes(notify_target: str, report_body: str) -> bool:
                 pass
 
 
+def _send_via_hermes(notify_target: str, report_body: str) -> bool:
+    """Boolean back-compat wrapper around :func:`_hermes_send`.
+
+    Returns True when the message was delivered (or skipped as a duplicate by
+    Hermes), False on failure. Used by call sites that don't thread.
+    """
+    return _hermes_send(notify_target, report_body) is not None
+
+
+def _deliver_to_issue_thread(
+    workdir: str, issue_number: Optional[int], event_key: str,
+    targets, body: str, *, dry_run: bool = False,
+) -> int:
+    """Mirror *body* into each target's per-issue conversation thread (#121).
+
+    For every target in *targets* (``hermes send`` strings):
+
+      * **Dedup** — skip if *event_key* was already mirrored to this
+        issue/target on a previous tick.
+      * **Reply** — when a thread anchor is already stored, post as a reply in
+        it. If that threaded send fails (anchor deleted / invalid), fall back
+        to a fresh root message and replace the stored anchor.
+      * **Open** — when no anchor exists yet, post a root message and store its
+        returned id as the anchor for subsequent replies.
+
+    The event is marked seen only after a successful send, so a transient
+    failure is retried on the next tick. Returns the number of targets that
+    received the message.
+    """
+    targets = [t for t in (targets or []) if t]
+    if not workdir or issue_number is None or not targets or not (body or "").strip():
+        return 0
+
+    sent = 0
+    for t in targets:
+        if dispatch_state.thread_event_seen(workdir, issue_number, t, event_key):
+            logger.debug("dispatch: '%s' for #%s already mirrored to %s — skipping",
+                         event_key, issue_number, t)
+            continue
+        if dry_run:
+            logger.info("[dry-run] would mirror '%s' for #%s to %s",
+                        event_key, issue_number, t)
+            sent += 1
+            continue
+
+        anchor = dispatch_state.get_thread_anchor(workdir, issue_number, t)
+        if anchor:
+            result = _hermes_send(t, body, thread_id=anchor)
+            if result is None:
+                # Anchor likely deleted/invalid — start a new root message.
+                logger.info("dispatch: thread anchor for #%s on %s invalid — "
+                            "posting a new root", issue_number, t)
+                result = _hermes_send(t, body)
+                if result:
+                    dispatch_state.set_thread_anchor(workdir, issue_number, t, result)
+        else:
+            result = _hermes_send(t, body)
+            if result:
+                dispatch_state.set_thread_anchor(workdir, issue_number, t, result)
+
+        if result is None:
+            continue  # total failure — retry next tick (event left unmarked)
+        dispatch_state.mark_thread_event(workdir, issue_number, t, event_key)
+        sent += 1
+
+    return sent
+
+
 def _deliver_doc_reports(
     slug: str, provider, notify_targets,
-    *, dry_run: bool = False,
+    *, workdir: str = "", dry_run: bool = False,
 ) -> List[int]:
     """Deliver completed documentation reports to the messaging target(s).
 
@@ -2960,17 +3072,27 @@ def _deliver_doc_reports(
             issue_url=provider.issue_url(issue_number) if issue_number else "",
         )
 
-        # Deliver via the dispatcher's root context — fan out to every target.
-        sent_to = [t for t in notify_targets if _send_via_hermes(t, notification)]
-        if not sent_to:
-            # Total send failure → do NOT post the sentinel (retry next tick)
-            continue
-        if len(sent_to) < len(notify_targets):
-            logger.warning(
-                "dispatch: doc report for PR #%s reached %d/%d targets (failed: %s)",
-                pr_number, len(sent_to), len(notify_targets),
-                ", ".join(t for t in notify_targets if t not in sent_to),
+        # Deliver via the dispatcher's root context. When we know the parent
+        # issue, mirror the report as a reply in that issue's per-platform
+        # thread (issue #121); otherwise fall back to a flat fan-out.
+        if workdir and issue_number is not None:
+            sent_count = _deliver_to_issue_thread(
+                workdir, issue_number, f"doc-report:{pr_number}",
+                notify_targets, notification,
             )
+            if not sent_count:
+                # Total send failure → do NOT post the sentinel (retry next tick)
+                continue
+        else:
+            sent_to = [t for t in notify_targets if _send_via_hermes(t, notification)]
+            if not sent_to:
+                continue
+            if len(sent_to) < len(notify_targets):
+                logger.warning(
+                    "dispatch: doc report for PR #%s reached %d/%d targets (failed: %s)",
+                    pr_number, len(sent_to), len(notify_targets),
+                    ", ".join(t for t in notify_targets if t not in sent_to),
+                )
 
         # Post sentinel so we never re-deliver
         if not provider.post_delivery_marker(pr_number, report_body):
@@ -2982,10 +3104,7 @@ def _deliver_doc_reports(
             )
 
         delivered.append(pr_number)
-        logger.info(
-            "dispatch: delivered doc report for PR #%s to %s",
-            pr_number, ", ".join(sent_to),
-        )
+        logger.info("dispatch: delivered doc report for PR #%s", pr_number)
 
     return delivered
 

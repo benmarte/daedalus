@@ -384,3 +384,28 @@ def render_pr_ready(
         f"**Target branch:** `{base_branch}`\n\n"
         f"{_link('Open PR', pr_url)}"
     )
+
+
+# ── issue thread root (issue #121) ────────────────────────────────────────────
+
+def render_issue_thread_root(
+    name: str,
+    issue_number: int,
+    issue_title: str,
+    *,
+    issue_url: str = "",
+    repo: str = "",
+) -> str:
+    """Root (anchor) message that opens a per-issue conversation thread.
+
+    Posted once when Daedalus dispatches an issue; the platform message id it
+    returns becomes the thread anchor every later agent comment replies into.
+    """
+    issue_ref = _link(f"#{issue_number}: {issue_title}", issue_url)
+    repo_ref = f"\n**Repository:** `{repo}`" if repo else ""
+    return (
+        f"## 🧵 {name} — {issue_ref}\n"
+        f"{repo_ref}\n\n"
+        f"Daedalus picked up this issue. Progress updates, spec posts, PR "
+        f"activity, and review feedback will appear as replies in this thread."
+    )

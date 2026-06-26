@@ -109,3 +109,82 @@ def get_review_sha(workdir: str, pr_number: int, reviewer: str) -> Optional[str]
     """Return the commit SHA at which *reviewer* last reviewed *pr_number*, or *None*."""
     state = _load(workdir)
     return state.get("reviews", {}).get(str(pr_number), {}).get(reviewer)
+
+
+# ── Notification thread anchors (issue #121) ──────────────────────────────────
+# Each managed issue gets one conversation thread per notification target so
+# agent comments (spec posts, PR opens, reviews, merges) mirror into the same
+# thread instead of scattering as standalone messages. The anchor is whatever
+# id the platform threads on — Slack ``thread_ts``, Discord/Telegram message id
+# — captured from ``hermes send --json`` and reused as ``target:<anchor>`` on
+# subsequent replies. ``events`` records which lifecycle events already reached
+# a given target so the same event is not re-posted on a later tick.
+
+
+def _thread_entry(state: Dict[str, Any], issue_number: int) -> Dict[str, Any]:
+    """Return the (mutable) per-issue thread entry, creating it if absent."""
+    threads = state.setdefault("threads", {})
+    entry = threads.setdefault(str(issue_number), {})
+    entry.setdefault("anchors", {})
+    entry.setdefault("events", {})
+    return entry
+
+
+def get_thread_anchor(workdir: str, issue_number: int, target: str) -> Optional[str]:
+    """Return the stored thread anchor for *issue_number* on *target*, or *None*.
+
+    *None* means no root message has been posted yet (or the record is
+    malformed) — the caller should post a fresh root and store its id via
+    :func:`set_thread_anchor`.
+    """
+    state = _load(workdir)
+    entry = state.get("threads", {}).get(str(issue_number), {})
+    anchors = entry.get("anchors") if isinstance(entry, dict) else None
+    anchor = anchors.get(target) if isinstance(anchors, dict) else None
+    return anchor if isinstance(anchor, str) and anchor else None
+
+
+def set_thread_anchor(workdir: str, issue_number: int, target: str, anchor: str) -> None:
+    """Store *anchor* as the thread root for *issue_number* on *target*.
+
+    A falsy *anchor* is ignored — platforms that deliver without a usable
+    thread id simply get standalone (un-threaded) replies.
+    """
+    if not anchor:
+        return
+    state = _load(workdir)
+    _thread_entry(state, issue_number)["anchors"][target] = anchor
+    _save(workdir, state)
+
+
+def thread_event_seen(workdir: str, issue_number: int, target: str, event_key: str) -> bool:
+    """Return *True* if *event_key* was already mirrored to *issue_number* on *target*."""
+    state = _load(workdir)
+    entry = state.get("threads", {}).get(str(issue_number), {})
+    events = entry.get("events") if isinstance(entry, dict) else None
+    seen = events.get(target) if isinstance(events, dict) else None
+    return event_key in seen if isinstance(seen, list) else False
+
+
+def mark_thread_event(workdir: str, issue_number: int, target: str, event_key: str) -> None:
+    """Record that *event_key* was mirrored to *issue_number* on *target*.
+
+    Idempotent: recording the same key twice is a no-op. Pairs with
+    :func:`thread_event_seen` for cross-tick duplicate suppression.
+    """
+    state = _load(workdir)
+    seen = _thread_entry(state, issue_number)["events"].setdefault(target, [])
+    if event_key not in seen:
+        seen.append(event_key)
+        _save(workdir, state)
+
+
+def clear_threads(workdir: str, issue_number: int) -> None:
+    """Drop all thread anchors / event markers for *issue_number*.
+
+    Call once the issue's lifecycle is over (after the final reply is posted)
+    so a future re-open starts a fresh thread.
+    """
+    state = _load(workdir)
+    if state.get("threads", {}).pop(str(issue_number), None) is not None:
+        _save(workdir, state)
