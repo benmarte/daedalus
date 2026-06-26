@@ -356,6 +356,30 @@ def test_setup_detects_gitlab_self_hosted(tmp_path):
     assert cfg["vcs"]["base_url"] == "https://gitlab.corp.io"
 
 
+def test_setup_gitlab_enables_label_board(tmp_path):
+    """setup.sh turns on label-driven board mode for GitLab so issues are polled."""
+    import yaml
+    repo = _init_tmp_repo(tmp_path, "https://gitlab.com/team/app.git")
+    registry = tmp_path / "registry"
+    result = _run_setup(repo, registry)
+    assert result.returncode == 0, result.stderr
+    cfg = yaml.safe_load((repo / ".hermes" / "daedalus.yaml").read_text())
+    assert cfg["vcs"]["provider"] == "gitlab"
+    assert cfg["tracking"]["label_board"] is True
+
+
+def test_setup_github_unaffected_by_gitlab_autoconfig(tmp_path):
+    """GitHub setups never gain label_board (the GitLab-only auto-config)."""
+    import yaml
+    repo = _init_tmp_repo(tmp_path, "https://github.com/acme/widgets.git")
+    registry = tmp_path / "registry"
+    result = _run_setup(repo, registry)
+    assert result.returncode == 0, result.stderr
+    cfg = yaml.safe_load((repo / ".hermes" / "daedalus.yaml").read_text())
+    # Template leaves tracking unset (null) for GitHub — no label_board injected.
+    assert not (cfg.get("tracking") or {}).get("label_board")
+
+
 def test_setup_detects_azure_devops(tmp_path):
     """setup.sh writes provider azuredevops + org/project/repo for an Azure remote."""
     import yaml

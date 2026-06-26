@@ -127,6 +127,44 @@ def test_label_board_ready_numbers():
     assert p.board_numbers_with_statuses(["Ready"]) == {1, 2}
 
 
+def test_get_default_branch(provider):
+    provider._http.get_json.return_value = {"default_branch": "master"}
+    assert provider.get_default_branch() == "master"
+    (path,) = provider._http.get_json.call_args[0]
+    assert path == "/projects/group%2Fproj"
+
+
+def test_get_default_branch_error(provider):
+    provider._http.get_json.side_effect = ProviderError("500", status_code=500)
+    assert provider.get_default_branch() is None
+
+
+def test_ensure_status_labels_creates_missing(provider):
+    provider._http.get_paginated.return_value = [{"name": "Ready", "color": "#fff"}]
+    created = provider.ensure_status_labels(["Ready", "In progress", "Done"])
+    assert created == ["In progress", "Done"]  # "Ready" already exists, skipped
+    posted = {call.args[0]: call.args[1] for call in provider._http.post_json.call_args_list}
+    assert "/projects/group%2Fproj/labels" in posted
+    names = {call.args[1]["name"] for call in provider._http.post_json.call_args_list}
+    assert names == {"In progress", "Done"}
+
+
+def test_ensure_status_labels_idempotent_on_409(provider):
+    provider._http.get_paginated.return_value = []  # nothing pre-exists
+    provider._http.post_json.side_effect = ProviderError("conflict", status_code=409)
+    # 409 (already exists) must not raise and must not be reported as created.
+    assert provider.ensure_status_labels(["Ready"]) == []
+
+
+def test_ensure_status_labels_noop_when_all_exist(provider):
+    provider._http.get_paginated.return_value = [
+        {"name": "Ready"}, {"name": "In progress"},
+        {"name": "In review"}, {"name": "Done"}]
+    assert provider.ensure_status_labels(
+        ["Ready", "In progress", "In review", "Done"]) == []
+    provider._http.post_json.assert_not_called()
+
+
 def test_errors_degrade_gracefully(provider):
     provider._http.get_json.side_effect = ProviderError("500", status_code=500)
     assert provider.list_issues() == []
