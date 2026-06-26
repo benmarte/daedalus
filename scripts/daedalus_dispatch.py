@@ -136,6 +136,15 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
     "opencode": "opencode run",
 }
 
+# Wall-clock ceiling (seconds) the worker waits for a spawned coding agent to
+# write its output file before failing fast (issue #141). A dead agent is caught
+# within one poll via the PID liveness check; this is the backstop for an agent
+# that is alive-but-stuck (hung on a prompt, deadlocked). Override per project
+# via execution.coding_agent_max_wait. Resolved once per dispatch tick into
+# ``_CODING_AGENT_MAX_WAIT`` (run() is single-threaded per process).
+_DEFAULT_CODING_AGENT_MAX_WAIT = 3600
+_CODING_AGENT_MAX_WAIT = _DEFAULT_CODING_AGENT_MAX_WAIT
+
 
 _ROLE_TMP_PREFIX: Dict[str, str] = {
     "pm": "pm",
@@ -149,55 +158,106 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
     "planner": "planner",
 }
 
-# Templates keyed by role. ``{pfx}`` and ``{issue_number}`` are filled in by
-# ``_build_delegation_instructions`` so each concurrent task reads/writes an
-# isolated /tmp pair (issue #114).
+# Shared instruction injected after every role's wait step. If the guarded wait
+# (see ``_wait_for_agent_cmd``) reports the agent died or timed out, the worker
+# must move its card OUT of ``running`` (block it) so the dispatcher retries per
+# kanban.failure_limit instead of leaving a zombie ``running`` card (issue #141).
+_AGENT_FAILED_NOTE = (
+    "If that output contains 'CODING_AGENT_DIED' or 'CODING_AGENT_TIMEOUT', the coding agent "
+    "failed to produce a result — do NOT proceed and do NOT complete your card. Block it with "
+    "kanban_block(\"coding-agent-failed: <CODING_AGENT_DIED|CODING_AGENT_TIMEOUT> — see stderr above\") "
+    "then run: bash ~/.hermes/scripts/daedalus-cron.sh so the dispatcher retries per failure_limit."
+)
+
+
+def _wait_for_agent_cmd(pfx: str, issue_number: int, max_wait: int) -> str:
+    """Build the bounded, liveness-guarded wait command for a spawned coding agent.
+
+    Polls for the agent's output file, but unlike the old ``until [ -s out ]``
+    loop it ALSO (a) checks the spawned PID with ``kill -0`` and bails the moment
+    the process is gone with no output, and (b) enforces a ``max_wait`` wall-clock
+    ceiling. On either failure it prints a ``CODING_AGENT_DIED`` /
+    ``CODING_AGENT_TIMEOUT`` marker plus the stderr tail so the death reason
+    (OOM / auth / crash) is visible (issue #141). The whole command is a single
+    line so it drops straight into a ``terminal("...")`` call.
+    """
+    out = f"/tmp/{pfx}-{issue_number}-out.txt"
+    err = f"/tmp/{pfx}-{issue_number}-err.txt"
+    pid = f"/tmp/{pfx}-{issue_number}-pid.txt"
+    # No double quotes anywhere — this whole string is embedded inside a
+    # terminal("...") call, so a literal " would terminate it early. An empty or
+    # stale PID makes ``kill -0`` exit non-zero (treated as dead), which is the
+    # behavior we want, so the unquoted $P needs no -z guard.
+    return (
+        f"P=$(cat {pid} 2>/dev/null); S=$SECONDS; "
+        f"while [ ! -s {out} ]; do "
+        f"if ! kill -0 $P 2>/dev/null; then "
+        f"echo CODING_AGENT_DIED: agent exited without writing output. stderr tail:; "
+        f"tail -n 40 {err} 2>/dev/null; break; fi; "
+        f"if [ $((SECONDS-S)) -ge {max_wait} ]; then "
+        f"echo CODING_AGENT_TIMEOUT: exceeded {max_wait}s with no output. stderr tail:; "
+        f"tail -n 40 {err} 2>/dev/null; break; fi; "
+        f"sleep 30; done; cat {out} 2>/dev/null"
+    )
+
+
+# Templates keyed by role. ``{wait_cmd}`` (the bounded liveness-guarded wait) and
+# ``{failed_note}`` are filled in by ``_build_delegation_instructions`` along with
+# ``{pfx}``/``{issue_number}`` so each concurrent task reads/writes an isolated
+# /tmp pair (issue #114) and fails fast on a dead agent (issue #141).
 _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "developer": (
-        "  4. Wait for coding agent to finish: terminal(\"until [ -s /tmp/{pfx}-{issue_number}-out.txt ]; do sleep 30; done; cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
-        "  5. The agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
+        "  4. Wait for the coding agent to finish: terminal(\"{wait_cmd}\")\n"
+        "  4b. {failed_note}\n"
+        "  5. On success the agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
         "  6. Block your card: kanban_block(\"review-required: PR #<n> — <branch>\")\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do NOT open the PR yourself. Wait for coding agent output then block with the real PR number.\n"
     ),
     "validator": (
-        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
-        "  5. The agent will have posted the validation report to GitHub and output its verdict.\n"
+        "  4. Wait for the coding agent: terminal(\"{wait_cmd}\")\n"
+        "  4b. {failed_note}\n"
+        "  5. On success the agent will have posted the validation report to GitHub and output its verdict.\n"
         "  6. Complete your card with the exact verdict line: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-        "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block. Output CONFIRMED/BLOCKED as plain text only.\n"
+        "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block unless the agent failed. Output CONFIRMED/BLOCKED as plain text only.\n"
     ),
     "pm": (
-        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
-        "  5. The agent will have posted the spec to GitHub and output \"spec: <summary>\".\n"
+        "  4. Wait for the coding agent: terminal(\"{wait_cmd}\")\n"
+        "  4b. {failed_note}\n"
+        "  5. On success the agent will have posted the spec to GitHub and output \"spec: <summary>\".\n"
         "  6. Complete your card with: 'spec: <one-line summary from the output>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not write the spec yourself.\n"
     ),
     "qa": (
-        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
-        "  5. The agent will have posted a QA report to GitHub and output its verdict.\n"
+        "  4. Wait for the coding agent: terminal(\"{wait_cmd}\")\n"
+        "  4b. {failed_note}\n"
+        "  5. On success the agent will have posted a QA report to GitHub and output its verdict.\n"
         "  6. Complete your card: 'qa-passed: PR #N' or block with 'qa-failed: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not run the tests yourself.\n"
     ),
     "reviewer": (
-        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
-        "  5. The agent will have posted review findings to GitHub and output its verdict.\n"
+        "  4. Wait for the coding agent: terminal(\"{wait_cmd}\")\n"
+        "  4b. {failed_note}\n"
+        "  5. On success the agent will have posted review findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'reviewed: approved' or 'reviewed: changes-requested: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not review the PR yourself.\n"
     ),
     "security": (
-        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
-        "  5. The agent will have posted security findings to GitHub and output its verdict.\n"
+        "  4. Wait for the coding agent: terminal(\"{wait_cmd}\")\n"
+        "  4b. {failed_note}\n"
+        "  5. On success the agent will have posted security findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'security: cleared' or 'security: flagged: <finding>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not audit the PR yourself.\n"
     ),
     "documentation": (
-        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
-        "  5. The agent will have posted the completion report to GitHub.\n"
+        "  4. Wait for the coding agent: terminal(\"{wait_cmd}\")\n"
+        "  4b. {failed_note}\n"
+        "  5. On success the agent will have posted the completion report to GitHub.\n"
         "  6. Complete your card: 'docs: posted completion report for PR #N'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not write the report yourself.\n"
@@ -222,10 +282,14 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
     pfx = _ROLE_TMP_PREFIX.get(role, role)
+    wait_cmd = _wait_for_agent_cmd(pfx, issue_number, _CODING_AGENT_MAX_WAIT)
     after = _ROLE_AFTER_SPAWN.get(role, _ROLE_AFTER_SPAWN["developer"]).format(
-        pfx=pfx, issue_number=issue_number)
+        pfx=pfx, issue_number=issue_number, wait_cmd=wait_cmd, failed_note=_AGENT_FAILED_NOTE)
     label = _CLOUD_AGENT_LABELS.get(agent, agent)
 
+    # Spawn captures the agent PID (for the liveness check) and sends stderr to
+    # its own ``-err.txt`` log so a crash reason survives even when nothing is
+    # written to stdout/``-out.txt`` (issue #141).
     if agent == "claude-code":
         run_cmd = effective_cmd or "claude --dangerously-skip-permissions -p"
         return (
@@ -234,7 +298,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-{issue_number}-task.txt | {run_cmd} > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
             + after
         )
     if agent == "codex":
@@ -245,7 +309,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
             + after
         )
     if agent == "opencode":
@@ -256,7 +320,7 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
             + after
         )
     return ""
@@ -324,6 +388,36 @@ def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
         logger.warning("dispatch: invalid coding_agent %r — defaulting to hermes", agent)
         return "hermes"
     return agent
+
+
+def _resolve_coding_agent_max_wait(execution: Dict[str, Any]) -> int:
+    """Return the wall-clock wait ceiling (seconds) for a spawned coding agent.
+
+    Reads ``execution.coding_agent_max_wait``; falls back to
+    ``_DEFAULT_CODING_AGENT_MAX_WAIT`` when unset, non-numeric, or <= 0.
+    """
+    raw = (execution or {}).get("coding_agent_max_wait")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_CODING_AGENT_MAX_WAIT
+    return val if val > 0 else _DEFAULT_CODING_AGENT_MAX_WAIT
+
+
+def _resolve_max_dispatch(execution: Dict[str, Any], default: int = 5) -> int:
+    """Return how many issues to dispatch per tick from ``execution.max_dispatch``.
+
+    Falls back to ``default`` (5) when unset, non-numeric, or <= 0. Wiring this
+    into the CLI ``run()`` path caps how many coding agents can be spawned in a
+    single tick, which prevents the OOM-by-over-concurrency that triggered the
+    dead-agent hangs (issue #141).
+    """
+    raw = (execution or {}).get("max_dispatch")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
 
 
 
@@ -2415,6 +2509,11 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
     coding_agent = _resolve_coding_agent(execution)
     coding_agent_cmd = _resolve_coding_agent_cmd(execution)
+    # Resolve the per-project coding-agent wait ceiling once per tick. run() is
+    # single-threaded per process, so the body builders (called below) read this
+    # module global rather than threading it through every signature (issue #141).
+    global _CODING_AGENT_MAX_WAIT
+    _CODING_AGENT_MAX_WAIT = _resolve_coding_agent_max_wait(execution)
     role_agents: Dict[str, str] = {
         role: _resolve_agent_for_role(execution, role) for role in _DEFAULT_PROFILES
     }
@@ -3292,7 +3391,9 @@ def main() -> int:
             return 0
         name = resolved.get("name", repo_path)
         try:
-            summaries[name] = run(resolved, dry_run=dry_run)
+            summaries[name] = run(
+                resolved, dry_run=dry_run,
+                max_dispatch=_resolve_max_dispatch(resolved.get("execution") or {}))
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
@@ -3327,7 +3428,9 @@ def main() -> int:
         name = resolved.get("name", rp)
         resolved_map[name] = resolved
         try:
-            summaries[name] = run(resolved, dry_run=dry_run)
+            summaries[name] = run(
+                resolved, dry_run=dry_run,
+                max_dispatch=_resolve_max_dispatch(resolved.get("execution") or {}))
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}

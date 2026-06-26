@@ -743,6 +743,116 @@ def test_build_delegation_instructions_none_returns_empty():
     assert disp._build_delegation_instructions("none") == ""
 
 
+# ── issue #141: dead/hung coding agent must fail fast, not hang forever ───────
+
+
+def test_wait_for_agent_cmd_has_pid_liveness_and_timeout():
+    """_wait_for_agent_cmd polls output AND checks PID liveness + a wall-clock cap."""
+    cmd = disp._wait_for_agent_cmd("dev", 141, 1800)
+    # liveness check on the captured PID
+    assert "kill -0" in cmd, f"expected a PID liveness check, got:\n{cmd}"
+    assert "dev-141-pid.txt" in cmd, "wait must read the spawned PID file"
+    # wall-clock ceiling
+    assert "1800" in cmd, "wait must honor the max_wait ceiling"
+    assert "$((SECONDS-S))" in cmd, "wait must track elapsed wall-clock time"
+    # clear failure markers + stderr surfaced
+    assert "CODING_AGENT_DIED" in cmd
+    assert "CODING_AGENT_TIMEOUT" in cmd
+    assert "dev-141-err.txt" in cmd, "wait must surface the agent stderr log"
+
+
+def test_wait_for_agent_cmd_has_no_double_quotes():
+    """The wait command is embedded in terminal(\"...\"); a literal \" would break it."""
+    cmd = disp._wait_for_agent_cmd("dev", 141, 3600)
+    assert '"' not in cmd, f"double quotes would terminate the terminal() string:\n{cmd}"
+
+
+def test_wait_for_agent_cmd_no_infinite_until_loop():
+    """The old unbounded `until [ -s out ]; do sleep 30; done` must be gone."""
+    cmd = disp._wait_for_agent_cmd("dev", 141, 3600)
+    assert "until [ -s" not in cmd, (
+        "the infinite poll loop that hung on dead agents must not return"
+    )
+
+
+def test_delegation_spawn_captures_pid_and_separate_stderr():
+    """Spawn line must record the agent PID and route stderr to its own log."""
+    for agent in ("claude-code", "codex", "opencode"):
+        body = disp._build_delegation_instructions(agent, cmd="", issue_number=141)
+        assert "echo $$ > /tmp/dev-141-pid.txt" in body, (
+            f"{agent}: spawn must capture the PID for the liveness check, got:\n{body}"
+        )
+        # The current Hermes terminal tool rejects nohup/&/disown/setsid in a
+        # foreground call, so the agent must spawn via terminal(background=True);
+        # otherwise the coding agent never launches and the card hangs (#141).
+        assert "background=True" in body, (
+            f"{agent}: spawn must use terminal(background=True); nohup/& is rejected by Hermes"
+        )
+        assert "nohup" not in body and "background=False" not in body, (
+            f"{agent}: must not use the Hermes-rejected nohup/& foreground spawn"
+        )
+        assert "2> /tmp/dev-141-err.txt" in body, (
+            f"{agent}: stderr must go to its own log, not merged into out.txt"
+        )
+        # stderr must NOT be merged into out.txt anymore
+        assert f"out.txt 2>&1' >" not in body, (
+            f"{agent}: stderr must not be merged into out.txt"
+        )
+
+
+def test_delegation_instructions_fail_fast_on_dead_agent():
+    """Every delegating role is told to block (not complete) when the agent dies."""
+    for role in ("developer", "validator", "pm", "qa", "reviewer", "security",
+                 "documentation"):
+        body = disp._build_delegation_instructions(
+            "claude-code", cmd="", role=role, issue_number=141)
+        assert "kill -0" in body, f"{role}: wait must include a liveness check"
+        assert "CODING_AGENT_DIED" in body, f"{role}: must surface the death marker"
+        assert "coding-agent-failed:" in body, (
+            f"{role}: must block the card with a clear error on agent failure"
+        )
+        assert "until [ -s" not in body, f"{role}: no infinite poll loop"
+
+
+def test_delegation_wait_uses_configured_max_wait():
+    """The configured coding_agent_max_wait is baked into the generated wait."""
+    with mock.patch.object(disp, "_CODING_AGENT_MAX_WAIT", 600):
+        body = disp._build_delegation_instructions(
+            "claude-code", cmd="", role="developer", issue_number=141)
+    assert "600s" in body, f"expected configured 600s ceiling in wait, got:\n{body}"
+
+
+def test_resolve_coding_agent_max_wait_default():
+    """Unset / invalid / non-positive max_wait falls back to the default."""
+    d = disp._DEFAULT_CODING_AGENT_MAX_WAIT
+    assert disp._resolve_coding_agent_max_wait({}) == d
+    assert disp._resolve_coding_agent_max_wait(None) == d
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": "nope"}) == d
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": 0}) == d
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": -5}) == d
+
+
+def test_resolve_coding_agent_max_wait_override():
+    """A positive max_wait (int or numeric string) is honored."""
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": 900}) == 900
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": "120"}) == 120
+
+
+def test_resolve_max_dispatch_default():
+    """Unset / invalid / non-positive max_dispatch falls back to 5."""
+    assert disp._resolve_max_dispatch({}) == 5
+    assert disp._resolve_max_dispatch(None) == 5
+    assert disp._resolve_max_dispatch({"max_dispatch": "x"}) == 5
+    assert disp._resolve_max_dispatch({"max_dispatch": 0}) == 5
+    assert disp._resolve_max_dispatch({}, default=3) == 3
+
+
+def test_resolve_max_dispatch_override():
+    """A positive max_dispatch is honored (caps concurrent coding agents)."""
+    assert disp._resolve_max_dispatch({"max_dispatch": 2}) == 2
+    assert disp._resolve_max_dispatch({"max_dispatch": "4"}) == 4
+
+
 def test_resolve_coding_agent_cmd_empty_when_not_set():
     """_resolve_coding_agent_cmd returns '' when field absent or blank."""
     assert disp._resolve_coding_agent_cmd({}) == ""
@@ -1081,18 +1191,24 @@ def test_role_tmp_prefix_has_explicit_accessibility_and_planner():
 
 
 def test_role_delegation_wait_command_is_issue_scoped():
-    """The _ROLE_AFTER_SPAWN wait command also embeds the issue number (issue #114)."""
+    """The _ROLE_AFTER_SPAWN wait command embeds the issue number (issue #114).
+
+    The wait is now a bounded, liveness-guarded loop (issue #141) rather than the
+    old `until [ -s ... ]`, but every /tmp ref must still be issue-scoped.
+    """
     issue = {"number": 42, "title": "T", "body": "B"}
-    # developer uses an `until [ -s ... ]` poll loop; assert both refs are scoped.
     dev_body = disp._dev_task_body("o/r", issue, 1, "/tmp", "main", "github",
                                    coding_agent="claude-code")
-    assert "until [ -s /tmp/dev-42-out.txt ]" in dev_body
-    assert "cat /tmp/dev-42-out.txt" in dev_body
+    assert "/tmp/dev-42-out.txt" in dev_body
+    assert "/tmp/dev-42-pid.txt" in dev_body
+    assert "/tmp/dev-42-err.txt" in dev_body
+    assert "until [ -s" not in dev_body  # the hang-forever loop is gone (#141)
     assert "/tmp/dev-out.txt" not in dev_body
-    # validator uses a plain `cat` wait; confirm it is scoped too.
+    # validator wait must be scoped too.
     val_body = disp._validator_body("o/r", issue, "/tmp", "main", "github",
                                     coding_agent="claude-code")
-    assert "cat /tmp/validator-42-out.txt" in val_body
+    assert "/tmp/validator-42-out.txt" in val_body
+    assert "/tmp/validator-42-pid.txt" in val_body
     assert "/tmp/validator-out.txt" not in val_body
 
 

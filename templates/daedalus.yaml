@@ -103,7 +103,9 @@ cron:
 
 # ── Execution tunables ────────────────────────────────────────────────────────
 execution:
-  # How many issues the dispatcher spawns per tick (default: unlimited).
+  # How many issues the dispatcher spawns per tick (default: 5). Caps how many
+  # coding agents can be launched at once — keep it low (e.g. 2-4) on memory-
+  # constrained hosts to avoid OOM-killing parallel coding agents (issue #141).
   # max_dispatch: 5
 
   # Iterations per agent (how many back-and-forth steps each agent gets).
@@ -235,3 +237,12 @@ execution:
   # agent loops. Defaults to 10 for one-shot modes.
   #
   # coding_agent_max_turns: 10
+
+  # Wall-clock ceiling (seconds) the worker waits for a spawned coding agent to
+  # write its output before failing the card fast (issue #141). A dead agent is
+  # caught immediately via a PID liveness check; this is the backstop for an
+  # agent that is alive but hung. On exceed the card is blocked
+  # ('coding-agent-failed: CODING_AGENT_TIMEOUT') and retried per failure_limit.
+  # Defaults to 3600 (1 hour).
+  #
+  # coding_agent_max_wait: 3600
