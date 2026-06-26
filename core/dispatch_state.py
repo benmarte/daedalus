@@ -49,10 +49,18 @@ def _save(workdir: str, state: Dict[str, Any]) -> None:
 # ── Issue dispatch timestamps ─────────────────────────────────────────────────
 
 def record_dispatch(workdir: str, issue_number: int) -> None:
-    """Record the current time as the dispatch timestamp for *issue_number*."""
+    """Record the current time as the dispatch timestamp for *issue_number*.
+
+    Preserves any other keys already on the entry (e.g. ``threads`` /
+    ``thread_events``) so re-dispatching an issue never wipes its thread anchors.
+    """
     state = _load(workdir)
     issues = state.setdefault("issues", {})
-    issues[str(issue_number)] = {"dispatched_at": time.time()}
+    entry = issues.setdefault(str(issue_number), {})
+    if not isinstance(entry, dict):
+        entry = {}
+        issues[str(issue_number)] = entry
+    entry["dispatched_at"] = time.time()
     _save(workdir, state)
 
 
@@ -76,6 +84,92 @@ def clear_dispatch(workdir: str, issue_number: int) -> None:
     """Remove the dispatch record for *issue_number* (e.g. after it's closed)."""
     state = _load(workdir)
     state.get("issues", {}).pop(str(issue_number), None)
+    _save(workdir, state)
+
+
+# ── Per-issue platform threads (issue/PR comment mirroring) ───────────────────
+#
+# Each managed issue mirrors its agent conversation into one thread per
+# configured notification target.  We persist two maps under the issue entry:
+#
+#   "threads":       {target: anchor}        — the thread anchor per target
+#                                              (Slack thread_ts / Discord msg id)
+#   "thread_events": {target: [event_key]}   — events already mirrored, for
+#                                              cross-tick duplicate suppression
+#
+# Keyed by the *full* ``hermes send`` target string (e.g. ``slack:C123``) rather
+# than by bare platform name, because an anchor is channel-specific: a Slack ts
+# only resolves a thread within the channel that produced it.
+
+
+def _issue_entry(state: Dict[str, Any], issue_number: int) -> Dict[str, Any]:
+    """Return (creating if needed) the mutable issue entry for *issue_number*."""
+    issues = state.setdefault("issues", {})
+    entry = issues.setdefault(str(issue_number), {})
+    if not isinstance(entry, dict):
+        entry = {}
+        issues[str(issue_number)] = entry
+    return entry
+
+
+def get_thread_anchor(workdir: str, issue_number: int, target: str) -> Optional[str]:
+    """Return the stored thread anchor for *target* on *issue_number*, or *None*."""
+    entry = _load(workdir).get("issues", {}).get(str(issue_number))
+    if not isinstance(entry, dict):
+        return None
+    threads = entry.get("threads")
+    if not isinstance(threads, dict):
+        return None
+    anchor = threads.get(target)
+    return str(anchor) if anchor else None
+
+
+def set_thread_anchor(workdir: str, issue_number: int, target: str, anchor: str) -> None:
+    """Persist the thread *anchor* for *target* on *issue_number*."""
+    state = _load(workdir)
+    entry = _issue_entry(state, issue_number)
+    threads = entry.setdefault("threads", {})
+    if not isinstance(threads, dict):
+        threads = {}
+        entry["threads"] = threads
+    threads[target] = str(anchor)
+    _save(workdir, state)
+
+
+def get_thread_anchors(workdir: str, issue_number: int) -> Dict[str, str]:
+    """Return the full ``{target: anchor}`` map for *issue_number* (may be empty)."""
+    entry = _load(workdir).get("issues", {}).get(str(issue_number))
+    if not isinstance(entry, dict):
+        return {}
+    threads = entry.get("threads")
+    return dict(threads) if isinstance(threads, dict) else {}
+
+
+def has_thread_event(workdir: str, issue_number: int, target: str, event_key: str) -> bool:
+    """Return *True* if *event_key* was already mirrored to *target* for this issue."""
+    entry = _load(workdir).get("issues", {}).get(str(issue_number))
+    if not isinstance(entry, dict):
+        return False
+    events = entry.get("thread_events")
+    if not isinstance(events, dict):
+        return False
+    return event_key in (events.get(target) or [])
+
+
+def mark_thread_event(workdir: str, issue_number: int, target: str, event_key: str) -> None:
+    """Record that *event_key* has been mirrored to *target* for this issue."""
+    state = _load(workdir)
+    entry = _issue_entry(state, issue_number)
+    events = entry.setdefault("thread_events", {})
+    if not isinstance(events, dict):
+        events = {}
+        entry["thread_events"] = events
+    lst = events.setdefault(target, [])
+    if not isinstance(lst, list):
+        lst = []
+        events[target] = lst
+    if event_key not in lst:
+        lst.append(event_key)
     _save(workdir, state)
 
 
