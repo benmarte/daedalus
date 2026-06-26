@@ -10,13 +10,13 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 1. Read the task body from your kanban card using `kanban_show`.
 2. Save it to a temp file:
    ```
-   write_file("/tmp/pm-task.txt", "<full task body>")
+   write_file("/tmp/pm-<issue_number>-task.txt", "<full task body>")
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("cat /tmp/pm-task.txt | <command from delegation block> > /tmp/pm-out.txt 2>&1", background=True)
+   terminal("cat /tmp/pm-<issue_number>-task.txt | <command from delegation block> > /tmp/pm-<issue_number>-out.txt 2>&1", background=True)
    ```
-4. Wait for it to finish: `terminal("cat /tmp/pm-out.txt")`
+4. Wait for it to finish: `terminal("cat /tmp/pm-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the spec to GitHub and printed `spec: <summary>`.
 6. Complete YOUR kanban card with: `spec: <one-line summary from the output>`
 7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
@@ -140,7 +140,21 @@ print(urllib.request.urlopen(req).read())
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 
-### 3. Complete your kanban task
+### 3. Save the spec to disk
+
+After posting to GitHub, write the same spec body to `.hermes/specs/issue-N.md` (where N is the issue number) inside the project's working directory:
+
+```python
+import os
+specs_dir = os.path.join("<workdir>", ".hermes", "specs")
+os.makedirs(specs_dir, exist_ok=True)
+with open(os.path.join(specs_dir, f"issue-{issue_number}.md"), "w") as f:
+    f.write(body)
+```
+
+This gives users an offline copy. The GitHub comment is the authoritative source; this file is a local mirror.
+
+### 5. Complete your kanban task
 Complete with summary starting **EXACTLY**:
 ```
 spec: <one-line summary of what to implement>
@@ -148,7 +162,7 @@ spec: <one-line summary of what to implement>
 
 The dispatcher detects the `spec:` prefix to trigger team creation. Any other prefix and the pipeline stalls.
 
-### 4. Run the dispatcher
+### 6. Run the dispatcher
 ```
 bash ~/.hermes/scripts/daedalus-cron.sh
 ```

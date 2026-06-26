@@ -21,7 +21,6 @@ import re
 import sqlite3
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
@@ -137,57 +136,64 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
 
 _ROLE_TMP_PREFIX: Dict[str, str] = {
     "pm": "pm",
-    "developer": "cc",
+    "developer": "dev",
     "validator": "validator",
     "qa": "qa",
     "reviewer": "rev",
     "security": "sec",
     "documentation": "docs",
+    "accessibility": "a11y",
+    "planner": "planner",
 }
 
+# Templates keyed by role. ``{pfx}`` and ``{issue_number}`` are filled in by
+# ``_build_delegation_instructions`` so each concurrent task reads/writes an
+# isolated /tmp pair (issue #114).
 _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "developer": (
-        "  4. Immediately block: kanban_block(\"review-required: awaiting-pr — Claude Code spawned, PR pending\")\n"
-        "  5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-        "  STOP — do not poll, do not wait for the PR. Block immediately after spawning.\n"
+        "  4. Wait for coding agent to finish: terminal(\"until [ -s /tmp/{pfx}-{issue_number}-out.txt ]; do sleep 30; done; cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
+        "  5. The agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
+        "  6. Block your card: kanban_block(\"review-required: PR #<n> — <branch>\")\n"
+        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
+        "  STOP — do NOT open the PR yourself. Wait for coding agent output then block with the real PR number.\n"
     ),
     "validator": (
-        "  4. Wait: terminal(\"cat /tmp/validator-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted the validation report to GitHub and output its verdict.\n"
         "  6. Complete your card with the exact verdict line: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block. Output CONFIRMED/BLOCKED as plain text only.\n"
     ),
     "pm": (
-        "  4. Wait: terminal(\"cat /tmp/pm-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted the spec to GitHub and output \"spec: <summary>\".\n"
         "  6. Complete your card with: 'spec: <one-line summary from the output>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not write the spec yourself.\n"
     ),
     "qa": (
-        "  4. Wait: terminal(\"cat /tmp/qa-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted a QA report to GitHub and output its verdict.\n"
         "  6. Complete your card: 'qa-passed: PR #N' or block with 'qa-failed: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not run the tests yourself.\n"
     ),
     "reviewer": (
-        "  4. Wait: terminal(\"cat /tmp/rev-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted review findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'reviewed: approved' or 'reviewed: changes-requested: <reason>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not review the PR yourself.\n"
     ),
     "security": (
-        "  4. Wait: terminal(\"cat /tmp/sec-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted security findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'security: cleared' or 'security: flagged: <finding>'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not audit the PR yourself.\n"
     ),
     "documentation": (
-        "  4. Wait: terminal(\"cat /tmp/docs-out.txt\")\n"
+        "  4. Wait: terminal(\"cat /tmp/{pfx}-{issue_number}-out.txt\")\n"
         "  5. The agent will have posted the completion report to GitHub.\n"
         "  6. Complete your card: 'docs: posted completion report for PR #N'\n"
         "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
@@ -202,15 +208,19 @@ _CLOUD_AGENT_LABELS: Dict[str, str] = {
 }
 
 
-def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "developer") -> str:
+def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "developer",
+                                   issue_number: int = 0) -> str:
     """Return delegation instruction text to inject into any role's task body.
 
     ``cmd`` is the full CLI command from coding_agent_cmd.
     ``role`` selects role-specific post-spawn steps (what to do with the output).
+    ``issue_number`` scopes the /tmp task/out filenames so concurrent tasks for
+    different issues never clobber each other's files (issue #114).
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
     pfx = _ROLE_TMP_PREFIX.get(role, role)
-    after = _ROLE_AFTER_SPAWN.get(role, _ROLE_AFTER_SPAWN["developer"])
+    after = _ROLE_AFTER_SPAWN.get(role, _ROLE_AFTER_SPAWN["developer"]).format(
+        pfx=pfx, issue_number=issue_number)
     label = _CLOUD_AGENT_LABELS.get(agent, agent)
 
     if agent == "claude-code":
@@ -220,8 +230,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-task.txt | {run_cmd} > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"nohup bash -c 'cat /tmp/{pfx}-{issue_number}-task.txt | {run_cmd} > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "codex":
@@ -231,8 +241,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     if agent == "opencode":
@@ -242,8 +252,8 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
-            f"  2. write_file(\"/tmp/{pfx}-task.txt\", \"<full task body>\")\n"
-            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-task.txt > /tmp/{pfx}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
+            f"  2. write_file(\"/tmp/{pfx}-{issue_number}-task.txt\", \"<full task body>\")\n"
+            f"  3. terminal(\"nohup bash -c '{run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2>&1' > /dev/null 2>&1 &\", background=False)\n"
             + after
         )
     return ""
@@ -288,112 +298,6 @@ def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
     return agent
 
 
-# Shared lock directory for CI retry — visible to all Hermes profiles so that
-# one profile's retry cron suppresses duplicates from other profiles (issue #79).
-_RETRY_LOCK_DIR = Path.home() / ".hermes" / "daedalus"
-# How long a lock is considered "recent" (seconds). After this TTL the lock is
-# stale and a still-pending CI re-arms the retry.
-_RETRY_LOCK_TTL = 600  # 10 minutes
-
-
-def _schedule_ci_retry(slug: str, pending_count: int) -> bool:
-    """Schedule a one-shot retry dispatch when CI is still pending.
-
-    Idempotent via a shared lock file under ``_RETRY_LOCK_DIR``.  The lock is
-    visible to every Hermes profile, so a retry scheduled by one profile
-    suppresses duplicates from all others (issue #79).  A stale lock (older
-    than ``_RETRY_LOCK_TTL``) is treated as expired and a new retry is created.
-
-    Returns True if a new cron was actually created, False if skipped.
-    """
-    try:
-        slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
-        cron_name = f"daedalus-ci-retry-{slug_safe}"
-        lock_path = _RETRY_LOCK_DIR / f".ci-retry-{slug_safe}.lock"
-
-        # Check the shared lock file (profile-agnostic).
-        if lock_path.exists():
-            age = time.time() - lock_path.stat().st_mtime
-            if age < _RETRY_LOCK_TTL:
-                logger.debug(
-                    "dispatch: retry lock %s is recent (%.0fs old) — skipping",
-                    lock_path.name, age,
-                )
-                return False
-            logger.debug(
-                "dispatch: retry lock %s is stale (%.0fs old) — re-arming",
-                lock_path.name, age,
-            )
-
-        # Force --profile default so the cron lands in the same bucket regardless
-        # of which role agent (qa-daedalus, accessibility-daedalus, etc.) triggered
-        # the dispatch. Without this, same-named crons from different profiles are
-        # distinct jobs in Hermes and the dedup-by-name guard is bypassed.
-        subprocess.run(
-            [
-                "hermes", "cron", "create", "3m",
-                "--name", cron_name,
-                "--no-agent",
-                "--script", "daedalus-cron.sh",
-                "--repeat", "1",
-                "--profile", "default",
-            ],
-            capture_output=True, text=True, timeout=10,
-        )
-        # Write the shared lock file.
-        _RETRY_LOCK_DIR.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text(cron_name)
-        logger.info(
-            "dispatch: CI pending on %d card(s) — scheduled retry in 3m (%s)",
-            pending_count, cron_name,
-        )
-        return True
-    except Exception as exc:
-        logger.warning("dispatch: failed to schedule CI retry cron: %s", exc)
-        return False
-
-
-def _cancel_ci_retry(slug: str) -> bool:
-    """Delete the CI-retry cron for ``slug`` once CI is no longer pending.
-
-    Also removes the shared lock file so the next CI-pending tick can
-    re-arm the retry cleanly.
-
-    Because ``_schedule_ci_retry`` creates a ``--repeat 1`` cron, the job is
-    removed from ``hermes cron list`` the moment it fires. The idempotency
-    guard there only suppresses duplicates while the job is still scheduled,
-    so a fired-but-still-pending retry would be re-created on every dispatch
-    tick — an unbounded accumulation loop (issue #70). Calling this whenever
-    CI is done closes the loop: the next dispatch deletes the retry cron and
-    stops the cycle.
-
-    Idempotent: a missing cron (already fired/never created) is not an error.
-
-    Returns True if a delete was attempted and succeeded, False otherwise.
-    """
-    try:
-        slug_safe = re.sub(r"[^A-Za-z0-9_.-]", "-", slug)
-        cron_name = f"daedalus-ci-retry-{slug_safe}"
-        lock_path = _RETRY_LOCK_DIR / f".ci-retry-{slug_safe}.lock"
-        result = subprocess.run(
-            ["hermes", "cron", "delete", cron_name],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0:
-            # Remove the shared lock file.
-            lock_path.unlink(missing_ok=True)
-            logger.info("dispatch: CI done — cancelled retry cron (%s)", cron_name)
-            return True
-        # Non-zero almost always means "not found" — that's the common, benign
-        # case (the cron already fired or was never scheduled). Log at debug.
-        logger.debug(
-            "dispatch: no retry cron to cancel for %s (rc=%d)",
-            cron_name, result.returncode,
-        )
-        return False
-    except Exception as exc:
-        logger.warning("dispatch: failed to cancel CI retry cron: %s", exc)
-        return False
 
 
 def _hermes_profile_exists(name: str) -> bool:
@@ -791,7 +695,7 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"--- Issue #{n} ---\n{body}\n"
     )
     if coding_agent != "none":
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n)
     return _body
 
 
@@ -900,7 +804,7 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
         f"     → Post a comment on issue #{n} listing exactly what info is needed.\n"
         f"     → Block your card with summary starting 'BLOCKED: needs more info'.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
-    ) + (_build_delegation_instructions(coding_agent, coding_agent_cmd, role="validator") + "\n\n"
+    ) + (_build_delegation_instructions(coding_agent, coding_agent_cmd, role="validator", issue_number=n) + "\n\n"
          if coding_agent != "none" else "")
 
 
@@ -917,7 +821,7 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="pm") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="pm", issue_number=n) + "\n\n"
     _body += (
         f"You are the PROJECT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
@@ -1073,7 +977,7 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"\n--- Issue #{n} ---\n{body}\n"
     )
     if coding_agent != "none":
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd)
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n)
     return _body
 
 
@@ -1092,7 +996,7 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd) + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n) + "\n\n"
     _body += (
         f"You are the DEVELOPER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
@@ -1135,7 +1039,7 @@ def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="qa") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="qa", issue_number=n) + "\n\n"
     _body += (
         f"You are the QA for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
@@ -1144,7 +1048,7 @@ def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"2. Read the PR diff and issue #{n}.\n"
         f"3. Run the test suite and verify the fix resolves the issue.\n"
         f"4. Write any missing tests.\n"
-        f"5. Post a QA summary comment on GitHub issue #{n} using: {comment_howto}\n"
+        f"5. Post a QA summary comment on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"6. Complete your kanban card:\n"
         f"   - Tests pass: summary 'qa-passed: PR #N'\n"
         f"   - Tests fail: block with 'qa-failed: <reason>' — developer will fix\n"
@@ -1162,14 +1066,14 @@ def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="reviewer") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="reviewer", issue_number=n) + "\n\n"
     _body += (
         f"You are the REVIEWER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"QA has passed. Review the developer's PR for correctness, quality, and performance.\n"
         f"1. Find the PR linked to issue #{n}.\n"
         f"2. Review: correctness, edge cases, error handling, performance, readability.\n"
-        f"3. Post review findings on GitHub issue #{n} using: {comment_howto}\n"
+        f"3. Post review findings on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"4. Complete your kanban card:\n"
         f"   - 'reviewed: approved' if ready to merge\n"
         f"   - 'reviewed: changes-requested: <reason>' if fixes needed\n"
@@ -1187,7 +1091,7 @@ def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="security") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="security", issue_number=n) + "\n\n"
     _body += (
         f"You are the SECURITY-ANALYST for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
@@ -1196,7 +1100,7 @@ def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"input validation, path traversal, SSRF, dependency vulnerabilities.\n"
         f"1. Find the PR linked to issue #{n}.\n"
         f"2. Audit the diff.\n"
-        f"3. Post findings or sign-off on GitHub issue #{n} using: {comment_howto}\n"
+        f"3. Post findings or sign-off on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"4. Complete your kanban card:\n"
         f"   - 'security: cleared' if no issues\n"
         f"   - 'security: flagged: <finding>' if human review needed\n"
@@ -1216,7 +1120,7 @@ def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                                           _PR_COMMENT_HOWTO["github"]).format(repo=repo)
     _body = ""
     if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="documentation") + "\n\n"
+        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="documentation", issue_number=n) + "\n\n"
     _body += (
         f"You are the DOCUMENTATION agent for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
@@ -1598,7 +1502,7 @@ def _extract_follow_ups_from_pr_comment(
         )
         issue_refs = "\n".join(f"- #{n}" for n in created)
         summary = (
-            f"Agent: dispatcher\n\n"
+            f"**Agent: dispatcher**\n\n"
             f"Follow-up items extracted from reviewer/QA comments:\n\n"
             f"{issue_refs}\n\n"
             f"{markers}"
@@ -1741,6 +1645,22 @@ def _find_issue_n_from_parents(slug: str, task_id: str) -> Optional[str]:
     except Exception as exc:
         logger.debug("dispatch: repair: parent lookup failed for %s: %s", task_id, exc)
     return None
+
+
+def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
+    """Count active (non-done, non-cancelled) kanban tasks for issue #N.
+
+    A task "belongs" to an issue when its title references ``#<issue_number>``.
+    Used to guard orphaned-issue cleanup: an issue closed on VCS while active
+    kanban tasks remain is likely an accidental close (bot mis-fire, manual
+    mis-click mid-pipeline), so the dispatcher must NOT bulk-complete its tasks.
+    """
+    active = 0
+    for t in kanban.list_tasks(slug):
+        m = re.search(r"#(\d+)", t.get("title") or "")
+        if m and int(m.group(1)) == issue_number and t.get("status") not in ("done", "cancelled"):
+            active += 1
+    return active
 
 
 def _repair_orphan_tasks(
@@ -2305,6 +2225,8 @@ def _check_team_blockers(
             continue  # security escalation — not a PM blocker
         if summary.startswith("review-required:"):
             continue  # PR in review or awaiting-pr — iterate handles this, PM can't unblock it
+        if summary.startswith("a11y-skipped:"):
+            continue  # accessibility skipped (no UI changes) — not a real blocker
         m = re.search(r"#(\d+)", card.get("title") or "")
         if not m:
             continue
@@ -2513,20 +2435,6 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                       if v > 0 and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE, iterate.PENDING_CI)}
     if any(c > 0 for c in iterate_counts.values()) and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
-
-    # ── CI pending retry scheduling ─────────────────────────────────────────
-    # When one or more cards were skipped because CI was still PENDING, schedule
-    # a one-shot retry so the dispatcher re-runs after CI has likely finished.
-    # Idempotent: skips creation if a retry job for this slug already exists.
-    #
-    # When CI is *no longer* pending, cancel any leftover retry cron. The retry
-    # uses ``--repeat 1`` and so vanishes from `hermes cron list` once it fires;
-    # without this cleanup a still-pending CI would re-create a fresh retry on
-    # every dispatch tick, accumulating crons without bound (issue #70).
-    if pending_ci_cards and not dry_run:
-        _schedule_ci_retry(slug, len(pending_ci_cards))
-    elif not dry_run:
-        _cancel_ci_retry(slug)
 
     # ── doc-report delivery ──────────────────────────────────────────────────
     # The dispatcher delivers documentation reports (PR comments prefixed
@@ -2867,6 +2775,19 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         state = provider.get_issue_state(n)
         if state != "closed":
             continue  # still open (filtered by label/limit) or unknown — leave it
+
+        # Guard: if there are still active (non-done) kanban tasks for this issue,
+        # the close is likely accidental (bot close, manual mis-click). Skip cleanup
+        # so a human reopen can resume the pipeline without data loss.
+        active_count = _count_active_issue_tasks(slug, n)
+        if active_count:
+            logger.warning(
+                "dispatch: #%s is closed on VCS but has %d active kanban task(s) — "
+                "skipping bulk-complete (likely accidental close; reopen the issue to resume)",
+                n, active_count,
+            )
+            continue
+
         if dry_run:
             dry_closed = kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed", dry_run=True)
             logger.info("[dry-run] #%s closed externally → would archive kanban tasks + Done (%d task(s))", n, len(dry_closed))

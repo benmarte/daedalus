@@ -10,13 +10,13 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 1. Read the task body from your kanban card using `kanban_show`.
 2. Save it to a temp file:
    ```
-   write_file("/tmp/docs-task.txt", "<full task body>")
+   write_file("/tmp/docs-<issue_number>-task.txt", "<full task body>")
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("cat /tmp/docs-task.txt | <command from delegation block> > /tmp/docs-out.txt 2>&1", background=True)
+   terminal("cat /tmp/docs-<issue_number>-task.txt | <command from delegation block> > /tmp/docs-<issue_number>-out.txt 2>&1", background=True)
    ```
-4. Wait for it to finish: `terminal("cat /tmp/docs-out.txt")`
+4. Wait for it to finish: `terminal("cat /tmp/docs-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the documentation report to GitHub.
 6. Mark YOUR kanban card as done.
 7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
@@ -145,14 +145,14 @@ Keep this **lightweight** — it is bounded by the number of recent PRs, not the
    state_path.write_text(json.dumps({"last_doc_sweep_sha": head}, indent=2))
    ```
 
-### 4. Write and post a completion report to the GitHub issue
-Post a comment on the GitHub **issue** (not the PR) using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl — markdown with backticks breaks shell escaping.
+### 4. Write and post a completion report to the GitHub PR
+Post a comment on the GitHub **PR** (not the issue) using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl — markdown with backticks breaks shell escaping.
 
 ```python
 import os, urllib.request, json
 body = """**Agent: documentation**
 
-## 📋 Documentation Report — Issue #N · PR #<pr_number>
+## Documentation Report — Issue #N · PR #<pr_number>
 
 **Issue:** [#N <title>](https://github.com/<org>/<repo>/issues/N)
 **PR:** [#<pr_number> <pr_title>](<pr_url>)
@@ -203,7 +203,7 @@ Expected result: <what should happen>
 <Caveats, known limitations, follow-up issues filed, or "None.">
 """
 req = urllib.request.Request(
-    'https://api.github.com/repos/<org>/<repo>/issues/<number>/comments',
+    'https://api.github.com/repos/<org>/<repo>/issues/<pr_number>/comments',
     data=json.dumps({'body': body}).encode(),
     headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
              'Accept': 'application/vnd.github+json'}, method='POST')
@@ -227,10 +227,8 @@ Summary: <2-sentence summary of what changed>
 Report: https://github.com/<org>/<repo>/issues/N"
 ```
 
-### 6. Block your kanban task
-Block with `review-required` and reason: `docs posted: issue #N PR #<pr_number> — <one-line summary>`
-
-**Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
+### 6. Complete your kanban task
+Complete your card with summary: `docs posted: issue #N PR #<pr_number> — <one-line summary>`
 
 ## Quality bar
 - Every changed file in the diff must appear in the "Files Changed" table

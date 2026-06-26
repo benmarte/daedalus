@@ -10,13 +10,13 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 1. Read the task body from your kanban card using `kanban_show`.
 2. Save it to a temp file:
    ```
-   write_file("/tmp/qa-task.txt", "<full task body>")
+   write_file("/tmp/qa-<issue_number>-task.txt", "<full task body>")
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("cat /tmp/qa-task.txt | <command from delegation block> > /tmp/qa-out.txt 2>&1", background=True)
+   terminal("cat /tmp/qa-<issue_number>-task.txt | <command from delegation block> > /tmp/qa-<issue_number>-out.txt 2>&1", background=True)
    ```
-4. Wait for it to finish: `terminal("cat /tmp/qa-out.txt")`
+4. Wait for it to finish: `terminal("cat /tmp/qa-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the QA report to GitHub and printed `qa-passed` or `qa-failed: <reason>`.
 6. Block YOUR kanban card with `review-required`, reason: `<output from agent>` (e.g. `qa-passed: PR #N verified` or `qa-failed: <reason>`).
 7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`

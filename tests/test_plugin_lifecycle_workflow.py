@@ -79,6 +79,28 @@ def test_driver_covers_all_five_stages() -> None:
     assert "ci-sample-daedalus" in body, "upgrade stage must assert cron self-heal (#80)"
 
 
+def test_self_test_guard_has_pytest_installed() -> None:
+    """Regression for #106: the self-test guard runs ``python -m pytest`` so the
+    job MUST install pytest first. pytest is test-only (excluded from
+    requirements.txt), so it has to be added explicitly — without it the
+    Plugin Lifecycle workflow fails on every run with ``No module named pytest``.
+    """
+    wf = _load_workflow()
+    steps = wf["jobs"]["lifecycle"]["steps"]
+    runs = [step.get("run", "") for step in steps]
+
+    pytest_step_idx = next(
+        (i for i, r in enumerate(runs) if "python -m pytest" in r), None
+    )
+    assert pytest_step_idx is not None, "lifecycle job must run the pytest self-test guard"
+
+    install_before = "".join(runs[:pytest_step_idx])
+    assert "pytest" in install_before, (
+        "a step before the pytest self-test guard must install pytest "
+        "(test-only dep, not in requirements.txt) — see #106"
+    )
+
+
 def test_stub_implements_required_subcommands() -> None:
     """The stub must keep handling every hermes verb the install scripts call."""
     body = _stub.read_text()

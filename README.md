@@ -511,7 +511,7 @@ bash ~/.hermes/scripts/daedalus-cron.sh
 ```
 
 This means each phase transition starts within seconds rather than waiting for the
-hourly cron tick. For example, as soon as the developer blocks with `review-required`,
+next cron tick. For example, as soon as the developer blocks with `review-required`,
 the dispatcher fires, detects CI green, and promotes the reviewer task — all within
 seconds.
 
@@ -771,7 +771,7 @@ workdir: /path/to/app-one
 vcs: { provider: github, target_branch: dev }
 tracking: { github_project_number: 1 }
 cron:
-  schedule: "every 60m"
+  schedule: "0 * * * *"
   notifications:
     - { platform: Slack, target: "slack:C0CHANNEL1", events: [doc-report, pipeline-failure] }
 

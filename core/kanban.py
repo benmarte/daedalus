@@ -22,7 +22,7 @@ from typing import List, Optional, Set
 logger = logging.getLogger("daedalus.kanban")
 
 
-def _hk(args: List[str], timeout: int = 60):
+def _hk(args: List[str], timeout: int = 60) -> tuple[int, str, str]:
     """Run ``hermes kanban <args>``; return (rc, stdout, stderr). Patched in tests."""
     try:
         r = subprocess.run(["hermes", "kanban"] + args, capture_output=True, text=True, timeout=timeout)

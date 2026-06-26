@@ -10,15 +10,17 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 1. Read the task body from your kanban card using `kanban_show`.
 2. Save it to a temp file:
    ```
-   write_file("/tmp/a11y-task.txt", "<full task body>")
+   write_file("/tmp/a11y-<issue_number>-task.txt", "<full task body>")
    ```
 3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
    ```
-   terminal("cat /tmp/a11y-task.txt | <command from delegation block> > /tmp/a11y-out.txt 2>&1", background=True)
+   terminal("cat /tmp/a11y-<issue_number>-task.txt | <command from delegation block> > /tmp/a11y-<issue_number>-out.txt 2>&1", background=True)
    ```
-4. Wait for it to finish: `terminal("cat /tmp/a11y-out.txt")`
+4. Wait for it to finish: `terminal("cat /tmp/a11y-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the accessibility review to GitHub and printed `a11y-approved: PR #N` or `a11y-blocked: <reason>` or `a11y-skipped: no UI changes`.
-6. Block YOUR kanban card with `review-required`, reason: `<verdict line from the output>`
+6. **Choose the correct terminal action based on the verdict:**
+   - If output is `a11y-skipped: ...` (no UI changes): **complete** YOUR card with summary: `<verdict line>`
+   - If output is `a11y-approved: ...` or `a11y-blocked: ...`: **block** YOUR card with `review-required`, reason: `<verdict line from the output>`
 7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
 
 ⛔ **DO NOT audit the PR yourself. DO NOT post any GitHub comment yourself.**

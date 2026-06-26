@@ -315,23 +315,48 @@ def _ensure_dispatch_crons() -> None:
             if res.returncode != 0:
                 logger.debug("daedalus: cron list returned %s during self-heal", res.returncode)
                 return
-            # Parse name AND status so we can detect dead [completed] crons.
-            # Only active (non-completed) crons block recreation.
-            cron_info: dict[str, tuple[str, str]] = {}  # name -> (cron_id, status)
+            # Parse name, status, AND schedule so we can detect dead or
+            # interval-format crons.  Only active crons with crontab-syntax
+            # schedules block recreation.
+            # NOTE: cron list output has Name: before Schedule:, so we must
+            # accumulate all fields and flush when the next entry starts.
+            cron_info: dict[str, tuple[str, str, str]] = {}  # name -> (cron_id, status, schedule)
             _cur_id: str | None = None
             _cur_status: str | None = None
+            _cur_schedule: str | None = None
+            _cur_name: str | None = None
+
+            def _flush_cron_entry() -> None:
+                if _cur_id and _cur_name:
+                    cron_info[_cur_name] = (_cur_id, _cur_status or "", _cur_schedule or "")
+
             for line in res.stdout.splitlines():
                 id_m = re.match(r"^\s+([0-9a-f]{8,})\s+\[(\w+)\]", line)
                 if id_m:
-                    _cur_id, _cur_status = id_m.group(1), id_m.group(2)
+                    _flush_cron_entry()
+                    _cur_id, _cur_status, _cur_schedule, _cur_name = id_m.group(1), id_m.group(2), None, None
                     continue
                 name_m = re.match(r"^\s*Name:\s+(.+)$", line)
                 if name_m and _cur_id:
-                    cron_info[name_m.group(1).strip()] = (_cur_id, _cur_status or "")
-            # Active crons: name is present and status is not "completed"
-            existing_names = {n for n, (_, s) in cron_info.items() if s != "completed"}
+                    _cur_name = name_m.group(1).strip()
+                    continue
+                sched_m = re.match(r"^\s*Schedule:\s+(.+)$", line)
+                if sched_m and _cur_id:
+                    _cur_schedule = sched_m.group(1).strip()
+            _flush_cron_entry()  # flush the last entry
+            # Active crons: present and not completed AND already using crontab syntax.
+            # Interval-format crons (e.g. "every 60m") are treated as stale and recreated.
+            existing_names = {
+                n for n, (_, s, sched) in cron_info.items()
+                if s != "completed" and _schedule_to_crontab(sched) == sched
+            }
             # Dead crons: [completed] — must delete before recreating
-            dead_crons = {n: cid for n, (cid, s) in cron_info.items() if s == "completed"}
+            dead_crons = {n: cid for n, (cid, s, _) in cron_info.items() if s == "completed"}
+            # Interval-format active crons: stale, must delete and recreate with crontab syntax
+            interval_crons = {
+                n: cid for n, (cid, s, sched) in cron_info.items()
+                if s != "completed" and _schedule_to_crontab(sched) != sched
+            }
 
             for raw in registry_file.read_text().splitlines():
                 repo_path = raw.strip()
@@ -360,6 +385,20 @@ def _ensure_dispatch_crons() -> None:
                 cron_name = f"{name}-daedalus"
                 if cron_name in existing_names:
                     continue
+
+                # Delete interval-format active crons so we can recreate with crontab syntax.
+                if cron_name in interval_crons:
+                    try:
+                        subprocess.run(
+                            ["hermes", "cron", "delete", interval_crons[cron_name]],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        logger.info(
+                            "daedalus: deleted interval-format dispatch cron: %s (%s) — will recreate with crontab syntax",
+                            cron_name, interval_crons[cron_name],
+                        )
+                    except Exception as exc:
+                        logger.debug("daedalus: could not delete interval cron %s: %s", cron_name, exc)
 
                 # Delete the dead completed job so hermes lets us recreate the name.
                 if cron_name in dead_crons:
@@ -392,6 +431,27 @@ def _ensure_dispatch_crons() -> None:
                     if res.returncode == 0:
                         logger.info("daedalus: recreated missing dispatch cron: %s", cron_name)
                         existing_names.add(cron_name)  # prevent double-create within same load
+                        # Write the normalised crontab schedule back to the config file so
+                        # _reconcile_cron (dashboard) also uses crontab syntax and doesn't
+                        # keep reverting the cron to interval format on the next save.
+                        if crontab_schedule != schedule:
+                            try:
+                                raw_cfg = cfg_file.read_text()
+                                import re as _re
+                                new_cfg = _re.sub(
+                                    r"(schedule\s*:\s*).*",
+                                    lambda m: f'{m.group(1)}"{crontab_schedule}"',
+                                    raw_cfg,
+                                    count=1,
+                                )
+                                if new_cfg != raw_cfg:
+                                    cfg_file.write_text(new_cfg)
+                                    logger.info(
+                                        "daedalus: normalised cron schedule in config: %s → %s",
+                                        schedule, crontab_schedule,
+                                    )
+                            except Exception as exc:
+                                logger.debug("daedalus: could not update schedule in config: %s", exc)
                     else:
                         logger.warning(
                             "daedalus: failed to recreate cron %s: %s",
