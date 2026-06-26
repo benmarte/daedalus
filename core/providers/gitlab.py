@@ -20,6 +20,10 @@ from .http import HTTPClient, ProviderError
 
 _MR_STATE = {"opened": "open", "merged": "merged", "closed": "closed", "locked": "open"}
 
+# Default color for auto-created board status labels (GitLab requires a color on
+# label creation). A neutral blue — users can recolor in the GitLab UI.
+_STATUS_LABEL_COLOR = "#6699cc"
+
 
 class GitLabProvider(VCSProvider):
     name = "gitlab"
@@ -233,6 +237,31 @@ class GitLabProvider(VCSProvider):
         self._log.info("board: #%s -> %s", issue_number, status_name)
         return True
 
+    def ensure_status_labels(self, status_names: List[str]) -> List[str]:
+        """Create any missing board status labels in the project (idempotent).
+
+        Guarantees the Issue Board lists keyed to ``status_map`` exist so
+        ready-gating has something to match. A 409 (label already exists, e.g.
+        a concurrent tick or a case-insensitive collision) is treated as
+        success. Returns the names that were newly created.
+        """
+        created: List[str] = []
+        existing = {label.name for label in self.list_labels()}
+        for name in status_names:
+            if not name or name in existing:
+                continue
+            try:
+                self._http.post_json(f"{self._proj}/labels",
+                                     {"name": name, "color": _STATUS_LABEL_COLOR})
+                created.append(name)
+            except ProviderError as e:
+                if e.status_code == 409:
+                    continue  # already exists — idempotent
+                self._log.warning("ensure_status_labels: create %r failed: %s", name, e)
+        if created:
+            self._log.info("ensure_status_labels: created %s", ", ".join(created))
+        return created
+
     # ── URL builders ─────────────────────────────────────────────────────────
     def issue_url(self, issue_number: int) -> str:
         if not self._project_web_path:
@@ -249,6 +278,15 @@ class GitLabProvider(VCSProvider):
         return self._project_web_path or self._cfg.get("repo") or ""
 
     # ── meta ─────────────────────────────────────────────────────────────────
+    def get_default_branch(self) -> Optional[str]:
+        """The project's default branch (GET /projects/:id), or None on error."""
+        try:
+            data = self._http.get_json(self._proj)
+        except ProviderError as e:
+            self._log.warning("get_default_branch failed: %s", e)
+            return None
+        return (data or {}).get("default_branch") or None
+
     def list_branches(self) -> List[str]:
         try:
             data = self._http.get_paginated(f"{self._proj}/repository/branches",

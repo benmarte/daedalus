@@ -130,16 +130,28 @@ else
     -e "s|{{WORKDIR}}|$WORKDIR|g" \
     "$TEMPLATE" > "$CONFIG_FILE"
 
+  # For GitLab, detect the repo's real default branch from the remote so PRs
+  # target an existing branch (issue #133). Best-effort: empty if offline or
+  # the remote has no symref — the runtime reconcile corrects it later via API.
+  DEFAULT_BRANCH=""
+  if [[ "$PROVIDER" == "gitlab" ]]; then
+    DEFAULT_BRANCH="$( { git ls-remote --symref origin HEAD 2>/dev/null \
+      | sed -n 's@^ref: refs/heads/\(.*\)[[:space:]]HEAD@\1@p' | head -1; } || true )"
+  fi
+
   # Apply the auto-detected provider (+ provider-specific keys: gitlab
   # base_url for self-hosted, azure org/project/repo). The template default
-  # is github, so only non-github detections need the rewrite.
+  # is github, so only non-github detections need the rewrite. For GitLab we
+  # also enable label-driven board mode and write the detected default branch
+  # so issues are polled out of the box (issue #133).
   if [[ "$PROVIDER" != "github" ]]; then
-    PYTHONPATH="$ORCH_ROOT" python3 - "$CONFIG_FILE" "$REMOTE_URL" <<'PY'
+    PYTHONPATH="$ORCH_ROOT" python3 - "$CONFIG_FILE" "$REMOTE_URL" "$DEFAULT_BRANCH" <<'PY'
 import sys
 import yaml
 from core.providers.detect import detect_from_url
 
 path, url = sys.argv[1], sys.argv[2]
+default_branch = sys.argv[3] if len(sys.argv) > 3 else ""
 d = detect_from_url(url)
 if d:
     with open(path) as f:
@@ -148,6 +160,16 @@ if d:
     vcs["provider"] = d["provider"]
     for k, v in (d.get("vcs_extra") or {}).items():
         vcs.setdefault(k, v)
+    if d["provider"] == "gitlab":
+        # GitLab Issue Boards are label-driven — enable board mode so the
+        # dispatcher polls issues (otherwise it silently runs kanban-only).
+        tracking = cfg.get("tracking")
+        if not isinstance(tracking, dict):
+            tracking = {}
+        tracking.setdefault("label_board", True)
+        cfg["tracking"] = tracking
+        if default_branch:
+            vcs["target_branch"] = default_branch
     with open(path, "w") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False,
                        allow_unicode=True)
