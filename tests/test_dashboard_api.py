@@ -917,6 +917,34 @@ class TestReconcileCron:
         create_args = mock_run.call_args_list[1][0][0]
         assert "--deliver" not in create_args
 
+    def test_workdir_passed_when_cfg_path_given(self):
+        """Issue #137: _reconcile_cron passes --workdir <repo root> on create + edit
+        so the dispatcher self-scopes to that project instead of sweeping all repos."""
+        from pathlib import Path
+        from dashboard.plugin_api import _reconcile_cron
+
+        cfg_path = Path("/repos/myproj/.hermes/daedalus.yaml")
+        expected = str(cfg_path.parent.parent.resolve())  # /repos/myproj
+
+        # create path (no existing job). Use a crontab schedule so the function
+        # never tries to write the schedule back to the (fake) cfg_path.
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
+            _reconcile_cron("myproj", {"schedule": "0 * * * *"}, cfg_path)
+        create_args = mock_run.call_args_list[-1][0][0]
+        assert create_args[0] == "create"
+        assert "--workdir" in create_args
+        assert expected in create_args
+
+        # edit path (one existing "test-project-daedalus" job → edited in place).
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
+            _reconcile_cron("test-project", {"schedule": "0 * * * *"}, cfg_path)
+        edit_args = mock_run.call_args_list[1][0][0]
+        assert edit_args[0] == "edit"
+        assert "--workdir" in edit_args
+        assert expected in edit_args
+
     # ── sweep duplicates: two same-name jobs → both removed by id ────────
 
     def test_sweeps_duplicate_cron_jobs(self):

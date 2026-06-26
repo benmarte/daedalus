@@ -14,6 +14,7 @@ status bookkeeping happens here, in code, so it can never be skipped.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -3333,9 +3334,30 @@ def _summary_events(summary: Dict[str, Any]) -> set:
     return events
 
 
+# Sentinel "issue number" under which a project's tick-summary thread is anchored
+# in dispatch_state. Real issues start at 1, so 0 never collides — this lets the
+# per-project summary reuse the same dedup + threading machinery as per-issue
+# comment mirrors (issue #137).
+_PROJECT_SUMMARY_ANCHOR = 0
+
+
 def _notify_project_summary(name: str, summary: Dict[str, Any],
                             resolved: Dict[str, Any], *, dry_run: bool = False) -> bool:
     """Self-deliver a project's tick summary to its ``cron.notifications`` targets.
+
+    Threaded + deduped (issue #137): the summary is mirrored through
+    :func:`thread_delivery.deliver_event` under a per-project anchor
+    (:data:`_PROJECT_SUMMARY_ANCHOR`) with an ``event_key`` derived from the
+    summary's content hash, so:
+
+      * a *silent* tick (``render_dispatch_summary`` returns "") sends nothing;
+      * an *unchanged* summary on a later tick / self-healing iteration is
+        recognised by its content hash and skipped — no duplicate top-level spam;
+      * a *changed* summary posts as a reply under the project's anchor message,
+        so the whole dispatch history threads under one message.
+
+    Falls back to a plain (un-threaded) send when the project config carries no
+    ``workdir`` to persist dedup state against.
 
     Returns True when the project uses ``notifications[]`` — the caller must
     then NOT include it in stdout (which the legacy cron ``--deliver`` path
@@ -3356,11 +3378,37 @@ def _notify_project_summary(name: str, summary: Dict[str, Any],
         for t in _notify_targets(resolved, event):
             if t not in targets:
                 targets.append(t)
+    if not targets:
+        return True
+
+    workdir = (resolved.get("workdir") or "").strip()
+    if not workdir:
+        # No state dir to dedup/thread against — fall back to a plain send.
+        for t in targets:
+            if dry_run:
+                logger.info("[dry-run] would send dispatch summary for %s to %s", name, t)
+            else:
+                _send_via_hermes(t, msg)
+        return True
+
+    # Stable per-content key: identical summaries dedupe across ticks/processes;
+    # different summaries thread as replies under the same per-project anchor.
+    event_key = "summary:" + hashlib.sha1(msg.encode("utf-8")).hexdigest()
+
+    def sender(target: str, body: str, thread_id: Optional[str]):
+        return _hermes_send(target, body, thread_id=thread_id)
+
+    sent = 0
     for t in targets:
-        if dry_run:
-            logger.info("[dry-run] would send dispatch summary for %s to %s", name, t)
-        else:
-            _send_via_hermes(t, msg)
+        if thread_delivery.deliver_event(
+            workdir, _PROJECT_SUMMARY_ANCHOR, t, msg, event_key,
+            send=sender, dry_run=dry_run,
+        ) == "sent":
+            sent += 1
+    if sent:
+        verb = "[dry-run] would deliver" if dry_run else "delivered"
+        logger.info("dispatch: %s threaded summary for %s to %d target(s)",
+                    verb, name, sent)
     return True
 
 
@@ -3389,14 +3437,67 @@ def _find_doc_comment(provider, pr_number: int) -> str:
     return ""
 
 
+def _resolve_repo_arg(arg: str) -> Optional[str]:
+    """Resolve a ``--repo`` value to a local repo path.
+
+    Accepts either a filesystem path (used directly) or a VCS identifier such as
+    ``owner/repo`` (GitHub) / ``group/project`` (GitLab), matched against the
+    ``repo`` field of every registered project's resolved config. This lets the
+    webhook handler pass the identifier straight from its payload (issue #137).
+    Returns the resolved repo path, or ``None`` when an identifier matches no
+    registered project.
+    """
+    if not arg:
+        return None
+    p = Path(arg).expanduser()
+    if p.exists():
+        return str(p.resolve())
+    loader = ConfigLoader()
+    for rp in registry.list_projects():
+        try:
+            resolved = loader.resolve_repo_config(rp)
+        except Exception:
+            continue
+        if (resolved.get("repo") or "").strip() == arg.strip():
+            workdir = (resolved.get("workdir") or "").strip() or rp
+            return str(Path(workdir).expanduser().resolve())
+    return None
+
+
+def _resolve_repo_from_cwd() -> Optional[str]:
+    """Return the registered repo path containing the current working directory.
+
+    Lets a cron (``--workdir``), session-end hook (worker cwd) or manual
+    ``daedalus_dispatch.py`` invocation auto-scope to the project it was fired
+    from instead of sweeping every registered repo (issue #137). Returns ``None``
+    when cwd is outside every registered project.
+    """
+    try:
+        cwd = Path.cwd().resolve()
+    except Exception:
+        return None
+    for rp in registry.list_projects():
+        try:
+            rpath = Path(rp).expanduser().resolve()
+        except Exception:
+            continue
+        if cwd == rpath or rpath in cwd.parents:
+            return str(rpath)
+    return None
+
+
 def main() -> int:
     """Cron / single-repo entrypoint.
 
-    Without --repo: sweeps every repo registered in core.registry, resolves
-    each via ConfigLoader().resolve_repo_config(), calls run(), aggregates
-    per-repo summaries into a human Slack message.
+    With --repo <path-or-slug>: resolves that single repo (a filesystem path or a
+    registered ``owner/repo`` VCS identifier) and calls run() for it.
 
-    With --repo <path>: resolves that single repo and calls run() for it.
+    Without --repo: auto-scopes to the registered project containing cwd (set by a
+    cron's ``--workdir`` or a kanban worker's working dir) so a cron/hook/webhook
+    tick processes only its own project (issue #137). Only when cwd is outside
+    every registered project does it fall back to the legacy registry sweep —
+    resolving each via ConfigLoader, calling run(), and aggregating per-repo
+    summaries into a human Slack message.
 
     Always returns 0 (errors are logged + summarized, never via exit code).
     """
@@ -3420,9 +3521,25 @@ def main() -> int:
     loader = ConfigLoader()
     summaries: Dict[str, Dict[str, Any]] = {}
 
-    # -- single-repo path ----------------------------------------------------
+    # Scope resolution (issue #137): an explicit --repo (path or VCS slug) wins;
+    # otherwise auto-scope to the registered project containing cwd (cron
+    # --workdir / worker cwd). Only when neither resolves do we fall back to the
+    # legacy all-projects registry sweep, so a cron/hook/webhook tick processes
+    # only its own project instead of double-processing every registered repo.
+    repo_path: Optional[str] = None
     if args.repo:
-        repo_path = str(Path(args.repo).expanduser().resolve())
+        repo_path = _resolve_repo_arg(args.repo)
+        if not repo_path:
+            logger.warning("dispatch: --repo %s matched no registered project; "
+                           "treating it as a literal path", args.repo)
+            repo_path = str(Path(args.repo).expanduser().resolve())
+    else:
+        repo_path = _resolve_repo_from_cwd()
+        if repo_path:
+            logger.info("dispatch: scoped to %s (cwd)", repo_path)
+
+    # -- single-repo path ----------------------------------------------------
+    if repo_path:
         try:
             resolved = loader.resolve_repo_config(repo_path)
         except Exception as e:
