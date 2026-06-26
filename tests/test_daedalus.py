@@ -2288,6 +2288,17 @@ def test_schedule_to_crontab_passthrough_crontab():
     check("0 9 * * * passthrough", init._schedule_to_crontab("0 9 * * *") == "0 9 * * *")
 
 
+def test_core_util_schedule_to_crontab_is_source_of_truth():
+    """core.util.schedule_to_crontab is the shared helper (issue #134) that both
+    _ensure_dispatch_crons and dashboard _reconcile_cron normalise schedules with."""
+    from core.util import schedule_to_crontab
+    check("60m → '0 * * * *'", schedule_to_crontab("60m") == "0 * * * *")
+    check("every 2h → '0 */2 * * *'", schedule_to_crontab("every 2h") == "0 */2 * * *")
+    check("15m → '*/15 * * * *'", schedule_to_crontab("15m") == "*/15 * * * *")
+    check("crontab passthrough", schedule_to_crontab("0 9 * * *") == "0 9 * * *")
+    check("empty stays empty", schedule_to_crontab("") == "")
+
+
 # ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
 # (Patch _FakeProvider at module level to avoid test-isolation issues)
 

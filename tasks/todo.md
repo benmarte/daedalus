@@ -1,33 +1,31 @@
-# Issue #121 — Deliver agent issue/PR comments to platform threads
+# Issue #134 — _reconcile_cron skips schedule conversion (one-shot crons)
 
-Branch: `fix/issue-121-slack-threads` (off `dev`).
+## Problem
+`_reconcile_cron()` passes the raw `cron.schedule` (e.g. `60m`) to `hermes cron
+edit/create` without `_schedule_to_crontab()`. Hermes treats interval syntax as
+a one-shot job → after one run it goes `[completed]` and the dispatcher stops.
+`_ensure_dispatch_crons()` already converts; `_reconcile_cron()` (dashboard Save)
+does not.
 
-## Goal
-Mirror every daedalus agent comment (issue + linked PR) into a per-issue thread
-on each configured `cron.notifications` platform. Root anchor on dispatch;
-replies for comments / PR-open / merge; graceful fallback when the anchor is
-gone; dedup across ticks; works for every platform (Slack `thread_ts`, Discord
-`message_id`) with no new config keys.
+## Fix plan
+- [ ] Add canonical `schedule_to_crontab()` to `core/util.py` (dep-free shared home,
+      already imported by plugin_api for board_slug/parse_env_file).
+- [ ] `__init__.py._schedule_to_crontab` delegates to `core.util` (lazy import → keeps
+      plugin load import-safe; keeps the back-compat name the tests use).
+- [ ] `_reconcile_cron(project_name, cron_cfg, cfg_path=None)`:
+      - convert schedule to crontab before edit/create (both paths)
+      - when conversion changed the value and cfg_path given, write the crontab
+        schedule back to the YAML (mirror `_ensure_dispatch_crons`)
+- [ ] Pass `cfg_path` from both callers (create + save endpoints).
 
-## Threading contract (verified via `hermes send --help` + source)
-- `hermes send -t platform:chat_id:thread_id --file f --json` posts into a thread.
-- `--json` returns `{"success": true, "message_id": "<ts-or-id>"}` — `message_id`
-  is the thread anchor (Slack ts / Discord message id).
+## Tests
+- [ ] Fix `test_updates_single_cron_in_place` (60m → "0 * * * *" in edit args).
+- [ ] New: edit path converts interval → crontab.
+- [ ] New: create path converts interval → crontab.
+- [ ] New: crontab passthrough unchanged.
+- [ ] New: write-back rewrites schedule in config file.
+- [ ] core.util.schedule_to_crontab unit coverage.
 
-## Tasks
-- [ ] `core/dispatch_state.py`: per-issue `threads` (target→anchor) + `thread_events`
-      (target→[event]) accessors; preserve sub-keys in `record_dispatch`.
-- [ ] `core/thread_delivery.py` (new, pure/testable): `deliver_event()` send +
-      dedup + anchor fallback; `select_comments()` agent-comment picker.
-- [ ] `core/notify_templates.py`: `render_thread_root` / `_comment` / `_pr_event`.
-- [ ] `scripts/daedalus_dispatch.py`: `_hermes_send()` (threaded, returns anchor),
-      `_send_via_hermes` delegates; `_mirror_issue_threads()` wired into run loop;
-      add `comment-mirror` to `NOTIFY_EVENTS`; summary `threads_mirrored`.
-- [ ] Tests: `tests/test_thread_delivery.py`, `tests/test_dispatch_state.py`.
-- [ ] Lint, run full suite, review, simplify, PR, comment, block card, dispatcher.
-
-## Notes
-- `threads` keyed by full target string (`slack:C123`) not just platform — a
-  Slack ts is channel-specific, so multi-channel correctness requires it.
-- Dedup is per (target, event_key); event marked only after a successful send.
-- Merged path: post the final reply BEFORE `clear_dispatch` wipes thread state.
+## Verify
+- [ ] pytest tests/ green
+- [ ] ruff check/format on changed files
