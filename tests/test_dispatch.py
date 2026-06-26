@@ -1025,6 +1025,28 @@ def test_local_agent_roles_have_no_delegation():
         assert "AGENT DELEGATION" not in body
 
 
+def test_validator_body_delegation_appended_for_cloud_agent():
+    """_validator_body appends delegation block (append=True) for a cloud agent."""
+    body = disp._validator_body("org/repo", _ISSUE, "/tmp", "main", "github",
+                                coding_agent="claude-code")
+    assert "AGENT DELEGATION" in body
+    assert "terminal(" in body
+    # validator uses append mode: delegation comes AFTER the issue body
+    assert body.index("--- Issue #55 ---") < body.index("AGENT DELEGATION")
+
+
+def test_validator_body_hermes_leaves_body_unchanged():
+    """Locks item-6 fix: hermes path drops no delegation block AND no stray
+    trailing blank line that the old ``!= "none"`` guard used to append."""
+    plain = disp._validator_body("org/repo", _ISSUE, "/tmp", "main", "github",
+                                 coding_agent="hermes")
+    none = disp._validator_body("org/repo", _ISSUE, "/tmp", "main", "github",
+                                coding_agent="none")
+    assert "AGENT DELEGATION" not in plain
+    # hermes must be byte-identical to none (no trailing "\n\n" append regression)
+    assert plain == none
+
+
 def test_role_delegation_uses_role_specific_tmp_file():
     """Each role uses a distinct, issue-scoped tmp file pair to avoid conflicts."""
     issue = {"number": 7, "title": "T", "body": "B"}
