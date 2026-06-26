@@ -51,6 +51,7 @@ from core import source_specs  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core.providers.base import ensure_closing_keyword  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
+from core.util import extract_issue_number  # noqa: E402
 
 logger = logging.getLogger("daedalus.dispatch")
 
@@ -257,6 +258,31 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
             + after
         )
     return ""
+
+
+def _prepend_delegation(body: str, coding_agent: str, coding_agent_cmd: str,
+                        role: str = "developer", issue_number: int = 0,
+                        *, append: bool = False, trailing: str = "\n\n") -> str:
+    """Inject the agent-delegation block into a role body.
+
+    Guards uniformly with ``not in ("none", "hermes")`` — this fixes the latent
+    inconsistency where ``_task_body``/``_downstream_body``/``_validator_body``
+    used ``!= "none"`` (which let the no-op "hermes" path append stray output).
+    ``_build_delegation_instructions`` returns ``""`` for "hermes" anyway, so the
+    only effect is that ``_validator_body`` no longer appends a trailing blank
+    line in the "hermes" case.
+
+    By default the block is prepended (``block + trailing + body``); pass
+    ``append=True`` to append (``body + block + trailing``). Returns ``body``
+    unchanged when no external coding agent is configured.
+    """
+    if coding_agent in ("none", "hermes"):
+        return body
+    block = _build_delegation_instructions(
+        coding_agent, coding_agent_cmd, role=role, issue_number=issue_number)
+    if append:
+        return body + block + trailing
+    return block + trailing + body
 
 
 def _resolve_agent_for_role(execution: Dict[str, Any], role: str) -> str:
@@ -539,6 +565,71 @@ _PR_CREATE_HOWTO = {
 }
 
 
+def _unpack_issue(issue: Dict[str, Any]) -> tuple:
+    """Extract ``(number, title, body, url)`` from an issue dict.
+
+    ``body`` is stripped; ``title``/``url`` default to ``""``. Shared by every
+    ``_*_body()`` builder, which previously inlined this extraction.
+    """
+    return (
+        issue.get("number"),
+        issue.get("title", ""),
+        (issue.get("body") or "").strip(),
+        issue.get("url", ""),
+    )
+
+
+def _resolve_howtos(provider_name: str, repo: str, issue_number: int = 0) -> Dict[str, str]:
+    """Resolve provider-appropriate how-to instruction strings for a role body.
+
+    Returns ``{"comment", "pr_create", "close_completed", "close_wontfix"}`` —
+    the same strings each ``_*_body()`` previously built inline. Callers pick the
+    keys they need; unused keys are cheap to compute and never emitted.
+    """
+    comment = _PR_COMMENT_HOWTO.get(provider_name, _PR_COMMENT_HOWTO["github"]).format(repo=repo)
+    pr_create = _PR_CREATE_HOWTO.get(provider_name, _PR_CREATE_HOWTO["github"]).format(repo=repo)
+    close_tmpl = _CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
+    return {
+        "comment": comment,
+        "pr_create": pr_create,
+        "close_completed": close_tmpl.format(repo=repo, n=issue_number, reason="completed"),
+        "close_wontfix": close_tmpl.format(repo=repo, n=issue_number, reason="not_planned"),
+    }
+
+
+def _build_security_notify_cmds(repo: str, n: int, title: str, targets: List[str]) -> str:
+    """Build the ``hermes send`` escalation commands block for a role body.
+
+    Mirrors the inline block shared by ``_task_body`` and ``_validator_body``:
+    one ``hermes send`` line per target, or a placeholder when none configured.
+    """
+    if not targets:
+        return "       (no notification targets configured for this project)"
+    return "\n".join(
+        f"       hermes send -t {t} -q "
+        f"--body \"SECURITY ESCALATION: {repo}#{n} ({title}) blocked for human review.\""
+        for t in targets
+    )
+
+
+def _get_task_summary(task: Dict[str, Any], slug: str) -> str:
+    """Return a task's latest summary, falling back to ``show_card``.
+
+    ``hermes kanban list --json`` omits per-card summaries, so when the listed
+    task carries no inline ``summary``/``last_summary`` we fetch the card and
+    read ``latest_summary``. Mirrors the inline fallback previously copy-pasted
+    into ``_pm_task_state``, ``_check_confirmed_validators`` and
+    ``_check_completed_pm``.
+    """
+    summary_raw = (task.get("summary") or task.get("last_summary") or "").strip()
+    if not summary_raw:
+        tid = (task.get("id") or task.get("task_id") or "").strip()
+        if tid:
+            card = kanban.show_card(slug, tid) or {}
+            summary_raw = (card.get("latest_summary") or "").strip()
+    return summary_raw
+
+
 def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                notify_target: str = "", base_branch: str = "dev",
                provider_name: str = "github",
@@ -548,28 +639,14 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
     """Triage body for decompose(): describes the FULL lifecycle so the decomposer
     fans it out across the roster (validator → developer → reviewer → security-analyst →
     documentation). Each role's instructions are spelled out so routing is clean."""
-    n = issue.get("number")
-    title = issue.get("title", "")
-    body = (issue.get("body") or "").strip()
-    issue_url = issue.get("url", "")
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    pr_create_howto = _PR_CREATE_HOWTO.get(provider_name,
-                                           _PR_CREATE_HOWTO["github"]).format(repo=repo)
-    close_howto_completed = (_CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
-                             .format(repo=repo, n=n, reason="completed"))
-    close_howto_wontfix = (_CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
-                           .format(repo=repo, n=n, reason="not_planned"))
-    security_targets = security_notify_targets or []
-    security_notify_cmds = (
-        "\n".join(
-            f"       hermes send -t {t} -q "
-            f"--body \"SECURITY ESCALATION: {repo}#{n} ({title}) blocked for human review.\""
-            for t in security_targets
-        )
-        if security_targets
-        else "       (no notification targets configured for this project)"
-    )
+    n, title, body, issue_url = _unpack_issue(issue)
+    _h = _resolve_howtos(provider_name, repo, n)
+    comment_howto = _h["comment"]
+    pr_create_howto = _h["pr_create"]
+    close_howto_completed = _h["close_completed"]
+    close_howto_wontfix = _h["close_wontfix"]
+    security_notify_cmds = _build_security_notify_cmds(
+        repo, n, title, security_notify_targets or [])
     _body = (
         f"Deliver issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
@@ -694,9 +771,8 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
         f"attempt to send the report yourself.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
-    if coding_agent != "none":
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n)
-    return _body
+    return _prepend_delegation(_body, coding_agent, coding_agent_cmd,
+                               issue_number=n, append=True, trailing="")
 
 
 def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch: str,
@@ -705,26 +781,14 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
                     coding_agent: str = "none",
                     coding_agent_cmd: str = "") -> str:
     """Phase-1 task body: VALIDATOR only. No other agent sees this task."""
-    n = issue.get("number")
-    title = issue.get("title", "")
-    body = (issue.get("body") or "").strip()
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    close_howto_completed = (_CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
-                             .format(repo=repo, n=n, reason="completed"))
-    close_howto_wontfix = (_CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
-                           .format(repo=repo, n=n, reason="not_planned"))
-    security_targets = security_notify_targets or []
-    security_notify_cmds = (
-        "\n".join(
-            f"       hermes send -t {t} -q "
-            f"--body \"SECURITY ESCALATION: {repo}#{n} ({title}) blocked for human review.\""
-            for t in security_targets
-        )
-        if security_targets
-        else "       (no notification targets configured for this project)"
-    )
-    return (
+    n, title, body, _ = _unpack_issue(issue)
+    _h = _resolve_howtos(provider_name, repo, n)
+    comment_howto = _h["comment"]
+    close_howto_completed = _h["close_completed"]
+    close_howto_wontfix = _h["close_wontfix"]
+    security_notify_cmds = _build_security_notify_cmds(
+        repo, n, title, security_notify_targets or [])
+    _vbody = (
         f"Validate issue {repo}#{n}: {title}\n"
         f"Repo at {workdir} (read only — cd there for git/grep). Base branch: {base_branch}.\n\n"
         f"⛔ READ-ONLY — You may run existing tests to verify bug reproduction but MUST NOT write, "
@@ -804,8 +868,9 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
         f"     → Post a comment on issue #{n} listing exactly what info is needed.\n"
         f"     → Block your card with summary starting 'BLOCKED: needs more info'.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
-    ) + (_build_delegation_instructions(coding_agent, coding_agent_cmd, role="validator", issue_number=n) + "\n\n"
-         if coding_agent != "none" else "")
+    )
+    return _prepend_delegation(_vbody, coding_agent, coding_agent_cmd,
+                               role="validator", issue_number=n, append=True)
 
 
 def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: str,
@@ -814,15 +879,9 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
              coding_agent: str = "none",
              coding_agent_cmd: str = "") -> str:
     """Phase-2 task body: PM writes the spec. Dispatcher creates all downstream tasks."""
-    n = issue.get("number")
-    title = issue.get("title", "")
-    body = (issue.get("body") or "").strip()
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    _body = ""
-    if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="pm", issue_number=n) + "\n\n"
-    _body += (
+    n, title, body, _ = _unpack_issue(issue)
+    comment_howto = _resolve_howtos(provider_name, repo, n)["comment"]
+    _body = _prepend_delegation((
         f"You are the PROJECT MANAGER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
         f"The VALIDATOR has confirmed this issue is real, safe, and ready to implement.\n"
@@ -840,7 +899,7 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"      The dispatcher detects this EXACT prefix to trigger the team.\n"
         f"   4) Run: bash ~/.hermes/scripts/daedalus-cron.sh\n\n"
         f"--- Issue #{n} ---\n{body}\n"
-    )
+    ), coding_agent, coding_agent_cmd, role="pm", issue_number=n)
     return _body
 
 
@@ -863,19 +922,15 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
 
     Only created after the validator completes with a 'CONFIRMED:' summary.
     """
-    n = issue.get("number")
-    title = issue.get("title", "")
-    body = (issue.get("body") or "").strip()
-    issue_url = issue.get("url", "")
+    n, title, body, issue_url = _unpack_issue(issue)
     issue_labels = [
         (lbl["name"] if isinstance(lbl, dict) else lbl).lower()
         for lbl in (issue.get("labels") or [])
     ]
     p = profiles or _DEFAULT_PROFILES
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    pr_create_howto = _PR_CREATE_HOWTO.get(provider_name,
-                                           _PR_CREATE_HOWTO["github"]).format(repo=repo)
+    _h = _resolve_howtos(provider_name, repo, n)
+    comment_howto = _h["comment"]
+    pr_create_howto = _h["pr_create"]
 
     # Resolve label-driven overrides: merge all matching label configs.
     merged_override: Dict[str, Any] = {}
@@ -976,9 +1031,8 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"{doc_role}"
         f"\n--- Issue #{n} ---\n{body}\n"
     )
-    if coding_agent != "none":
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n)
-    return _body
+    return _prepend_delegation(_body, coding_agent, coding_agent_cmd,
+                               issue_number=n, append=True, trailing="")
 
 
 def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
@@ -987,17 +1041,11 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
                    profiles: Optional[Dict[str, str]] = None,
                    label_overrides: Optional[Dict[str, Any]] = None) -> str:
     """Developer task body. Delegation block always comes first when coding_agent is set."""
-    n = issue.get("number")
-    title = issue.get("title", "")
-    body = (issue.get("body") or "").strip()
-    pr_create_howto = _PR_CREATE_HOWTO.get(provider_name,
-                                           _PR_CREATE_HOWTO["github"]).format(repo=repo)
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    _body = ""
-    if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, issue_number=n) + "\n\n"
-    _body += (
+    n, title, body, _ = _unpack_issue(issue)
+    _h = _resolve_howtos(provider_name, repo, n)
+    pr_create_howto = _h["pr_create"]
+    comment_howto = _h["comment"]
+    _body = _prepend_delegation((
         f"You are the DEVELOPER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
         f"The PM has written the spec — read it on GitHub issue #{n} before starting.\n\n"
@@ -1026,21 +1074,16 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
         f"### 6. Run dispatcher\n"
         f"```\nbash ~/.hermes/scripts/daedalus-cron.sh\n```\n\n"
         f"--- Issue #{n} ---\n{body}\n"
-    )
+    ), coding_agent, coding_agent_cmd, issue_number=n)
     return _body
 
 
 def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                   provider_name: str, profiles: Optional[Dict[str, str]] = None,
                   coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
-    n = issue.get("number")
-    title = issue.get("title", "")
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    _body = ""
-    if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="qa", issue_number=n) + "\n\n"
-    _body += (
+    n, title, _, _ = _unpack_issue(issue)
+    comment_howto = _resolve_howtos(provider_name, repo, n)["comment"]
+    _body = _prepend_delegation((
         f"You are the QA for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"The developer has opened a PR. Your job:\n"
@@ -1053,21 +1096,16 @@ def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"   - Tests pass: summary 'qa-passed: PR #N'\n"
         f"   - Tests fail: block with 'qa-failed: <reason>' — developer will fix\n"
         f"7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-    )
+    ), coding_agent, coding_agent_cmd, role="qa", issue_number=n)
     return _body
 
 
 def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                         provider_name: str, profiles: Optional[Dict[str, str]] = None,
                         coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
-    n = issue.get("number")
-    title = issue.get("title", "")
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    _body = ""
-    if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="reviewer", issue_number=n) + "\n\n"
-    _body += (
+    n, title, _, _ = _unpack_issue(issue)
+    comment_howto = _resolve_howtos(provider_name, repo, n)["comment"]
+    _body = _prepend_delegation((
         f"You are the REVIEWER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"QA has passed. Review the developer's PR for correctness, quality, and performance.\n"
@@ -1078,21 +1116,16 @@ def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"   - 'reviewed: approved' if ready to merge\n"
         f"   - 'reviewed: changes-requested: <reason>' if fixes needed\n"
         f"5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-    )
+    ), coding_agent, coding_agent_cmd, role="reviewer", issue_number=n)
     return _body
 
 
 def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                         provider_name: str, profiles: Optional[Dict[str, str]] = None,
                         coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
-    n = issue.get("number")
-    title = issue.get("title", "")
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    _body = ""
-    if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="security", issue_number=n) + "\n\n"
-    _body += (
+    n, title, _, _ = _unpack_issue(issue)
+    comment_howto = _resolve_howtos(provider_name, repo, n)["comment"]
+    _body = _prepend_delegation((
         f"You are the SECURITY-ANALYST for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"Audit the developer's PR diff for security vulnerabilities.\n"
@@ -1105,7 +1138,7 @@ def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"   - 'security: cleared' if no issues\n"
         f"   - 'security: flagged: <finding>' if human review needed\n"
         f"5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-    )
+    ), coding_agent, coding_agent_cmd, role="security", issue_number=n)
     return _body
 
 
@@ -1113,15 +1146,9 @@ def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
                     provider_name: str, notify_target: str,
                     profiles: Optional[Dict[str, str]] = None,
                     coding_agent: str = "none", coding_agent_cmd: str = "") -> str:
-    n = issue.get("number")
-    title = issue.get("title", "")
-    issue_url = issue.get("url", "")
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
-    _body = ""
-    if coding_agent not in ("none", "hermes"):
-        _body += _build_delegation_instructions(coding_agent, coding_agent_cmd, role="documentation", issue_number=n) + "\n\n"
-    _body += (
+    n, title, _, issue_url = _unpack_issue(issue)
+    comment_howto = _resolve_howtos(provider_name, repo, n)["comment"]
+    _body = _prepend_delegation((
         f"You are the DOCUMENTATION agent for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
         f"The PR has been reviewed and approved. Write a detailed completion report.\n"
@@ -1133,7 +1160,7 @@ def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"NOTE: messaging-platform delivery is handled by the dispatcher — do NOT attempt to send it yourself.\n"
         f"3. Complete with summary: 'docs: posted completion report for PR #N'\n"
         f"4. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
-    )
+    ), coding_agent, coding_agent_cmd, role="documentation", issue_number=n)
     return _body
 
 
@@ -1260,11 +1287,7 @@ def _pm_task_state(slug: str, issue_number: int,
         if status not in ("done", "complete", "completed"):
             has_running = True
             continue
-        tid = (t.get("id") or t.get("task_id") or "").strip()
-        summary_raw = (t.get("summary") or t.get("last_summary") or "").strip()
-        if not summary_raw and tid:
-            card = kanban.show_card(slug, tid) or {}
-            summary_raw = (card.get("latest_summary") or "").strip()
+        summary_raw = _get_task_summary(t, slug)
         s = summary_raw.lower()
         if s.startswith("spec:") or s.startswith("assigned:"):
             has_complete = True
@@ -1639,9 +1662,9 @@ def _find_issue_n_from_parents(slug: str, task_id: str) -> Optional[str]:
         conn.close()
         for parent_title, parent_body in rows:
             text = (parent_title or "") + " " + (parent_body or "")
-            m = re.search(r"#(\d+)", text)
-            if m:
-                return m.group(1)
+            num = extract_issue_number(text)
+            if num is not None:
+                return str(num)
     except Exception as exc:
         logger.debug("dispatch: repair: parent lookup failed for %s: %s", task_id, exc)
     return None
@@ -1657,8 +1680,8 @@ def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
     """
     active = 0
     for t in kanban.list_tasks(slug):
-        m = re.search(r"#(\d+)", t.get("title") or "")
-        if m and int(m.group(1)) == issue_number and t.get("status") not in ("done", "cancelled"):
+        num = extract_issue_number(t.get("title") or "")
+        if num == issue_number and t.get("status") not in ("done", "cancelled"):
             active += 1
     return active
 
@@ -1720,9 +1743,9 @@ def _repair_orphan_tasks(
         issue_n: Optional[str] = None
         card = kanban.show_card(slug, task_id) or {}
         body_text = (card.get("body") or "").strip()
-        m = re.search(r"#(\d+)", body_text)
-        if m:
-            issue_n = m.group(1)
+        _num = extract_issue_number(body_text)
+        if _num is not None:
+            issue_n = str(_num)
 
         if not issue_n:
             issue_n = _find_issue_n_from_parents(slug, task_id)
@@ -1774,18 +1797,13 @@ def _check_confirmed_validators(
         # `hermes kanban list --json` omits the summary; fetch it from show.
         # Fall back to inline fields so unit-test mocks that stub list_tasks
         # with summary pre-populated still work without calling show_card.
-        tid = (task.get("id") or task.get("task_id") or "").strip()
-        summary_raw = (task.get("summary") or task.get("last_summary") or "").strip()
-        if not summary_raw and tid:
-            card = kanban.show_card(slug, tid) or {}
-            summary_raw = (card.get("latest_summary") or "").strip()
+        summary_raw = _get_task_summary(task, slug)
         summary = summary_raw.lower()
         if not summary.startswith("confirmed"):
             # Non-CONFIRMED validator done cards: re-triage instead of silent drop.
-            m_nr = re.search(r"#(\d+)", task.get("title") or "")
-            if not m_nr:
+            n_nr = extract_issue_number(task.get("title") or "")
+            if n_nr is None:
                 continue
-            n_nr = int(m_nr.group(1))
             if summary.startswith("escalate:"):
                 # Security/harm escalation — existing human escalation path, skip silently.
                 continue
@@ -1886,10 +1904,9 @@ def _check_confirmed_validators(
                 )
                 triggered.append(n_nr)
             continue
-        m = re.search(r"#(\d+)", task.get("title") or "")
-        if not m:
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
             continue
-        n = int(m.group(1))
         pm_state, stale_count = _pm_task_state(slug, n, p["pm"])
         if pm_state in ("running", "complete"):
             continue  # PM task active or properly done
@@ -1958,19 +1975,15 @@ def _check_completed_pm(
         if (task.get("assignee") or "").strip() != p["pm"]:
             continue
         # `hermes kanban list --json` omits the summary; fetch it from show.
-        tid = (task.get("id") or task.get("task_id") or "").strip()
-        summary_raw = (task.get("summary") or task.get("last_summary") or "").strip()
-        if not summary_raw and tid:
-            card = kanban.show_card(slug, tid) or {}
-            summary_raw = (card.get("latest_summary") or "").strip()
+        summary_raw = _get_task_summary(task, slug)
         summary = summary_raw.lower()
         # Accept both old "SPEC:" and new "assigned:" PM completion signals.
         # "assigned:" means PM already created all team tasks directly — skip triage creation.
         if summary.startswith("assigned:"):
             # PM created team tasks directly via SOUL.md. Log and skip — tasks already exist.
-            m2 = re.search(r"#(\d+)", task.get("title") or "")
-            if m2:
-                logger.info("dispatch: PM assigned #%s — team tasks created by PM directly, skipping triage", int(m2.group(1)))
+            _n2 = extract_issue_number(task.get("title") or "")
+            if _n2 is not None:
+                logger.info("dispatch: PM assigned #%s — team tasks created by PM directly, skipping triage", _n2)
             continue
         if not summary.startswith("spec:"):
             continue
@@ -1978,10 +1991,9 @@ def _check_completed_pm(
         title = (task.get("title") or "").lower()
         if title.startswith("consult:"):
             continue
-        m = re.search(r"#(\d+)", task.get("title") or "")
-        if not m:
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
             continue
-        n = int(m.group(1))
         if _has_downstream_tasks(slug, n, validator_profile=p["validator"], pm_profile=p["pm"]):
             continue  # team triage already exists
         issue = issues_map.get(n)
@@ -2111,10 +2123,8 @@ def _check_completed_pm(
 def _pm_consultation_body(repo: str, issue: Dict[str, Any], blocker_summary: str,
                           workdir: str, provider_name: str) -> str:
     """Task body for a PM consultation when a team member hits a technical blocker."""
-    n = issue.get("number")
-    title = issue.get("title", "")
-    comment_howto = _PR_COMMENT_HOWTO.get(provider_name,
-                                          _PR_COMMENT_HOWTO["github"]).format(repo=repo)
+    n, title, _, _ = _unpack_issue(issue)
+    comment_howto = _resolve_howtos(provider_name, repo, n)["comment"]
     return (
         f"You are the PRODUCT MANAGER responding to a TEAM BLOCKER on issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}.\n\n"
@@ -2227,10 +2237,9 @@ def _check_team_blockers(
             continue  # PR in review or awaiting-pr — iterate handles this, PM can't unblock it
         if summary.startswith("a11y-skipped:"):
             continue  # accessibility skipped (no UI changes) — not a real blocker
-        m = re.search(r"#(\d+)", card.get("title") or "")
-        if not m:
+        n = extract_issue_number(card.get("title") or "")
+        if n is None:
             continue
-        n = int(m.group(1))
         if _has_active_pm_consultation(slug, n, p["pm"]):
             continue  # PM consultation already open for this issue
         issue = issues_map.get(n)
@@ -2290,10 +2299,9 @@ def _enforce_validator_blocks(
         )
         if not is_validator:
             continue
-        m = re.search(r"#(\d+)", card.get("title") or "")
-        if not m:
+        n = extract_issue_number(card.get("title") or "")
+        if n is None:
             continue
-        n = int(m.group(1))
         if n not in existing:
             continue
         if dry_run:
@@ -3042,9 +3050,8 @@ def _resolve_pr_from_parents(slug: str, provider, card: dict) -> Optional[int]:
         if not parent:
             continue
         # Try to find an issue number in the parent's title
-        m = re.search(r"#(\d+)", (parent.get("title") or ""))
-        if m:
-            issue_num = int(m.group(1))
+        issue_num = extract_issue_number(parent.get("title") or "")
+        if issue_num is not None:
             pr = provider.pr_number_for_issue(issue_num)
             if pr:
                 return pr

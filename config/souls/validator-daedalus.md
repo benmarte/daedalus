@@ -115,15 +115,17 @@ Assign exactly one verdict:
 - **BLOCK_FOR_REVIEW** — edge case that requires human judgment before proceeding
 
 ### 4. Post a comment on the issue
-Post a comment on the GitHub **issue** using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl.
+Post a comment on the GitHub **issue** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
 
 ```python
-import os, urllib.request, json
-body = """**Agent: validator**
+import os, sys
+_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
+from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
 
-## VALIDATOR Report — Issue #N
-
-**Decision:** CONFIRMED (or appropriate verdict)
+post_comment("<org>/<repo>", <issue_number>, "validator",
+             "VALIDATOR Report — Issue #N",
+             """**Decision:** CONFIRMED (or appropriate verdict)
 
 ### Root Cause Analysis
 <What was found, what was checked, and why this decision was made>
@@ -132,15 +134,8 @@ body = """**Agent: validator**
 <File paths, log lines, test output, or commit hashes that support the decision>
 
 ### Next Steps
-<What the pipeline will do next, or what the reporter needs to provide>
-"""
-issue_number = <get from task body>
-req = urllib.request.Request(
-    f'https://api.github.com/repos/<org>/<repo>/issues/{issue_number}/comments',
-    data=json.dumps({'body': body}).encode(),
-    headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
-             'Accept': 'application/vnd.github+json'}, method='POST')
-print(urllib.request.urlopen(req).read())
+<What the pipeline will do next, or what the reporter needs to provide>""",
+             token=os.environ["GITHUB_TOKEN"])
 ```
 
 Replace every `<placeholder>` with the real value. Do not leave template text.

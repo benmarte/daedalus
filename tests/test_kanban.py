@@ -21,22 +21,12 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from core import kanban
-from core.kanban import close_issue_tasks, complete, show_card, _hk
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-
-_passed = 0
-_failed = 0
-
-
-def check(name, cond):
-    global _passed, _failed
-    if cond:
-        _passed += 1
-        print(f"  PASS  {name}")
-    else:
-        _failed += 1
-        print(f"  FAIL  {name}")
+import conftest  # noqa: E402
+from conftest import check  # noqa: E402,F401
+from core import kanban  # noqa: E402
+from core.kanban import close_issue_tasks, complete, show_card, _hk  # noqa: E402
 
 
 # ── Helper to build fake task dicts ──────────────────────────────────────────
@@ -382,10 +372,10 @@ if __name__ == "__main__":
         try:
             t()
         except Exception as e:
-            _failed += 1
+            conftest._failed += 1
             print(f"  FAIL  (raised {type(e).__name__}: {e})")
 
     print(f"\n{'='*60}")
-    print(f"Results: {_passed} passed, {_failed} failed")
-    if _failed:
+    print(f"Results: {conftest._passed} passed, {conftest._failed} failed")
+    if conftest._failed:
         sys.exit(1)

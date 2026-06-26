@@ -146,15 +146,17 @@ Keep this **lightweight** — it is bounded by the number of recent PRs, not the
    ```
 
 ### 4. Write and post a completion report to the GitHub PR
-Post a comment on the GitHub **PR** (not the issue) using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl — markdown with backticks breaks shell escaping.
+Post a comment on the GitHub **PR** (not the issue) using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl — markdown with backticks breaks shell escaping.
 
 ```python
-import os, urllib.request, json
-body = """**Agent: documentation**
+import os, sys
+_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
+from agent_comment import post_pr_comment  # helper prepends the mandatory **Agent:** header
 
-## Documentation Report — Issue #N · PR #<pr_number>
-
-**Issue:** [#N <title>](https://github.com/<org>/<repo>/issues/N)
+post_pr_comment("<org>/<repo>", <pr_number>, "documentation",
+                "Documentation Report — Issue #N · PR #<pr_number>",
+                """**Issue:** [#N <title>](https://github.com/<org>/<repo>/issues/N)
 **PR:** [#<pr_number> <pr_title>](<pr_url>)
 
 ---
@@ -200,14 +202,8 @@ Expected result: <what should happen>
 
 ## Notes
 
-<Caveats, known limitations, follow-up issues filed, or "None.">
-"""
-req = urllib.request.Request(
-    'https://api.github.com/repos/<org>/<repo>/issues/<pr_number>/comments',
-    data=json.dumps({'body': body}).encode(),
-    headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
-             'Accept': 'application/vnd.github+json'}, method='POST')
-print(urllib.request.urlopen(req).read())
+<Caveats, known limitations, follow-up issues filed, or "None.">""",
+                token=os.environ["GITHUB_TOKEN"])
 ```
 
 Replace every `<placeholder>` with the real value. Do not leave template text.

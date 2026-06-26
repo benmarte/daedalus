@@ -120,17 +120,19 @@ Classify each finding as:
 - **INFO** — informational; low risk but worth noting
 
 ### 3. Post a security review comment on the PR
-Post a comment on the GitHub **PR** using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl.
+Post a comment on the GitHub **PR** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
 
 Note: GitHub treats PR comments the same as issue comments via the `/issues/{pr_number}/comments` endpoint.
 
 ```python
-import os, urllib.request, json
-body = """**Agent: security-analyst**
+import os, sys
+_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
+from agent_comment import post_pr_comment  # helper prepends the mandatory **Agent:** header
 
-## Security Review — PR #<pr_number>
-
-**Verdict:** APPROVED (or BLOCKED)
+post_pr_comment("<org>/<repo>", <pr_number>, "security-analyst",
+                "Security Review — PR #<pr_number>",
+                """**Verdict:** APPROVED (or BLOCKED)
 
 ### Summary
 <1-2 sentences summarizing the security posture of this change>
@@ -146,15 +148,8 @@ body = """**Agent: security-analyst**
 _(or "No findings." if clean)_
 
 ### Verdict Rationale
-<Why APPROVED or BLOCKED — what must change if blocked>
-"""
-pr_number = <get from task body or developer's comment>
-req = urllib.request.Request(
-    f'https://api.github.com/repos/<org>/<repo>/issues/{pr_number}/comments',
-    data=json.dumps({'body': body}).encode(),
-    headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
-             'Accept': 'application/vnd.github+json'}, method='POST')
-print(urllib.request.urlopen(req).read())
+<Why APPROVED or BLOCKED — what must change if blocked>""",
+                token=os.environ["GITHUB_TOKEN"])
 ```
 
 Replace every `<placeholder>` with the real value. Do not leave template text.

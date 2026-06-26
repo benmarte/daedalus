@@ -1,36 +1,17 @@
 """Dispatcher unit tests."""
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-
-def _load_dispatch():
-    p = Path(__file__).resolve().parent.parent / "scripts" / "daedalus_dispatch.py"
-    spec = importlib.util.spec_from_file_location("disp", str(p))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
+import conftest  # noqa: E402
+from conftest import _load_dispatch, check  # noqa: E402,F401
 
 disp = _load_dispatch()
-
-_passed = 0
-_failed = 0
-
-
-def check(name, cond):
-    global _passed, _failed
-    if cond:
-        _passed += 1
-        print(f"  PASS  {name}")
-    else:
-        _failed += 1
-        print(f"  FAIL  {name}")
 
 
 
@@ -1044,6 +1025,28 @@ def test_local_agent_roles_have_no_delegation():
         assert "AGENT DELEGATION" not in body
 
 
+def test_validator_body_delegation_appended_for_cloud_agent():
+    """_validator_body appends delegation block (append=True) for a cloud agent."""
+    body = disp._validator_body("org/repo", _ISSUE, "/tmp", "main", "github",
+                                coding_agent="claude-code")
+    assert "AGENT DELEGATION" in body
+    assert "terminal(" in body
+    # validator uses append mode: delegation comes AFTER the issue body
+    assert body.index("--- Issue #55 ---") < body.index("AGENT DELEGATION")
+
+
+def test_validator_body_hermes_leaves_body_unchanged():
+    """Locks item-6 fix: hermes path drops no delegation block AND no stray
+    trailing blank line that the old ``!= "none"`` guard used to append."""
+    plain = disp._validator_body("org/repo", _ISSUE, "/tmp", "main", "github",
+                                 coding_agent="hermes")
+    none = disp._validator_body("org/repo", _ISSUE, "/tmp", "main", "github",
+                                coding_agent="none")
+    assert "AGENT DELEGATION" not in plain
+    # hermes must be byte-identical to none (no trailing "\n\n" append regression)
+    assert plain == none
+
+
 def test_role_delegation_uses_role_specific_tmp_file():
     """Each role uses a distinct, issue-scoped tmp file pair to avoid conflicts."""
     issue = {"number": 7, "title": "T", "body": "B"}
@@ -1243,6 +1246,89 @@ def test_count_active_issue_tasks_ignores_other_issues():
     assert active == 1, "guard must scope active-task count to the closed issue only"
 
 
+# ── issue #120 extracted helpers ──────────────────────────────────────────────
+
+
+def test_unpack_issue_extracts_and_strips():
+    n, title, body, url = disp._unpack_issue(
+        {"number": 9, "title": "T", "body": "  x  ", "url": "u"})
+    assert (n, title, body, url) == (9, "T", "x", "u")
+
+
+def test_unpack_issue_defaults():
+    n, title, body, url = disp._unpack_issue({"number": 1})
+    assert (n, title, body, url) == (1, "", "", "")
+
+
+def test_resolve_howtos_keys_and_github_default():
+    h = disp._resolve_howtos("github", "org/repo", 5)
+    assert set(h) == {"comment", "pr_create", "close_completed", "close_wontfix"}
+    assert "org/repo" in h["comment"]
+    assert "org/repo/issues/5" in h["close_completed"]
+    assert "completed" in h["close_completed"]
+    assert "not_planned" in h["close_wontfix"]
+
+
+def test_resolve_howtos_unknown_provider_falls_back_to_github():
+    h = disp._resolve_howtos("bogus", "org/repo", 1)
+    assert h["comment"] == disp._resolve_howtos("github", "org/repo", 1)["comment"]
+
+
+def test_build_security_notify_cmds_empty_is_placeholder():
+    out = disp._build_security_notify_cmds("org/repo", 3, "Title", [])
+    assert "no notification targets" in out
+
+
+def test_build_security_notify_cmds_one_line_per_target():
+    out = disp._build_security_notify_cmds(
+        "org/repo", 3, "Title", ["slack:ops", "discord:sec"])
+    lines = out.splitlines()
+    assert len(lines) == 2
+    assert "hermes send -t slack:ops" in lines[0]
+    assert "org/repo#3 (Title)" in lines[0]
+
+
+def test_prepend_delegation_none_returns_body_unchanged():
+    assert disp._prepend_delegation("BODY", "none", "") == "BODY"
+
+
+def test_prepend_delegation_hermes_returns_body_unchanged():
+    # The latent-bug fix: "hermes" is now guarded exactly like "none".
+    assert disp._prepend_delegation("BODY", "hermes", "") == "BODY"
+
+
+def test_prepend_delegation_prepends_for_real_agent():
+    out = disp._prepend_delegation("BODY", "claude-code", "", role="developer",
+                                   issue_number=7)
+    assert out.endswith("BODY")
+    assert "AGENT DELEGATION" in out
+    assert out.index("AGENT DELEGATION") < out.index("BODY")
+
+
+def test_prepend_delegation_append_mode():
+    out = disp._prepend_delegation("BODY", "claude-code", "", issue_number=7,
+                                   append=True, trailing="")
+    assert out.startswith("BODY")
+    assert "AGENT DELEGATION" in out
+
+
+def test_get_task_summary_uses_inline_summary():
+    assert disp._get_task_summary({"summary": "spec: do it"}, "slug") == "spec: do it"
+
+
+def test_get_task_summary_falls_back_to_show_card():
+    fake = mock.Mock()
+    fake.show_card.return_value = {"latest_summary": "CONFIRMED: ok"}
+    with mock.patch.object(disp, "kanban", fake):
+        out = disp._get_task_summary({"id": "t1"}, "slug")
+    assert out == "CONFIRMED: ok"
+    fake.show_card.assert_called_once_with("slug", "t1")
+
+
+def test_get_task_summary_no_id_no_fallback():
+    assert disp._get_task_summary({}, "slug") == ""
+
+
 if __name__ == "__main__":
     print("CI retry scheduling tests")
     print("-" * 60)
@@ -1348,5 +1434,5 @@ if __name__ == "__main__":
     ):
         fn()
     print("-" * 60)
-    print(f"Results: {_passed} passed, {_failed} failed")
-    sys.exit(1 if _failed else 0)
+    print(f"Results: {conftest._passed} passed, {conftest._failed} failed")
+    sys.exit(1 if conftest._failed else 0)

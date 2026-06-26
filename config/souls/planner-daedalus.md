@@ -115,15 +115,17 @@ Write a detailed, ordered plan covering:
 - **Out of scope**: explicitly state what is NOT part of this fix
 
 ### 4. Post the plan as a comment on the issue
-Post a comment on the GitHub **issue** using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl.
+Post a comment on the GitHub **issue** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
 
 ```python
-import os, urllib.request, json
-body = """**Agent: planner**
+import os, sys
+_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
+from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
 
-## Implementation Plan — Issue #N: <title>
-
-### Files to Change
+post_comment("<org>/<repo>", <issue_number>, "planner",
+             "Implementation Plan — Issue #N: <title>",
+             """### Files to Change
 | File | Change |
 |------|--------|
 | `path/to/file.ts` | <what changes and why> |
@@ -141,15 +143,8 @@ body = """**Agent: planner**
 - <Risk 2>
 
 ### Out of Scope
-- <What is explicitly not part of this fix>
-"""
-issue_number = <get from task body>
-req = urllib.request.Request(
-    f'https://api.github.com/repos/<org>/<repo>/issues/{issue_number}/comments',
-    data=json.dumps({'body': body}).encode(),
-    headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
-             'Accept': 'application/vnd.github+json'}, method='POST')
-print(urllib.request.urlopen(req).read())
+- <What is explicitly not part of this fix>""",
+             token=os.environ["GITHUB_TOKEN"])
 ```
 
 Replace every `<placeholder>` with the real value. Do not leave template text.

@@ -143,15 +143,17 @@ EOF
 **CRITICAL: Do NOT add a "Reviews" section to the PR body. Never claim that reviews happened — that is for the reviewer/QA/security/docs agents to report themselves in their own comments. Fabricating review outcomes causes the pipeline to skip actual review.**
 
 ### 5. Post a comment on the issue
-Post a comment on the GitHub **issue** (not the PR) using Python `urllib`. Use your `GITHUB_TOKEN` env var. Never use curl.
+Post a comment on the GitHub **issue** (not the PR) using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
 
 ```python
-import os, urllib.request, json
-body = """**Agent: developer**
+import os, sys
+_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
+from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
 
-## Implementation Complete — Issue #N
-
-**PR:** #<pr_number> — <pr_title>
+post_comment("<org>/<repo>", <issue_number>, "developer",
+             "Implementation Complete — Issue #N",
+             """**PR:** #<pr_number> — <pr_title>
 **Branch:** `fix/issue-N-<slug>` → `dev`
 **Commit:** `<short hash>`
 
@@ -168,15 +170,8 @@ body = """**Agent: developer**
 
 ### Verification
 Run: `<command to verify the fix>`
-Expected: `<expected output>`
-"""
-issue_number = <get from task body>
-req = urllib.request.Request(
-    f'https://api.github.com/repos/<org>/<repo>/issues/{issue_number}/comments',
-    data=json.dumps({'body': body}).encode(),
-    headers={'Authorization': f'Bearer {os.environ["GITHUB_TOKEN"]}',
-             'Accept': 'application/vnd.github+json'}, method='POST')
-print(urllib.request.urlopen(req).read())
+Expected: `<expected output>`""",
+             token=os.environ["GITHUB_TOKEN"])
 ```
 
 Replace every `<placeholder>` with the real value. Do not leave template text.

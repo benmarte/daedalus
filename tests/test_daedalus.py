@@ -9,9 +9,12 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-# Make the package root importable (config/, core/).
+# Make the package root importable (config/, core/) and the tests dir (conftest).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import conftest  # noqa: E402
+from conftest import FakeProvider, _load_dispatch, check  # noqa: E402,F401
 from config import ConfigLoader, deep_merge  # noqa: E402
 from core import kanban  # noqa: E402
 
@@ -32,13 +35,13 @@ _ORIG_KANBAN = {
 }
 
 
-class _FakeProvider:
-    """Stands in for a core.providers.VCSProvider in dispatcher tests."""
+class _FakeProvider(FakeProvider):
+    """Dispatcher-test double: extends the canonical conftest ``FakeProvider``
+    with the board/PR-state stubs the dispatcher ``run()`` path exercises.
 
-    name = "github"
-
-    def board_configured(self):
-        return False
+    ``name``, ``board_configured`` and ``list_issues`` are inherited from the
+    base (identical defaults), so only dispatcher-specific surface lives here.
+    """
 
     def status_name(self, key):
         return {"ready": "Ready", "in_progress": "In progress",
@@ -49,9 +52,6 @@ class _FakeProvider:
 
     def board_set_status(self, n, status):
         return True
-
-    def list_issues(self, state="open", labels=None, limit=50):
-        return []
 
     def close_issue(self, n):
         return True
@@ -107,19 +107,6 @@ gp = _FakeProvider()  # patched per-test via mock.patch.object
 class _Comment:
     def __init__(self, body):
         self.body = body
-
-_passed = 0
-_failed = 0
-
-
-def check(name, cond):
-    global _passed, _failed
-    if cond:
-        _passed += 1
-        print(f"  PASS  {name}")
-    else:
-        _failed += 1
-        print(f"  FAIL  {name}")
 
 
 # ── config: deep_merge ───────────────────────────────────────────────────────
@@ -239,13 +226,7 @@ def test_ensure_board_failure():
 
 
 # ── dispatch: dual mode (GitHub board optional, kanban always) ───────────────
-def _load_dispatch():
-    import importlib.util
-    p = Path(__file__).resolve().parent.parent / "scripts" / "daedalus_dispatch.py"
-    spec = importlib.util.spec_from_file_location("disp", str(p))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+# ``_load_dispatch`` is imported from conftest (single source of truth).
 
 
 # ── config: resolve_repo_config ──────────────────────────────────────────────
@@ -2320,5 +2301,5 @@ if __name__ == "__main__":
                test_schedule_to_crontab_passthrough_crontab):
         fn()
     print("-" * 60)
-    print(f"Results: {_passed} passed, {_failed} failed")
-    sys.exit(1 if _failed else 0)
+    print(f"Results: {conftest._passed} passed, {conftest._failed} failed")
+    sys.exit(1 if conftest._failed else 0)

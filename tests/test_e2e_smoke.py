@@ -26,19 +26,10 @@ from unittest import mock
 
 # Package root (the dir containing __init__.py).
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-_passed = 0
-_failed = 0
-
-
-def check(name, cond):
-    global _passed, _failed
-    if cond:
-        _passed += 1
-        print(f"  PASS  {name}")
-    else:
-        _failed += 1
-        print(f"  FAIL  {name}")
+import conftest  # noqa: E402
+from conftest import _load_dispatch, check  # noqa: E402,F401
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -49,15 +40,6 @@ def _load_package():
     spec = importlib.util.spec_from_file_location(
         "daedalus_plugin", str(ROOT / "__init__.py")
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _load_dispatch():
-    """Load the daedalus_dispatch module by path."""
-    p = ROOT / "scripts" / "daedalus_dispatch.py"
-    spec = importlib.util.spec_from_file_location("disp", str(p))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -272,5 +254,5 @@ if __name__ == "__main__":
         fn()
     print()
     print("=" * 60)
-    print(f"Results: {_passed} passed, {_failed} failed")
-    sys.exit(1 if _failed else 0)
+    print(f"Results: {conftest._passed} passed, {conftest._failed} failed")
+    sys.exit(1 if conftest._failed else 0)
