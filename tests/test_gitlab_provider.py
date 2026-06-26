@@ -12,8 +12,8 @@ from core.providers.gitlab import GitLabProvider  # noqa: E402
 from core.providers.http import ProviderError  # noqa: E402
 
 
-def _provider(extra_vcs=None, tracking=None):
-    cfg = {"repo": "group/proj",
+def _provider(extra_vcs=None, tracking=None, repo="group/proj"):
+    cfg = {"repo": repo,
            "vcs": {"provider": "gitlab", **(extra_vcs or {})}}
     if tracking:
         cfg["tracking"] = tracking
@@ -35,6 +35,83 @@ def test_project_path_is_url_encoded(provider):
 def test_project_id_takes_precedence():
     p = _provider(extra_vcs={"project_id": 42})
     assert p._proj == "/projects/42"
+
+
+def test_issue_url_with_project_path(provider):
+    assert provider.issue_url(7) == "https://gitlab.com/group/proj/-/issues/7"
+    provider._http.get_json.assert_not_called()
+
+
+def test_pr_url_with_project_path(provider):
+    assert provider.pr_url(3) == "https://gitlab.com/group/proj/-/merge_requests/3"
+    provider._http.get_json.assert_not_called()
+
+
+def test_issue_url_with_numeric_project_id_fetches_path():
+    # repo has no "/" so _project_web_path starts as None — must be fetched from API.
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "mygroup/myproject"}
+    assert p.issue_url(5) == "https://gitlab.com/mygroup/myproject/-/issues/5"
+    p._http.get_json.assert_called_once_with("/projects/42")
+
+
+def test_pr_url_with_numeric_project_id_fetches_path():
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "mygroup/myproject"}
+    assert p.pr_url(9) == "https://gitlab.com/mygroup/myproject/-/merge_requests/9"
+    p._http.get_json.assert_called_once_with("/projects/42")
+
+
+def test_resolve_web_path_cached_after_first_call():
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "g/p"}
+    p.issue_url(1)
+    p.issue_url(2)
+    p.pr_url(3)
+    assert p._http.get_json.call_count == 1  # fetched once, shared by both methods
+
+
+def test_resolve_web_path_api_error_caches_failure():
+    # After a ProviderError, the failure is cached — no retry on subsequent calls.
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.side_effect = ProviderError("403", status_code=403)
+    assert p.issue_url(1) == ""
+    assert p.pr_url(1) == ""
+    assert p._http.get_json.call_count == 1  # one attempt, then cached as ""
+
+
+def test_resolve_web_path_invalid_path_rejected():
+    # Malformed path_with_namespace must be rejected for URL safety.
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "../../evil"}
+    assert p.issue_url(1) == ""
+    assert p._http.get_json.call_count == 1  # still cached after rejection
+
+
+def test_resolve_web_path_null_or_missing_key_returns_empty():
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"default_branch": "main"}  # no path key
+    assert p.issue_url(1) == ""
+    assert p._http.get_json.call_count == 1
+
+
+def test_get_default_branch_populates_web_path_as_side_effect():
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"default_branch": "main",
+                                     "path_with_namespace": "g/p"}
+    p.get_default_branch()
+    assert p._project_web_path == "g/p"
+    # issue_url now works without a second API call
+    assert p.issue_url(3) == "https://gitlab.com/g/p/-/issues/3"
+    assert p._http.get_json.call_count == 1
+
+
+def test_get_default_branch_does_not_overwrite_known_web_path(provider):
+    # Pre-set from project_path at init — get_default_branch must not clobber it.
+    provider._http.get_json.return_value = {"default_branch": "main",
+                                            "path_with_namespace": "other/proj"}
+    provider.get_default_branch()
+    assert provider._project_web_path == "group/proj"  # unchanged
 
 
 def test_self_hosted_base_url():
@@ -125,6 +202,44 @@ def test_label_board_ready_numbers():
         {"iid": 1, "state": "opened", "labels": ["Ready"]},
         {"iid": 2, "state": "opened", "labels": ["Ready"]}]
     assert p.board_numbers_with_statuses(["Ready"]) == {1, 2}
+
+
+def test_get_default_branch(provider):
+    provider._http.get_json.return_value = {"default_branch": "master"}
+    assert provider.get_default_branch() == "master"
+    (path,) = provider._http.get_json.call_args[0]
+    assert path == "/projects/group%2Fproj"
+
+
+def test_get_default_branch_error(provider):
+    provider._http.get_json.side_effect = ProviderError("500", status_code=500)
+    assert provider.get_default_branch() is None
+
+
+def test_ensure_status_labels_creates_missing(provider):
+    provider._http.get_paginated.return_value = [{"name": "Ready", "color": "#fff"}]
+    created = provider.ensure_status_labels(["Ready", "In progress", "Done"])
+    assert created == ["In progress", "Done"]  # "Ready" already exists, skipped
+    posted = {call.args[0]: call.args[1] for call in provider._http.post_json.call_args_list}
+    assert "/projects/group%2Fproj/labels" in posted
+    names = {call.args[1]["name"] for call in provider._http.post_json.call_args_list}
+    assert names == {"In progress", "Done"}
+
+
+def test_ensure_status_labels_idempotent_on_409(provider):
+    provider._http.get_paginated.return_value = []  # nothing pre-exists
+    provider._http.post_json.side_effect = ProviderError("conflict", status_code=409)
+    # 409 (already exists) must not raise and must not be reported as created.
+    assert provider.ensure_status_labels(["Ready"]) == []
+
+
+def test_ensure_status_labels_noop_when_all_exist(provider):
+    provider._http.get_paginated.return_value = [
+        {"name": "Ready"}, {"name": "In progress"},
+        {"name": "In review"}, {"name": "Done"}]
+    assert provider.ensure_status_labels(
+        ["Ready", "In progress", "In review", "Done"]) == []
+    provider._http.post_json.assert_not_called()
 
 
 def test_errors_degrade_gracefully(provider):

@@ -2328,6 +2328,74 @@ def _enforce_validator_blocks(
     return enforced
 
 
+def _reconcile_vcs_board(resolved: Dict[str, Any], provider,
+                         *, dry_run: bool = False):
+    """Auto-configure GitLab board settings in memory so a project works out of
+    the box and self-heals on every tick (issue #133).
+
+    GitLab Issue Boards are label-driven, so a project that was scaffolded
+    kanban-only (``tracking: null``) silently never polls issues. This reconcile
+    repairs that, idempotently and without writing the config file (so the
+    heavily-commented YAML keeps its comments):
+
+      1. Enable board mode (``tracking.label_board: true``) when the user has
+         not set it explicitly — then rebuild the provider so THIS tick polls.
+      2. Ensure the ``status_map`` board labels exist in the project.
+      3. Fix ``vcs.target_branch`` when the configured branch does not exist in
+         the repo, setting it to the real default branch (e.g. ``main`` → the
+         repo's actual ``master``). A valid configured branch is left untouched.
+
+    Returns ``(provider, notes)`` — ``notes`` is a list of one-line change
+    descriptions (empty when nothing was reconciled). Non-GitLab providers are
+    a no-op. Every API call degrades gracefully on failure.
+    """
+    notes: List[str] = []
+    if provider is None or providers.provider_name(resolved) != "gitlab":
+        return provider, notes
+
+    # ── 1. Enable label-board mode unless explicitly configured ───────────────
+    tracking = resolved.get("tracking")
+    label_board_set = isinstance(tracking, dict) and "label_board" in tracking
+    if not label_board_set:
+        if dry_run:
+            notes.append("would enable board mode (tracking.label_board=true)")
+        else:
+            if not isinstance(tracking, dict):
+                tracking = {}
+                resolved["tracking"] = tracking
+            tracking["label_board"] = True
+            provider = providers.get_provider(resolved) or provider
+            notes.append("board mode enabled")
+
+    # ── 2. Ensure status labels exist (only meaningful once board mode is on) ──
+    if (provider is not None and provider.board_configured()
+            and hasattr(provider, "ensure_status_labels")):
+        status_names = [provider.status_name(k)
+                        for k in ("ready", "in_progress", "in_review", "done")]
+        if dry_run:
+            notes.append("would ensure status labels exist")
+        else:
+            created = provider.ensure_status_labels(status_names)
+            if created:
+                notes.append("created labels " + ", ".join(created))
+
+    # ── 3. Fix target_branch when the configured branch does not exist ────────
+    if hasattr(provider, "get_default_branch"):
+        vcs = resolved.setdefault("vcs", {})
+        configured = (vcs.get("target_branch") or "").strip()
+        branches = set(provider.list_branches())
+        if branches and configured not in branches:
+            default_branch = provider.get_default_branch()
+            if default_branch and default_branch != configured:
+                if dry_run:
+                    notes.append(f"would set target_branch={default_branch}")
+                else:
+                    vcs["target_branch"] = default_branch
+                    notes.append(f"target_branch={default_branch}")
+
+    return provider, notes
+
+
 def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatch: int = 5,
         dry_run: bool = False, provider=None) -> Dict[str, Any]:
     """Reconcile statuses, create tasks for new issues, and dispatch. Returns a summary.
@@ -2376,10 +2444,16 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     workdir = resolved.get("workdir", "")
     # Messaging target the documentation agent's completion report is sent to.
     notify_target = (resolved.get("cron") or {}).get("deliver", "")
-    base_branch = (resolved.get("vcs") or {}).get("target_branch", "dev")
     slug = _board_slug(repo, resolved.get("name", ""))
     if provider is None:
         provider = providers.get_provider(resolved)
+    # Auto-configure GitLab board settings (board mode, status labels, default
+    # branch) in memory so freshly-set-up and pre-existing projects work on the
+    # first tick without manual daedalus.yaml edits (issue #133). Idempotent.
+    provider, vcs_autoconfig = _reconcile_vcs_board(resolved, provider, dry_run=dry_run)
+    if vcs_autoconfig:
+        logger.info("dispatch: GitLab auto-config — %s", "; ".join(vcs_autoconfig))
+    base_branch = (resolved.get("vcs") or {}).get("target_branch", "dev")
     board_mode = bool(provider is not None and provider.board_configured())
     if not board_mode:
         logger.warning("dispatch: no VCS board configured — skipping board status moves")
@@ -2473,7 +2547,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                    "reconciled": reconciled, "completed": completed,
                    "advance_prs": advance_prs, "routed_actions": routed_actions,
                    "issues_seen": 0, "spec_created": spec_created,
-                   "slack_delivered": slack_delivered}
+                   "slack_delivered": slack_delivered, "vcs_autoconfig": vcs_autoconfig}
         logger.info("dispatch summary: %s", summary)
         return summary
 
@@ -2836,7 +2910,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                "routed_actions": routed_actions, "issues_seen": len(issues),
                "spec_created": spec_created, "slack_delivered": slack_delivered,
                "blocked": blocked_issues, "threads_mirrored": threads_mirrored,
-               "pm_triggered": pm_triggered, "blocker_triggered": blocker_triggered}
+               "pm_triggered": pm_triggered, "blocker_triggered": blocker_triggered,
+               "vcs_autoconfig": vcs_autoconfig}
     logger.info("dispatch summary: %s", summary)
     return summary
 

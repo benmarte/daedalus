@@ -11,14 +11,25 @@ sent as the PRIVATE-TOKEN header.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+
+# Allowlist for path_with_namespace values returned by the GitLab API.
+# GitLab constrains slugs to alphanumerics, dots, hyphens, and underscores,
+# separated by exactly one "/" per level.  Reject anything else before
+# interpolating into notification URLs.
+_WEB_PATH_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.\-]*)+$')
 
 from .base import (CIStatus, Comment, IssueSummary, LabelDef, PRSummary,
                    ProviderConfigError, VCSProvider, resolve_token)
 from .http import HTTPClient, ProviderError
 
 _MR_STATE = {"opened": "open", "merged": "merged", "closed": "closed", "locked": "open"}
+
+# Default color for auto-created board status labels (GitLab requires a color on
+# label creation). A neutral blue — users can recolor in the GitLab UI.
+_STATUS_LABEL_COLOR = "#6699cc"
 
 
 class GitLabProvider(VCSProvider):
@@ -49,9 +60,12 @@ class GitLabProvider(VCSProvider):
         self._http = HTTPClient(f"{base_url}/api/v4", headers, token=token,
                                  verify_ssl=vcs.get("verify_ssl", True))
         self.supports_boards = bool((self._cfg.get("tracking") or {}).get("label_board"))
-        # Stored for URL building — populated only when project_path (not numeric ID) is known.
         self._web_base = base_url
-        self._project_web_path = project_path if "/" in project_path else ""
+        # None = "not yet fetched"; "" = "fetched but unavailable". Distinguishing
+        # the two prevents repeated API retries after a permanent failure.
+        self._project_web_path: Optional[str] = (
+            project_path if "/" in project_path else None
+        )
 
     @property
     def _proj(self) -> str:
@@ -233,22 +247,86 @@ class GitLabProvider(VCSProvider):
         self._log.info("board: #%s -> %s", issue_number, status_name)
         return True
 
+    def ensure_status_labels(self, status_names: List[str]) -> List[str]:
+        """Create any missing board status labels in the project (idempotent).
+
+        Guarantees the Issue Board lists keyed to ``status_map`` exist so
+        ready-gating has something to match. A 409 (label already exists, e.g.
+        a concurrent tick or a case-insensitive collision) is treated as
+        success. Returns the names that were newly created.
+        """
+        created: List[str] = []
+        existing = {label.name for label in self.list_labels()}
+        for name in status_names:
+            if not name or name in existing:
+                continue
+            try:
+                self._http.post_json(f"{self._proj}/labels",
+                                     {"name": name, "color": _STATUS_LABEL_COLOR})
+                created.append(name)
+            except ProviderError as e:
+                if e.status_code == 409:
+                    continue  # already exists — idempotent
+                self._log.warning("ensure_status_labels: create %r failed: %s", name, e)
+        if created:
+            self._log.info("ensure_status_labels: created %s", ", ".join(created))
+        return created
+
     # ── URL builders ─────────────────────────────────────────────────────────
+    def _resolve_web_path(self) -> str:
+        """Return path_with_namespace, fetching it once when only project_id is set.
+
+        When the project is configured with a numeric ``vcs.project_id`` the
+        web path is unknown at init time.  This method fetches the project's
+        ``path_with_namespace`` from the API on first call and caches the result.
+        Failures are also cached (as ``""``) so a permanent error (bad token,
+        wrong ID) does not cause a fresh API call on every URL request.
+        """
+        if self._project_web_path is None:
+            raw = ""
+            try:
+                data = self._http.get_json(self._proj)
+                raw = (data or {}).get("path_with_namespace") or ""
+            except ProviderError as e:
+                self._log.warning("_resolve_web_path failed: %s", e)
+            if raw and _WEB_PATH_RE.match(raw):
+                self._project_web_path = raw
+            else:
+                if raw:
+                    self._log.warning("_resolve_web_path: unexpected path_with_namespace %r", raw)
+                self._project_web_path = ""  # cache the failure — don't retry
+        return self._project_web_path
+
     def issue_url(self, issue_number: int) -> str:
-        if not self._project_web_path:
+        path = self._resolve_web_path()
+        if not path:
             return ""
-        return f"{self._web_base}/{self._project_web_path}/-/issues/{issue_number}"
+        return f"{self._web_base}/{path}/-/issues/{issue_number}"
 
     def pr_url(self, pr_number: int) -> str:
-        if not self._project_web_path:
+        path = self._resolve_web_path()
+        if not path:
             return ""
-        return f"{self._web_base}/{self._project_web_path}/-/merge_requests/{pr_number}"
+        return f"{self._web_base}/{path}/-/merge_requests/{pr_number}"
 
     @property
     def display_repo(self) -> str:
         return self._project_web_path or self._cfg.get("repo") or ""
 
     # ── meta ─────────────────────────────────────────────────────────────────
+    def get_default_branch(self) -> Optional[str]:
+        """The project's default branch (GET /projects/:id), or None on error."""
+        try:
+            data = self._http.get_json(self._proj)
+        except ProviderError as e:
+            self._log.warning("get_default_branch failed: %s", e)
+            return None
+        if self._project_web_path is None:
+            # Also caches path_with_namespace for URL builders — free side effect.
+            raw = (data or {}).get("path_with_namespace") or ""
+            self._project_web_path = raw if (raw and _WEB_PATH_RE.match(raw)) else ""
+        return (data or {}).get("default_branch") or None
+
     def list_branches(self) -> List[str]:
         try:
             data = self._http.get_paginated(f"{self._proj}/repository/branches",
