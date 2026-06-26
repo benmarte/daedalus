@@ -84,13 +84,22 @@ cron:
   # (Slack, Discord, Telegram, Signal, WhatsApp, …). `events` filters what a
   # target receives; omit it to receive everything.
   # Events: doc-report | dispatch-summary | pipeline-failure | pr-ready
+  #         | security-escalation | comment-mirror
+  #
+  # ⚠️ Comment threading (since beta.30): daedalus mirrors every agent comment
+  # on an issue and its linked PR into ONE persistent thread per target — so the
+  # whole pipeline conversation is readable without leaving chat. This is the
+  # `comment-mirror` event. It works automatically; no new config keys needed.
+  # A CATCH-ALL entry (no `events` filter, or `events: []`) receives
+  # `comment-mirror` too, so active boards will see a higher message volume than
+  # before. To exclude it, list the events you DO want and leave it out.
   # notifications:
   #   - platform: "Slack"
   #     target: "slack:C0CHANNEL1"
-  #     events: ["doc-report", "pipeline-failure"]
+  #     events: ["doc-report", "pipeline-failure"]  # no comment-mirror → no threads
   #   - platform: "Discord"
   #     target: "discord:1234567890123456789"  # numeric channel ID (not name)
-  #     events: ["dispatch-summary", "pr-ready"]
+  #     events: ["dispatch-summary", "pr-ready", "comment-mirror"]
 
 # ── Execution tunables ────────────────────────────────────────────────────────
 execution:
