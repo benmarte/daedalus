@@ -912,6 +912,33 @@ def test_dev_task_body_has_delegation_when_claude_code():
     assert body.index("AGENT DELEGATION") < body.index("You are the DEVELOPER")
 
 
+def test_coding_agent_max_turns_default_for_claude():
+    """A fresh project (no override) gets a sane --max-turns, not claude's 25 default (#143)."""
+    cmd = disp._apply_coding_agent_max_turns("claude-code", "", {})
+    assert "--max-turns 100" in cmd, cmd
+    assert "claude" in cmd  # the default claude-code cmd was applied
+
+
+def test_coding_agent_max_turns_configurable():
+    """execution.coding_agent_max_turns overrides the default budget."""
+    cmd = disp._apply_coding_agent_max_turns("claude-code", "", {"coding_agent_max_turns": 250})
+    assert "--max-turns 250" in cmd, cmd
+
+
+def test_coding_agent_max_turns_respects_explicit():
+    """An explicit --max-turns in the cmd is never doubled."""
+    base = "claude --dangerously-skip-permissions -p --max-turns 50"
+    cmd = disp._apply_coding_agent_max_turns("claude-code", base, {})
+    assert cmd == base
+    assert cmd.count("--max-turns") == 1
+
+
+def test_coding_agent_max_turns_skips_non_claude():
+    """codex/opencode use different turn flags — leave them untouched."""
+    assert disp._apply_coding_agent_max_turns("codex", "codex exec --full-auto", {}) == "codex exec --full-auto"
+    assert disp._apply_coding_agent_max_turns("opencode", "opencode run", {}) == "opencode run"
+
+
 def test_dev_task_body_no_delegation_when_none():
     """_dev_task_body has no delegation block when coding_agent=none."""
     body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
