@@ -1,3 +1,5 @@
+## [bug: _reconcile_cron skips schedule conversion, creating one-shot crons instead of repeating jobs](https://github.com/benmarte/daedalus/issues/134) — [PR #136](https://github.com/benmarte/daedalus/pull/136)
+
 ## [docs: update README and user guide for beta.30 release](https://github.com/benmarte/daedalus/issues/127) — [PR #128](https://github.com/benmarte/daedalus/pull/128)
 
 # Changelog
