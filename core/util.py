@@ -38,6 +38,34 @@ def board_slug(repo: str, name: str = "") -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
 
 
+def schedule_to_crontab(schedule: str) -> str:
+    """Convert interval schedules to crontab syntax so crons run forever (Repeat: ∞).
+
+    Hermes treats interval syntax like ``60m`` or ``every 2h`` as a one-shot job
+    — it runs once then moves to ``[completed]`` and the dispatcher silently
+    stops. Crontab syntax (``0 * * * *``) is inherently infinite. If the schedule
+    is already in crontab format (or unrecognised) it is returned unchanged.
+
+    Single source of truth shared by ``_ensure_dispatch_crons`` (plugin load
+    self-heal) and ``dashboard.plugin_api._reconcile_cron`` (dashboard Save).
+    """
+    s = re.sub(r"^every\s+", "", schedule.strip().lower())
+    if re.match(r"^[\d*/,\-]+(\s+[\d*/,\-]+){4}$", s):
+        return schedule.strip()
+    m = re.match(r"^(\d+)m$", s)
+    if m:
+        minutes = int(m.group(1))
+        if minutes >= 60 and minutes % 60 == 0:
+            hours = minutes // 60
+            return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
+        return f"*/{minutes} * * * *"
+    m = re.match(r"^(\d+)h$", s)
+    if m:
+        hours = int(m.group(1))
+        return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
+    return schedule.strip()
+
+
 def parse_env_file(path: Path) -> Dict[str, str]:
     """Parse a ``.env`` file into ``{key: value}``. Returns ``{}`` on any error.
 

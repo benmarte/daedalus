@@ -210,25 +210,13 @@ def _ensure_cron_wrapper() -> None:
 def _schedule_to_crontab(schedule: str) -> str:
     """Convert interval schedules to crontab syntax so recreated crons run forever (Repeat: ∞).
 
-    Hermes treats interval syntax like '60m' or 'every 2h' as one-shot jobs.
-    Crontab syntax ('0 * * * *') is inherently infinite. If the schedule is
-    already in crontab format it is returned unchanged.
+    Thin back-compat wrapper around ``core.util.schedule_to_crontab`` — the single
+    source of truth now shared with ``dashboard.plugin_api._reconcile_cron`` (issue
+    #134). Imported lazily so the plugin entry point stays import-safe even if
+    ``core`` is not yet on ``sys.path`` at load time.
     """
-    s = re.sub(r"^every\s+", "", schedule.strip().lower())
-    if re.match(r"^[\d*/,\-]+(\s+[\d*/,\-]+){4}$", s):
-        return schedule.strip()
-    m = re.match(r"^(\d+)m$", s)
-    if m:
-        minutes = int(m.group(1))
-        if minutes >= 60 and minutes % 60 == 0:
-            hours = minutes // 60
-            return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
-        return f"*/{minutes} * * * *"
-    m = re.match(r"^(\d+)h$", s)
-    if m:
-        hours = int(m.group(1))
-        return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
-    return schedule.strip()
+    from core.util import schedule_to_crontab
+    return schedule_to_crontab(schedule)
 
 
 def _ensure_dispatch_crons() -> None:
