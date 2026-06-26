@@ -15,6 +15,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -256,3 +257,99 @@ def test_thread_dry_run_sends_nothing(tmp_path, monkeypatch):
     assert n == 1
     assert fake.calls == []
     assert dispatch_state.get_thread_anchor(wd, 121, "slack:C1") is None
+
+
+# ── _all_notify_targets (thread roots open on every reachable platform) ─────────
+
+
+def test_all_notify_targets_unions_and_dedups():
+    """AC: a root thread opens on *each* configured platform.
+
+    The union spans every event a target could later receive, deduped and
+    order-preserving — so a target wired only to ``pr-ready`` still gets a
+    thread root at dispatch time.
+    """
+    resolved = {"cron": {"notifications": [
+        {"platform": "slack", "target": "slack:C1", "events": ["doc-report"]},
+        {"platform": "discord", "target": "discord:9", "events": ["pr-ready"]},
+        {"platform": "slack", "target": "slack:C1", "events": ["dispatch-summary"]},
+    ]}}
+    assert disp._all_notify_targets(resolved) == ["slack:C1", "discord:9"]
+
+
+def test_all_notify_targets_empty_when_no_notifications():
+    assert disp._all_notify_targets({"cron": {}}) == []
+
+
+# ── _deliver_doc_reports threaded branch (issue #121 integration) ───────────────
+
+
+def test_deliver_doc_reports_routes_through_issue_thread(tmp_path):
+    """With a workdir + resolvable parent issue, the doc report mirrors into
+    that issue's thread (not the legacy flat fan-out)."""
+    wd = str(tmp_path)
+    doc_card = {"id": "t_doc", "assignee": "documentation-daedalus",
+                "body": "PR #42 ready", "latest_summary": "", "parents": []}
+    provider = SimpleNamespace(
+        display_repo="acme/widgets",
+        pr_url=lambda n: f"https://example/pr/{n}",
+        issue_url=lambda n: f"https://example/issue/{n}",
+        pr_has_delivery_marker=lambda n: False,
+        post_delivery_marker=lambda n, body="": True,
+    )
+    captured = {}
+
+    def fake_thread(workdir, issue_number, event_key, targets, body, *, dry_run=False):
+        captured.update(issue=issue_number, key=event_key, targets=list(targets))
+        return len(list(targets))
+
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
+        with mock.patch.object(disp, "_parse_pr_from_card", return_value=42):
+            with mock.patch.object(
+                disp, "_find_doc_comment",
+                return_value="**Agent: documentation**\n\nCloses #121\n\nReport",
+            ):
+                with mock.patch.object(
+                    disp, "_deliver_to_issue_thread", side_effect=fake_thread,
+                ) as threaded:
+                    with mock.patch.object(disp, "_send_via_hermes") as flat:
+                        result = disp._deliver_doc_reports(
+                            "slug", provider, ["slack:C1"], workdir=wd,
+                        )
+
+    assert result == [42]
+    assert threaded.called          # routed through the threaded path
+    assert not flat.called          # NOT the legacy flat fan-out
+    assert captured["issue"] == 121          # under the parent issue, not the PR
+    assert captured["key"] == "doc-report:42"
+    assert captured["targets"] == ["slack:C1"]
+
+
+def test_deliver_doc_reports_flat_fanout_without_workdir():
+    """Back-compat: with no workdir the legacy flat fan-out is used."""
+    doc_card = {"id": "t_doc", "assignee": "documentation-daedalus",
+                "body": "PR #42 ready", "latest_summary": "", "parents": []}
+    provider = SimpleNamespace(
+        display_repo="acme/widgets",
+        pr_url=lambda n: f"https://example/pr/{n}",
+        issue_url=lambda n: f"https://example/issue/{n}",
+        pr_has_delivery_marker=lambda n: False,
+        post_delivery_marker=lambda n, body="": True,
+    )
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[doc_card]):
+        with mock.patch.object(disp, "_parse_pr_from_card", return_value=42):
+            with mock.patch.object(
+                disp, "_find_doc_comment",
+                return_value="**Agent: documentation**\n\nCloses #121\n\nReport",
+            ):
+                with mock.patch.object(
+                    disp, "_deliver_to_issue_thread",
+                ) as threaded:
+                    with mock.patch.object(
+                        disp, "_send_via_hermes", return_value=True,
+                    ) as flat:
+                        result = disp._deliver_doc_reports("slug", provider, ["slack:C1"])
+
+    assert result == [42]
+    assert flat.called              # legacy flat fan-out
+    assert not threaded.called      # threaded path skipped without workdir
