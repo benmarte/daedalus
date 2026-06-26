@@ -161,6 +161,50 @@ def render_agent_header(
     return template.format_map(ctx)
 
 
+# ── per-issue thread mirroring (issue #121) ───────────────────────────────────
+
+def render_thread_root(name: str, issue_number: int, issue_title: str,
+                       issue_url: str = "") -> str:
+    """Root (thread-anchor) message posted when an issue is dispatched.
+
+    This is the parent every later agent comment / PR event replies to, so the
+    full conversation lives in one platform thread.
+    """
+    title = (issue_title or "").strip()
+    ref = _link(f"#{issue_number}", issue_url)
+    head = f"{ref}: {title}" if title else ref
+    return (
+        f"## 🧵 Daedalus — **{name}**\n\n"
+        f"**Issue:** {head}\n\n"
+        f"Dispatched to the roster. Agent updates on this issue and its PR will "
+        f"appear in this thread."
+    )
+
+
+def render_thread_comment(issue_number: int, pr_number: Optional[int],
+                          comment_body: str, *, issue_url: str = "",
+                          pr_url: str = "") -> str:
+    """Thread reply wrapping a mirrored agent issue/PR comment verbatim."""
+    if pr_number:
+        loc = f"on {_link(f'PR #{pr_number}', pr_url)} · issue {_link(f'#{issue_number}', issue_url)}"
+    else:
+        loc = f"on issue {_link(f'#{issue_number}', issue_url)}"
+    return f"💬 New agent comment {loc}:\n\n{comment_body.strip()}"
+
+
+def render_thread_pr_event(event: str, pr_number: int, pr_title: str = "",
+                           pr_url: str = "") -> str:
+    """Thread reply for a PR lifecycle transition (opened / merged)."""
+    icon = {"opened": "🔍", "merged": "✅", "closed": "🚪"}.get(event, "🔄")
+    verb = {"opened": "opened for review",
+            "merged": "merged — work complete",
+            "closed": "closed"}.get(event, event)
+    title = (pr_title or "").strip()
+    ref = _link(f"PR #{pr_number}", pr_url)
+    head = f"{ref}: {title}" if title else ref
+    return f"{icon} {head} {verb}."
+
+
 # ── dispatch summary ──────────────────────────────────────────────────────────
 
 def render_dispatch_summary(

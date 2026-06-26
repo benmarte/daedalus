@@ -475,13 +475,14 @@ def test_find_doc_comment():
 
 
 def test_send_via_hermes():
-    """_send_via_hermes calls `hermes send -t <target> --file <tmpfile>`."""
+    """_send_via_hermes calls `hermes send -t <target> --file <tmpfile> --json`."""
     disp = _load_dispatch()
     subprocess_calls = []
 
     def fake_run(args, **kwargs):
         subprocess_calls.append(args)
-        return type("R", (), {"returncode": 0, "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stderr": "",
+                              "stdout": '{"success": true, "message_id": "1700.5"}'})()
 
     with mock.patch.object(disp.subprocess, "run", fake_run):
         ok = disp._send_via_hermes("slack:tasks", "Report body here")
@@ -490,13 +491,15 @@ def test_send_via_hermes():
           subprocess_calls[0][0] == "hermes" and "send" in subprocess_calls[0])
     check("_send_via_hermes passed target", "-t" in subprocess_calls[0] and
           "slack:tasks" in subprocess_calls[0])
+    check("_send_via_hermes requests JSON result", "--json" in subprocess_calls[0])
 
     # Failure case
     subprocess_calls.clear()
 
     def fake_run_fail(args, **kwargs):
         subprocess_calls.append(args)
-        return type("R", (), {"returncode": 1, "stderr": "no such platform"})()
+        return type("R", (), {"returncode": 1, "stderr": "no such platform",
+                              "stdout": ""})()
 
     with mock.patch.object(disp.subprocess, "run", fake_run_fail):
         ok2 = disp._send_via_hermes("slack:tasks", "Report")
@@ -507,6 +510,82 @@ def test_send_via_hermes():
           disp._send_via_hermes("", "body") is False)
     check("_send_via_hermes returns False for empty body",
           disp._send_via_hermes("slack:tasks", "") is False)
+
+
+def test_hermes_send_returns_anchor_and_threads():
+    """_hermes_send parses message_id as the anchor and threads via target suffix."""
+    disp = _load_dispatch()
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return type("R", (), {"returncode": 0, "stderr": "",
+                              "stdout": '{"success": true, "message_id": "ts-123"}'})()
+
+    with mock.patch.object(disp.subprocess, "run", fake_run):
+        ok, anchor = disp._hermes_send("slack:C1", "body")
+        check("root send ok", ok is True)
+        check("anchor parsed from message_id", anchor == "ts-123")
+        # Threaded reply appends :thread_id to the target.
+        disp._hermes_send("slack:C1", "reply", thread_id="ts-123")
+    target_arg = calls[1][calls[1].index("-t") + 1]
+    check("reply target carries thread id", target_arg == "slack:C1:ts-123")
+
+    # Adapter-reported error in JSON → failure even on rc 0.
+    def fake_err(args, **kwargs):
+        return type("R", (), {"returncode": 0, "stderr": "",
+                              "stdout": '{"error": "channel_not_found"}'})()
+
+    with mock.patch.object(disp.subprocess, "run", fake_err):
+        ok2, anchor2 = disp._hermes_send("slack:C1", "body")
+    check("json error → not ok", ok2 is False and anchor2 is None)
+
+
+def test_mirror_issue_threads_root_then_comment_reply(tmp_path):
+    """_mirror_issue_threads posts a root, then mirrors agent comments as replies."""
+    disp = _load_dispatch()
+
+    class P(_FakeProvider):
+        def get_issue_comments(self, n):
+            return [{"id": 7, "body": "**Agent: validator**\nCONFIRMED"},
+                    {"id": 8, "body": "a human aside"}]
+
+    resolved = {
+        "name": "proj", "workdir": str(tmp_path),
+        "cron": {"notifications": [{"platform": "slack", "target": "slack:C1"}]},
+    }
+    issue = {"number": 121, "title": "Slack threads"}
+    sends = []
+
+    def fake_hermes(target, body, *, thread_id=None):
+        sends.append((target, body, thread_id))
+        return (True, "ts-root") if thread_id is None else (True, None)
+
+    with mock.patch.object(disp, "_hermes_send", fake_hermes):
+        # First tick: posts root + the agent comment (human aside excluded).
+        n1 = disp._mirror_issue_threads(resolved, P(), issue, 121, str(tmp_path),
+                                        pr_obj=None, pr_state=None)
+        # Second tick: everything already mirrored → nothing new.
+        n2 = disp._mirror_issue_threads(resolved, P(), issue, 121, str(tmp_path),
+                                        pr_obj=None, pr_state=None)
+
+    check("first tick sent root + 1 comment", n1 == 2)
+    check("root posted with no thread_id", sends[0][2] is None)
+    check("comment posted as reply to anchor", sends[1][2] == "ts-root")
+    check("second tick is fully deduped", n2 == 0)
+    check("anchor persisted", disp.dispatch_state.get_thread_anchor(str(tmp_path), 121, "slack:C1") == "ts-root")
+
+
+def test_mirror_issue_threads_no_targets_is_noop(tmp_path):
+    """With no cron.notifications, mirroring is a no-op (legacy projects unaffected)."""
+    disp = _load_dispatch()
+    sends = []
+    with mock.patch.object(disp, "_hermes_send",
+                           lambda *a, **k: sends.append(a) or (True, "x")):
+        n = disp._mirror_issue_threads(
+            {"name": "p", "workdir": str(tmp_path), "cron": {}},
+            _FakeProvider(), {"number": 1, "title": "t"}, 1, str(tmp_path))
+    check("no targets → 0 sent", n == 0 and not sends)
 
 
 def test_deliver_doc_reports_idempotent():
@@ -2230,7 +2309,8 @@ if __name__ == "__main__":
                test_resolve_repo_config_missing_file,
                test_main_registry_sweep, test_main_single_repo,
                test_parse_pr_from_card, test_find_doc_comment,
-               test_send_via_hermes, test_deliver_doc_reports_idempotent,
+               test_send_via_hermes, test_hermes_send_returns_anchor_and_threads,
+               test_deliver_doc_reports_idempotent,
                test_deliver_doc_reports_no_target,
                test_deliver_doc_reports_send_failure,
                test_deliver_doc_reports_non_doc_assignee,

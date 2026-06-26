@@ -49,6 +49,7 @@ from core import kanban  # noqa: E402
 from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
 from core import notify_templates  # noqa: E402
+from core import thread_delivery  # noqa: E402
 from core.providers.base import ensure_closing_keyword  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
 from core.util import extract_issue_number  # noqa: E402
@@ -58,7 +59,8 @@ logger = logging.getLogger("daedalus.dispatch")
 _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify → Ship")
 
 # Notification event types a cron.notifications[] entry can subscribe to.
-NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready", "security-escalation")
+NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready",
+                 "security-escalation", "comment-mirror")
 
 # Priority label ordering — P0 dispatched before P1 before P2 before unlabeled.
 _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
@@ -2454,6 +2456,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     )
 
     created, reconciled, completed = [], [], []
+    threads_mirrored = 0
     issues: List[Dict[str, Any]] = []
 
     if not board_mode:
@@ -2589,6 +2592,11 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                     # Archive kanban tasks immediately so the orphan cleanup path
                     # on the next tick doesn't re-report this issue as completed.
                     kanban.close_issue_tasks(slug, n, summary=f"closed: parent issue #{n} merged and closed")
+                    # Post the final "merged" reply into the thread BEFORE clearing
+                    # dispatch state (which wipes the thread anchor for this issue).
+                    threads_mirrored += _mirror_issue_threads(
+                        resolved, provider, issue, n, workdir,
+                        pr_obj=merged_pr, pr_state="merged", dry_run=dry_run)
                     dispatch_state.clear_dispatch(workdir, n)
                     completed.append(n)
                     # CHANGELOG auto-update: prepend a brief entry using the PR title.
@@ -2680,6 +2688,13 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                     reconciled.append((n, in_review_name))
                 elif provider.board_set_status(n, in_review_name):
                     reconciled.append((n, in_review_name))
+            if pr != "merged":
+                # Open-PR / no-PR managed issue: mirror the ongoing conversation
+                # (root anchor + agent comments + PR-open event). The merged case
+                # already mirrored its final reply above, before clear_dispatch.
+                threads_mirrored += _mirror_issue_threads(
+                    resolved, provider, issue, n, workdir,
+                    pr_obj=open_pr_obj, pr_state=pr, dry_run=dry_run)
             # No/closed PR on a managed issue: leave it (worker still in progress).
             continue
         # Unmanaged issue: only "Ready" items become new work.
@@ -2701,6 +2716,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                         n, issue.get("title", ""))
             created.append(n)
             existing.add(n)
+            threads_mirrored += _mirror_issue_threads(
+                resolved, provider, issue, n, workdir, dry_run=dry_run)
             continue
         provider.board_set_status(n, provider.status_name("in_progress"))
         # Phase 1: dispatch ONLY the validator. The dispatcher creates developer/
@@ -2721,6 +2738,10 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             created.append(n)
             existing.add(n)
             dispatch_state.record_dispatch(workdir, n)
+            # Open the platform thread now so every later agent comment has a
+            # root to reply to (posts the anchor; no comments exist yet).
+            threads_mirrored += _mirror_issue_threads(
+                resolved, provider, issue, n, workdir, dry_run=dry_run)
 
     if created and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)  # nudge (gateway also auto-dispatches)
@@ -2814,7 +2835,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),
                "spec_created": spec_created, "slack_delivered": slack_delivered,
-               "blocked": blocked_issues,
+               "blocked": blocked_issues, "threads_mirrored": threads_mirrored,
                "pm_triggered": pm_triggered, "blocker_triggered": blocker_triggered}
     logger.info("dispatch summary: %s", summary)
     return summary
@@ -2834,18 +2855,25 @@ def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False,
 # ── Slack delivery (dispatcher context, NOT agent) ──────────────────────────
 
 
-def _send_via_hermes(notify_target: str, report_body: str) -> bool:
-    """Send a report to Slack via `hermes send` from the dispatcher's root context.
+def _hermes_send(notify_target: str, report_body: str,
+                 *, thread_id: Optional[str] = None) -> tuple[bool, Optional[str]]:
+    """Send ``report_body`` via ``hermes send`` from the dispatcher's root context.
 
-    Runs ``hermes send -t <notify_target> --file <tmpfile>`` via subprocess
-    (list-args, no shell). A temporary file is created for the body and cleaned
-    up afterwards. Returns True on success; False is logged gracefully.
+    Runs ``hermes send -t <target> --file <tmpfile> --json`` (list-args, no
+    shell) and parses the JSON result. When *thread_id* is given the message is
+    posted as a thread reply (target becomes ``<target>:<thread_id>``).
+
+    Returns ``(ok, anchor)`` where *anchor* is the posted message's thread anchor
+    (Slack ``thread_ts`` / Discord ``message_id``) reported by the platform
+    adapter — used to anchor subsequent replies. Failures are logged gracefully
+    and return ``(False, None)``.
     """
     import tempfile
 
     if not notify_target or not report_body.strip():
-        return False
+        return (False, None)
 
+    target = f"{notify_target}:{thread_id}" if thread_id else notify_target
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
@@ -2853,26 +2881,107 @@ def _send_via_hermes(notify_target: str, report_body: str) -> bool:
             tf.write(report_body)
             tmp = tf.name
         r = subprocess.run(
-            ["hermes", "send", "-t", notify_target, "--file", tmp, "-q"],
+            ["hermes", "send", "-t", target, "--file", tmp, "--json"],
             capture_output=True, text=True, timeout=30,
         )
         if r.returncode != 0:
             logger.warning(
                 "dispatch: hermes send to %s failed (rc=%s): %s",
-                notify_target, r.returncode, (r.stderr or "").strip(),
+                target, r.returncode, (r.stderr or "").strip(),
             )
-            return False
-        logger.info("dispatch: delivered doc report to %s", notify_target)
-        return True
+            return (False, None)
+        anchor: Optional[str] = None
+        try:
+            payload = json.loads(r.stdout or "{}")
+        except (json.JSONDecodeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict):
+            if payload.get("error"):
+                logger.warning("dispatch: hermes send to %s errored: %s",
+                               target, payload.get("error"))
+                return (False, None)
+            raw = payload.get("message_id") or payload.get("ts")
+            if raw is not None:
+                anchor = str(raw)
+        logger.info("dispatch: delivered to %s", target)
+        return (True, anchor)
     except Exception as e:
-        logger.warning("dispatch: hermes send to %s raised: %s", notify_target, e)
-        return False
+        logger.warning("dispatch: hermes send to %s raised: %s", target, e)
+        return (False, None)
     finally:
         if tmp:
             try:
                 Path(tmp).unlink()
             except OSError:
                 pass
+
+
+def _send_via_hermes(notify_target: str, report_body: str) -> bool:
+    """Backward-compatible bool wrapper around :func:`_hermes_send` (no threading)."""
+    ok, _ = _hermes_send(notify_target, report_body)
+    return ok
+
+
+def _mirror_issue_threads(
+    resolved: Dict[str, Any], provider, issue: Dict[str, Any], n: int, workdir: str,
+    *, pr_obj=None, pr_state: Optional[str] = None, dry_run: bool = False,
+) -> int:
+    """Mirror an issue's agent conversation into a thread on every target.
+
+    Posts (idempotently, deduped across ticks) for issue #*n*:
+      * a root thread-anchor message (first event on each target);
+      * one reply per agent comment on the issue and its linked PR;
+      * a reply when the PR is opened / merged.
+
+    Targets come from ``cron.notifications`` (event ``comment-mirror``); catch-all
+    entries — those with no ``events`` filter — receive it automatically, so no
+    new config keys are required. Returns the number of events actually sent.
+    """
+    if not workdir:
+        return 0
+    targets = _notify_targets(resolved, "comment-mirror")
+    if not targets:
+        return 0
+
+    name = resolved.get("name", "")
+    issue_url = provider.issue_url(n) if provider else ""
+    pr_number = getattr(pr_obj, "number", None)
+    pr_url = provider.pr_url(pr_number) if (provider and pr_number) else ""
+    pr_title = getattr(pr_obj, "title", "") or ""
+
+    # Build the ordered event list once (shared across all targets).
+    events: List[tuple] = [
+        ("root", notify_templates.render_thread_root(
+            name, n, issue.get("title", ""), issue_url)),
+    ]
+    if pr_number and pr_state in ("open", "merged"):
+        verb = "opened" if pr_state == "open" else "merged"
+        events.append((
+            f"pr-{verb}:{pr_number}",
+            notify_templates.render_thread_pr_event(verb, pr_number, pr_title, pr_url),
+        ))
+    for event_key, body in thread_delivery.select_comments(provider, n, pr_number):
+        events.append((event_key, notify_templates.render_thread_comment(
+            n, pr_number, body, issue_url=issue_url, pr_url=pr_url)))
+
+    sent = 0
+
+    def sender(target: str, body: str, thread_id: Optional[str]):
+        return _hermes_send(target, body, thread_id=thread_id)
+
+    for target in targets:
+        for event_key, body in events:
+            result = thread_delivery.deliver_event(
+                workdir, n, target, body, event_key,
+                send=sender, dry_run=dry_run,
+            )
+            if result == "sent":
+                sent += 1
+    if sent:
+        verb = "[dry-run] would mirror" if dry_run else "mirrored"
+        logger.info("dispatch: %s %d thread event(s) for #%s to %s",
+                    verb, sent, n, ", ".join(targets))
+    return sent
 
 
 def _deliver_doc_reports(
