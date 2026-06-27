@@ -25,6 +25,7 @@ from core.providers.base import (IssueSummary, VCSProvider,  # noqa: E402
                                  parse_depends_on)
 from core.providers.github import GitHubProvider  # noqa: E402
 from core.providers.gitlab import GitLabProvider  # noqa: E402
+from core.providers.http import ProviderError  # noqa: E402
 from core import notify_templates  # noqa: E402
 
 
@@ -109,6 +110,8 @@ def test_github_blockers_body_fallback_open_only():
     p = _github()
 
     def _get(path, params=None):
+        if path.endswith("/dependencies/blocked_by"):
+            raise ProviderError("Not Found", status_code=404)
         if path.endswith("/issues/99"):
             return {"number": 99, "body": "Depends on: #1, #2", "state": "open"}
         if path.endswith("/issues/1"):
