@@ -681,8 +681,12 @@ def _execute_pm_route(
         f"- developer — code fix\n"
         f"- security-analyst — security hardening\n"
         f"- re-spec — the request itself was wrong\n\n"
-        f"Create the appropriate fix card (pinned, assigned to the chosen profile) "
-        f"with the findings. When the fix lands green, unblock and re-engage the "
+        f"Create the appropriate fix card (assigned to the chosen profile) "
+        f"with the findings. IMPORTANT: do NOT set the review card ({tid}) as a "
+        f"parent of the fix card — that creates a circular dependency where the fix "
+        f"waits for the reviewer which waits for the fix. The fix card must be "
+        f"independent (no parent link to the review card). "
+        f"When the fix lands green, unblock and re-engage the "
         f"original reviewer/security-analyst cards."
     )
 
