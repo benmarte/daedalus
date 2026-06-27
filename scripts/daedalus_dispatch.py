@@ -51,7 +51,7 @@ from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core import thread_delivery  # noqa: E402
-from core.providers.base import ensure_closing_keyword  # noqa: E402
+from core.providers.base import ensure_closing_keyword, is_epic  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
 from core.util import extract_issue_number  # noqa: E402
 
@@ -81,6 +81,7 @@ _DEFAULT_PROFILES: Dict[str, str] = {
     "security": "security-analyst-daedalus",
     "documentation": "documentation-daedalus",
     "accessibility": "accessibility-daedalus",
+    "planner": "planner-daedalus",
 }
 
 
@@ -733,6 +734,65 @@ def _unpack_issue(issue: Dict[str, Any]) -> tuple:
         issue.get("title", ""),
         (issue.get("body") or "").strip(),
         issue.get("url", ""),
+    )
+
+
+
+def _is_epic(issue: Dict[str, Any]) -> bool:
+    """Thin wrapper — delegates to the canonical is_epic() in core.providers.base."""
+    return is_epic(issue)
+
+
+def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
+                  base_branch: str, provider_name: str) -> str:
+    """Task body for the planner role — Phase 1: epic detection stub.
+
+    Phase 2+ will add codebase analysis, sub-issue creation, and dependency
+    tracking. For now the planner stub only logs why the issue was flagged.
+    """
+    n = issue.get("number", "?")
+    title = issue.get("title", "")
+    body = issue.get("body") or ""
+    url = issue.get("url", "")
+
+    # Build reasons list for logging
+    reasons = []
+    if len(body) > 1000:
+        reasons.append(f"body size ({len(body)} chars)")
+    checklist_count = len(re.findall(r"^\s*[-*+]\s*\[[ xX]\]", body, re.MULTILINE))
+    if checklist_count >= 5:
+        reasons.append(f"checklist ({checklist_count} items)")
+    for lbl in (issue.get("labels") or []):
+        name = lbl if isinstance(lbl, str) else (lbl.get("name", "") if isinstance(lbl, dict) else "")
+        if isinstance(name, str) and name.strip().lower() == "epic":
+            reasons.append("epic-label")
+            break
+    reason_str = ", ".join(reasons) if reasons else "unknown heuristic"
+
+    body_excerpt = body[:1000]
+    truncation_note = "\n\n(Body truncated — see full issue for remainder)" if len(body) > 1000 else ""
+
+    return (
+        f"# Epic Issue #{n} — Phase 1 Detection\n\n"
+        f"This issue was routed to the planner because it appears too large for a\n"
+        f"single developer session.\n\n"
+        f"**Repository:** {repo}\n"
+        f"**Title:** {title}\n"
+        f"**Workdir:** {workdir}\n"
+        f"**Branch:** {base_branch}\n"
+        f"**Provider:** {provider_name}\n"
+        f"**URL:** {url}\n\n"
+        f"## Detection Reasons\n\n"
+        f"{reason_str}\n\n"
+        f"## Phase 1 Scope\n\n"
+        f"**Current scope:** detection only. Log the detection, summarize the scope,\n"
+        f"and complete your card:\n\n"
+        f"  `planner-detected: #{n} — <scope summary>`\n\n"
+        f"Phase 2+ will add codebase analysis, automatic sub-issue decomposition,\n"
+        f"and dependency tracking.\n\n"
+        f"---\n\n"
+        f"## Issue Body\n\n"
+        f"{body_excerpt}{truncation_note}\n"
     )
 
 
@@ -2969,20 +3029,33 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                 resolved, provider, issue, n, workdir, dry_run=dry_run)
             continue
         provider.board_set_status(n, provider.status_name("in_progress"))
-        # Phase 1: dispatch ONLY the validator. The dispatcher creates developer/
-        # reviewer/security/documentation tasks ONLY after the validator completes
-        # with a 'CONFIRMED:' summary. No other agent can start until then.
-        vid = kanban.create_task(
-            slug, f"#{n} {issue.get('title', '')}",
-            body=_validator_body(repo, issue, workdir, base_branch, provider.name,
-                                 _notify_targets(resolved, "security-escalation"),
-                                 coding_agent=_resolve_agent_for_role(execution, "validator"),
-                                 coding_agent_cmd=coding_agent_cmd),
-            assignee=profiles["validator"],
-            idempotency_key=f"validator-{n}",
-            workspace=f"dir:{workdir}" if workdir else "",
-            skills=role_skills.get("validator") or None,
-        )
+        # Epic routing (Phase 1 of #149): large issues go to planner first.
+        # Phase 2+ will add codebase analysis + sub-issue decomposition.
+        if _is_epic(issue):
+            logger.info("dispatch: #%s detected as epic — routing to planner", n)
+            vid = kanban.create_task(
+                slug, f"#{n} {issue.get('title', '')}",
+                body=_planner_body(repo, issue, workdir, base_branch, provider.name),
+                assignee=profiles["planner"],
+                idempotency_key=f"planner-{n}",
+                workspace=f"dir:{workdir}" if workdir else "",
+                skills=role_skills.get("planner") or None,
+            )
+        else:
+            # Phase 1: dispatch ONLY the validator. The dispatcher creates developer/
+            # reviewer/security/documentation tasks ONLY after the validator completes
+            # with a 'CONFIRMED:' summary. No other agent can start until then.
+            vid = kanban.create_task(
+                slug, f"#{n} {issue.get('title', '')}",
+                body=_validator_body(repo, issue, workdir, base_branch, provider.name,
+                                     _notify_targets(resolved, "security-escalation"),
+                                     coding_agent=_resolve_agent_for_role(execution, "validator"),
+                                     coding_agent_cmd=coding_agent_cmd),
+                assignee=profiles["validator"],
+                idempotency_key=f"validator-{n}",
+                workspace=f"dir:{workdir}" if workdir else "",
+                skills=role_skills.get("validator") or None,
+            )
         if vid:
             created.append(n)
             existing.add(n)
