@@ -184,10 +184,10 @@ class TestPlannerBody:
         body = disp._planner_body("org/repo", issue, "/work", "main", "github")
         assert "Big Task Title" in body
 
-    def test_mentions_phase_1(self):
+    def test_mentions_planning_complete(self):
         issue = _make_issue(number=300, body="- [ ] t\n" * 5)
         body = disp._planner_body("org/repo", issue, "/work", "main", "github")
-        assert "Phase 1" in body
+        assert "PLANNING COMPLETE" in body
 
     def test_lists_detection_reasons(self):
         issue = _make_issue(number=400, body="- [ ] t\n" * 5, labels=[{"name": "epic"}])

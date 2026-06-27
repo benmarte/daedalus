@@ -313,6 +313,17 @@ class GitHubProvider(VCSProvider):
             return False
         return True
 
+    def add_label(self, issue_number: int, label_name: str) -> bool:
+        try:
+            self._http.post_json(
+                f"/repos/{self.repo}/issues/{issue_number}/labels",
+                {"labels": [label_name]},
+            )
+            return True
+        except ProviderError as e:
+            self._log.warning("add_label #%s %r failed: %s", issue_number, label_name, e)
+            return False
+
     def append_changelog(self, base_branch: str, entry: str) -> bool:
         """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the Contents API.
 

@@ -291,6 +291,10 @@ class VCSProvider(abc.ABC):
         """
         return None
 
+    def add_label(self, issue_number: int, label_name: str) -> bool:
+        """Apply a label to an issue. Returns True on success. Default no-op."""
+        return False
+
     # ── cross-issue dependencies (ready-gating, issue #139) ──────────────────
     def _depends_on_blockers(self, issue_number: int,
                              *, body: Optional[str] = None) -> List[int]:

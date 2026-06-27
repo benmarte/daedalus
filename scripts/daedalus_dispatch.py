@@ -745,17 +745,12 @@ def _is_epic(issue: Dict[str, Any]) -> bool:
 
 def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
                   base_branch: str, provider_name: str) -> str:
-    """Task body for the planner role — Phase 1: epic detection stub.
-
-    Phase 2+ will add codebase analysis, sub-issue creation, and dependency
-    tracking. For now the planner stub only logs why the issue was flagged.
-    """
+    """Task body for the planner role — Phase 3: confirm epic is ready for decomposition."""
     n = issue.get("number", "?")
     title = issue.get("title", "")
     body = issue.get("body") or ""
     url = issue.get("url", "")
 
-    # Build reasons list for logging
     reasons = []
     if len(body) > 1000:
         reasons.append(f"body size ({len(body)} chars)")
@@ -773,9 +768,9 @@ def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
     truncation_note = "\n\n(Body truncated — see full issue for remainder)" if len(body) > 1000 else ""
 
     return (
-        f"# Epic Issue #{n} — Phase 1 Detection\n\n"
-        f"This issue was routed to the planner because it appears too large for a\n"
-        f"single developer session.\n\n"
+        f"# Epic Issue #{n} — Ready for Decomposition\n\n"
+        f"This issue was routed to you because it appears too large for a single\n"
+        f"developer session and should be broken into sub-issues.\n\n"
         f"**Repository:** {repo}\n"
         f"**Title:** {title}\n"
         f"**Workdir:** {workdir}\n"
@@ -784,12 +779,14 @@ def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"**URL:** {url}\n\n"
         f"## Detection Reasons\n\n"
         f"{reason_str}\n\n"
-        f"## Phase 1 Scope\n\n"
-        f"**Current scope:** detection only. Log the detection, summarize the scope,\n"
-        f"and complete your card:\n\n"
-        f"  `planner-detected: #{n} — <scope summary>`\n\n"
-        f"Phase 2+ will add codebase analysis, automatic sub-issue decomposition,\n"
-        f"and dependency tracking.\n\n"
+        f"## Your Task\n\n"
+        f"Review the issue below and confirm it is ready for automated decomposition.\n"
+        f"The dispatcher will create sub-issues automatically once you signal completion.\n\n"
+        f"When done, complete your card with:\n\n"
+        f"  `PLANNING COMPLETE: ready for decomposition`\n\n"
+        f"If the issue is NOT suitable for decomposition (e.g. it is already small enough\n"
+        f"or has a blocking dependency), complete with a different summary explaining why\n"
+        f"and the PM will be notified.\n\n"
         f"---\n\n"
         f"## Issue Body\n\n"
         f"{body_excerpt}{truncation_note}\n"
@@ -2166,6 +2163,42 @@ def _check_confirmed_validators(
     return triggered
 
 
+def _check_completed_planner(
+    slug: str, workdir: str,
+    profiles: Optional[Dict[str, str]] = None,
+    *, dry_run: bool = False, provider=None,
+) -> List[int]:
+    """Phase-3 epic trigger: planner PLANNING COMPLETE → create sub-issues + triage cards.
+
+    Runs each tick. Idempotency is handled inside _execute_planner_decompose
+    via the <!-- daedalus:sub-issues:[...] --> marker comment on the parent issue.
+    """
+    from core.iterate import _execute_planner_decompose
+    p = profiles or _DEFAULT_PROFILES
+    triggered: List[int] = []
+    for task in kanban.list_tasks(slug, status="done"):
+        if (task.get("assignee") or "").strip() != p["planner"]:
+            continue
+        summary_raw = _get_task_summary(task, slug)
+        if "PLANNING COMPLETE" not in summary_raw.upper():
+            continue
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            continue
+        logger.info("dispatch: planner PLANNING COMPLETE #%s — triggering decompose", n)
+        # Ensure issue number is present in body for _extract_issue_number_from_card.
+        card = dict(task)
+        if f"#{n}" not in (card.get("body") or ""):
+            card["body"] = f"Issue #{n}\n" + (card.get("body") or "")
+        ok = _execute_planner_decompose(
+            slug, card, "", summary_raw,
+            workdir=workdir, dry_run=dry_run, provider=provider,
+        )
+        if ok:
+            triggered.append(n)
+    return triggered
+
+
 def _check_completed_pm(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -2828,6 +2861,12 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         dry_run=dry_run, provider=provider,
     )
     if confirmed_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    planner_triggered = _check_completed_planner(
+        slug, workdir, profiles=profiles, dry_run=dry_run, provider=provider,
+    )
+    if planner_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     pm_triggered = _check_completed_pm(
