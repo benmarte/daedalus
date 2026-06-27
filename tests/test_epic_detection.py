@@ -1,11 +1,7 @@
-"""Tests for epic detection heuristic (issue #138 Phase 1).
+"""Tests for epic-issue detection (issues #138 and #149).
 
-``is_epic`` lives in ``core.providers.base`` so it sits next to the issue data
-models it inspects. These tests exercise the three heuristics independently,
-edge cases (None, missing keys, mixed input shapes), and the OR-combination
-contract.
-
-Phase 1 is detection only — no dispatcher changes are tested here.
+Heuristic tests use ``is_epic`` from ``core.providers.base`` directly (Phase 1,
+#138). Planner-body and dispatcher-routing tests use the dispatch module (#149).
 """
 from __future__ import annotations
 
@@ -13,12 +9,22 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.providers.base import is_epic, _EPIC_CHECKLIST_MIN, _EPIC_BODY_SIZE_MIN
+from conftest import _load_dispatch  # noqa: E402
+
+disp = _load_dispatch()
 
 
-def _make_issue(body: str = "", labels=None) -> dict:
-    return {"body": body, "labels": labels if labels is not None else []}
+def _make_issue(body: str = "", labels=None, title: str = "Test", number: int = 1) -> dict:
+    return {
+        "number": number,
+        "title": title,
+        "body": body,
+        "labels": labels if labels is not None else [],
+        "url": "https://example.com/issues/1",
+    }
 
 
 # ── Heuristic 1: checklist density ──────────────────────────────────────────
@@ -96,7 +102,6 @@ class TestEpicLabelHeuristic:
         assert is_epic({"body": "x", "labels": None}) is False
 
     def test_string_labels(self):
-        # Provider dicts use {"name": ...} but guard for plain strings
         assert is_epic(_make_issue(labels=["epic"])) is True
         assert is_epic(_make_issue(labels=[{"name": "epic"}])) is True
 
@@ -138,7 +143,6 @@ class TestInputShapes:
         assert is_epic({"labels": []}) is False
 
     def test_missing_labels_key(self):
-        # Body large enough to trigger
         assert is_epic({"body": "y" * 3000}) is True
 
     def test_none_body(self):
@@ -164,3 +168,63 @@ class TestOrCombination:
 
     def test_no_triggers_not_epic(self):
         assert is_epic(_make_issue(body="small issue", labels=[{"name": "bug"}])) is False
+
+
+# ── _planner_body output (dispatch-specific, #149) ─────────────────────────
+
+
+class TestPlannerBody:
+    def test_contains_issue_number(self):
+        issue = _make_issue(number=100, title="Big task", body="- [ ] t\n" * 5)
+        body = disp._planner_body("org/repo", issue, "/work", "main", "github")
+        assert "#100" in body
+
+    def test_contains_title(self):
+        issue = _make_issue(number=200, title="Big Task Title", body="- [ ] t\n" * 5)
+        body = disp._planner_body("org/repo", issue, "/work", "main", "github")
+        assert "Big Task Title" in body
+
+    def test_mentions_phase_1(self):
+        issue = _make_issue(number=300, body="- [ ] t\n" * 5)
+        body = disp._planner_body("org/repo", issue, "/work", "main", "github")
+        assert "Phase 1" in body
+
+    def test_lists_detection_reasons(self):
+        issue = _make_issue(number=400, body="- [ ] t\n" * 5, labels=[{"name": "epic"}])
+        body = disp._planner_body("org/repo", issue, "/work", "main", "github")
+        assert "checklist" in body.lower()
+        assert "epic" in body.lower()
+
+    def test_contains_repo_info(self):
+        issue = _make_issue(body="- [ ] t\n" * 5)
+        body = disp._planner_body("owner/repo", issue, "/path/to/work", "dev", "github")
+        assert "owner/repo" in body
+        assert "/path/to/work" in body
+        assert "dev" in body
+        assert "github" in body
+
+    def test_original_body_excerpt(self):
+        original = "This is the original issue description for testing purposes."
+        issue = _make_issue(body=original, labels=[{"name": "epic"}])
+        body = disp._planner_body("org/repo", issue, "/work", "main", "github")
+        assert original in body
+
+    def test_truncates_large_body(self):
+        long_body = "X" * 2000
+        issue = _make_issue(body=long_body)
+        body = disp._planner_body("org/repo", issue, "/work", "main", "github")
+        assert "X" * 1000 in body
+        assert len(body) < len(long_body)
+
+
+# ── Dispatcher routing (integration, #149) ──────────────────────────────────
+
+
+class TestDispatcherRouting:
+    def test_planner_profile_registered(self):
+        assert "planner" in disp._DEFAULT_PROFILES
+        assert disp._DEFAULT_PROFILES["planner"] == "planner-daedalus"
+
+    def test_planner_in_role_tmp_prefix(self):
+        assert "planner" in disp._ROLE_TMP_PREFIX
+        assert disp._ROLE_TMP_PREFIX["planner"] == "planner"
