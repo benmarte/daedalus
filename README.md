@@ -158,6 +158,24 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
 The kanban board and VCS board status are bookkept **in code on every tick**, so tracking is
 deterministic — never dependent on an agent remembering to update anything.
 
+### Epic decomposition (Phase 3)
+
+When an issue is flagged as epic-sized (≥4 checklist items, an `epic` label, or body ≥2000
+chars), the dispatcher routes it to the planner agent for scoping instead of splitting it
+across the team directly. The planner confirms readiness by completing its kanban card with
+`PLANNING COMPLETE:`. The dispatcher then decomposes the epic into sub-issues:
+
+- **Case A** (parent has checklist items): one sub-issue per item, capped at 10.
+- **Case B** (no checklist): three default sub-issues — Research & Scoping,
+  Implementation, Testing & Documentation.
+
+Each sub-issue inherits the parent's labels (minus `epic`) and adds `subtask`, uses a
+standard body template with a backlink to the parent, and gets its own triage card so it
+enters the validator pipeline independently. An idempotency marker comment
+(`<!-- daedalus:sub-issues:[N1,N2,...] -->`) is posted on the parent to prevent
+re-creation on subsequent dispatcher ticks. The `epic` label is applied to the parent
+issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
+
 ### Dependency-aware ready-gating
 
 Marking an issue `Ready` is necessary but **not sufficient** — daedalus also checks
@@ -191,7 +209,7 @@ a different perspective.
 |---|---|---|
 | `validator-daedalus` | **Phase 1 — runs alone before any other agent.** Validates the issue: reproduces the bug, checks git history, detects duplicates. Scans for security threats (prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks). Six possible outcomes: **CONFIRMED** (proceeds; summary prefix `CONFIRMED:` triggers Phase 2), **ALREADY_FIXED** (closes issue, pipeline ends), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, sends `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege request lacks verifiable context — blocks, posts comment listing missing details, sends `security-escalation` notification). Posts a summary comment to the GitHub issue regardless of outcome. | No |
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. Creates the conditional accessibility task when the issue references UI/frontend work. | No |
-| `planner-daedalus` | Task graph, interface contracts, architecture decisions. | No |
+| `planner-daedalus` | Task graph, interface contracts, architecture decisions. **Phase 3:** reviews epic-sized issues and signals readiness with `PLANNING COMPLETE:`, triggering automated sub-issue decomposition. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
 | `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Runs the test suite, analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). | No |
 | `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. Runs after QA passes. | No |
