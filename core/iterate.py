@@ -922,9 +922,10 @@ def _execute_planner_decompose(
             logger.warning("iterate: planner_decompose — create_issue failed for %r", title)
 
     # Post idempotency marker on parent
+    marker_numbers = f"[{','.join(str(n) for n in created_numbers)}]"
     provider.post_issue_comment(
         parent_n,
-        f"{_DECOMPOSE_MARKER_PREFIX}{created_numbers} -->\n"
+        f"{_DECOMPOSE_MARKER_PREFIX}{marker_numbers} -->\n"
         f"Daedalus created {len(created_numbers)} sub-issue(s): "
         + ", ".join(f"#{n}" for n in created_numbers),
     )
