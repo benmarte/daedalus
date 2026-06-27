@@ -2693,6 +2693,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     )
 
     created, reconciled, completed = [], [], []
+    blocked_deps: Dict[int, List[int]] = {}  # issue -> open blocker numbers (#139)
     threads_mirrored = 0
     issues: List[Dict[str, Any]] = []
 
@@ -2937,6 +2938,17 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # Unmanaged issue: only "Ready" items become new work.
         if ready is not None and n not in ready:
             continue  # Ready-gating: not in "Ready" -> don't dispatch yet
+        # Dependency-aware ready-gating (#139): even a Ready issue is held back
+        # while any of its blockers are still open. Re-checked every tick, so a
+        # tier auto-unblocks as its blockers' PRs merge — no human relabeling and
+        # no project-specific promote cron. Providers never raise; the getattr
+        # guard keeps older provider doubles working.
+        open_blockers = getattr(provider, "blockers", lambda _n: [])(n)
+        if open_blockers:
+            blocked_deps[n] = open_blockers
+            logger.info("dispatch: #%s is Ready but blocked by %s — skipping until closed",
+                        n, ", ".join(f"#{b}" for b in open_blockers))
+            continue
         if provider.pr_state_for_issue(n):
             # Already has an open/merged PR -> work exists; don't dispatch a
             # duplicate worker. (Checked only for Ready candidates to limit API calls.)
@@ -3072,7 +3084,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                "completed": completed, "advance_prs": advance_prs,
                "routed_actions": routed_actions, "issues_seen": len(issues),
                "spec_created": spec_created, "slack_delivered": slack_delivered,
-               "blocked": blocked_issues, "threads_mirrored": threads_mirrored,
+               "blocked": blocked_issues, "blocked_deps": blocked_deps,
+               "threads_mirrored": threads_mirrored,
                "pm_triggered": pm_triggered, "blocker_triggered": blocker_triggered,
                "vcs_autoconfig": vcs_autoconfig}
     logger.info("dispatch summary: %s", summary)

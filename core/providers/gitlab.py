@@ -125,6 +125,45 @@ class GitLabProvider(VCSProvider):
                 return "closed"
             return None
 
+    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+        try:
+            it = self._http.get_json(f"{self._proj}/issues/{issue_number}")
+        except ProviderError as e:
+            self._log.warning("get_issue #%s failed: %s", issue_number, e)
+            return None
+        if not it:
+            return None
+        return IssueSummary(
+            number=it.get("iid", issue_number), title=it.get("title") or "",
+            body=it.get("description") or "",
+            labels=list(it.get("labels") or []),
+            state="open" if (it.get("state") == "opened") else (it.get("state") or ""),
+            url=it.get("web_url") or "")
+
+    def blockers(self, issue_number: int) -> List[int]:
+        """Open blockers via native issue links (``link_type: is_blocked_by``)
+        merged with the portable ``Depends on:`` body fallback.
+
+        The links endpoint returns each linked issue with its ``state`` inline,
+        so open-filtering needs no extra request.
+        """
+        out: List[int] = []
+        try:
+            links = self._http.get_json(f"{self._proj}/issues/{issue_number}/links")
+        except ProviderError as e:
+            self._log.warning("blockers #%s links failed: %s", issue_number, e)
+            links = []
+        for it in links or []:
+            if (it.get("link_type") or "") != "is_blocked_by":
+                continue
+            iid = it.get("iid")
+            if isinstance(iid, int) and (it.get("state") or "").lower() == "opened":
+                out.append(iid)
+        for n in self._depends_on_blockers(issue_number):
+            if n not in out:
+                out.append(n)
+        return out
+
     # ── merge requests ───────────────────────────────────────────────────────
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
         gl_state = {"open": "opened", "merged": "merged", "closed": "closed"}.get(state)

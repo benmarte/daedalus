@@ -10,6 +10,19 @@ All notable changes to Daedalus are documented here. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 `1.0.0-beta.N` pre-release versioning.
 
+## [Unreleased] — dependency-aware ready-gating (#139) — [PR #148](https://github.com/benmarte/daedalus/pull/148)
+
+### Added
+
+- **Dependency-aware ready-gating** (#139, PR #148) — the dispatch sweep now refuses
+  to start a `Ready` issue while any of its blockers are still open, re-checking
+  every tick so a dependent auto-unblocks once its blockers' PRs merge. Blockers
+  are resolved per-provider (GitHub native dependencies via `blocked_by`, GitLab
+  `is_blocked_by` issue links, Azure DevOps `Predecessor` work-item links) all
+  merged with a portable `Depends on: #N` body fallback that works on any
+  provider. Dispatch summaries gain a new **⛓ Waiting on Dependencies** section
+  that surfaces *why* an issue is being held back.
+
 ## [1.0.0-beta.30] — 2026-06-26
 
 ### ⚠️ Notable behavior change — automatic comment-mirror threading

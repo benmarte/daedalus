@@ -249,12 +249,14 @@ class FakeProvider:
         issues: Optional[Dict[int, Any]] = None,
         branch_prs: Optional[Dict[str, int]] = None,
         supports_ci_status: bool = True,
+        blockers: Optional[Dict[int, List[int]]] = None,
     ) -> None:
         self.name = name
         self._ci = ci_status
         self._issues = issues or {}
         self._branch_prs = branch_prs or {}
         self.supports_ci_status = supports_ci_status
+        self._blockers = blockers or {}
         self.posted_issue_comments: List[tuple] = []
         self.posted_pr_comments: List[tuple] = []
         self.merged: List[tuple] = []
@@ -272,6 +274,9 @@ class FakeProvider:
 
     def get_issue(self, issue_number: int) -> Any:
         return self._issues.get(issue_number)
+
+    def blockers(self, issue_number: int) -> List[int]:
+        return list(self._blockers.get(issue_number, []))
 
     def list_issues(self, *args: Any, **kwargs: Any) -> List[Any]:
         return list(self._issues.values())

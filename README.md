@@ -119,7 +119,8 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    board label, or an Azure DevOps work-item state. That's the only manual step —
    nothing else moves without it.
 2. A **cron tick** runs `daedalus_dispatch.py` (`--no-agent`, pure code). It:
-   - selects **only `Ready`** issues (and skips any that already have a PR),
+   - selects **only `Ready`** issues, **skipping any that still have open blockers**
+     (dependency-aware ready-gating — see below), and skips any that already have a PR,
    - flips the board to **In progress** and creates **one validator task** (Phase 1).
      No developer, reviewer, or other downstream task is created yet — this is
      enforced at the infrastructure level, not by instructions alone.
@@ -156,6 +157,25 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
 
 The kanban board and VCS board status are bookkept **in code on every tick**, so tracking is
 deterministic — never dependent on an agent remembering to update anything.
+
+### Dependency-aware ready-gating
+
+Marking an issue `Ready` is necessary but **not sufficient** — daedalus also checks
+that the issue has **no open blockers** before dispatching it. Blockers are resolved
+per-provider:
+
+| Provider | Source |
+|----------|--------|
+| **GitHub** | Native issue dependencies via `GET /issues/{n}/dependencies/blocked_by` (sub-issues / task-list refs, GA Aug 2025), merged with the portable body fallback. |
+| **GitLab** | Issue links with `link_type: is_blocked_by` from `GET /issues/{iid}/links`, merged with the body fallback. |
+| **Azure DevOps** | Work-item `Predecessor` links (`System.LinkTypes.Dependency-Reverse`), merged with the body fallback. |
+| **Portable fallback** | A `Depends on: #N, #M` (or `Blocked by:` / `Depends-on:`) line anywhere in the issue body — works on any provider. |
+
+While any blocker is open, the issue is skipped and reported under
+**⛓ Waiting on Dependencies** in the dispatch summary. The next tick re-evaluates;
+once the last blocker closes, the dependent auto-dispatches with no human
+re-labeling. Unknown/unresolvable blocker references are treated as
+**not-blocking** so a dependent is never permanently wedged on a stale link.
 
 ---
 
