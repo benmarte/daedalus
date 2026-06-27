@@ -164,7 +164,28 @@ Expected: `<expected output>`""",
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 
-### 6. Block your kanban task with review-required
+### 6. Complete or block — depends on card type
+
+#### If your task body contains "Review card ID:" — this is a PR fix card
+
+You were created by the PM to fix review feedback on an existing PR. The original reviewer is already waiting. Do NOT block with review-required (that spawns 5 new review agents on top of the existing one — a waste and a mess).
+
+Instead:
+1. Push your fixes to the existing PR branch.
+2. Unblock the original reviewer card using its ID from "Review card ID: t_XXXXX":
+   ```
+   kanban_unblock("t_XXXXX", "re-review: PR #N — fixes applied, all tests passing")
+   ```
+3. **Complete** your own card directly:
+   ```
+   kanban_complete()
+   ```
+4. Run the dispatcher: `bash ~/.hermes/scripts/daedalus-cron.sh`
+
+Do NOT block with review-required. Do NOT create new downstream review tasks. The existing reviewer will pick up the updated PR.
+
+#### For all other developer cards — block with review-required
+
 **Do NOT complete your task.** Block it so the dispatcher can complete it and automatically create QA/reviewer/security/docs tasks:
 
 Block with summary: `review-required: PR #<pr_number> — fix/issue-N-<slug>`
