@@ -10,7 +10,7 @@ All notable changes to Daedalus are documented here. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 `1.0.0-beta.N` pre-release versioning.
 
-## [Unreleased] — dependency-aware ready-gating (#139) — [PR #148](https://github.com/benmarte/daedalus/pull/148)
+## [Unreleased]
 
 ### Added
 
@@ -22,6 +22,14 @@ All notable changes to Daedalus are documented here. The format loosely follows
   merged with a portable `Depends on: #N` body fallback that works on any
   provider. Dispatch summaries gain a new **⛓ Waiting on Dependencies** section
   that surfaces *why* an issue is being held back.
+
+- **Epic-issue detection (Phase 1)** (#138, PR #155) — new `is_epic()` helper in
+  `core.providers.base` flags issues as "epic-sized" using three disjunct
+  heuristics (≥4 markdown checklist items, `epic` label case-insensitive, or
+  body ≥2000 chars). Accepts provider dicts and `IssueSummary` objects; never
+  raises. 34 tests in `tests/test_epic_detection.py` cover all three heuristics,
+  boundary values, mixed input shapes, and the OR-combination contract. This is
+  detection only — dispatcher wiring ships in Phase 2.
 
 ## [1.0.0-beta.30] — 2026-06-26
 
