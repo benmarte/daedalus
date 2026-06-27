@@ -97,7 +97,7 @@ class TestEpicLabelHeuristic:
 
     def test_string_labels(self):
         # Provider dicts use {"name": ...} but guard for plain strings
-        assert is_epic(_make_issue(labels=["epic"])) is False  # no .get("name")
+        assert is_epic(_make_issue(labels=["epic"])) is True
         assert is_epic(_make_issue(labels=[{"name": "epic"}])) is True
 
 
