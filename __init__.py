@@ -21,6 +21,45 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _registry_file() -> "os.PathLike[str]":
+    """Path to the daedalus project registry (mirrors core.registry / _ensure_dispatch_crons).
+
+    Read directly rather than importing ``core.registry`` so the plugin process
+    never puts the plugin dir on ``sys.path`` (see module docstring).
+    """
+    from pathlib import Path
+    hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return Path(
+        os.environ.get("HERMES_ORCH_REGISTRY")
+        or os.path.join(hermes_home, "daedalus", "projects")
+    )
+
+
+def _resolve_project_for_task() -> Optional[str]:
+    """Return the registered repo path containing the worker's cwd, or ``None``.
+
+    A kanban worker runs in its project's workdir, so scoping the post-session
+    dispatch to that path stops a single worker from sweeping every registered
+    project (issues #137 / #133).
+    """
+    try:
+        from pathlib import Path
+        reg = _registry_file()
+        if not os.path.exists(reg):
+            return None
+        cwd = Path.cwd().resolve()
+        for raw in Path(reg).read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            rpath = Path(line).expanduser().resolve()
+            if cwd == rpath or rpath in cwd.parents:
+                return str(rpath)
+    except Exception:
+        return None
+    return None
+
+
 def _on_session_end(session_id, completed, interrupted, model, platform, **kwargs):
     """Fire the daedalus dispatcher immediately after any worker session ends.
 
@@ -37,10 +76,18 @@ def _on_session_end(session_id, completed, interrupted, model, platform, **kwarg
         logger.debug("daedalus on_session_end: cron script missing or not executable: %s", cron_script)
         return
 
+    # Scope the dispatch to the worker's own project so one session-end doesn't
+    # sweep (and re-notify) every registered repo (issues #137 / #133). Falls
+    # back to a global sweep when cwd isn't a registered project.
+    cmd = ["bash", cron_script]
+    repo = _resolve_project_for_task()
+    if repo:
+        cmd += ["--repo", repo]
+
     def _run():
         try:
             subprocess.run(
-                ["bash", cron_script],
+                cmd,
                 env=os.environ.copy(),
                 timeout=120,
                 check=False,
@@ -409,6 +456,9 @@ def _ensure_dispatch_crons() -> None:
                     "--name", cron_name,
                     "--script", "daedalus-cron.sh",
                     "--no-agent",
+                    # Run the dispatcher from this repo's root so it auto-scopes
+                    # to this project instead of sweeping every repo (issue #137).
+                    "--workdir", repo_path,
                 ]
                 deliver = (cron_cfg.get("deliver") or "").strip()
                 if deliver and not cron_cfg.get("notifications"):

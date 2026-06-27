@@ -828,6 +828,11 @@ def _reconcile_cron(
     has_notifications = bool(cron_cfg.get("notifications")) if cron_cfg else False
     deliver = "" if has_notifications else (cron_cfg.get("deliver", "").strip() if cron_cfg else "")
 
+    # Run the dispatcher from this repo's root so it auto-scopes to this project
+    # instead of sweeping every registered repo (issue #137). The repo root is the
+    # parent of the project's ``.hermes/`` dir, where daedalus.yaml lives.
+    workdir = str(cfg_path.parent.parent.resolve()) if cfg_path is not None else ""
+
     # 1. Find existing jobs by name.
     matching_ids: list[str] = []
     rc, out = _cron_cli(["list", "--all"])
@@ -844,6 +849,8 @@ def _reconcile_cron(
     # 3. Exactly one job → update it in place (native `hermes cron edit`).
     if len(matching_ids) == 1:
         edit_args = ["edit", matching_ids[0], "--schedule", schedule]
+        if workdir:
+            edit_args += ["--workdir", workdir]
         if deliver:
             edit_args += ["--deliver", deliver]
         rc, out = _cron_cli(edit_args)
@@ -863,6 +870,8 @@ def _reconcile_cron(
         "--script", "daedalus-cron.sh",
         "--no-agent",
     ]
+    if workdir:
+        cmd += ["--workdir", workdir]
     if deliver:
         cmd += ["--deliver", deliver]
 

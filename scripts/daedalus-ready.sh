@@ -27,21 +27,44 @@ if [[ "$provider" == "unknown" ]]; then
   exit 0
 fi
 
-# Run normalizer — extract if this is a Ready event
-is_ready=$(echo "$payload" | python3 -c "
+# Run normalizer — for a Ready event, resolve the LOCAL repo path of the project
+# the payload belongs to so the dispatch scopes to it instead of sweeping every
+# registered repo (issue #137). Output is one of:
+#   ""        — not a Ready event (ignore)
+#   "ALL"     — Ready, but no registered project matched (legacy global sweep)
+#   <path>    — Ready, scope the dispatch to this repo path
+scope=$(echo "$payload" | python3 -c "
 import sys, json
 sys.path.insert(0, '$HOME/.hermes/plugins/daedalus')
 from core.webhook_normalizer import normalize
+from core import registry
+from config import ConfigLoader
 d = json.load(sys.stdin)
-result = normalize('$provider', d)
-print('yes' if result else 'no')
-" 2>/dev/null || echo "no")
+ev = normalize('$provider', d)
+if not ev:
+    print(''); sys.exit(0)
+loader = ConfigLoader()
+ident = (ev.repo or '').strip()
+for rp in registry.list_projects():
+    try:
+        r = loader.resolve_repo_config(rp)
+    except Exception:
+        continue
+    if ident and (r.get('repo') or '').strip() == ident:
+        print((r.get('workdir') or rp).strip()); break
+else:
+    print('ALL')
+" 2>/dev/null || echo "")
 
-if [[ "$is_ready" == "yes" ]]; then
-  # Fire dispatcher in background — don't block the webhook response
-  bash ~/.hermes/scripts/daedalus-cron.sh </dev/null >/dev/null 2>&1 &
-  printf '{"status": "dispatched"}\n'
-else
+if [[ -z "$scope" ]]; then
   printf '{"status": "ignored", "reason": "not a Ready event"}\n'
   exit 0
+elif [[ "$scope" == "ALL" ]]; then
+  # Ready event but no local project matched — fall back to a global sweep.
+  bash ~/.hermes/scripts/daedalus-cron.sh </dev/null >/dev/null 2>&1 &
+  printf '{"status": "dispatched", "scope": "all"}\n'
+else
+  # Fire dispatcher in background, scoped to the matched project.
+  bash ~/.hermes/scripts/daedalus-cron.sh --repo "$scope" </dev/null >/dev/null 2>&1 &
+  printf '{"status": "dispatched", "repo": "%s"}\n' "$scope"
 fi

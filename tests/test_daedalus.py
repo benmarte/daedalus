@@ -878,6 +878,148 @@ def test_notify_project_summary_fans_out():
           handled2 is False and sent == [])
 
 
+def test_notify_project_summary_threads_and_dedupes():
+    """Issue #137: summaries thread under a per-project anchor and dedupe by content."""
+    import tempfile
+
+    disp = _load_dispatch()
+    summary = {"board": "b", "mode": "github", "created": [1], "reconciled": [],
+               "completed": [], "advance_prs": [], "routed_actions": {},
+               "issues_seen": 1, "spec_created": [], "slack_delivered": [],
+               "blocked": []}
+
+    with tempfile.TemporaryDirectory() as workdir:
+        resolved = {"workdir": workdir, "cron": {"notifications": [
+            {"platform": "Slack", "target": "slack:C1", "events": ["dispatch-summary"]},
+        ]}}
+        sends = []  # (target, thread_id)
+
+        def fake_send(target, body, *, thread_id=None):
+            sends.append((target, thread_id))
+            return (True, "anchor-1")
+
+        with mock.patch.object(disp, "_hermes_send", fake_send):
+            disp._notify_project_summary("proj", summary, resolved)
+            # identical summary on a later tick → recognised by content hash, skipped
+            disp._notify_project_summary("proj", dict(summary), resolved)
+        check("first summary posts a root (no thread id); repeat is deduped",
+              sends == [("slack:C1", None)])
+
+        # a CHANGED summary posts as a reply under the stored per-project anchor
+        sends.clear()
+        changed = dict(summary, created=[], completed=[1])
+        with mock.patch.object(disp, "_hermes_send", fake_send):
+            disp._notify_project_summary("proj", changed, resolved)
+        check("changed summary threads as a reply under the anchor",
+              sends == [("slack:C1", "anchor-1")])
+
+
+def test_notify_project_summary_silent_tick_sends_nothing():
+    """Issue #137: a no-op tick (empty summary) delivers nothing but is handled."""
+    import tempfile
+
+    disp = _load_dispatch()
+    empty = {"board": "b", "mode": "github", "created": [], "reconciled": [],
+             "completed": [], "advance_prs": [], "routed_actions": {},
+             "issues_seen": 1, "spec_created": [], "slack_delivered": [], "blocked": []}
+    with tempfile.TemporaryDirectory() as workdir:
+        resolved = {"workdir": workdir, "cron": {"notifications": [
+            {"platform": "Slack", "target": "slack:C1", "events": ["dispatch-summary"]},
+        ]}}
+        sends = []
+        with mock.patch.object(disp, "_hermes_send",
+                               lambda *a, **k: sends.append(a) or (True, "x")):
+            handled = disp._notify_project_summary("proj", empty, resolved)
+    check("silent tick is handled (excluded from stdout)", handled is True)
+    check("silent tick sends nothing", sends == [])
+
+
+def test_resolve_repo_arg_path_and_slug():
+    """Issue #137: --repo accepts a filesystem path OR a registered owner/repo slug."""
+    import tempfile
+    import yaml
+
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        hermes_dir = repo / ".hermes"
+        hermes_dir.mkdir()
+        (hermes_dir / "daedalus.yaml").write_text(
+            yaml.safe_dump({"name": "solo", "repo": "org/solo"}))
+
+        check("an existing path resolves to itself",
+              disp._resolve_repo_arg(str(repo)) == str(repo.resolve()))
+
+        with mock.patch.object(disp.registry, "list_projects",
+                               return_value=[str(repo.resolve())]):
+            check("a registered VCS slug resolves to its repo path",
+                  disp._resolve_repo_arg("org/solo") == str(repo.resolve()))
+            check("an unknown slug resolves to None",
+                  disp._resolve_repo_arg("org/unknown") is None)
+
+
+def test_resolve_repo_from_cwd():
+    """Issue #137: cwd inside a registered repo auto-scopes to that repo."""
+    import os
+    import tempfile
+
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp).resolve()
+        sub = repo / "src"
+        sub.mkdir()
+        orig = os.getcwd()
+        try:
+            with mock.patch.object(disp.registry, "list_projects",
+                                   return_value=[str(repo)]):
+                os.chdir(sub)
+                check("a child dir of a registered repo resolves to the repo",
+                      disp._resolve_repo_from_cwd() == str(repo))
+                os.chdir(orig)
+            with mock.patch.object(disp.registry, "list_projects", return_value=[]):
+                check("cwd outside every registered repo resolves to None",
+                      disp._resolve_repo_from_cwd() is None)
+        finally:
+            os.chdir(orig)
+
+
+def test_main_scopes_to_cwd_project():
+    """Issue #137: main() with no --repo scopes to the registered project at cwd."""
+    import os
+    import tempfile
+    import yaml
+
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp).resolve()
+        hermes_dir = repo / ".hermes"
+        hermes_dir.mkdir()
+        (hermes_dir / "daedalus.yaml").write_text(
+            yaml.safe_dump({"name": "scoped", "repo": "org/scoped"}))
+
+        called = []
+
+        def fake_run(resolved, *, dry_run=False, max_dispatch=5):
+            called.append(resolved)
+            return {"board": "scoped", "mode": "kanban", "created": [],
+                    "reconciled": [], "completed": [], "advanced": [], "issues_seen": 0}
+
+        orig = os.getcwd()
+        try:
+            os.chdir(repo)
+            with mock.patch.object(disp.registry, "list_projects",
+                                   return_value=[str(repo)]):
+                with mock.patch.object(disp, "run", fake_run):
+                    with mock.patch("sys.argv", ["daedalus_dispatch.py"]):
+                        disp.main()
+        finally:
+            os.chdir(orig)
+
+    check("cwd-scoped main() calls run() exactly once", len(called) == 1)
+    check("cwd-scoped main() runs the project at cwd",
+          called[0].get("name") == "scoped")
+
+
 def test_deliver_doc_reports_multi_target():
     """_deliver_doc_reports fans a report out to every configured target."""
     disp = _load_dispatch()
@@ -2335,6 +2477,11 @@ if __name__ == "__main__":
                test_notify_targets,
                test_summary_events,
                test_notify_project_summary_fans_out,
+               test_notify_project_summary_threads_and_dedupes,
+               test_notify_project_summary_silent_tick_sends_nothing,
+               test_resolve_repo_arg_path_and_slug,
+               test_resolve_repo_from_cwd,
+               test_main_scopes_to_cwd_project,
                test_deliver_doc_reports_multi_target,
                test_ensure_board_creates, test_ensure_board_already_exists,
                test_ensure_board_failure,

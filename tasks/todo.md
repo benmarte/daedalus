@@ -1,31 +1,29 @@
-# Issue #134 — _reconcile_cron skips schedule conversion (one-shot crons)
+# Issue #137 — thread/dedupe dispatch summaries + scope crons to --repo
 
-## Problem
-`_reconcile_cron()` passes the raw `cron.schedule` (e.g. `60m`) to `hermes cron
-edit/create` without `_schedule_to_crontab()`. Hermes treats interval syntax as
-a one-shot job → after one run it goes `[completed]` and the dispatcher stops.
-`_ensure_dispatch_crons()` already converts; `_reconcile_cron()` (dashboard Save)
-does not.
+## Spec / Acceptance
+- AC1: in-progress issue, no state change → no new Slack messages on later ticks.
+- AC2: identical consecutive summaries are threaded/deduped, not top-level.
+- AC3: a cron/hook/webhook tick processes only the relevant project.
 
-## Fix plan
-- [ ] Add canonical `schedule_to_crontab()` to `core/util.py` (dep-free shared home,
-      already imported by plugin_api for board_slug/parse_env_file).
-- [ ] `__init__.py._schedule_to_crontab` delegates to `core.util` (lazy import → keeps
-      plugin load import-safe; keeps the back-compat name the tests use).
-- [ ] `_reconcile_cron(project_name, cron_cfg, cfg_path=None)`:
-      - convert schedule to crontab before edit/create (both paths)
-      - when conversion changed the value and cfg_path given, write the crontab
-        schedule back to the YAML (mirror `_ensure_dispatch_crons`)
-- [ ] Pass `cfg_path` from both callers (create + save endpoints).
+## Plan (DONE — 823 tests pass, 8 new)
+### Problem 1 — thread + dedupe + suppress project dispatch summaries
+- [x] `scripts/daedalus_dispatch.py`: route `_notify_project_summary` through
+      `thread_delivery.deliver_event` with a per-project anchor
+      (`_PROJECT_SUMMARY_ANCHOR = 0`) + content-hash `event_key`.
+      Silent ticks already return "" (suppression). Falls back to plain send when
+      no workdir. `import hashlib`.
 
-## Tests
-- [ ] Fix `test_updates_single_cron_in_place` (60m → "0 * * * *" in edit args).
-- [ ] New: edit path converts interval → crontab.
-- [ ] New: create path converts interval → crontab.
-- [ ] New: crontab passthrough unchanged.
-- [ ] New: write-back rewrites schedule in config file.
-- [ ] core.util.schedule_to_crontab unit coverage.
+### Problem 2 — scope crons/hooks/webhook to one project
+- [x] `scripts/daedalus_dispatch.py`: `_resolve_repo_arg` (path or owner/repo
+      slug → repo path) + `_resolve_repo_from_cwd`; `main()` scopes to --repo,
+      else cwd-matched project, else legacy registry sweep.
+- [x] `__init__.py`: `_on_session_end` passes `--repo` (cwd→registry match via
+      `_resolve_project_for_task`). `_ensure_dispatch_crons` adds `--workdir`.
+- [x] `dashboard/plugin_api.py`: `_reconcile_cron` adds `--workdir` (create+edit).
+- [x] `scripts/daedalus-ready.sh`: resolve project from payload repo, pass `--repo`.
 
-## Verify
-- [ ] pytest tests/ green
-- [ ] ruff check/format on changed files
+### Tests
+- [x] threaded/deduped summary (sent once, reply on change, skip on repeat) + silent tick.
+- [x] `_resolve_repo_arg` / `_resolve_repo_from_cwd`.
+- [x] main() cwd-scoping.
+- [x] `_on_session_end` passes --repo; cron create/edit carry --workdir.
