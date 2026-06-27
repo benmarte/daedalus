@@ -1,3 +1,5 @@
+## [Dependency-aware ready-gating: don't dispatch an issue until its blockers are closed (native GitLab/GitHub issue links + Depends-on fallback)](https://github.com/benmarte/daedalus/issues/139) — [PR #148](https://github.com/benmarte/daedalus/pull/148)
+
 ## [Phase 1: Epic detection heuristic](https://github.com/benmarte/daedalus/issues/149) — [PR #156](https://github.com/benmarte/daedalus/pull/156)
 
 ## [Auto-configure VCS board settings in daedalus.yaml during setup (GitLab: label_board + status labels + default branch)](https://github.com/benmarte/daedalus/issues/133) — [PR #135](https://github.com/benmarte/daedalus/pull/135)
