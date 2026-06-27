@@ -80,6 +80,65 @@ class IssueSummary:
                 "labels": [{"name": n} for n in self.labels], "url": self.url}
 
 
+# ── Epic detection (Phase 1, issue #138) ────────────────────────────────────
+#
+# Heuristic: an issue is "epic-sized" if ANY of these hold:
+#   • body contains >= _EPIC_CHECKLIST_MIN markdown checklist items
+#     (``- [ ]`` / ``* [x]`` / ``+ [X]``, indented or not)
+#   • labels include an exact match for "epic" (case-insensitive)
+#   • body length >= _EPIC_BODY_SIZE_MIN chars
+#
+# Accepts a raw provider dict (``{"body": ..., "labels": [...]}``), an
+# :class:`IssueSummary`, or any object exposing ``.body`` / ``.labels``.
+# Never raises — missing/None fields default to False.
+
+_EPIC_CHECKLIST_MIN = 4
+_EPIC_BODY_SIZE_MIN = 2000
+_CHECKLIST_LINE_RE = re.compile(r"^\s*[-*+]\s+\[[\sxX]\]", re.MULTILINE)
+
+
+def _label_names(labels: Any) -> List[str]:
+    """Extract label names from either list-of-dicts or list-of-strings shape."""
+    if not labels:
+        return []
+    out: List[str] = []
+    for item in labels:
+        if isinstance(item, dict):
+            name = item.get("name")
+        else:
+            name = getattr(item, "name", None) if not isinstance(item, str) else item
+        if name:
+            out.append(str(name))
+    return out
+
+
+def is_epic(issue: Any) -> bool:
+    """Return True if ``issue`` looks epic-sized per the heuristics above."""
+    if issue is None:
+        return False
+    # Accept both IssueSummary / dataclass and raw provider dict.
+    if isinstance(issue, dict):
+        body = issue.get("body") or ""
+        labels = issue.get("labels") or []
+    else:
+        body = getattr(issue, "body", None) or ""
+        labels = getattr(issue, "labels", None) or []
+
+    # Heuristic 1: checklist density
+    if len(_CHECKLIST_LINE_RE.findall(body)) >= _EPIC_CHECKLIST_MIN:
+        return True
+
+    # Heuristic 2: "epic" label (exact, case-insensitive)
+    if any(name.lower() == "epic" for name in _label_names(labels)):
+        return True
+
+    # Heuristic 3: body size
+    if len(body) >= _EPIC_BODY_SIZE_MIN:
+        return True
+
+    return False
+
+
 @dataclass
 class PRSummary:
     number: int
