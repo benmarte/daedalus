@@ -127,6 +127,41 @@ class GitHubProvider(VCSProvider):
             url=data.get("html_url") or "",
         )
 
+    def blockers(self, issue_number: int) -> List[int]:
+        """Open blockers via native issue dependencies
+        (``GET …/issues/{n}/dependencies/blocked_by``, GA Aug 2025) merged with
+        the portable ``Depends on:`` body fallback.
+
+        Each returned item is a full issue object carrying ``state`` inline, so
+        open-filtering needs no extra request. Cross-repo blockers are ignored —
+        dispatch is scoped to a single repo and only local issue numbers are
+        dispatchable. Repos/accounts without the dependencies feature 404 here;
+        that degrades silently to the body fallback (logged only on other
+        errors, so the common no-feature case stays quiet).
+        """
+        out: List[int] = []
+        try:
+            deps = self._http.get_json(
+                f"/repos/{self.repo}/issues/{issue_number}/dependencies/blocked_by",
+                params={"per_page": 100})
+        except ProviderError as e:
+            if e.status_code != 404:
+                self._log.warning("blockers #%s blocked_by failed: %s", issue_number, e)
+            deps = []
+        for it in deps or []:
+            if "pull_request" in it:    # dependencies can include PRs — skip
+                continue
+            repo_full = ((it.get("repository") or {}).get("full_name") or "").strip()
+            if repo_full and repo_full != self.repo:
+                continue  # cross-repo blocker — its number isn't local, can't gate on it
+            num = it.get("number")
+            if isinstance(num, int) and (it.get("state") or "open").lower() == "open":
+                out.append(num)
+        for n in self._depends_on_blockers(issue_number):
+            if n not in out:
+                out.append(n)
+        return out
+
     def get_issue_comments(self, issue_number: int) -> List[Dict[str, Any]]:
         try:
             return self._http.get_json(
