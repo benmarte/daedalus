@@ -1,3 +1,5 @@
+## [Phase 1: Epic detection heuristic](https://github.com/benmarte/daedalus/issues/149) — [PR #156](https://github.com/benmarte/daedalus/pull/156)
+
 ## [Auto-configure VCS board settings in daedalus.yaml during setup (GitLab: label_board + status labels + default branch)](https://github.com/benmarte/daedalus/issues/133) — [PR #135](https://github.com/benmarte/daedalus/pull/135)
 
 ## [bug: _reconcile_cron skips schedule conversion, creating one-shot crons instead of repeating jobs](https://github.com/benmarte/daedalus/issues/134) — [PR #136](https://github.com/benmarte/daedalus/pull/136)
