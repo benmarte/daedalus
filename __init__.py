@@ -175,7 +175,7 @@ def _read_env_value(env_path: str, key: str) -> Optional[str]:
 
 
 def _sync_github_token() -> None:
-    """Copy GITHUB_TOKEN from ~/.hermes/.env into every *-daedalus profile .env.
+    """Sync GITHUB_TOKEN from ~/.hermes/.env into every *-daedalus profile .env.
 
     provision_roster.sh only writes GITHUB_TOKEN into each profile's .env when a
     token is resolvable at provision time. On a fresh install where the token is
@@ -183,10 +183,9 @@ def _sync_github_token() -> None:
     the profiles are left permanently missing the token and agents fail with
     GitHub auth errors until someone re-provisions (issue #78).
 
-    This runs on every plugin load and, for each ``~/.hermes/profiles/*-daedalus``
-    profile whose .env lacks a ``GITHUB_TOKEN=`` line, appends the token from
-    ~/.hermes/.env. Idempotent — profiles that already have the key are skipped,
-    so the value is never duplicated or overwritten. Never raises.
+    This runs on every plugin load. For each ``~/.hermes/profiles/*-daedalus``
+    profile, it adds or updates the GITHUB_TOKEN to match ~/.hermes/.env so that
+    token rotations are picked up automatically. Never raises.
     """
     try:
         hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
@@ -206,12 +205,12 @@ def _sync_github_token() -> None:
                 continue
             env_file = os.path.join(profile_dir, ".env")
 
-            # Idempotent: skip if a GITHUB_TOKEN line already exists.
-            if _read_env_value(env_file, "GITHUB_TOKEN") is not None:
-                continue
+            existing = _read_env_value(env_file, "GITHUB_TOKEN")
+            if existing is not None:
+                continue  # profile already has a token — leave it alone
 
             try:
-                # Match a trailing-newline-safe append, mirroring provision_roster.sh.
+                # Key absent — append it.
                 with open(env_file, "a") as f:
                     f.write(f"\nGITHUB_TOKEN={token}\n")
                 os.chmod(env_file, 0o600)

@@ -276,6 +276,30 @@ class GitLabProvider(VCSProvider):
         self._log.info("board: #%s -> %s", issue_number, status_name)
         return True
 
+    def ensure_labels(self) -> List[str]:
+        """Create required Daedalus labels (epic, subtask) plus all board lane labels."""
+        from .base import REQUIRED_LABELS
+        created: List[str] = []
+        existing = {lbl.name for lbl in self.list_labels()}
+        for ldef in REQUIRED_LABELS:
+            if ldef["name"] in existing:
+                continue
+            try:
+                self._http.post_json(
+                    f"{self._proj}/labels",
+                    {"name": ldef["name"], "color": f"#{ldef['color']}"},
+                )
+                created.append(ldef["name"])
+                self._log.info("ensure_labels: created %r", ldef["name"])
+            except ProviderError as e:
+                if e.status_code == 409:
+                    continue  # already exists — idempotent
+                self._log.warning("ensure_labels: create %r failed: %s", ldef["name"], e)
+        # Also ensure board lane labels (GitLab boards are label-driven)
+        status_names = [v for v in self._status_map.values() if v]
+        created.extend(self.ensure_status_labels(status_names))
+        return created
+
     def ensure_status_labels(self, status_names: List[str]) -> List[str]:
         """Create any missing board status labels in the project (idempotent).
 

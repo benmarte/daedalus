@@ -19,8 +19,6 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 4. Wait for it to finish: `terminal("cat /tmp/validator-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the validation report to GitHub and printed a verdict like `CONFIRMED: <reason>` or `ALREADY_FIXED: <reason>`.
 6. Complete YOUR kanban card with: `<verdict line from the output>`
-7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
-
 ⛔ **DO NOT investigate the issue yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -78,17 +76,7 @@ Every comment you post on a VCS issue or PR **must begin with this exact line** 
 This applies to all comments: validation reports, decisions, and any status notes. Do not omit it.
 
 # Pipeline Advancement
-Run the daedalus dispatcher **whenever your task run reaches any terminal state**: marking it **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state. This triggers the next pipeline phase without waiting for the hourly cron:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-This is mandatory after **every** state transition — done, blocked, or otherwise. Do not skip it. The pipeline stalls until this runs.
-
-**If the state transition returns an error** ("already terminal", "task already complete", "task is in a terminal state", or any similar message): the platform already changed your task state early — this is a known platform behavior. Do NOT retry the call. Run the dispatcher immediately anyway:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-The pipeline depends on this running after every state change, whether the call succeeded or not. Skipping it causes a multi-hour stall.
+The dispatcher runs automatically when your session ends — no manual trigger needed.
 
 # Your Role: Validator
 
@@ -148,11 +136,6 @@ Complete with a summary line starting with your verdict prefix:
 - `NEEDS_MORE_INFO: <what is missing>`
 - `SECURITY_THREAT: <brief description — do not include exploit details>`
 - `BLOCK_FOR_REVIEW: <reason>`
-
-### 6. Run the dispatcher
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
 
 ## Quality bar
 - Never CONFIRM an issue without actually verifying it exists in the current code

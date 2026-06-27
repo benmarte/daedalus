@@ -48,6 +48,15 @@ def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
 # kept from the Slack-only era so previously-marked PRs are not re-delivered.
 DELIVERY_MARKER = "<!-- daedalus:slack-delivered -->"
 
+# Labels that Daedalus requires in every VCS repo it manages.
+# Providers create these on first dispatch via ensure_labels().
+REQUIRED_LABELS: List[Dict[str, str]] = [
+    {"name": "epic",    "color": "7057ff",
+     "description": "Large issue requiring decomposition into sub-issues"},
+    {"name": "subtask", "color": "0075ca",
+     "description": "Child issue created from an epic decomposition"},
+]
+
 # Canonical pipeline statuses → default provider-facing names. Overridable per
 # project via vcs.status_map (values are board columns / labels / WI states).
 DEFAULT_STATUS_MAP = {
@@ -123,6 +132,10 @@ def is_epic(issue: Any) -> bool:
     else:
         body = getattr(issue, "body", None) or ""
         labels = getattr(issue, "labels", None) or []
+
+    # Sub-issues are never themselves epics — prevents infinite decomposition loops.
+    if "subtask" in {n.lower() for n in _label_names(labels)}:
+        return False
 
     # Heuristic 1: checklist density
     if len(_CHECKLIST_LINE_RE.findall(body)) >= _EPIC_CHECKLIST_MIN:
@@ -294,6 +307,17 @@ class VCSProvider(abc.ABC):
     def add_label(self, issue_number: int, label_name: str) -> bool:
         """Apply a label to an issue. Returns True on success. Default no-op."""
         return False
+
+    def ensure_labels(self) -> List[str]:
+        """Create required Daedalus labels if missing. Returns newly created names.
+
+        Called once per dispatch run so every managed repo always has the labels
+        Daedalus needs (epic, subtask, …). Provider-specific implementations also
+        create board-lane labels (e.g. GitLab's label-driven board columns).
+        Default is a no-op — safe for providers that don't need label pre-creation
+        (e.g. Azure DevOps where tags are free-text on work items).
+        """
+        return []
 
     # ── cross-issue dependencies (ready-gating, issue #139) ──────────────────
     def _depends_on_blockers(self, issue_number: int,

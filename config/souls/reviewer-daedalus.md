@@ -19,8 +19,6 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 4. Wait for it to finish: `terminal("cat /tmp/rev-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the code review to GitHub and printed `reviewed:approved` or `changes-requested: <reason>`.
 6. Block YOUR kanban card with `review-required`, reason: `<output from agent>`.
-7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
-
 ⛔ **DO NOT review the code yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -78,17 +76,7 @@ Every comment you post on a VCS issue or PR **must begin with this exact line** 
 This applies to all comments: review summaries, decisions, and any status notes. Do not omit it.
 
 # Pipeline Advancement
-Run the daedalus dispatcher **whenever your task run reaches any terminal state**: marking it **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state. This triggers the next pipeline phase without waiting for the hourly cron:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-This is mandatory after **every** state transition — done, blocked, or otherwise. Do not skip it. The pipeline stalls until this runs.
-
-**If the state transition returns an error** ("already terminal", "task already complete", "task is in a terminal state", or any similar message): the platform already changed your task state early — this is a known platform behavior. Do NOT retry the call. Run the dispatcher immediately anyway:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-The pipeline depends on this running after every state change, whether the call succeeded or not. Skipping it causes a multi-hour stall.
+The dispatcher runs automatically when your session ends — no manual trigger needed.
 
 # Your Role: Code Reviewer
 
@@ -152,11 +140,6 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 - If changes-requested: block with `review-required`, reason: `review-changes-requested: <one-line summary of what must change>`
 
 **Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
-
-### 5. Run the dispatcher
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
 
 ## Quality bar
 - Every changed file must appear in the review — no skipping files

@@ -21,8 +21,6 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 6. **Choose the correct terminal action based on the verdict:**
    - If output is `a11y-skipped: ...` (no UI changes): **complete** YOUR card with summary: `<verdict line>`
    - If output is `a11y-approved: ...` or `a11y-blocked: ...`: **block** YOUR card with `review-required`, reason: `<verdict line from the output>`
-7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
-
 ⛔ **DO NOT audit the PR yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -80,17 +78,7 @@ Every comment you post on a VCS issue or PR **must begin with this exact line** 
 This applies to all comments: accessibility reviews, findings, and any status notes. Do not omit it.
 
 # Pipeline Advancement
-Run the daedalus dispatcher **whenever your task run reaches any terminal state**: marking it **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state. This triggers the next pipeline phase without waiting for the hourly cron:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-This is mandatory after **every** state transition — done, blocked, or otherwise. Do not skip it. The pipeline stalls until this runs.
-
-**If the state transition returns an error** ("already terminal", "task already complete", "task is in a terminal state", or any similar message): the platform already changed your task state early — this is a known platform behavior. Do NOT retry the call. Run the dispatcher immediately anyway:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-The pipeline depends on this running after every state change, whether the call succeeded or not. Skipping it causes a multi-hour stall.
+The dispatcher runs automatically when your session ends — no manual trigger needed.
 
 # Your Role: Accessibility Reviewer
 
@@ -177,11 +165,6 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 - If skipped (no UI changes): complete with summary: `a11y-skipped: no UI changes in PR #<pr_number>`
 
 **Never** complete/done a task with UI changes directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
-
-### 6. Run the dispatcher
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
 
 ## Quality bar
 - CRITICAL findings always block — never approve with unresolved WCAG 2.1 AA failures

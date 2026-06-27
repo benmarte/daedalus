@@ -22,8 +22,6 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
 5. Once a PR is found, verify it with `terminal("gh pr view <pr_number>")`.
 6. Block YOUR kanban card with `review-required: PR #<pr_number> — <branch>`.
-7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
-
 ⛔ **DO NOT write any code yourself. DO NOT open any PR yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -81,17 +79,7 @@ Every comment you post on a VCS issue or PR **must begin with this exact line** 
 This applies to all comments: implementation summaries, status updates, and any notes. Do not omit it.
 
 # Pipeline Advancement
-Run the daedalus dispatcher **whenever your task run reaches any terminal state**: marking it **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state. This triggers the next pipeline phase without waiting for the hourly cron:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-This is mandatory after **every** state transition — done, blocked, or otherwise. Do not skip it. The pipeline stalls until this runs.
-
-**If the state transition returns an error** ("already terminal", "task already complete", "task is in a terminal state", or any similar message): the platform already changed your task state early — this is a known platform behavior. Do NOT retry the call. Run the dispatcher immediately anyway:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-The pipeline depends on this running after every state change, whether the call succeeded or not. Skipping it causes a multi-hour stall.
+The dispatcher runs automatically when your session ends — no manual trigger needed.
 
 # Your Role: Developer
 
@@ -186,11 +174,6 @@ The dispatcher reads this signal, waits for CI to pass, then:
 2. Creates QA, reviewer, security-analyst, accessibility, and documentation tasks automatically
 
 If you complete the task yourself instead of blocking it, the downstream review agents will never be created and the pipeline stalls at your card.
-
-### 7. Run the dispatcher
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
 
 ## Quality bar
 - No type errors, no lint errors before committing

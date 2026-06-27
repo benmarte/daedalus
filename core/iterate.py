@@ -150,7 +150,16 @@ def classify_blocked(
         # The executor will search VCS for a matching PR and update the block reason.
         if handoff["is_review_required"] and "awaiting-pr" in (handoff_text or "").lower():
             return PENDING_PR
-        # No PR or not review-required → PM route (was: silent drop returning "")
+        # Infrastructure / system crash — agent never ran or died at startup.
+        # PM routing cannot fix a gateway/OS crash and only creates a loop where
+        # each PM-ROUTE completes as "no-op" but a new one is spawned next tick.
+        _crash_markers = (
+            "coding-agent-failed:", "permission-error:", "coding_agent_died",
+            "coding_agent_timeout", "exited with code", "agent crash",
+        )
+        if any(m in (handoff_text or "").lower() for m in _crash_markers):
+            return ""  # infrastructure failure — human must fix env and unblock
+        # No PR or not review-required → PM route
         return PM_ROUTE
 
     # ── reviewer / security-analyst card ─────────────────────────────────
@@ -933,19 +942,29 @@ def _execute_planner_decompose(
     # Apply epic label to parent
     provider.add_label(parent_n, "epic")
 
-    # Create kanban triage card per sub-issue
+    # Create kanban triage card per sub-issue and invoke decompose immediately
     ws = f"dir:{workdir}" if workdir else ""
     for sub_n in created_numbers:
         sub_issue = provider.get_issue(sub_n)
         if sub_issue is None:
             continue
         sub_dict = sub_issue.as_dict() if hasattr(sub_issue, "as_dict") else sub_issue
-        kanban.create_triage(
+        triage_tid = kanban.create_triage(
             slug, sub_n, sub_dict.get("title", f"sub-issue #{sub_n}"),
             body=sub_dict.get("body", ""),
             idempotency_key=f"epic-sub-{sub_n}",
             workspace=ws,
         )
+        # Decompose immediately so the fan-out happens now rather than waiting
+        # for the next dispatcher tick's decompose_all_triage() sweep.
+        if triage_tid:
+            decomposed = kanban.decompose(slug, triage_tid)
+            if not decomposed:
+                logger.warning(
+                    "iterate: planner_decompose — decompose(%s) failed for sub-issue #%s; "
+                    "triage card will be swept on next tick",
+                    triage_tid, sub_n,
+                )
 
     kanban.complete(slug, tid,
                     summary=f"Decomposed epic #{parent_n} into {len(created_numbers)} sub-issues")

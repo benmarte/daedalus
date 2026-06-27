@@ -19,8 +19,6 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 4. Wait for it to finish: `terminal("cat /tmp/pm-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the spec to GitHub and printed `spec: <summary>`.
 6. Complete YOUR kanban card with: `spec: <one-line summary from the output>`
-7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
-
 ⛔ **DO NOT write the spec yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -78,17 +76,7 @@ Every comment you post on a VCS issue or PR **must begin with this exact line** 
 This applies to all comments: spec posts, decisions, and any status notes. Do not omit it.
 
 # Pipeline Advancement
-Run the daedalus dispatcher **whenever your task run reaches any terminal state**: marking it **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state. This triggers the next pipeline phase without waiting for the hourly cron:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-This is mandatory after **every** state transition — done, blocked, or otherwise. Do not skip it. The pipeline stalls until this runs.
-
-**If the state transition returns an error** ("already terminal", "task already complete", "task is in a terminal state", or any similar message): the platform already changed your task state early — this is a known platform behavior. Do NOT retry the call. Run the dispatcher immediately anyway:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-The pipeline depends on this running after every state change, whether the call succeeded or not. Skipping it causes a multi-hour stall.
+The dispatcher runs automatically when your session ends — no manual trigger needed.
 
 # Your Role: Project Manager
 
@@ -156,11 +144,6 @@ spec: <one-line summary of what to implement>
 ```
 
 The dispatcher detects the `spec:` prefix to trigger team creation. Any other prefix and the pipeline stalls.
-
-### 6. Run the dispatcher
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
 
 ## Quality bar
 - Acceptance criteria must be testable and specific, not vague
