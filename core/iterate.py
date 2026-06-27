@@ -65,6 +65,7 @@ def _parse_handoff(handoff_text: str) -> Dict[str, Any]:
     change_signals = [
         "changes requested", "changes required", "blocking findings",
         "request changes", "needs fixes", "need fixes",
+        "changes-requested",  # hyphenated form used by reviewer SOUL: "review-changes-requested:"
     ]
     if any(s in lower for s in change_signals):
         result["is_changes_requested"] = True
@@ -129,6 +130,9 @@ def classify_blocked(
 
     # ── project-manager blocked → escalate (human gate — PM can't consult itself) ──
     if assignee == "project-manager-daedalus":
+        # PM blocked while waiting for a developer fix — not a real escalation.
+        if "awaiting-fix:" in (handoff_text or "").lower():
+            return ""
         return ESCALATE
 
     # ── developer card ───────────────────────────────────────────────────
@@ -167,6 +171,11 @@ def classify_blocked(
         # Exceeded max fix attempts → escalate
         if fix_attempts >= MAX_FIX_ATTEMPTS:
             return ESCALATE
+        # A developer fix card is already in flight — don't create another PM-ROUTE.
+        # Concurrent cron ticks would otherwise each spawn a separate PM-ROUTE
+        # before any of them has time to annotate the card with "awaiting-fix:".
+        if "awaiting-fix:" in (handoff_text or "").lower():
+            return ""
         if handoff["is_changes_requested"]:
             return PM_ROUTE
         if handoff["is_approved"]:
@@ -272,16 +281,19 @@ def _count_fix_attempts(card: dict, slug: str = "", workdir: str = "") -> int:
 
     # Secondary: count fix cards on the board by idempotency-key pattern
     # (catches fix cards created by other dispatchers or manual runs)
+    # Only count PENDING/active tasks — completed fix cards are already spent
+    # and should not permanently block the counter from resetting.
     if tid and slug:
         tasks = kanban.list_tasks(slug)
         board_count = 0
         for task in tasks:
             ikey = (task.get("idempotency_key") or "")
+            status = (task.get("status") or "").lower()
             # Fix card idempotency keys:
             #   fix-ci-{tid}-attempt-N   (dev fix for CI-red)
             #   fix-review-{tid}-attempt-N  (legacy direct-dev review fix)
             #   pm-route-{tid}-attempt-N   (PM routing card)
-            if f"-{tid}-attempt-" in ikey:
+            if f"-{tid}-attempt-" in ikey and status not in ("done", "completed"):
                 board_count += 1
         attempts = max(attempts, board_count)
 
@@ -691,6 +703,15 @@ def _execute_pm_route(
         goal=True,
     )
     if pm_tid:
+        # Idempotency guard: create_task returns the existing task ID when a task
+        # with the same key already exists (even if done). If it's already done,
+        # the PM already handled this routing — don't re-increment fix_attempts or
+        # flood the card with duplicate comments.
+        pm_detail = kanban.show_card(slug, pm_tid)
+        pm_status = ((pm_detail or {}).get("task") or {}).get("status", "")
+        if pm_status in ("done", "completed"):
+            logger.info("iterate: PM-ROUTE %s already resolved (done) — skipping increment", pm_tid)
+            return True
         kanban.comment(slug, tid,
                        f"Created PM routing card {pm_tid} (attempt {fix_attempts}/{MAX_FIX_ATTEMPTS})")
         # Mark the reviewer card as blocked (awaiting-fix) so pending state is visible
