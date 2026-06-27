@@ -130,6 +130,32 @@ class LabelDef:
 
 _CLOSING_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b")
 
+# Portable cross-issue dependency convention: a ``Depends on: #N, #M`` (or
+# ``Depends-on:`` / ``Blocked by:``) line anywhere in an issue body. Used as the
+# provider-agnostic fallback for dependency-aware ready-gating (issue #139) when
+# native issue links aren't present. Leading list/quote markers are tolerated so
+# it works inside markdown bullets.
+_DEPENDS_RE = re.compile(r"(?im)^[ \t>*\-]*(?:depends[ -]on|blocked[ -]by)\s*:?[ \t]*(.+)$")
+_ISSUE_REF_RE = re.compile(r"#(\d+)")
+
+
+def parse_depends_on(body: str) -> List[int]:
+    """Issue numbers referenced by a ``Depends on:``/``Blocked by:`` line.
+
+    Order-preserving and de-duplicated; returns ``[]`` when the convention is
+    absent. Numbers are returned as declared — the caller is responsible for
+    filtering to those that are still open.
+    """
+    out: List[int] = []
+    seen = set()
+    for line in _DEPENDS_RE.finditer(body or ""):
+        for ref in _ISSUE_REF_RE.findall(line.group(1)):
+            n = int(ref)
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+    return out
+
 
 def issue_linked_to_pr(pr: PRSummary, issue_number: int) -> bool:
     """Branch-name / closing-keyword heuristic shared by all providers.
@@ -205,6 +231,36 @@ class VCSProvider(abc.ABC):
         Providers that support issue creation override this; default is a no-op.
         """
         return None
+
+    # ── cross-issue dependencies (ready-gating, issue #139) ──────────────────
+    def _depends_on_blockers(self, issue_number: int,
+                             *, body: Optional[str] = None) -> List[int]:
+        """Open blockers from the portable ``Depends on:`` body convention.
+
+        Fetches the issue body when not supplied, parses the convention, and
+        keeps only references that are still **open**. Providers with native
+        dependency links call this to merge the fallback with their link-derived
+        blockers. An unknown blocker state (provider returned ``None``) is
+        treated as not-blocking so a dependent is never permanently wedged on an
+        unresolvable reference.
+        """
+        if body is None:
+            issue = self.get_issue(issue_number)
+            body = issue.body if issue else ""
+        return [n for n in parse_depends_on(body)
+                if self.get_issue_state(n) == "open"]
+
+    def blockers(self, issue_number: int) -> List[int]:
+        """Open issue numbers that block ``issue_number`` (``[]`` when unblocked).
+
+        The dispatcher refuses to start new work on an issue while this is
+        non-empty, re-checking each tick so a dependent auto-unblocks once its
+        blockers close. The base implementation parses the portable
+        ``Depends on: #N, #M`` body convention; providers override to add native
+        dependency links (GitLab issue links, Azure predecessors, …) merged with
+        this fallback. Never raises — degrades to ``[]`` on any provider error.
+        """
+        return self._depends_on_blockers(issue_number)
 
     # ── pull/merge requests ──────────────────────────────────────────────────
     @abc.abstractmethod
