@@ -775,6 +775,53 @@ def test_wait_for_agent_cmd_no_infinite_until_loop():
     )
 
 
+def test_wait_for_agent_cmd_developer_detects_open_pr():
+    """detect_pr wires the provider-side PR handshake into the poll loop (#146).
+
+    When the agent opens a PR but doesn't exit/emit the handshake line, the
+    detector populates out.txt and the loop breaks instead of waiting out the
+    full timeout (then retrying into a duplicate PR).
+    """
+    cmd = disp._wait_for_agent_cmd("dev", 146, 3600, detect_pr=True)
+    assert "daedalus-detect-pr.sh" in cmd, (
+        f"developer wait must invoke the PR detector, got:\n{cmd}"
+    )
+    # detector is passed the out + pid files and the loop breaks once out fills
+    assert "dev-146-out.txt" in cmd and "dev-146-pid.txt" in cmd
+    assert "[ -s /tmp/dev-146-out.txt ] && break" in cmd, (
+        "loop must break immediately when the detector writes the PR line"
+    )
+    # still embeddable in terminal("...") — no literal double quotes
+    assert '"' not in cmd, f"double quotes would break the terminal() string:\n{cmd}"
+    # backstops remain
+    assert "kill -0" in cmd and "CODING_AGENT_TIMEOUT" in cmd
+
+
+def test_wait_for_agent_cmd_no_pr_detection_by_default():
+    """Non-developer roles (default detect_pr=False) must NOT poll for a PR.
+
+    They run on an existing PR branch, where detection would fire instantly and
+    kill their agent before it posts its report.
+    """
+    cmd = disp._wait_for_agent_cmd("qa", 146, 3600)
+    assert "daedalus-detect-pr.sh" not in cmd, (
+        f"only the developer role should detect PRs, got:\n{cmd}"
+    )
+
+
+def test_delegation_pr_detection_is_developer_only():
+    """Through the public builder: developer gets PR detection, others don't."""
+    dev = disp._build_delegation_instructions(
+        "claude-code", cmd="", role="developer", issue_number=146)
+    assert "daedalus-detect-pr.sh" in dev, "developer delegation must detect the PR"
+    for role in ("validator", "pm", "qa", "reviewer", "security", "documentation"):
+        body = disp._build_delegation_instructions(
+            "claude-code", cmd="", role=role, issue_number=146)
+        assert "daedalus-detect-pr.sh" not in body, (
+            f"{role}: must not run PR detection (would kill its agent early)"
+        )
+
+
 def test_delegation_spawn_captures_pid_and_separate_stderr():
     """Spawn line must record the agent PID and route stderr to its own log."""
     for agent in ("claude-code", "codex", "opencode"):
