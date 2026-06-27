@@ -14,7 +14,7 @@ All notable changes to Daedalus are documented here. The format loosely follows
 
 ### Added
 
-- **Epic sub-issue creation (Phase 3)** (#151, PR #167) — when the planner agent
+- **Epic sub-issue creation (Phase 3)** (#151, PR #179) — when the planner agent
   completes its kanban card with `PLANNING COMPLETE:`, the dispatcher automatically
   decomposes the parent epic into sub-issues, posts an idempotency marker
   (`<!-- daedalus:sub-issues:[N1,N2,...] -->`) on the parent, applies the `epic`

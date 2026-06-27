@@ -540,27 +540,17 @@ The template is applied to all dispatcher-posted comments (PR size warnings, for
 
 ## Autonomous pipeline advancement
 
-Each phase transition is triggered by a **completion hook** in every agent's SOUL.md.
-When an agent reaches any terminal state — marking its task **done**, blocking with
-**review-required**, blocking with **awaiting-fix**, or any other blocked state — it
-immediately runs:
+The dispatcher runs **automatically** when each agent's session ends. When an agent
+reaches any terminal state — marking its task **done**, blocking with **review-required**,
+blocking with **awaiting-fix**, or any other blocked state — the dispatcher fires at the
+end of the session, triggering the next phase within seconds rather than waiting for
+the next cron tick.
 
-```bash
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-
-This means each phase transition starts within seconds rather than waiting for the
-next cron tick. For example, as soon as the developer blocks with `review-required`,
-the dispatcher fires, detects CI green, and promotes the reviewer task — all within
-seconds.
-
-**Error recovery:** If the state-transition call itself fails ("already terminal" —
-a known platform bug where Hermes marks tasks done prematurely), agents are instructed
-to run the dispatcher anyway. The pipeline never waits for a human to manually trigger
-recovery.
+For example, as soon as the developer blocks with `review-required`, the session ends,
+the dispatcher fires, detects CI green, and promotes the reviewer task.
 
 The cron job is still present as a last-resort safety net (in case an agent crashes
-before reaching its final step), but it is no longer the primary advancement mechanism.
+before reaching its terminal state), but it is no longer the primary advancement mechanism.
 
 The result is a fully autonomous pipeline: once an issue is marked Ready, the entire
 validator → PM → developer → QA → reviewer + security-analyst + accessibility chain runs
@@ -571,22 +561,22 @@ issue marked Ready
       │
       ▼
 validator runs → CONFIRMED: <note>
-      │   └─ agent runs daedalus-cron.sh on any terminal state
+      │   └─ session ends → dispatcher triggers next phase
       ▼
 PM / project-manager runs → SPEC: <note>
-      │   └─ agent runs daedalus-cron.sh on any terminal state
+      │   └─ session ends → dispatcher triggers next phase
       ▼
 developer → review-required
-      │   └─ agent runs daedalus-cron.sh → dispatcher detects CI green → QA starts
+      │   └─ session ends → dispatcher detects CI green → QA starts
       ▼
 QA → qa-passed (or qa-failed → dev fix card)
-      │   └─ agent runs daedalus-cron.sh → dispatcher creates reviewer + security-analyst
+      │   └─ session ends → dispatcher creates reviewer + security-analyst
       │       + accessibility (only when UI/frontend keywords present in issue)
       ▼
 reviewer → approved
 security-analyst → cleared
 accessibility → approved (or accessibility-na if no frontend files changed)
-      │   └─ all three run in parallel; each agent runs daedalus-cron.sh on its terminal state
+      │   └─ all three run in parallel; each session end triggers dispatcher on its terminal state
       ▼
 documentation → done → report posted
 ```
