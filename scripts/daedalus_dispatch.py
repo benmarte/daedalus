@@ -171,7 +171,8 @@ _AGENT_FAILED_NOTE = (
 )
 
 
-def _wait_for_agent_cmd(pfx: str, issue_number: int, max_wait: int) -> str:
+def _wait_for_agent_cmd(pfx: str, issue_number: int, max_wait: int,
+                        detect_pr: bool = False) -> str:
     """Build the bounded, liveness-guarded wait command for a spawned coding agent.
 
     Polls for the agent's output file, but unlike the old ``until [ -s out ]``
@@ -181,17 +182,36 @@ def _wait_for_agent_cmd(pfx: str, issue_number: int, max_wait: int) -> str:
     ``CODING_AGENT_TIMEOUT`` marker plus the stderr tail so the death reason
     (OOM / auth / crash) is visible (issue #141). The whole command is a single
     line so it drops straight into a ``terminal("...")`` call.
+
+    When ``detect_pr`` is set (developer role only), each poll also runs
+    ``daedalus-detect-pr.sh``: if the coding agent has already opened a PR for its
+    branch but hasn't exited/emitted the handshake line, the helper writes that
+    line to ``out`` and kills the agent, so the card advances to review instead of
+    sitting ``running`` until the timeout and then retrying into a duplicate PR
+    (issue #146). The helper is a quiet no-op when no PR exists yet, so the
+    liveness/timeout backstop below is unchanged for every other case.
     """
     out = f"/tmp/{pfx}-{issue_number}-out.txt"
     err = f"/tmp/{pfx}-{issue_number}-err.txt"
     pid = f"/tmp/{pfx}-{issue_number}-pid.txt"
+    detect = "$HOME/.hermes/plugins/daedalus/scripts/daedalus-detect-pr.sh"
     # No double quotes anywhere — this whole string is embedded inside a
     # terminal("...") call, so a literal " would terminate it early. An empty or
     # stale PID makes ``kill -0`` exit non-zero (treated as dead), which is the
     # behavior we want, so the unquoted $P needs no -z guard.
+    #
+    # The PR-detection step runs FIRST each iteration and may populate {out}
+    # (and kill the agent). The ``[ -s {out} ] && break`` right after it exits the
+    # loop without consuming a 30s sleep when a PR was just found. {out} is a
+    # space-free /tmp path so it needs no quoting.
+    detect_step = (
+        f"bash {detect} {out} {pid} 2>/dev/null; [ -s {out} ] && break; "
+        if detect_pr else ""
+    )
     return (
         f"P=$(cat {pid} 2>/dev/null); S=$SECONDS; "
         f"while [ ! -s {out} ]; do "
+        f"{detect_step}"
         f"if ! kill -0 $P 2>/dev/null; then "
         f"echo CODING_AGENT_DIED: agent exited without writing output. stderr tail:; "
         f"tail -n 40 {err} 2>/dev/null; break; fi; "
@@ -283,7 +303,11 @@ def _build_delegation_instructions(agent: str, cmd: str = "", role: str = "devel
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
     pfx = _ROLE_TMP_PREFIX.get(role, role)
-    wait_cmd = _wait_for_agent_cmd(pfx, issue_number, _CODING_AGENT_MAX_WAIT)
+    # Only the developer opens a PR, so only it gets provider-side PR detection
+    # (issue #146). Other roles run ON an existing PR branch, where detection
+    # would false-fire and kill their agent prematurely.
+    wait_cmd = _wait_for_agent_cmd(
+        pfx, issue_number, _CODING_AGENT_MAX_WAIT, detect_pr=(role == "developer"))
     after = _ROLE_AFTER_SPAWN.get(role, _ROLE_AFTER_SPAWN["developer"]).format(
         pfx=pfx, issue_number=issue_number, wait_cmd=wait_cmd, failed_note=_AGENT_FAILED_NOTE)
     label = _CLOUD_AGENT_LABELS.get(agent, agent)
