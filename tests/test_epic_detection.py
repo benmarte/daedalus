@@ -76,6 +76,24 @@ class TestChecklistHeuristic:
 
 
 class TestEpicLabelHeuristic:
+    def test_subtask_label_excludes_non_epic(self):
+        """Issues labelled 'subtask' must never be classified as epics.
+
+        Sub-issues created by Phase 3 decomposition are never epics themselves;
+        without this guard, a large sub-issue body or inherited labels could
+        trigger the heuristic and cause infinite decomposition loops.
+        """
+        # Subtask + epic-like label → still excluded
+        assert is_epic(_make_issue(labels=[{"name": "subtask"}])) is False
+        assert is_epic(_make_issue(labels=[{"name": "subtask"}, {"name": "epic"}])) is False
+        assert is_epic(_make_issue(labels=[{"name": "SUBTASK"}])) is False
+        assert is_epic(_make_issue(labels=["subtask"])) is False
+        # Subtask + huge body → still excluded (body-size heuristic must not fire)
+        assert is_epic(_make_issue(body="x" * 5000, labels=[{"name": "subtask"}])) is False
+        # Subtask + checklist → still excluded
+        body = "\n".join(f"- [ ] task {i}" for i in range(10))
+        assert is_epic(_make_issue(body=body, labels=[{"name": "subtask"}])) is False
+
     def test_exact_epic_label(self):
         assert is_epic(_make_issue(labels=[{"name": "epic"}])) is True
 

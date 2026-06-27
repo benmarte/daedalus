@@ -169,6 +169,29 @@ def test_classify_blocked_variant_changes():
         check(f"changes phrase '{text[:40]}' → pm_route", result == iterate.PM_ROUTE)
 
 
+def test_classify_blocked_crash_markers():
+    """Crash/infrastructure markers → no action (empty string), not pm_route.
+
+    When the coding agent dies at startup or crashes, PM routing cannot fix it.
+    classify_blocked must return '' so the human is notified, not an infinite
+    pm_route loop that keeps spawning PM cards.
+    """
+    crash_texts = (
+        "coding-agent-failed: command exited with non-zero status",
+        "permission-error: API key invalid",
+        "agent died: coding_agent_died unexpectedly",
+        "agent crash: coding_agent_timeout after 300s",
+        "subprocess exited with code 137",
+        "agent crash during initialization",
+    )
+    for text in crash_texts:
+        result = iterate.classify_blocked("developer-daedalus", text, ci_green=False)
+        check(
+            f"crash marker '{text[:50]}' → no-op (not pm_route)",
+            result == "",
+        )
+
+
 # ── _parse_handoff ───────────────────────────────────────────────────────────
 
 
