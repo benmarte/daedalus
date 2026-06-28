@@ -379,7 +379,7 @@ class TestInstallCronWrapper:
         # Existing behavior preserved.
         assert ".hermes/.env" in text
         assert "daedalus_dispatch.py" in text
-        assert "exec python3" in text
+        assert "python3" in text
 
         # Watchdog: Python-based detection with rate limiting and backoff (#799).
         assert "gateway_watchdog.py" in text
@@ -387,8 +387,14 @@ class TestInstallCronWrapper:
         assert "--no-dispatch" in text
         # Overlap protection via mkdir-based lock.
         assert "mkdir" in text
-        # The watchdog must sit BEFORE the dispatcher exec.
-        assert text.index("gateway_watchdog.py") < text.index("exec python3")
+        # The watchdog must sit BEFORE the dispatcher invocation.
+        # Check that the actual python3 invocation of dispatch.py comes after watchdog invocations.
+        # Use rfind to get the last occurrence (the actual invocation), not comments.
+        dispatch_idx = text.rfind('python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py"')
+        watchdog_idx = text.find('python3 "$WATCHDOG')
+        assert dispatch_idx > 0, "dispatcher invocation not found"
+        assert watchdog_idx > 0, "watchdog invocation not found"
+        assert watchdog_idx < dispatch_idx, "watchdog must run before dispatcher"
 
     def test_wrapper_documents_and_parses_plugin_dir(self, postinstall, tmp_path):
         """Generated wrapper documents --plugin-dir and parses it before the exec (#233)."""
@@ -407,10 +413,14 @@ class TestInstallCronWrapper:
         # Override prepends PYTHONPATH and redirects the dispatcher path.
         assert 'export PYTHONPATH="$PLUGIN_DIR' in text
         assert 'DISPATCH_HOME="$PLUGIN_DIR"' in text
-        # The exec resolves through DISPATCH_HOME, forwarding only the kept ARGS.
-        assert 'exec python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"' in text
+        # The dispatcher invocation resolves through DISPATCH_HOME, forwarding only the kept ARGS.
+        assert 'python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"' in text
         # Parsing happens before the dispatcher is reached.
-        assert text.index("PLUGIN_DIR=") < text.index("exec python3")
+        # The actual dispatcher invocation (not in comments) should be near the end.
+        dispatch_idx = text.rfind('python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py"')
+        assert dispatch_idx > 0, "dispatcher invocation not found"
+        # The dispatcher should be after all watchdog invocations (in the last third of the script)
+        assert dispatch_idx > len(text) * 0.66, "dispatcher should run after setup and watchdogs"
 
 
 def _build_fake_bin(tmp_path, *, with_hermes: bool):

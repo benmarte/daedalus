@@ -172,11 +172,11 @@ def _install_cron_wrapper() -> tuple[bool, str]:
         "fi\n"
         "# ---------------------------------------------------------------------------\n"
         "\n"
-        "# Combined EXIT trap to clean up BOTH watchdog locks\n"
+        "# Combined EXIT trap ensures both lock dirs are removed on script exit\n"
         'trap \'rmdir "$WATCHDOG_HTTP_LOCK" 2>/dev/null; rmdir "$WATCHDOG_LOCK" 2>/dev/null\' EXIT\n'
-        "# ---------------------------------------------------------------------------\n"
         "\n"
-        'exec python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"\n'
+        "# Run dispatcher (no exec — bash must stay alive to fire the EXIT trap)\n"
+        'python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"\n'
     )
 
     try:
