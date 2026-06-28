@@ -123,10 +123,36 @@ def _label_names(labels: Any) -> List[str]:
     return out
 
 
-def is_epic(issue: Any) -> bool:
-    """Return True if ``issue`` looks epic-sized per the heuristics above."""
+def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True if ``issue`` looks epic-sized per the heuristics above.
+    
+    When ``epic_config`` is provided (from execution.epic_detection), its values
+    override the defaults. Otherwise uses _EPIC_CHECKLIST_MIN and _EPIC_BODY_SIZE_MIN.
+    
+    The config can disable epic detection entirely by setting ``enabled=False``.
+    """
     if issue is None:
         return False
+    
+    # Resolve thresholds from config or use constants
+    if epic_config:
+        # Check if epic detection is enabled (defaults to True)
+        enabled = epic_config.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
+        if not enabled:
+            return False
+        
+        min_checklist = int(epic_config.get("min_deliverables", 4))
+        min_body_size = int(epic_config.get("size_threshold", 2000))
+        epic_label = str(epic_config.get("epic_label", "epic"))
+        child_label = str(epic_config.get("child_label", "subtask"))
+    else:
+        min_checklist = _EPIC_CHECKLIST_MIN
+        min_body_size = _EPIC_BODY_SIZE_MIN
+        epic_label = "epic"
+        child_label = "subtask"
+    
     # Accept both IssueSummary / dataclass and raw provider dict.
     if isinstance(issue, dict):
         body = issue.get("body") or ""
@@ -136,19 +162,19 @@ def is_epic(issue: Any) -> bool:
         labels = getattr(issue, "labels", None) or []
 
     # Sub-issues are never themselves epics — prevents infinite decomposition loops.
-    if "subtask" in {n.lower() for n in _label_names(labels)}:
+    if child_label in {n.lower() for n in _label_names(labels)}:
         return False
 
     # Heuristic 1: checklist density
-    if len(_CHECKLIST_LINE_RE.findall(body)) >= _EPIC_CHECKLIST_MIN:
+    if len(_CHECKLIST_LINE_RE.findall(body)) >= min_checklist:
         return True
 
-    # Heuristic 2: "epic" label (exact, case-insensitive)
-    if any(name.lower() == "epic" for name in _label_names(labels)):
+    # Heuristic 2: epic label (exact, case-insensitive)
+    if any(name.lower() == epic_label for name in _label_names(labels)):
         return True
 
     # Heuristic 3: body size
-    if len(body) >= _EPIC_BODY_SIZE_MIN:
+    if len(body) >= min_body_size:
         return True
 
     return False
