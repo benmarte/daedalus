@@ -3853,6 +3853,129 @@ def _resolve_repo_from_cwd() -> Optional[str]:
     return None
 
 
+# ── Dispatch history (issue #235) ───────────────────────────────────────────
+# Each tick's summary dict is printed to logs but not persisted, so there is no
+# way to audit recent throughput without tailing logs. We append every tick's
+# summary (plus a UTC timestamp + project name) as a JSON line to a rotating
+# history log, and expose ``--history`` to print the last N entries as a table.
+
+_HISTORY_MAX_LINES = 1000
+
+# Columns rendered by ``--history``, in order: (summary key, header). List-valued
+# fields are shown as counts; scalars verbatim. ``timestamp``/``project`` are the
+# two fields _append_history injects ahead of the summary dict.
+_HISTORY_COLUMNS = (
+    ("timestamp", "TIMESTAMP"),
+    ("project", "PROJECT"),
+    ("mode", "MODE"),
+    ("issues_seen", "ISSUES"),
+    ("created", "CREATED"),
+    ("reconciled", "RECON"),
+    ("completed", "DONE"),
+    ("advance_prs", "PRS"),
+    ("spec_created", "SPEC"),
+    ("blocked", "BLOCKED"),
+    ("error", "ERROR"),
+)
+
+
+def _history_path() -> Path:
+    """Absolute path to the rotating dispatch-history log.
+
+    Always under the installed plugin dir (``~/.hermes/plugins/daedalus/``) so the
+    log is stable regardless of whether the script runs in-place or from the
+    Hermes-copied location.
+    """
+    return Path.home() / ".hermes" / "plugins" / "daedalus" / "history.jsonl"
+
+
+def _append_history(summary: Dict[str, Any], *, project: str = "",
+                    path: Optional[Path] = None,
+                    timestamp: Optional[str] = None) -> None:
+    """Append one dispatch-tick summary as a JSON line, capped at the line limit.
+
+    The record is the ``summary`` dict prefixed with a UTC ``timestamp`` (ISO-8601)
+    and the ``project`` name, so ``--history`` can show recent throughput without
+    tailing logs (issue #235). When the file exceeds :data:`_HISTORY_MAX_LINES`
+    the oldest lines are rotated out. Writes atomically (temp + replace) and never
+    raises — history is best-effort auditing and must never break a dispatch tick.
+    """
+    p = path or _history_path()
+    record: Dict[str, Any] = {
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat()
+    }
+    if project:
+        record["project"] = project
+    record.update(summary)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()] \
+            if p.exists() else []
+        lines.append(json.dumps(record, default=str))
+        if len(lines) > _HISTORY_MAX_LINES:
+            lines = lines[-_HISTORY_MAX_LINES:]
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:  # noqa: BLE001 — auditing must never break dispatch
+        logger.warning("dispatch: could not append history to %s: %s", p, e)
+
+
+def _read_history(n: int = 10, *, path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Return the last ``n`` parsed history records (oldest→newest).
+
+    Returns ``[]`` when the log is absent. Unparseable lines are skipped so a
+    partially-corrupt log still yields its readable entries. ``n <= 0`` returns
+    every record.
+    """
+    p = path or _history_path()
+    if not p.exists():
+        return []
+    try:
+        lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError as e:
+        logger.warning("dispatch: could not read history from %s: %s", p, e)
+        return []
+    selected = lines[-n:] if n > 0 else lines
+    out: List[Dict[str, Any]] = []
+    for line in selected:
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def _history_cell(value: Any) -> str:
+    """Render one summary field for the table: lists → counts, None → empty."""
+    if isinstance(value, list):
+        return str(len(value))
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _format_history(records: List[Dict[str, Any]]) -> str:
+    """Render history records as a fixed-width, human-readable table."""
+    if not records:
+        return "No dispatch history yet."
+    headers = [h for _, h in _HISTORY_COLUMNS]
+    rows = [[_history_cell(r.get(key)) for key, _ in _HISTORY_COLUMNS] for r in records]
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def _fmt(cols: List[str]) -> str:
+        return "  ".join(c.ljust(widths[i]) for i, c in enumerate(cols))
+
+    lines = [_fmt(headers), _fmt(["-" * w for w in widths])]
+    lines.extend(_fmt(row) for row in rows)
+    return "\n".join(lines)
+
+
 def main() -> int:
     """Cron / single-repo entrypoint.
 
@@ -3879,7 +4002,16 @@ def main() -> int:
                         help="Log intended actions without mutating anything.")
     parser.add_argument("--repo", type=str, default=None,
                         help="Run dispatch for a single repo path (skips the registry sweep).")
+    parser.add_argument("--history", nargs="?", const=10, type=int, default=None,
+                        metavar="N",
+                        help="Print the last N dispatch-history entries (default 10) and exit.")
     args = parser.parse_args()
+
+    # --history is a read-only report: print and exit before any dispatch work.
+    if args.history is not None:
+        n = args.history if args.history and args.history > 0 else 10
+        print(_format_history(_read_history(n)))
+        return 0
 
     dry_run = args.dry_run
     if dry_run:
@@ -3920,6 +4052,8 @@ def main() -> int:
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
+        if not dry_run:
+            _append_history(summaries[name], project=name)
         if _notify_project_summary(name, summaries[name], resolved, dry_run=dry_run):
             return 0
         try:
@@ -3957,6 +4091,8 @@ def main() -> int:
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
+        if not dry_run:
+            _append_history(summaries[name], project=name)
 
     # Projects with cron.notifications self-deliver their summary (multi-target,
     # any platform); the rest flow through stdout, which the no-agent cron
