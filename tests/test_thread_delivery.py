@@ -188,6 +188,93 @@ def test_select_comments_handles_provider_errors():
     check("provider error degrades to empty", got == [])
 
 
+
+# ── broadcast_thread_reply ─────────────────────────────────────────────────────
+
+
+class FakeSendWithBroadcast:
+    """Records (target, body, thread_id, broadcast) calls."""
+
+    def __init__(self, *, ok=True, anchor="ts-root"):
+        self.ok = ok
+        self.anchor = anchor
+        self.calls = []
+
+    def __call__(self, target, body, thread_id, broadcast=False):
+        self.calls.append((target, body, thread_id, broadcast))
+        if thread_id is not None:
+            return (self.ok, None)
+        return (self.ok, self.anchor if self.ok else None)
+
+
+def test_broadcast_propagated_to_send(tmp_path):
+    """broadcast_thread_reply=True passes broadcast=True to send on reply."""
+    wd = str(tmp_path)
+    send = FakeSendWithBroadcast()
+    res = thread_delivery.deliver_event(
+        wd, 1, "slack:C1", "root", "root", send=send,
+    )
+    check("root stored", dispatch_state.get_thread_anchor(wd, 1, "slack:C1") == "ts-root")
+    send.calls.clear()
+    res = thread_delivery.deliver_event(
+        wd, 1, "slack:C1", "reply", "evt1",
+        send=send, broadcast_thread_reply=True,
+    )
+    check("reply sent", res == "sent")
+    check("broadcast=True on reply",
+          send.calls[0] == ("slack:C1", "reply", "ts-root", True))
+
+
+def test_broadcast_false_omits_flag(tmp_path):
+    """broadcast_thread_reply=False (default) keeps broadcast=False on reply."""
+    wd = str(tmp_path)
+    send = FakeSendWithBroadcast()
+    thread_delivery.deliver_event(wd, 1, "slack:C1", "root", "root", send=send)
+    send.calls.clear()
+    res = thread_delivery.deliver_event(
+        wd, 1, "slack:C1", "reply", "evt1", send=send, broadcast_thread_reply=False,
+    )
+    check("reply sent", res == "sent")
+    check("broadcast=False on opt-out",
+          send.calls[0] == ("slack:C1", "reply", "ts-root", False))
+
+
+def test_broadcast_never_applied_to_root(tmp_path):
+    """Broadcast flag is NEVER applied to root posts (only replies)."""
+    wd = str(tmp_path)
+    send = FakeSendWithBroadcast()
+    res = thread_delivery.deliver_event(
+        wd, 1, "slack:C1", "first", "root", send=send, broadcast_thread_reply=True,
+    )
+    check("root sent", res == "sent")
+    check("broadcast=False on root even when opted in",
+          send.calls[0] == ("slack:C1", "first", None, False))
+
+
+def test_broadcast_legacy_3arg_send_unchanged(tmp_path):
+    """Legacy 3-arg send callables (no broadcast param) still work unchanged.
+
+    The thread_delivery module introspects the callable's signature and only
+    passes broadcast when the callable accepts it — backward compatible with
+    older test fakes and any external callers using the old 3-arg signature.
+    """
+    wd = str(tmp_path)
+    calls = []
+    def legacy_send(target, body, thread_id):
+        calls.append((target, body, thread_id))
+        return (True, "ts-root" if thread_id is None else None)
+
+    res = thread_delivery.deliver_event(wd, 1, "slack:C1", "root", "root", send=legacy_send)
+    check("legacy root sent", res == "sent")
+    check("legacy root got 3 args", len(calls[0]) == 3)
+
+    res = thread_delivery.deliver_event(
+        wd, 1, "slack:C1", "reply", "evt1", send=legacy_send, broadcast_thread_reply=True,
+    )
+    check("legacy reply broadcast skipped silently", res == "sent")
+    check("legacy reply still 3 args", len(calls[1]) == 3)
+
+
 if __name__ == "__main__":
     import inspect
     import tempfile

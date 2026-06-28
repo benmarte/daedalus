@@ -557,8 +557,8 @@ def test_mirror_issue_threads_root_then_comment_reply(tmp_path):
     issue = {"number": 121, "title": "Slack threads"}
     sends = []
 
-    def fake_hermes(target, body, *, thread_id=None):
-        sends.append((target, body, thread_id))
+    def fake_hermes(target, body, *, thread_id=None, broadcast=False):
+        sends.append((target, body, thread_id, broadcast))
         return (True, "ts-root") if thread_id is None else (True, None)
 
     with mock.patch.object(disp, "_hermes_send", fake_hermes):

@@ -566,6 +566,20 @@ def _notify_targets(resolved: Dict[str, Any], event: str) -> List[str]:
     deliver = (cron.get("deliver") or "").strip()
     return [deliver] if deliver else []
 
+def _get_target_broadcast(target: str, resolved: Dict[str, Any]) -> bool:
+    '''Get broadcast_thread_reply setting for a specific target.
+    
+    Searches cron.notifications for an entry with matching target and returns
+    its thread_broadcast value (defaulting to True if not specified).
+    '''
+    cron = resolved.get("cron") or {}
+    notifications = cron.get("notifications") or []
+    for entry in notifications:
+        if entry.get("target") == target:
+            return entry.get("thread_broadcast", True)
+    return True  # Default to broadcasting if nothing configured
+
+
 
 
 def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -3451,13 +3465,22 @@ def _human_summary(summaries: Dict[str, Dict[str, Any]], dry_run: bool = False,
 # ── Slack delivery (dispatcher context, NOT agent) ──────────────────────────
 
 
-def _hermes_send(notify_target: str, report_body: str,
-                 *, thread_id: Optional[str] = None) -> tuple[bool, Optional[str]]:
+def _hermes_send(
+    notify_target: str,
+    report_body: str,
+    *,
+    thread_id: Optional[str] = None,
+    broadcast: Optional[bool] = None,
+) -> tuple[bool, Optional[str]]:
     """Send ``report_body`` via ``hermes send`` from the dispatcher's root context.
 
     Runs ``hermes send -t <target> --file <tmpfile> --json`` (list-args, no
     shell) and parses the JSON result. When *thread_id* is given the message is
     posted as a thread reply (target becomes ``<target>:<thread_id>``).
+
+    When *broadcast* is True and *thread_id* is set, also post the message as a
+    root message to the channel feed (Slack reply_broadcast behavior). This is
+    handled by making a second call to _hermes_send without thread_id.
 
     Returns ``(ok, anchor)`` where *anchor* is the posted message's thread anchor
     (Slack ``thread_ts`` / Discord ``message_id``) reported by the platform
@@ -3471,6 +3494,7 @@ def _hermes_send(notify_target: str, report_body: str,
 
     target = f"{notify_target}:{thread_id}" if thread_id else notify_target
     tmp = None
+    broadcast_tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                          encoding="utf-8") as tf:
@@ -3480,6 +3504,33 @@ def _hermes_send(notify_target: str, report_body: str,
             ["hermes", "send", "-t", target, "--file", tmp, "--json"],
             capture_output=True, text=True, timeout=30,
         )
+
+        # Broadcast: post as root message to channel feed when broadcast=True
+        # and this is a thread reply. This makes the reply visible in the
+        # channel even if users don't expand the thread (Slack reply_broadcast
+        # equivalent).
+        if broadcast and thread_id:
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                                 encoding="utf-8") as bf:
+                    bf.write(report_body)
+                    broadcast_tmp = bf.name
+                # Post to channel root (no thread_id)
+                channel_target = notify_target
+                subprocess.run(
+                    ["hermes", "send", "-t", channel_target, "--file", broadcast_tmp, "--json"],
+                    capture_output=True, text=True, timeout=30,
+                )
+            except Exception as e:
+                # Broadcast failure is non-fatal, just log it
+                pass
+            finally:
+                if broadcast_tmp:
+                    try:
+                        os.unlink(broadcast_tmp)
+                    except OSError:
+                        pass
+
         if r.returncode != 0:
             logger.warning(
                 "dispatch: hermes send to %s failed (rc=%s): %s",
@@ -3562,14 +3613,18 @@ def _mirror_issue_threads(
 
     sent = 0
 
-    def sender(target: str, body: str, thread_id: Optional[str]):
-        return _hermes_send(target, body, thread_id=thread_id)
-
     for target in targets:
+        # Get broadcast setting for this target
+        broadcast_reply = _get_target_broadcast(target, resolved)
+        
+        def sender(target: str, body: str, thread_id: Optional[str], broadcast=False):
+            return _hermes_send(target, body, thread_id=thread_id, broadcast=broadcast)
+        
         for event_key, body in events:
             result = thread_delivery.deliver_event(
                 workdir, n, target, body, event_key,
                 send=sender, dry_run=dry_run,
+                broadcast_thread_reply=broadcast_reply,
             )
             if result == "sent":
                 sent += 1
