@@ -861,6 +861,31 @@ _CHECKLIST_RE = re.compile(r"^\s*[-*+]\s*\[[ xX]\]\s*(.+)", re.MULTILINE)
 _MAX_SUB_ISSUES = 10
 _DECOMPOSE_MARKER_PREFIX = "<!-- daedalus:sub-issues:"
 
+# Idempotency marker regex: matches any variation like
+#   <!-- daedalus:decomposed:123456789 -->
+#   <!--daedalus:decomposed:...-->
+#   <!--  daedalus:decomposed:...  -->
+# The marker is posted as an HTML comment on the parent issue body or a comment.
+_DECOMPOSED_MARKER_RE = re.compile(
+    r"<!--\s*daedalus:decomposed(?::\d+)?\s*-->", re.IGNORECASE
+)
+
+
+def has_decomposed_marker(text: Optional[str]) -> bool:
+    """Return True if *text* contains the ``<!-- daedalus:decomposed:... -->`` marker.
+
+    The marker is an idempotency signal: once present on a parent epic (body or
+    a posted comment), re-running the dispatcher must skip decomposition entirely
+    and create zero sub-issues. Detection is tolerant of whitespace variations
+    and optional Unix-timestamp suffix.
+    """
+    if not text:
+        return False
+    # Fast path: substring presence before regex (cheap check)
+    if "daedalus:decomposed" not in text.lower():
+        return False
+    return bool(_DECOMPOSED_MARKER_RE.search(text))
+
 
 def _extract_sub_issues_from_body(body: str) -> List[str]:
     """Return checklist item texts from an epic body (capped at _MAX_SUB_ISSUES)."""
@@ -924,12 +949,20 @@ def _execute_planner_decompose(
         for lbl in (parent_dict.get("labels") or [])
     ]
 
-    # Idempotency: skip if marker already posted
+    # Idempotency: skip if any marker already posted in body or comments.
+    # Two marker variants are checked (legacy and new):
+    #   - <!-- daedalus:sub-issues:[...] -->  (legacy — only in comments)
+    #   - <!-- daedalus:decomposed[:timestamp] -->  (new — in body OR comments)
+    if has_decomposed_marker(parent_body):
+        logger.info("iterate: planner_decompose #%s — already decomposed (body marker), skipping", parent_n)
+        kanban.complete(slug, tid, summary=f"Already decomposed epic #{parent_n}")
+        return True
+
     existing_comments = provider.get_issue_comments(parent_n) or []
     for c in existing_comments:
         body = c.get("body") or "" if isinstance(c, dict) else getattr(c, "body", "")
-        if _DECOMPOSE_MARKER_PREFIX in body:
-            logger.info("iterate: planner_decompose #%s — already decomposed, skipping", parent_n)
+        if has_decomposed_marker(body) or _DECOMPOSE_MARKER_PREFIX in body:
+            logger.info("iterate: planner_decompose #%s — already decomposed (comment marker), skipping", parent_n)
             kanban.complete(slug, tid, summary=f"Already decomposed epic #{parent_n}")
             return True
 
