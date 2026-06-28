@@ -163,7 +163,8 @@ def _make_kanban_stub():
 def test_integration_source_available_creates_file_specific_subissues(
     workdir_with_source_files,
 ):
-    """Scenario A: Real source files exist — sub-issues contain file-specific context."""
+    """Scenario A: Real source files exist — sub-issues reference the affected files
+    (paths/symbols) but must NOT embed raw source contents in the body (issue #899)."""
     # Parent issue with checklist referencing specific files
     parent_body = (
         "- [ ] Fix login bug in src/auth/login.py\n"
@@ -195,29 +196,34 @@ def test_integration_source_available_creates_file_specific_subissues(
         f"Expected 2 sub-issues, got {len(provider._create_calls)}"
     )
 
-    # Verify first sub-issue (login.py) has file-specific content
+    # Verify first sub-issue (login.py) references the affected file by path...
     first_title, first_body, first_labels = provider._create_calls[0]
     assert "src/auth/login.py" in first_body, (
         f"First sub-issue should reference src/auth/login.py: {first_body[:200]}"
     )
-    assert "## Relevant Source Context" in first_body, (
-        "First sub-issue should contain source context section"
+    # ...but must NOT embed the raw source-context block or file contents (#899).
+    assert "## Relevant Source Context" not in first_body, (
+        "First sub-issue body must not embed the raw source-context block (#899)"
     )
-    # The actual file content should be embedded
-    assert "def handle_login" in first_body, (
-        "First sub-issue should contain the actual source code from login.py"
+    assert "def handle_login" not in first_body, (
+        "First sub-issue body must not embed raw source code from login.py (#899)"
     )
 
-    # Verify second sub-issue (users.py) has file-specific content
+    # Verify second sub-issue (users.py): file referenced, contents excluded.
     second_title, second_body, second_labels = provider._create_calls[1]
     assert "src/api/users.py" in second_body, (
         f"Second sub-issue should reference src/api/users.py: {second_body[:200]}"
     )
-    assert "## Relevant Source Context" in second_body, (
-        "Second sub-issue should contain source context section"
+    assert "## Relevant Source Context" not in second_body, (
+        "Second sub-issue body must not embed the raw source-context block (#899)"
     )
-    assert "def get_user" in second_body, (
-        "Second sub-issue should contain the actual source code from users.py"
+    assert "def get_user" not in second_body, (
+        "Second sub-issue body must not embed raw source code from users.py (#899)"
+    )
+
+    # Bodies must stay well under GitHub's 65,536-char hard limit (#899).
+    assert len(first_body) < 65_536 and len(second_body) < 65_536, (
+        "sub-issue bodies must stay under GitHub's 65,536-char body limit (#899)"
     )
 
     # Verify labels
@@ -589,3 +595,66 @@ def test_integration_epic_label_applied_to_parent(tmp_path):
     assert (44, "epic") in provider._labels_added, (
         f"Epic label should be applied to parent; got labels: {provider._labels_added}"
     )
+
+
+# ── Regression: issue #899 (body-too-long 422) ───────────────────────────────
+
+
+def test_integration_large_source_files_keep_sub_issue_bodies_under_github_limit(tmp_path):
+    """Regression for #899.
+
+    Previously, source-file contents (up to 10 files truncated to ~50 KB each)
+    were injected into every sub-issue body, blowing past GitHub's 65,536-char
+    limit and yielding ``422: body is too long``. The decomposed marker was still
+    posted, so the dispatcher gave up with 0 sub-issues and the epic was stranded.
+
+    With the fix, source files may still be analyzed for context, but their
+    contents are NOT written into the body — so bodies stay well under the limit.
+    """
+    # Large source files matching the checklist items by path.
+    src = tmp_path / "src"
+    src.mkdir()
+    big_login = "def handle_login():\n    " + ("x = 1  # padding\n    " * 4000)
+    big_users = "def get_user():\n    " + ("y = 2  # padding\n    " * 4000)
+    (src / "login.py").write_text(big_login)
+    (src / "users.py").write_text(big_users)
+    assert len(big_login) > 65_536  # the files alone would blow the limit
+
+    parent_body = (
+        "- [ ] Fix login flow in src/login.py\n"
+        "- [ ] Update users endpoint in src/users.py\n"
+    )
+    parent_issue = _FakeIssue(
+        number=899,
+        title="E2E regression epic",
+        body=parent_body,
+        labels=["epic"],
+    )
+    provider = _FakeProvider(parent_issue, created_numbers=[900, 901])
+
+    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+        ok = _execute_planner_decompose(
+            "test",
+            _make_card(issue_n=899, body=parent_body),
+            "test/repo",
+            "PLANNING COMPLETE",
+            workdir=str(tmp_path),
+            provider=provider,
+        )
+
+    assert ok is True
+    # Sub-issues actually got created (not silently dropped by a 422).
+    assert len(provider._create_calls) == 2, (
+        f"Expected 2 sub-issues, got {len(provider._create_calls)}"
+    )
+    for title, body, _labels in provider._create_calls:
+        assert len(body) < 65_536, (
+            f"sub-issue {title!r} body is {len(body)} chars — exceeds GitHub's "
+            "65,536-char limit (#899 regression)"
+        )
+        assert "## Relevant Source Context" not in body, (
+            f"sub-issue {title!r} body must not embed raw source context (#899)"
+        )
+        assert "padding" not in body, (
+            f"sub-issue {title!r} body must not embed raw source file contents (#899)"
+        )

@@ -1682,15 +1682,17 @@ def _execute_planner_decompose_inner(
         sub_titles = _default_sub_issue_titles(parent_n, parent_title)
         sub_scopes = [t.split(" — ", 1)[0] for t in sub_titles]
 
-    # Phase 4: source-file reading & context injection
+    # Phase 4: source-file analysis for decomposition planning.
+    # Source files are analyzed to derive per-sub-issue context (file paths and
+    # symbols), but their *contents* are deliberately NOT injected into sub-issue
+    # bodies: doing so blew past GitHub's 65,536-char body limit and produced a
+    # 422 "body is too long", silently stranding the epic (issue #899).  The
+    # concise affected-files/symbols metadata still flows into the body via
+    # `per_sub_contexts` below.
     # If reading fails or workdir is unavailable, fall back to Phase 3
     # behavior (template-only generation without analysis).
     global _source_reading_fallback_count
     full_issue_text = f"{parent_title}\n\n{parent_body}"
-    source_context = ""
-    file_contents: dict[str, str] = {}
-    file_metadata: dict[str, str] = {}
-    epic_agg: AggregateEpicContext | None = None
     per_sub_contexts: list[EpicContext] = []
     if workdir and Path(workdir).exists():
         try:
@@ -1699,13 +1701,13 @@ def _execute_planner_decompose_inner(
             per_sub_contexts = [extract_epic_context(item, known_components) for item in sub_scopes]
             epic_agg = _build_aggregate_context(sub_scopes, known_components)
 
-            rel_files, file_metadata = identify_relevant_files(full_issue_text, workdir, epic_context=epic_agg)
+            rel_files, _file_metadata = identify_relevant_files(full_issue_text, workdir, epic_context=epic_agg)
             if rel_files:
-                file_contents = read_source_files(rel_files, workdir)
-                source_context = build_sub_issue_context(file_contents)
+                analyzed = read_source_files(rel_files, workdir)
                 logger.info(
-                    "iterate: planner_decompose #%s — injected context from %d source files",
-                    parent_n, len(file_contents),
+                    "iterate: planner_decompose #%s — analyzed %d source files "
+                    "(contents NOT injected into sub-issue bodies, see #899)",
+                    parent_n, len(analyzed),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -1728,26 +1730,16 @@ def _execute_planner_decompose_inner(
     created_numbers: List[int] = []
     ready_numbers: List[int] = []
     for idx, (title, scope) in enumerate(zip(sub_titles, sub_scopes)):
-        # Per-sub-issue scoped context: filter full file_contents to files
-        # relevant only to this sub-issue's EpicContext.
         sub_ctx = per_sub_contexts[idx] if idx < len(per_sub_contexts) else EpicContext()
-        if file_contents and epic_agg is not None and any(
-            sub_ctx.file_paths or sub_ctx.identifiers or sub_ctx.dir_tags or sub_ctx.component_names
-        ):
-            filtered_contents = filter_context_for_sub(file_contents, sub_ctx, file_metadata)
-            scoped_context = build_sub_issue_context(filtered_contents)
-        else:
-            scoped_context = source_context
-
-        enhanced_scope = build_enhanced_scope(scope, scoped_context) if scoped_context else scope
         # Each sub-issue depends on all previously created sub-issues in this epic
         # (sequential tier ordering). The first sub-issue has empty depends_on and
         # is immediately actionable — labeled Ready below.
-        # Pass per-sub-issue file_paths and identifiers from epic context analysis
+        # The body carries only the concise checklist-derived scope plus the
+        # affected files/symbols metadata — NOT raw source contents (issue #899).
         sub_body = _sub_issue_body(
             parent_n,
             parent_title,
-            enhanced_scope,
+            scope,
             list(created_numbers),
             file_paths=sub_ctx.file_paths,
             identifiers=sub_ctx.identifiers,
