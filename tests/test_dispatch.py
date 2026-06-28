@@ -1524,6 +1524,134 @@ def test_get_task_summary_no_id_no_fallback():
     assert disp._get_task_summary({}, "slug") == ""
 
 
+# ── _check_confirmed_validators: STOP handler reachability (issue #115) ─────────
+
+
+def _make_done_validator_card(tid, summary, issue_number):
+    """Build a done validator card dict for testing."""
+    return {
+        "id": tid,
+        "assignee": "validator-daedalus",
+        "title": f"#validate: #{issue_number} Some issue",
+        "status": "done",
+        "summary": summary,
+        "latest_summary": summary,
+        "idempotency_key": "",
+    }
+
+
+def test_check_confirmed_validators_stop_reaches_dedicated_handler():
+    """stop: summaries must reach the dedicated handler (line 2101), auto-close the
+    issue, and NOT create a PM consultation card (that was the dead-code symptom).
+    """
+    done_card = _make_done_validator_card("t_val1", "STOP: duplicate issue", 501)
+    issue = {"number": 501, "title": "Test issue", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.return_value = [done_card]       # status="done" call
+    # second call: all-tasks scan for idempotency — none already handled
+    fake_kanban.list_tasks.side_effect = [[done_card], []]
+    fake_kanban.create_task.return_value = "t_stop_marker"  # idempotency marker task
+
+    provider = mock.Mock()
+    provider.close_issue.return_value = True
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {501: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=provider,
+        )
+
+    # Stop handler must actually call close_issue
+    provider.close_issue.assert_called_once_with(501)
+    # Issue number is in the triggered list
+    assert 501 in triggered, f"expected 501 in triggered, got {triggered}"
+    # Idempotency marker task was created (so future ticks don't re-close)
+    assert fake_kanban.create_task.call_count >= 1
+    # The marker task's idempotency key must start with the correct prefix
+    created_args = fake_kanban.create_task.call_args_list[0]
+    assert created_args.kwargs["idempotency_key"].startswith("validator-stop-closed-")
+
+
+def test_check_confirmed_validators_stop_idempotent_already_closed():
+    """A stop: whose idempotency marker already exists must NOT re-call close_issue,
+    but must still appear in triggered (so iteration bookkeeping stays consistent).
+    """
+    done_card = _make_done_validator_card("t_val2", "STOP: already fixed", 502)
+    marker = {
+        "id": "t_old_mark",
+        "idempotency_key": "validator-stop-closed-502",
+    }
+    issue = {"number": 502, "title": "Dup issue", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = [[done_card], [marker]]
+
+    provider = mock.Mock()
+    provider.close_issue.return_value = True  # would succeed but must not be called
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {502: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=provider,
+        )
+
+    provider.close_issue.assert_not_called()
+    assert 502 in triggered
+
+
+def test_check_confirmed_validators_blocked_still_creates_pm_consultation():
+    """Guard against regressing back: a blocked: summary must still create a PM
+    consultation task (regression safety net for the original handler).
+    """
+    done_card = _make_done_validator_card("t_val3", "BLOCKED: cannot reproduce", 503)
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.return_value = [done_card]
+    fake_kanban.create_task.return_value = "t_pm_consult"
+
+    # No provider — blocked handler doesn't need one
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    # Must create a PM consultation task
+    fake_kanban.create_task.assert_called_once()
+    call = fake_kanban.create_task.call_args
+    assert "consult:" in call.args[1] or "consult:" in call.kwargs.get("title", "")
+    assert 503 in triggered
+
+
+def test_check_confirmed_validators_stop_no_provider_skips_close():
+    """When provider is None, the stop: handler must log but not crash, skip
+    the close_issue call, and continue. The issue is NOT added to triggered
+    (graceful no-op when the dispatcher can't actually act).
+    """
+    done_card = _make_done_validator_card("t_val4", "STOP: cannot reproduce", 504)
+    issue = {"number": 504, "title": "Flaky issue", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = [[done_card], []]
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {504: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    # No crash, no close_issue, no marker task
+    assert not fake_kanban.create_task.called
+    # The no-provider path is a graceful no-op (issue NOT in triggered)
+    assert 504 not in triggered
+
+
 if __name__ == "__main__":
     print("Follow-up extraction tests")
     print("-" * 60)

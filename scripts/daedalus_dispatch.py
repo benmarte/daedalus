@@ -54,6 +54,7 @@ from core import sweeper  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core import thread_delivery  # noqa: E402
 from core.providers.base import ensure_closing_keyword, is_epic  # noqa: E402
+from core import tier_promotion  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
 from core.util import extract_issue_number  # noqa: E402
 
@@ -2073,10 +2074,10 @@ def _check_confirmed_validators(
             if summary.startswith("escalate:"):
                 # Security/harm escalation — existing human escalation path, skip silently.
                 continue
-            if summary.startswith("blocked:") or summary.startswith("stop:"):
-                # Validator couldn't proceed or it's a duplicate/already-fixed — PM consultation.
+            if summary.startswith("blocked:"):
+                # Validator couldn't proceed with a blocking issue — PM consultation.
                 issue_nt = issues_map.get(n_nr)
-                if issue_nt and summary.startswith("blocked:"):
+                if issue_nt:
                     if dry_run:
                         logger.info("[dry-run] validator BLOCKED #%s — would create PM consultation", n_nr)
                         triggered.append(n_nr)
@@ -2114,6 +2115,17 @@ def _check_confirmed_validators(
                         "dispatch: validator STOP #%s but no provider — cannot auto-close",
                         n_nr,
                     )
+                    continue
+                if dry_run:
+                    logger.info(
+                        "dispatch: [dry-run] would auto-close issue #%s (validator STOP)",
+                        n_nr,
+                    )
+                    triggered.append(n_nr)
+                    continue
+                # Check if issue is already closed before attempting to close
+                issue_state = provider.get_issue_state(n_nr) if hasattr(provider, 'get_issue_state') else "open"
+                if issue_state == "closed":
                     triggered.append(n_nr)
                     continue
                 if provider.close_issue(n_nr):
@@ -2131,8 +2143,8 @@ def _check_confirmed_validators(
                     )
                 else:
                     logger.warning(
-                        "dispatch: validator done with STOP:%s for #%s but close_issue failed",
-                        summary_raw[4:].strip(), n_nr,
+                        "dispatch: failed to close issue #%s (validator STOP) - will retry next tick",
+                        n_nr,
                     )
                 triggered.append(n_nr)
                 continue
@@ -3339,6 +3351,32 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # re-reporting on every tick when hermes kanban ls still returns done tasks.
         if closed_tasks:
             completed.append(n)
+
+    # ── Tier promotion: re-evaluate sub-issue Ready labels after merges ──────
+    # When sub-issues declare ``Depends on:`` dependencies (via the body convention),
+    # closure of a blocker should promote its dependents to Ready idempotently.
+    # Called after the completed list is fully populated so all just-closed issues
+    # participate in one pass. Never raises — logs and records errors in the result.
+    if completed and not dry_run:
+        try:
+            promo_result = tier_promotion.promote_waiting_tiers(provider, list(completed))
+            if promo_result.promoted:
+                logger.info(
+                    "tier promotion: promoted %d issue(s) to Ready: %s",
+                    len(promo_result.promoted), promo_result.promoted,
+                )
+            if promo_result.errors:
+                logger.warning(
+                    "tier promotion: encountered %d error(s): %s",
+                    len(promo_result.errors), promo_result.errors,
+                )
+            if promo_result.cycles:
+                logger.warning(
+                    "tier promotion: detected %d cycle(s) in dependency graph: %s",
+                    len(promo_result.cycles), promo_result.cycles,
+                )
+        except Exception as e:
+            logger.error("tier promotion crashed unexpectedly: %s", e)
 
     summary = {"board": slug, "mode": provider.name, "created": created, "reconciled": reconciled,
                "completed": completed, "advance_prs": advance_prs,
