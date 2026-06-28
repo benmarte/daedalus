@@ -262,6 +262,7 @@ class FakeProvider:
         get_issue_failures: int = 0,
         closed_issues: Optional[set[int]] = None,
         close_issue_fail_for: Optional[set[int]] = None,
+        post_issue_comment_fail_for: Optional[set[int]] = None,
     ) -> None:
         self.name = name
         self._ci = ci_status
@@ -279,6 +280,7 @@ class FakeProvider:
         self.close_calls: List[int] = []
         self._closed_issues: set[int] = set(closed_issues or [])
         self._close_issue_fail_for: set[int] = set(close_issue_fail_for or [])
+        self._post_comment_fail_for: set[int] = set(post_issue_comment_fail_for or [])
 
     def get_pr_ci_status(self, pr_number: int) -> str:
         if isinstance(self._ci, dict):
@@ -306,6 +308,8 @@ class FakeProvider:
 
     def post_issue_comment(self, issue_number: int, body: str) -> bool:
         self.posted_issue_comments.append((issue_number, body))
+        if issue_number in self._post_comment_fail_for:
+            return False
         return True
 
     def post_pr_comment(self, pr_number: int, body: str) -> bool:

@@ -256,3 +256,88 @@ class TestNonStopDoesNotCloseIssue:
         assert 52 not in triggered
         assert provider.close_calls == []
         assert fake_kanban.created_with_key("validator-stop-closed-52") is None
+
+
+class TestStopAutoCloseComment:
+    """Verify that STOP: validator posts an explanatory comment when auto-closing."""
+
+    def test_stop_post_issue_comment_success(self, disp, fake_kanban, monkeypatch):
+        _seed_tasks(fake_kanban, [
+            {"assignee": VALIDATOR, "status": "done",
+             "title": "#72 already fixed", "summary": "STOP: already fixed in abc123"},
+        ])
+        monkeypatch.setattr(disp, "kanban", fake_kanban)
+        provider = FakeProvider()
+
+        triggered = _call(disp, fake_kanban, {72: _issue(72)}, provider=provider)
+
+        assert 72 in triggered
+        comments = provider.posted_issue_comments
+        assert len(comments) == 1, f"Expected 1 comment, got {len(comments)}"
+        assert comments[0][0] == 72
+        body = comments[0][1]
+        assert "Auto-closed by STOP:" in body, f"Comment missing auto-close marker: {body[:80]}"
+        assert "already fixed" in body.lower(), f"Comment missing reason: {body[:80]}"
+
+
+    def test_stop_post_issue_comment_failure(self, disp, fake_kanban, monkeypatch, caplog):
+        """If post_issue_comment returns False, close_issue still succeeds and
+        the marker task is still created (no crash)."""
+        _seed_tasks(fake_kanban, [
+            {"assignee": VALIDATOR, "status": "done",
+             "title": "#73 duplicate", "summary": "STOP: duplicate of #71"},
+        ])
+        monkeypatch.setattr(disp, "kanban", fake_kanban)
+        provider = FakeProvider(post_issue_comment_fail_for={73})
+
+        with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
+            triggered = _call(disp, fake_kanban, {73: _issue(73)}, provider=provider)
+
+        assert 73 in triggered
+        assert 73 in provider.close_calls
+        # Comment attempt was made (and False returned), so still in posted list
+        assert len(provider.posted_issue_comments) == 1
+        # Warning should be logged about the comment failure
+        assert any(
+            r.levelname == "WARNING" and "comment" in r.getMessage().lower() and "73" in r.getMessage()
+            for r in caplog.records
+        ), "Should log warning when post_issue_comment fails"
+        # Marker task still created despite comment failure
+        assert fake_kanban.created_with_key("validator-stop-closed-73") is not None
+
+
+    def test_stop_no_comment_when_already_closed(self, disp, fake_kanban, monkeypatch):
+        """If issue is already closed, skip both close_issue and comment."""
+        _seed_tasks(fake_kanban, [
+            {"assignee": VALIDATOR, "status": "done",
+             "title": "#74 already closed", "summary": "STOP: cannot reproduce"},
+        ])
+        monkeypatch.setattr(disp, "kanban", fake_kanban)
+        provider = FakeProvider(closed_issues={74})
+
+        triggered = _call(disp, fake_kanban, {74: _issue(74)}, provider=provider)
+
+        # close_issue short-circuits (already closed) — no actual API call
+        assert 74 not in provider.close_calls
+        # No comment posted either — the already-closed branch continues before reaching it
+        assert len(provider.posted_issue_comments) == 0
+        # Still in triggered, marker written
+        assert 74 in triggered
+        assert fake_kanban.created_with_key("validator-stop-closed-74") is not None
+
+
+    def test_stop_dry_run_no_close_or_comment(self, disp, fake_kanban, monkeypatch):
+        """Dry-run mode should not close issue or post comments."""
+        _seed_tasks(fake_kanban, [
+            {"assignee": VALIDATOR, "status": "done",
+             "title": "#75 duplicate", "summary": "STOP: duplicate of #70"},
+        ])
+        monkeypatch.setattr(disp, "kanban", fake_kanban)
+        provider = FakeProvider()
+
+        triggered = _call(disp, fake_kanban, {75: _issue(75)}, provider=provider, dry_run=True)
+
+        assert 75 in triggered
+        assert 75 not in provider.close_calls
+        assert len(provider.posted_issue_comments) == 0
+        assert fake_kanban.created_with_key("validator-stop-closed-75") is None
