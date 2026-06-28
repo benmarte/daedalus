@@ -153,13 +153,31 @@ This SOUL is consumed by the `reviewer-daedalus` branch of `classify_blocked()` 
 
 | Block reason substring | Dispatcher action |
 |---|---|
-| `approved` (e.g. `review-approved: PR #N`) | `APPROVE_ADVANCE` — advances pipeline |
-| `changes-requested` or `changes requested` (e.g. `review-changes-requested: <reason>`) | `PM_ROUTE` — PM re-routes to developer for fix |
+| Any approve synonym (see below) | `APPROVE_ADVANCE` — advances pipeline |
+| Any change-request synonym (see below) | `PM_ROUTE` — PM re-routes to developer for fix |
 | `awaiting-fix: <card_id>` | silent no-op (a developer fix card is in flight; card auto-resumes when fix completes) |
 | (after 3 fix attempts) | `ESCALATE` — human review |
 | ANY OTHER PHRASING | `""` — **silent permanent stall** (no escalation, no recovery) |
 
-**Canonical forms you must emit:**
+**Full approve synonyms** (any one triggers `APPROVE_ADVANCE`, case-insensitive — authoritative list in `core/iterate.py:_parse_handoff`):
+- `approved` (e.g. `review-approved: PR #N`)
+- `sign-off`, `signoff`
+- `lgtm`
+- `looks good`
+- `no findings`
+- `pass`
+- `:+1:`
+
+**Full change-request synonyms** (any one triggers `PM_ROUTE`, case-insensitive):
+- `changes requested` (with space)
+- `changes-requested` (hyphenated)
+- `changes required`
+- `blocking findings`
+- `request changes`
+- `needs fixes`
+- `need fixes`
+
+**Canonical forms you should emit** (subset of above, for clarity and predictability):
 - Approval → `review-approved: PR #<n>` (contains `approved`)
 - Changes requested → `review-changes-requested: <reason>` (contains `changes-requested`)
 
