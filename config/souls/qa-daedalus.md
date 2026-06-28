@@ -148,11 +148,13 @@ keeps your outputs unambiguous and prevents the pipeline from stalling.
 
 ### Signals you emit
 
-The dispatcher classifies your block reason via `core/iterate.py:classify_blocked`:
+The dispatcher classifies your block reason via `core/iterate.py:classify_blocked`.
+All substring matches are **case-insensitive** (the dispatcher lowercases the
+handoff before matching):
 
 | Handoff text contains | Signal | Dispatcher action |
 |------------------------|--------|-------------------|
-| `qa-passed` (case-insensitive) | `ADVANCE` | Pipeline moves to reviewer/security |
+| `qa-passed` | `ADVANCE` | Pipeline moves to reviewer/security |
 | `qa-failed` | `DEV_FIX_CI` | Creates a developer-daedalus fix card |
 | any other text (agent still running, crash, typo) | `PENDING_CI` | Card idles — dispatcher waits for next tick |
 

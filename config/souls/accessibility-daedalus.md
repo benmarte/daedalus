@@ -180,7 +180,9 @@ emit an unexpected signal, the dispatcher responds automatically.
 
 ### Signals you emit
 
-The dispatcher classifies your handoff via `core/iterate.py:classify_blocked`:
+The dispatcher classifies your handoff via `core/iterate.py:classify_blocked`.
+All substring matches are **case-insensitive** (the dispatcher lowercases the
+handoff before matching):
 
 | Handoff text contains | Signal | Dispatcher action |
 |------------------------|--------|-------------------|
@@ -215,8 +217,11 @@ notices at 48 h.
    `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. Human must intervene.
 4. **Infrastructure failure** (agent crash, gateway death, permission error, or
    the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing
-   `coding_agent_timeout`) → no special-case handler for accessibility. Card stuck
-   in `PENDING_CI` until sweeper notices at 48 h.
+   `coding_agent_timeout`) → handoff matches a crash marker
+   (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
+   `coding_agent_timeout`, `exited with code`, `agent crash`). There is no
+   special-case handler for accessibility — a crash (including a timeout)
+   leaves the card stuck in `PENDING_CI` until the sweeper notices at 48 h.
 5. **Unrecognized signal** → falls to `PENDING_CI`, card idles until sweeper alerts.
 6. **`a11y-skipped` / `accessibility-na`** (no UI changes) → card should `complete`
    directly (not block). If you block instead, sweeper notices at 48 h.
