@@ -181,6 +181,15 @@ enters the validator pipeline independently. An idempotency marker comment
 re-creation on subsequent dispatcher ticks. The `epic` label is applied to the parent
 issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
 
+**Source file context injection.** When the dispatcher detects a planner task completion
+with the `PLANNING COMPLETE:` prefix (which triggers the decompose), the planner now reads
+up to 10 source files from the codebase (configurable via `planner.source_files.max_files`
+and `planner.source_files.max_bytes`) and injects their contents into the planner's task body.
+This gives the planner concrete context about existing implementations when scoping sub-issues.
+The dispatcher scans the repo's source tree and picks the most relevant files (config files,
+entry points, modules matching the epic's keywords). Sub-issue bodies always include an
+explicit `depends_on:` metadata line (even when empty), making tier-graph parsing consistent.
+
 ### Tier promotion: dependency-aware sub-issue Ready-gating
 
 Phase-3 sub-issues can declare `Depends on: #N` (or the planner emits `depends_on:` in its
