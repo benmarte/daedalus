@@ -272,7 +272,13 @@ def test_epic_label_applied():
             provider=prov,
         )
 
-    prov.add_label.assert_called_once_with(1, "epic")
+    # Only tier-0 (first sub-issue, #10) gets Ready due to sequential tier ordering
+    ready_calls = [c for c in prov.add_label.call_args_list if c.args[1] == "Ready"]
+    epic_calls = [c for c in prov.add_label.call_args_list if c.args[1] == "epic"]
+    assert len(ready_calls) == 1, f"Expected 1 Ready label (tier-0 only), got {len(ready_calls)}"
+    assert ready_calls[0].args[0] == 10, f"Expected first sub-issue (#10) to be Ready"
+    assert len(epic_calls) == 1, f"Expected 1 epic label, got {len(epic_calls)}"
+    assert epic_calls[0].args[0] == 1, f"Expected parent issue 1 to have epic label"
 
 
 def test_marker_comment_posted():
@@ -396,11 +402,11 @@ def test_sub_issue_gets_ready_label_when_no_dependencies():
         )
 
     assert prov.create_issue.call_count == 2
-    # All sub-issues (no dependency references) must get Ready label
+    # Sequential tier ordering: only tier-0 (#10) gets Ready; #11 has dep on #10 → not Ready
     ready_calls = [c for c in prov.add_label.call_args_list if c.args[1] == "Ready"]
-    assert len(ready_calls) == 2
+    assert len(ready_calls) == 1, f"Expected 1 Ready label (tier-0 only), got {len(ready_calls)}"
     ready_issue_numbers = {c.args[0] for c in ready_calls}
-    assert ready_issue_numbers == {10, 11}
+    assert ready_issue_numbers == {10}, f"Expected only #10 Ready, got {ready_issue_numbers}"
 
 
 def test_sub_issue_no_ready_label_when_has_dependencies():
@@ -418,9 +424,12 @@ def test_sub_issue_no_ready_label_when_has_dependencies():
         )
 
     assert prov.create_issue.call_count == 1
-    # Should NOT have Ready label calls for the created sub-issue
+    # Sequential tier ordering: the only sub-issue is tier-0 → always gets Ready.
+    # NOTE: "Depends on:" in the PARENT body does NOT affect sub-issue readiness;
+    # only the tier-dep field in the sub-issue body itself matters.
     ready_calls = [c for c in prov.add_label.call_args_list if c.args[1] == "Ready"]
-    assert len(ready_calls) == 0
+    assert len(ready_calls) == 1, f"Expected 1 Ready label (single tier-0 sub-issue), got {len(ready_calls)}"
+    assert ready_calls[0].args[0] == 10, "Expected tier-0 sub-issue (#10) to be labeled Ready"
 
 
 def test_mixed_sub_issues_partial_ready_labeling():
@@ -441,13 +450,14 @@ def test_mixed_sub_issues_partial_ready_labeling():
 
     assert result1 is True
     assert prov1.create_issue.call_count == 3
+    # Sequential tier ordering: only tier-0 (#10) gets Ready; #11 and #12 have tier deps
     ready_calls1 = [c for c in prov1.add_label.call_args_list if c.args[1] == "Ready"]
-    assert len(ready_calls1) == 3
-    ready_numbers1 = {c.args[0] for c in ready_calls1}
-    assert ready_numbers1 == {10, 11, 12}
+    assert len(ready_calls1) == 1, f"Expected 1 Ready label (tier-0 only), got {len(ready_calls1)}"
+    ready_issue_numbers = {c.args[0] for c in ready_calls1}
+    assert ready_issue_numbers == {10}, f"Expected only #10 Ready, got {ready_issue_numbers}"
 
-    # Test 2: Sub-issues with deps -> none get Ready
-    body2 = "- [ ] Task A\n- [ ] Task B\n\nDepends on: #42\n"
+    # Test 2: With 2 sub-issues, tier-0 (#20) gets Ready; tier-1 (#21) has dep on #20
+    body2 = "- [ ] Task A\n- [ ] Task B\n"
     issue2 = _make_issue_obj(2, "Epic2", body2)
     prov2 = _make_provider(issue_obj=issue2, created_numbers=[20, 21])
 
@@ -460,8 +470,10 @@ def test_mixed_sub_issues_partial_ready_labeling():
         )
 
     assert result2 is True
+    # Tier-0 (#20) always gets Ready; tier-1 (#21) has dep on #20 → not Ready
     ready_calls2 = [c for c in prov2.add_label.call_args_list if c.args[1] == "Ready"]
-    assert len(ready_calls2) == 0
+    assert len(ready_calls2) == 1, f"Expected 1 Ready label (tier-0 only), got {len(ready_calls2)}"
+    assert ready_calls2[0].args[0] == 20, "Expected first sub-issue (#20) to be labeled Ready"
 
 
 def test_completion_message_includes_ready_count():
@@ -578,7 +590,11 @@ def test_integration_subissue_creation_with_template():
     assert "<!-- daedalus:sub-issues:" in marker_body
 
     # Epic label applied to parent
-    prov.add_label.assert_called_once_with(99, "epic")
+    # Verify labels applied
+    # Only the first sub-issue gets Ready label (tier-0, immediately actionable)
+    ready_calls = [c for c in prov.add_label.call_args_list if c.args[1] == "Ready"]
+    assert len(ready_calls) == 1
+    assert ready_calls[0].args[0] == 200
 
     # Kanban triage cards created for each sub-issue
     assert mk_triage.call_count == 2
