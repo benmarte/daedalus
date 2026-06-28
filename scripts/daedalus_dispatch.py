@@ -2265,10 +2265,32 @@ def _check_confirmed_validators(
                     triggered.append(n_nr)
                     continue
                 if provider.close_issue(n_nr):
+                    stop_reason = summary_raw[4:].strip()
                     logger.info(
                         "dispatch: validator done with STOP:%s for #%s — auto-closed issue",
-                        summary_raw[4:].strip(), n_nr,
+                        stop_reason, n_nr,
                     )
+                    # Post an explanatory comment on the closed issue so readers
+                    # understand why it was closed (issue #115).
+                    comment_body = (
+                        f"Auto-closed by STOP: validator — {stop_reason}\n\n"
+                        f"The validator determined this issue should not proceed "
+                        f"(duplicate / already fixed / cannot reproduce). "
+                        f"Reopen if this was a mistake."
+                    )
+                    try:
+                        if not provider.post_issue_comment(n_nr, comment_body):
+                            logger.warning(
+                                "dispatch: failed to post auto-close comment on #%s — "
+                                "issue closed but comment missing",
+                                n_nr,
+                            )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "dispatch: post_issue_comment #%s raised %s — "
+                            "issue closed but comment failed",
+                            n_nr, exc,
+                        )
                     # Mark as handled so we don't re-close on future dispatches.
                     kanban.create_task(
                         slug, f"validator-stop #{n_nr}",
