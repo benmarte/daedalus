@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -948,11 +949,233 @@ def _extract_keywords(text: str, max_keywords: int = 10) -> List[str]:
     return keywords
 
 
+# ── Phase 4b: epic-context-informed source reading ────────────────────────────
+
+
+@dataclass
+class EpicContext:
+    """Structured extraction of context signals from a single sub-issue scope."""
+    scope: str = ""
+    file_paths: list[str] = field(default_factory=list)
+    identifiers: list[str] = field(default_factory=list)
+    component_names: list[str] = field(default_factory=list)
+    dir_tags: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AggregateEpicContext:
+    """Aggregated context across all sub-issues in an epic."""
+    per_sub_issues: list[EpicContext] = field(default_factory=list)
+    all_file_paths: set[str] = field(default_factory=set)
+    all_identifiers: set[str] = field(default_factory=set)
+    all_component_names: set[str] = field(default_factory=set)
+    all_dir_tags: set[str] = field(default_factory=set)
+
+
+# Well-known directories for dir-tag extraction
+_KNOWN_DIRS = frozenset({"src", "lib", "app", "core", "tests", "scripts", "providers"})
+
+
+def extract_epic_context(
+    scope_text: str,
+    known_components: set[str] | None = None,
+) -> EpicContext:
+    """Extract structured context signals from a scope/checklist item.
+
+    Pure function — no filesystem access.
+
+    Args:
+        scope_text: Single sub-issue scope text.
+        known_components: Optional set of known component names.
+    """
+    scope_text = scope_text or ""
+    scope_lower = scope_text.lower()
+
+    # 1. File paths — reuse path_re regex
+    path_re = re.compile(
+        r"(?:^|(?<=\s)|(?<=[\"'`(]))"
+        r"([a-zA-Z0-9_][\w\-./]*[a-zA-Z0-9_\-]"
+        r"\.(?:py|js|ts|jsx|tsx|java|go|rs|rb|c|cpp|h|md|yaml|yml|json|toml|sh))"
+        r"(?:\b|$)"
+    )
+    file_paths: list[str] = []
+    for m in path_re.finditer(scope_text):
+        p = m.group(1)
+        if p not in file_paths:
+            file_paths.append(p)
+
+    # 2. Identifiers — def/class names mentioned
+    func_re = re.compile(r"\b(?:def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b")
+    identifiers: list[str] = []
+    for m in func_re.finditer(scope_text):
+        name = m.group(1)
+        if name not in identifiers:
+            identifiers.append(name)
+
+    # 3. Component names — cross-reference scope words against known_components
+    component_names: list[str] = []
+    if known_components:
+        words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]+\b", scope_text)
+        for w in words:
+            lw = w.lower()
+            if lw in {c.lower() for c in known_components} and lw not in component_names:
+                component_names.append(lw)
+
+    # 4. Dir tags — known directory names mentioned in scope
+    dir_tags: list[str] = []
+    for d in _KNOWN_DIRS:
+        if re.search(rf"\b{re.escape(d)}\b", scope_lower) and d not in dir_tags:
+            dir_tags.append(d)
+
+    # 5. Keywords — significant tokens via _extract_keywords
+    keywords = _extract_keywords(scope_text)
+
+    return EpicContext(
+        scope=scope_text,
+        file_paths=file_paths,
+        identifiers=identifiers,
+        component_names=component_names,
+        dir_tags=dir_tags,
+        keywords=keywords,
+    )
+
+
+def load_known_components(workdir: str) -> set[str]:
+    """Derive known component names from project structure.
+
+    Sources:
+    1. config/souls/*.md filenames — strip -daedalus.md
+    2. Top-level Python package dirs
+    3. core/*.py module basenames
+    """
+    components: set[str] = set()
+    try:
+        workdir_path = Path(workdir)
+        if not workdir_path.exists():
+            return components
+
+        # 1. SOUL profile names
+        souls_dir = workdir_path / "config" / "souls"
+        if souls_dir.exists() and souls_dir.is_dir():
+            for f in souls_dir.glob("*-daedalus.md"):
+                name = f.stem
+                if name.endswith("-daedalus"):
+                    components.add(name[: -len("-daedalus")])
+
+        # 2. Top-level package dirs
+        for entry in workdir_path.iterdir():
+            if entry.is_dir() and (entry / "__init__.py").exists():
+                components.add(entry.name)
+
+        # 3. core/*.py module basenames
+        core_dir = workdir_path / "core"
+        if core_dir.exists() and core_dir.is_dir():
+            for f in core_dir.glob("*.py"):
+                if f.stem != "__init__":
+                    components.add(f.stem)
+
+    except (OSError, ValueError) as exc:
+        logger.debug("load_known_components: failed to scan workdir %s: %s", workdir, exc)
+
+    return components
+
+
+def filter_context_for_sub(
+    file_contents: dict[str, str],
+    sub_context: EpicContext,
+    file_metadata: dict[str, str],
+) -> dict[str, str]:
+    """Filter file_contents to files relevant to this sub-issue.
+
+    A file is relevant if its path, directory, or content matches
+    sub_context signals. When no files match, returns all unchanged
+    (graceful degradation).
+    """
+    if not file_contents:
+        return file_contents
+
+    # If the sub-context has NO signals at all, return everything (graceful)
+    has_any_signal = (
+        sub_context.file_paths
+        or sub_context.identifiers
+        or sub_context.component_names
+        or sub_context.dir_tags
+    )
+    if not has_any_signal:
+        return file_contents
+
+    relevant: dict[str, str] = {}
+    for file_path, content in file_contents.items():
+        # Check signal match
+        if _file_matches_sub_context(file_path, content, sub_context):
+            relevant[file_path] = content
+
+    # Graceful degradation: if no match, return all
+    return relevant if relevant else file_contents
+
+
+def _file_matches_sub_context(
+    file_path: str,
+    content: str,
+    ctx: EpicContext,
+) -> bool:
+    """Return True when *file_path*/*content* match any sub-context signal."""
+    path_lower = file_path.lower()
+
+    # File path matches explicit paths mentioned
+    for p in ctx.file_paths:
+        if p.lower() in path_lower or path_lower.endswith(p.lower()):
+            return True
+
+    # Directory matches dir_tags
+    for d in ctx.dir_tags:
+        if f"/{d}/" in path_lower or path_lower.startswith(f"{d}/"):
+            return True
+
+    # Content contains identifiers
+    for ident in ctx.identifiers:
+        if ident in content:
+            return True
+
+    # Content contains component names
+    for comp in ctx.component_names:
+        if comp in content.lower():
+            return True
+
+    return False
+
+
+def _build_aggregate_context(
+    checklist_items: list[str],
+    known_components: set[str] | None = None,
+) -> AggregateEpicContext:
+    """Build AggregateEpicContext from per-checklist-item scopes."""
+    per_sub = [extract_epic_context(item, known_components) for item in checklist_items]
+    agg_file_paths: set[str] = set()
+    agg_identifiers: set[str] = set()
+    agg_component_names: set[str] = set()
+    agg_dir_tags: set[str] = set()
+    for ctx in per_sub:
+        agg_file_paths.update(ctx.file_paths)
+        agg_identifiers.update(ctx.identifiers)
+        agg_component_names.update(ctx.component_names)
+        agg_dir_tags.update(ctx.dir_tags)
+    return AggregateEpicContext(
+        per_sub_issues=per_sub,
+        all_file_paths=agg_file_paths,
+        all_identifiers=agg_identifiers,
+        all_component_names=agg_component_names,
+        all_dir_tags=agg_dir_tags,
+    )
+
+
 def identify_relevant_files(
     scope_text: str,
     workdir: str,
     max_files: int = 10,
     max_depth: int = 5,
+    epic_context: "AggregateEpicContext | None" = None,
 ) -> tuple[List[Path], dict]:
     """Identify source files in *workdir* relevant to *scope_text*.
 
@@ -982,6 +1205,44 @@ def identify_relevant_files(
         candidates.add(p)
         metadata[str(p)] = why
         return len(candidates) >= max_files
+
+    # ── Epic-context priority boost (Strategy 0) ─────────────────────────
+    # When an AggregateEpicContext is provided, files mentioned in its
+    # all_file_paths are added FIRST with the highest strategy tag, so they
+    # appear before scope-only matches. All aggregated identifiers are also
+    # grepped directly, giving the planner a wider signal window.
+    if epic_context is not None:
+        for p in sorted(epic_context.all_file_paths):
+            try:
+                fp = workdir_path / p
+                if fp.exists() and fp.is_file() and fp.resolve().is_relative_to(workdir_path.resolve()):
+                    if _add(fp, "epic_context:path"):
+                        break
+            except (OSError, ValueError):
+                continue
+        # Grep for aggregated identifiers directly (more precise than
+        # re-extracting from raw scope text).
+        if not (len(candidates) >= max_files):
+            import subprocess as _sp_agg
+            for ident in sorted(epic_context.all_identifiers):
+                try:
+                    res = _sp_agg.run(
+                        ["grep", "-rl", f"--include=*.py", "-e", f"def {ident}", "-e", f"class {ident}", workdir],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                except (_sp_agg.SubprocessError, _sp_agg.TimeoutExpired, OSError):
+                    continue
+                if res.returncode == 0:
+                    for line in res.stdout.splitlines():
+                        fp = Path(line.strip())
+                        try:
+                            if fp.exists() and fp.resolve().is_relative_to(workdir_path.resolve()):
+                                if _add(fp, f"epic_context:ident:{ident}"):
+                                    break
+                        except (OSError, ValueError):
+                            continue
+                if len(candidates) >= max_files:
+                    break
 
     # Strategy 1 — explicit file paths mentioned in scope text.
     # Matches things like ``src/foo.py``, ``./lib/utils.js``, ``core/iterate.py``.
@@ -1227,9 +1488,17 @@ def _execute_planner_decompose(
     full_issue_text = f"{parent_title}\n\n{parent_body}"
     source_context = ""
     file_contents: dict[str, str] = {}
+    file_metadata: dict[str, str] = {}
+    epic_agg: AggregateEpicContext | None = None
+    per_sub_contexts: list[EpicContext] = []
     if workdir and Path(workdir).exists():
         try:
-            rel_files, _meta = identify_relevant_files(full_issue_text, workdir)
+            # Build per-sub-issue epic context from checklist items
+            known_components = load_known_components(workdir)
+            per_sub_contexts = [extract_epic_context(item, known_components) for item in sub_scopes]
+            epic_agg = _build_aggregate_context(sub_scopes, known_components)
+
+            rel_files, file_metadata = identify_relevant_files(full_issue_text, workdir, epic_context=epic_agg)
             if rel_files:
                 file_contents = read_source_files(rel_files, workdir)
                 source_context = build_sub_issue_context(file_contents)
@@ -1250,9 +1519,19 @@ def _execute_planner_decompose(
     inherit_labels = [l for l in parent_labels if l and l.lower() != "epic"]
     created_numbers: List[int] = []
     ready_numbers: List[int] = []
-    for title, scope in zip(sub_titles, sub_scopes):
-        # Inject enhanced scope only when source context was found.
-        enhanced_scope = build_enhanced_scope(scope, source_context) if source_context else scope
+    for idx, (title, scope) in enumerate(zip(sub_titles, sub_scopes)):
+        # Per-sub-issue scoped context: filter full file_contents to files
+        # relevant only to this sub-issue's EpicContext.
+        sub_ctx = per_sub_contexts[idx] if idx < len(per_sub_contexts) else EpicContext()
+        if file_contents and epic_agg is not None and any(
+            sub_ctx.file_paths or sub_ctx.identifiers or sub_ctx.dir_tags or sub_ctx.component_names
+        ):
+            filtered_contents = filter_context_for_sub(file_contents, sub_ctx, file_metadata)
+            scoped_context = build_sub_issue_context(filtered_contents)
+        else:
+            scoped_context = source_context
+
+        enhanced_scope = build_enhanced_scope(scope, scoped_context) if scoped_context else scope
         # Each sub-issue depends on all previously created sub-issues in this epic
         # (sequential tier ordering). The first sub-issue has empty depends_on and
         # is immediately actionable — labeled Ready below.
