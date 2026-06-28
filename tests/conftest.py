@@ -339,6 +339,176 @@ class FakeProvider:
         return False
 
 
+# ── multi-tick pipeline harness (issue #901) ──────────────────────────────────
+# A reusable driver that runs N *real* dispatcher ticks over the shared in-memory
+# board, simulating each role's agent between ticks, and records the stage
+# progression so tests can assert the pipeline advances one stage per tick and
+# reaches a terminal ``done`` state without sticking or looping. Where
+# ``test_e2e_full_pipeline`` hand-drives every handoff in sequence, this harness
+# generalises that into an N-tick loop other suites (e.g. #902) can build on.
+
+# role name → assignee profile (mirrors the live ``*-daedalus`` roster).
+PIPELINE_ROLES = {
+    "validator": "validator-daedalus",
+    "pm": "project-manager-daedalus",
+    "developer": "developer-daedalus",
+    "qa": "qa-daedalus",
+    "reviewer": "reviewer-daedalus",
+    "security": "security-analyst-daedalus",
+    "accessibility": "accessibility-daedalus",
+    "docs": "documentation-daedalus",
+}
+
+# Dependency order the live pipeline advances in. The harness always drives the
+# earliest-in-order card still ``running`` (the frontier), so downstream roles
+# (qa, reviewer, …) never hand off before the developer's PR exists — even though
+# all five team cards are created ``running`` at PM-spec time.
+STAGE_ORDER = [
+    "validator", "pm", "developer", "qa",
+    "reviewer", "security", "accessibility", "docs",
+]
+
+# Reverse map: assignee profile → role name.
+_ASSIGNEE_ROLE = {profile: role for role, profile in PIPELINE_ROLES.items()}
+
+
+def _role_handoff(role: str, *, issue: int, repo: str, pr: int) -> tuple:
+    """Return ``(action, signal)`` for a role's simulated agent.
+
+    ``action`` is ``"complete"`` (validator/PM emit a done-card summary the
+    dispatcher reads) or ``"block"`` (team roles emit a ``review-required:``
+    handoff the dispatcher auto-advances). The signal strings mirror the live
+    handoffs exercised by ``test_e2e_full_pipeline``.
+    """
+    signals = {
+        "validator": ("complete", "CONFIRMED: reproduced on main; scope is clear"),
+        "pm": ("complete", "SPEC: acceptance criteria defined"),
+        "developer": ("block", f"review-required: PR #{pr} opened for {repo}#{issue}"),
+        "qa": ("block", f"review-required: qa-passed: PR #{pr} — suite green"),
+        "reviewer": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
+        "security": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
+        "accessibility": ("block", f"review-required: a11y-skipped: no UI changes. PR #{pr}"),
+        "docs": ("block", f"review-required: docs posted: issue #{issue} PR #{pr} — README updated"),
+    }
+    return signals[role]
+
+
+class MultiTickHarness:
+    """Drive a seeded issue through the pipeline by running real dispatcher ticks.
+
+    Each :meth:`tick` (1) simulates the *frontier* role's agent — completing the
+    validator/PM card or blocking a team card with its ``review-required:``
+    handoff — then (2) runs one real dispatcher pass (``run_iterate`` →
+    ``_check_confirmed_validators`` → ``_check_completed_pm``) over the shared
+    in-memory board, in the same order the live ``run()`` does. ``stage_log``
+    records the role processed each tick so callers can assert stage progression.
+    """
+
+    def __init__(
+        self,
+        pipeline: Any,
+        provider: Any,
+        *,
+        repo: str = "benmarte/daedalus",
+        slug: str = "proj",
+        issue: int = 901,
+        pr: int = 5901,
+    ) -> None:
+        self.disp = pipeline.disp
+        self.iterate = pipeline.iterate
+        self.kanban = pipeline.kanban
+        self.provider = provider
+        self.repo = repo
+        self.slug = slug
+        self.issue = issue
+        self.pr = pr
+        self.issues_map: Dict[int, Dict[str, Any]] = {}
+        self.stage_log: List[str] = []
+
+    # ---- setup ----
+
+    def seed(self, issue_card: Dict[str, Any]) -> None:
+        """Seed the issue's validator card (``running``) and register the issue."""
+        self.issues_map = {self.issue: issue_card}
+        self.kanban.seed(
+            assignee=PIPELINE_ROLES["validator"],
+            title=f"#{self.issue} {issue_card['title']}",
+            status="running",
+        )
+
+    # ---- one tick ----
+
+    def _frontier(self) -> tuple:
+        """Return ``(role, card)`` for the earliest-in-order ``running`` card."""
+        running: Dict[str, Dict[str, Any]] = {}
+        for t in self.kanban.tasks.values():
+            if (t.get("status") or "") != "running":
+                continue
+            role = _ASSIGNEE_ROLE.get(t.get("assignee"))
+            if role is not None:
+                running.setdefault(role, t)
+        for role in STAGE_ORDER:
+            if role in running:
+                return role, running[role]
+        return None, None
+
+    def _simulate_agent(self, role: str, card: Dict[str, Any]) -> None:
+        action, signal = _role_handoff(role, issue=self.issue, repo=self.repo, pr=self.pr)
+        if action == "complete":
+            self.kanban.complete(self.slug, card["id"], signal)
+        else:
+            self.kanban.block_task(self.slug, card["id"], signal)
+
+    def _dispatch_pass(self) -> None:
+        """Run one dispatcher pass over the board (iterate → validator → PM)."""
+        self.iterate.run_iterate(self.slug, self.repo, provider=self.provider)
+        self.disp._check_confirmed_validators(
+            self.slug, self.repo, self.issues_map, 3, "", "", "dev", "github",
+        )
+        self.disp._check_completed_pm(
+            self.slug, self.repo, self.issues_map, 3, "", "", "dev", "github",
+        )
+
+    def tick(self) -> Optional[str]:
+        """Simulate the frontier agent (if any) then run one dispatcher pass.
+
+        Returns the role processed this tick, or ``None`` when the board is idle
+        — terminal or idempotent, where the dispatcher pass is a pure no-op.
+        """
+        role, card = self._frontier()
+        if role is not None:
+            self._simulate_agent(role, card)
+            self.stage_log.append(role)
+        self._dispatch_pass()
+        return role
+
+    def run(self, max_ticks: int = 20) -> List[str]:
+        """Tick until the board is terminal or the budget runs out.
+
+        Returns ``stage_log``. Stops as soon as a tick finds no frontier (every
+        pipeline card is ``done``), so a clean run never burns the full budget.
+        """
+        for _ in range(max_ticks):
+            if self.tick() is None:
+                break
+        return self.stage_log
+
+    # ---- assertions ----
+
+    def pipeline_cards(self) -> List[Dict[str, Any]]:
+        """Every card assigned to a pipeline role (validator … docs)."""
+        return [t for t in self.kanban.tasks.values()
+                if _ASSIGNEE_ROLE.get(t.get("assignee")) is not None]
+
+    def all_done(self) -> bool:
+        """True when every pipeline card has reached ``done``."""
+        cards = self.pipeline_cards()
+        return bool(cards) and all((t.get("status") or "") == "done" for t in cards)
+
+    def created_count(self) -> int:
+        return len(self.kanban.created)
+
+
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -413,3 +583,20 @@ def pipeline(fake_kanban, monkeypatch):
     monkeypatch.setattr(disp, "kanban", fake_kanban)
     monkeypatch.setattr(iterate, "kanban", fake_kanban)
     return SimpleNamespace(disp=disp, iterate=iterate, kanban=fake_kanban)
+
+
+@pytest.fixture
+def multi_tick_harness(pipeline, fake_provider):
+    """Factory for a :class:`MultiTickHarness` wired to the shared board.
+
+    Builds a green-CI provider, constructs the harness, and seeds the issue's
+    validator card so the caller can start ticking immediately.
+    """
+
+    def _make(issue_card: Dict[str, Any], *, issue: int = 901, **kwargs: Any) -> MultiTickHarness:
+        provider = fake_provider(ci_status=kwargs.pop("ci_status", "green"))
+        h = MultiTickHarness(pipeline, provider, issue=issue, **kwargs)
+        h.seed(issue_card)
+        return h
+
+    return _make

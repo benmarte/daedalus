@@ -21,6 +21,7 @@ PIP    ?= $(PYTHON) -m pip
 # issue and walks it through all seven stages; test_e2e_smoke validates a fresh
 # Hermes install; test_pipeline_scenarios covers happy/block/escalate slices.
 E2E_TESTS := tests/test_e2e_full_pipeline.py \
+             tests/test_e2e_multi_tick.py \
              tests/test_e2e_smoke.py \
              tests/test_pipeline_scenarios.py
 
