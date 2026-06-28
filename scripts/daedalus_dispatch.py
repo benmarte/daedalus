@@ -155,6 +155,65 @@ _DEFAULT_CODING_AGENT_MAX_WAIT = 3600
 _CODING_AGENT_MAX_WAIT = _DEFAULT_CODING_AGENT_MAX_WAIT
 
 
+# ── Central pipeline-threshold registry ──────────────────────────────────────
+# All tunable numeric limits live under ``execution.thresholds`` in daedalus.yaml.
+# Resolved once per dispatch tick into the module-level ``_TH`` dict so core
+# modules can read without re-parsing config. Missing / non-numeric / non-positive
+# keys fall back to the defaults below.
+#
+# Keys:
+#   max_fix_attempts          - CI-fix / review-fix attempts before escalation
+#   max_sub_issues            - sub-issues created when decomposing an epic
+#   file_symbol_cap           - cap on files/symbols shown per sub-issue
+#   pr_search_limit           - open PRs scanned per tick when locating a PR
+#   hermes_send_timeout       - seconds for ``hermes send`` subprocess calls
+#   decompose_timeout         - seconds for ``hermes kanban decompose`` calls
+#   source_file_max_size      - max bytes read from one source file (Phase 4)
+#   follow_up_dedup_limit     - open follow-up issues fetched for dedup
+#   webhook_timeout           - HTTP timeout for notification webhooks (sec)
+_THRESHOLD_DEFAULTS: Dict[str, float] = {
+    "max_fix_attempts": 3,
+    "max_sub_issues": 10,
+    "file_symbol_cap": 50,
+    "pr_search_limit": 50,
+    "hermes_send_timeout": 30,
+    "decompose_timeout": 180,
+    "source_file_max_size": 50_000,
+    "follow_up_dedup_limit": 100,
+    "webhook_timeout": 10.0,
+}
+_TH: Dict[str, float] = _THRESHOLD_DEFAULTS.copy()
+
+
+def _resolve_thresholds(execution: Dict[str, Any]) -> Dict[str, float]:
+    """Resolve ``execution.thresholds`` over built-in defaults.
+
+    Missing, non-numeric, or non-positive values fall back to the default.
+    ``webhook_timeout`` accepts float; integer keys accept int. Returns a copy
+    so callers can mutate freely.
+    """
+    raw = (execution or {}).get("thresholds") or {}
+    if not isinstance(raw, dict):
+        return _THRESHOLD_DEFAULTS.copy()
+    out = _THRESHOLD_DEFAULTS.copy()
+    for key, default in _THRESHOLD_DEFAULTS.items():
+        if key not in raw:
+            continue
+        val = raw[key]
+        try:
+            if key == "webhook_timeout":
+                fv = float(val)
+                if fv > 0:
+                    out[key] = fv
+            else:
+                iv = int(val)
+                if iv > 0:
+                    out[key] = iv
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 _ROLE_TMP_PREFIX: Dict[str, str] = {
     "pm": "pm",
     "developer": "dev",
@@ -930,36 +989,151 @@ def _unpack_issue(issue: Dict[str, Any]) -> tuple:
 
 
 
-def _is_epic(issue: Dict[str, Any]) -> bool:
-    """Thin wrapper — delegates to the canonical is_epic() in core.providers.base."""
-    return is_epic(issue)
+def _resolve_epic_config(execution: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve execution.epic_detection config with soft validation.
+    
+    Returns a normalized config dict. Invalid values are logged as warnings
+    and replaced with defaults (soft validation per planner spec).
+    
+    Defaults: enabled=True, min_deliverables=6, size_threshold=1000,
+              epic_label='epic', child_label='subtask'.
+    
+    Validation rules (soft - warns and uses default on failure):
+      - enabled: bool, string, or int (coerced to bool)
+      - min_deliverables: int >= 1 (defaults to 6 if invalid)
+      - size_threshold: int >= 100 (defaults to 1000 if invalid)
+      - epic_label: non-empty string (defaults to 'epic' if empty/invalid)
+      - child_label: non-empty string (defaults to 'subtask' if empty/invalid)
+    """
+    defaults = {
+        "enabled": True,
+        "min_deliverables": 6,
+        "size_threshold": 1000,
+        "epic_label": "epic",
+        "child_label": "subtask",
+    }
+    raw = (execution or {}).get("epic_detection") or {}
+    
+    if not isinstance(raw, dict):
+        logger.warning("epic_detection must be a dict, using defaults (got %s)", type(raw).__name__)
+        return defaults
+    
+    result = dict(defaults)
+    
+    # Validate enabled — allow bool, int, or string (truthy coercion)
+    if "enabled" in raw:
+        val = raw["enabled"]
+        if isinstance(val, bool):
+            result["enabled"] = val
+        elif isinstance(val, int):
+            result["enabled"] = bool(val)
+        elif isinstance(val, str):
+            result["enabled"] = val.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            logger.warning("epic_detection.enabled must be bool/int/str (got %s), using default %s", 
+                          type(val).__name__, defaults["enabled"])
+    
+    # Validate min_deliverables
+    if "min_deliverables" in raw:
+        val = raw["min_deliverables"]
+        if isinstance(val, bool):
+            logger.warning("epic_detection.min_deliverables must be int, not bool, using default %s", 
+                          defaults["min_deliverables"])
+        elif isinstance(val, int):
+            if val < 1:
+                logger.warning("epic_detection.min_deliverables must be >= 1 (got %d), using default %s", 
+                              val, defaults["min_deliverables"])
+            else:
+                result["min_deliverables"] = val
+        else:
+            logger.warning("epic_detection.min_deliverables must be int (got %s), using default %s", 
+                          type(val).__name__, defaults["min_deliverables"])
+    
+    # Validate size_threshold
+    if "size_threshold" in raw:
+        val = raw["size_threshold"]
+        if isinstance(val, bool):
+            logger.warning("epic_detection.size_threshold must be int, not bool, using default %s", 
+                          defaults["size_threshold"])
+        elif isinstance(val, int):
+            if val < 100:
+                logger.warning("epic_detection.size_threshold must be >= 100 (got %d), using default %s", 
+                              val, defaults["size_threshold"])
+            else:
+                result["size_threshold"] = val
+        else:
+            logger.warning("epic_detection.size_threshold must be int (got %s), using default %s", 
+                          type(val).__name__, defaults["size_threshold"])
+    
+    # Validate epic_label
+    if "epic_label" in raw:
+        val = raw["epic_label"]
+        if isinstance(val, str) and val.strip():
+            result["epic_label"] = val.lower()
+        else:
+            logger.warning("epic_detection.epic_label must be non-empty string, using default %r", 
+                          defaults["epic_label"])
+    
+    # Validate child_label
+    if "child_label" in raw:
+        val = raw["child_label"]
+        if isinstance(val, str) and val.strip():
+            result["child_label"] = val.lower()
+        else:
+            logger.warning("epic_detection.child_label must be non-empty string, using default %r", 
+                          defaults["child_label"])
+    
+    return result
+
+
+def _is_epic(issue: Dict[str, Any], epic_config: Optional[Dict[str, Any]] = None) -> bool:
+    """Thin wrapper — delegates to the canonical is_epic() in core.providers.base.
+    
+    Passes epic_config through to enable per-config heuristics.
+    """
+    return is_epic(issue, epic_config=epic_config)
 
 
 def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
-                  base_branch: str, provider_name: str) -> str:
-    """Task body for the planner role — Phase 3: confirm epic is ready for decomposition."""
+                  base_branch: str, provider_name: str,
+                  epic_config: Optional[Dict[str, Any]] = None) -> str:
+    """Task body for the planner role — Phase 3: confirm epic is ready for decomposition.
+    
+    When ``epic_config`` is provided, uses its thresholds for detection reasons.
+    Otherwise uses legacy hardcoded values (1000 / 5 / 'epic').
+    """
     from core.iterate import identify_relevant_files, read_source_files, build_sub_issue_context
 
     n = issue.get("number", "?")
     title = issue.get("title", "")
     body = issue.get("body") or ""
     url = issue.get("url", "")
+    
+    # Get thresholds from config or use legacy defaults
+    if epic_config:
+        size_threshold = int(epic_config.get("size_threshold", 1000))
+        min_checklist = int(epic_config.get("min_deliverables", 5))
+        epic_label = str(epic_config.get("epic_label", "epic"))
+    else:
+        size_threshold = 1000
+        min_checklist = 5
+        epic_label = "epic"
 
     reasons = []
-    if len(body) > 1000:
+    if len(body) > size_threshold:
         reasons.append(f"body size ({len(body)} chars)")
     checklist_count = len(re.findall(r"^\s*[-*+]\s*\[[ xX]\]", body, re.MULTILINE))
-    if checklist_count >= 5:
+    if checklist_count >= min_checklist:
         reasons.append(f"checklist ({checklist_count} items)")
     for lbl in (issue.get("labels") or []):
         name = lbl if isinstance(lbl, str) else (lbl.get("name", "") if isinstance(lbl, dict) else "")
-        if isinstance(name, str) and name.strip().lower() == "epic":
+        if isinstance(name, str) and name.strip().lower() == epic_label:
             reasons.append("epic-label")
             break
     reason_str = ", ".join(reasons) if reasons else "unknown heuristic"
 
-    body_excerpt = body[:1000]
-    truncation_note = "\n\n(Body truncated — see full issue for remainder)" if len(body) > 1000 else ""
+    body_excerpt = body[:size_threshold]
+    truncation_note = f"\n\n(Body truncated — see full issue for remainder)" if len(body) > size_threshold else ""
 
     # Inject source context from relevant files (design spec: issue #386)
     source_context = ""
@@ -3322,8 +3496,17 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     global _CODING_AGENT_MAX_WAIT
     _CODING_AGENT_MAX_WAIT = _resolve_coding_agent_max_wait(execution)
     role_agents: Dict[str, str] = {
-        role: _resolve_agent_for_role(execution, role) for role in _DEFAULT_PROFILES
     }
+    
+    # Resolve epic detection config (issue #455) with soft validation
+    try:
+        epic_config = _resolve_epic_config(execution)
+    except Exception as exc:
+        logger.warning("Failed to resolve epic_detection config: %s, using defaults", exc)
+        epic_config = {"enabled": True, "min_deliverables": 6, "size_threshold": 1000,
+                      "epic_label": "epic", "child_label": "subtask"}
+    
+    # Inject the correct autonomous-ai-agents skill for every role that delegates to a cloud agent.
     # Inject the correct autonomous-ai-agents skill for every role that delegates to a cloud agent.
     _AGENT_SKILL: Dict[str, str] = {
         "claude-code": "autonomous-ai-agents/claude-code",
@@ -3750,7 +3933,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         provider.board_set_status(n, provider.status_name("in_progress"))
         # Epic routing (Phase 1 of #149): large issues go to planner first.
         # Phase 2+ will add codebase analysis + sub-issue decomposition.
-        if _is_epic(issue):
+        if _is_epic(issue, epic_config):
             planner_key = f"planner-{n}"
             # Idempotency check (#181): query for existing planner card BEFORE
             # creation. The CLI's --idempotency-key returns the existing task ID
@@ -3772,7 +3955,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                 logger.info("dispatch: #%s detected as epic — routing to planner", n)
                 vid = kanban.create_task(
                     slug, f"#{n} {issue.get('title', '')}",
-                    body=_planner_body(repo, issue, workdir, base_branch, provider.name),
+                    body=_planner_body(repo, issue, workdir, base_branch, provider.name, epic_config),
                     assignee=profiles["planner"],
                     idempotency_key=planner_key,
                     workspace=f"dir:{workdir}" if workdir else "",
