@@ -786,6 +786,8 @@ def _is_epic(issue: Dict[str, Any]) -> bool:
 def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
                   base_branch: str, provider_name: str) -> str:
     """Task body for the planner role — Phase 3: confirm epic is ready for decomposition."""
+    from core.iterate import identify_relevant_files, read_source_files, build_sub_issue_context
+
     n = issue.get("number", "?")
     title = issue.get("title", "")
     body = issue.get("body") or ""
@@ -806,6 +808,27 @@ def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
 
     body_excerpt = body[:1000]
     truncation_note = "\n\n(Body truncated — see full issue for remainder)" if len(body) > 1000 else ""
+
+    # Inject source context from relevant files (design spec: issue #386)
+    source_context = ""
+    if workdir:
+        try:
+            scope_text = f"{title}\n{body}"
+            file_paths, _meta = identify_relevant_files(scope_text, workdir, max_files=10)
+            if file_paths:
+                file_contents = read_source_files(file_paths, workdir, max_size=50_000)
+                if file_contents:
+                    source_context = build_sub_issue_context(file_contents)
+                    # Enforce 100KB total context cap (measure in bytes, not chars)
+                    encoded = source_context.encode("utf-8")
+                    if len(encoded) > 100_000:
+                        # Truncate by bytes, decode back to string
+                        source_context = encoded[:100_000].decode("utf-8", errors="ignore")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("_planner_body: source context injection failed: %s", exc)
+            source_context = ""
+
+    source_section = f"\n\n{source_context}" if source_context else ""
 
     return (
         f"# Epic Issue #{n} — Ready for Decomposition\n\n"
@@ -829,7 +852,7 @@ def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"and the PM will be notified.\n\n"
         f"---\n\n"
         f"## Issue Body\n\n"
-        f"{body_excerpt}{truncation_note}\n"
+        f"{body_excerpt}{truncation_note}{source_section}\n"
     )
 
 
