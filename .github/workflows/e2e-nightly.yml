@@ -1,0 +1,40 @@
+name: E2E Nightly
+
+# End-to-end regression suite (issue #898/#903). Runs on a nightly cron so a
+# regression in any inter-stage handoff (validator -> PM -> developer -> QA ->
+# reviewer -> security -> docs) is caught within a day, not in production.
+#
+# The offline suite (`make e2e`) needs no secrets and always runs. The live
+# smoke (`make e2e-live`) exercises the REAL dispatcher and is opt-in via
+# workflow_dispatch so it never fires unattended without a token.
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # nightly at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: 'Also run the live smoke test against the real dispatcher'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: make install
+      - name: Run offline E2E regression suite
+        run: make e2e
+      - name: Run live smoke against the real dispatcher (opt-in)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make e2e-live
