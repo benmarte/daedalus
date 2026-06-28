@@ -117,6 +117,11 @@ SHIP_GATE_SH="$HERMES/agent-hooks/ship-gate.sh"
 SHIP_GATE_D="$HERMES/agent-hooks/ship-gate.d"
 [[ -f "$SHIP_GATE_SH" ]] && HOST_ARTIFACTS+=("$SHIP_GATE_SH")
 [[ -d "$SHIP_GATE_D" ]] && HOST_ARTIFACTS+=("$SHIP_GATE_D/")
+# Session-end advance hook + its project resolver (installed by postinstall.py)
+ADVANCE_SH="$HERMES/agent-hooks/daedalus-advance.sh"
+ADVANCE_PY="$HERMES/agent-hooks/daedalus_resolve_project.py"
+[[ -f "$ADVANCE_SH" ]] && HOST_ARTIFACTS+=("$ADVANCE_SH")
+[[ -f "$ADVANCE_PY" ]] && HOST_ARTIFACTS+=("$ADVANCE_PY")
 
 # ── 2. Roster profiles ───────────────────────────────────────────────────────
 ROLES=(

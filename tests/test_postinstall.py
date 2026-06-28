@@ -304,6 +304,77 @@ class TestMain:
         assert hasattr(postinstall, "_check_vcs_tokens")
 
 
+# ── advance hook install tests (#936) ────────────────────────────────────────
+
+
+class TestInstallAdvanceHook:
+    """_install_advance_hook copies both advance-hook files to ~/.hermes/agent-hooks/."""
+
+    def test_install_success(self, postinstall, tmp_path):
+        """Installs daedalus-advance.sh (+x) and daedalus_resolve_project.py to agent-hooks."""
+        sh_source = _repo_root / "scripts" / "daedalus-advance.sh"
+        py_source = _repo_root / "scripts" / "daedalus_resolve_project.py"
+        if not (sh_source.is_file() and py_source.is_file()):
+            pytest.skip("advance hook source scripts not present")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = postinstall._install_advance_hook()
+
+        assert ok is True
+        assert "OK:" in msg
+        hooks_dir = fake_home / ".hermes" / "agent-hooks"
+        sh_installed = hooks_dir / "daedalus-advance.sh"
+        py_installed = hooks_dir / "daedalus_resolve_project.py"
+        # Both files present.
+        assert sh_installed.is_file()
+        assert py_installed.is_file()
+        # Shell script is executable (Hermes execs it on session end).
+        assert sh_installed.stat().st_mode & 0o111
+        # Content copied verbatim from the repo source.
+        assert sh_installed.read_text() == sh_source.read_text()
+        assert py_installed.read_text() == py_source.read_text()
+
+    def test_install_idempotent(self, postinstall, tmp_path):
+        """Running twice leaves the same content (idempotent re-copy on update)."""
+        sh_source = _repo_root / "scripts" / "daedalus-advance.sh"
+        if not sh_source.is_file():
+            pytest.skip("scripts/daedalus-advance.sh not present")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok1, _ = postinstall._install_advance_hook()
+            ok2, _ = postinstall._install_advance_hook()
+        assert ok1 and ok2
+        installed = fake_home / ".hermes" / "agent-hooks" / "daedalus-advance.sh"
+        assert installed.read_text() == sh_source.read_text()
+
+    def test_install_source_missing(self, postinstall, tmp_path):
+        """Returns FAIL when a source script is missing."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        # Build a scripts dir that has postinstall.py but NOT the advance hook files.
+        fake_scripts = tmp_path / "scripts"
+        fake_scripts.mkdir()
+        fake_postinstall = fake_scripts / "postinstall.py"
+        fake_postinstall.write_text((_repo_root / "scripts" / "postinstall.py").read_text())
+
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("postinstall_adv_nomock", str(fake_postinstall))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = mod._install_advance_hook()
+
+        assert ok is False
+        assert "MISSING" in msg
+
+
 # ── webhook handler install tests ────────────────────────────────────────────
 
 
