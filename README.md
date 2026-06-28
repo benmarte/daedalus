@@ -71,6 +71,7 @@ flowchart TD
   - [Creating the tokens (PAT scopes)](#creating-the-tokens-pat-scopes)
 - [Notifications](#notifications)
   - [Comment threading](#comment-threading)
+- [Dispatch history](#dispatch-history)
 - [Quickstart](#quickstart)
 - [Team setup](#team-setup)
 - [Uninstall / reset](#uninstall--reset)
@@ -777,6 +778,13 @@ age for operational visibility and — when `archive: true` is set — archived 
 the active board via `hermes kanban archive`. The sweeper degrades gracefully:
 any failure logs a warning and the tick continues.
 
+**Stale-running detector.** A separate pass (also in `core/sweeper.py`) scans
+cards still marked `running` with no heartbeat update for more than 24 hours
+(configurable via `tracking.stale_running.hours`). Unlike blocked cards, running
+cards are never auto-archived — the detector only logs a warning with the
+card id, assignee, and hours elapsed. Use it to spot dead workers that the
+self-healing loop can't classify.
+
 Configure per-project in `.hermes/daedalus.yaml`:
 
 ```yaml
@@ -1204,6 +1212,27 @@ comments are fetched before dedup decides what to mirror. This is fine for small
 boards; on large boards with many open issues it adds VCS API calls per tick.
 See [docs/notification-threading.md](docs/notification-threading.md) for the full
 reference.
+
+## Dispatch history
+
+Every dispatch tick appends a one-line JSON record to a rotating log at
+`~/.hermes/plugins/daedalus/history.jsonl` (capped at 1000 lines, oldest-first).
+Each record captures the tick's UTC timestamp, project name, and summary counters
+(issues_seen, created, reconciled, completed, advance_prs, spec_created, blocked,
+error). Use the `--history` flag to print the last N entries as a fixed-width
+table — no log tailing needed:
+
+```bash
+python3 ~/.hermes/plugins/daedalus/scripts/daedalus_dispatch.py --history 20
+```
+
+The table columns (in order): `TIMESTAMP`, `PROJECT`, `MODE`, `ISSUES`, `CREATED`,
+`RECON`, `DONE`, `PRS`, `SPEC`, `BLOCKED`, `ERROR`. List-valued fields are shown
+as counts; `--history` without an argument defaults to the last 10 entries.
+History is best-effort auditing — a write failure is logged but never breaks the
+dispatch tick.
+
+---
 
 ## Troubleshooting
 
