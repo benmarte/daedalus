@@ -573,7 +573,10 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     if provider is None:
         return []
     state = filters.get("state", "open")
-    limit = int(filters.get("limit", 20))
+    # Default 100 (GitHub's max per_page): a default of 20 silently paginated
+    # out older issues on boards with >20 open issues, stranding them in Ready
+    # forever (issue #203). Override via issues.filters.limit in daedalus.yaml.
+    limit = int(filters.get("limit", 100))
     labels = [l for l in (filters.get("labels") or []) if l]
     return [i.as_dict() for i in provider.list_issues(state=state, labels=labels, limit=limit)]
 
