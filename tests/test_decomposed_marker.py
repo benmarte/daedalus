@@ -238,7 +238,7 @@ def test_integ_rerun_after_marker_posted_creates_zero_sub_issues():
     # Capture the marker that was posted so we can simulate it being present.
     marker_call_args = prov.post_issue_comment.call_args
     marker_body = marker_call_args[0][1] if marker_call_args else ""
-    assert "<!-- daedalus:sub-issues:" in marker_body or "daedalus" in marker_body
+    assert "<!-- daedalus:decomposed:" in marker_body
 
     # ── Pass 2: marker now present as a comment — must short-circuit ──
     prov.get_issue_comments.return_value = [{"body": marker_body}]
