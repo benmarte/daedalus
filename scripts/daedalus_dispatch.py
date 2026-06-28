@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
@@ -53,6 +54,7 @@ from core import source_specs  # noqa: E402
 from core import sweeper  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core import thread_delivery  # noqa: E402
+from core.notification_sender import NotificationPayload, send as send_webhook_notification  # noqa: E402
 from core.providers.base import ensure_closing_keyword, is_epic  # noqa: E402
 from core import tier_promotion  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
@@ -2062,6 +2064,52 @@ def _send_retry_cap_notification(
         else:
             logger.warning("failed to send retry-cap notification to %s for #%s", target, issue_number)
 
+    # Fire webhook notification asynchronously (non-blocking)
+    _fire_webhook_notification(
+        role=role,
+        issue_number=issue_number,
+        retry_count=retry_count,
+        max_retries=max_retries,
+        dry_run=dry_run,
+    )
+
+
+def _fire_webhook_notification(
+    *,
+    role: str,
+    issue_number: int,
+    retry_count: int,
+    max_retries: int,
+    dry_run: bool,
+) -> None:
+    """Fire webhook notification in background thread (non-blocking).
+
+    Constructs a `NotificationPayload` with retry-cap context and dispatches
+    it via `send_webhook_notification` in a daemon thread so the caller does
+    not block on HTTP latency or webhook failures.
+    """
+    if dry_run:
+        return
+
+    def _fire():
+        try:
+            payload = NotificationPayload(
+                title=f"Retry Cap Exhausted: {role}",
+                body=f"Issue #{issue_number} has failed {retry_count}/{max_retries} retries. Manual intervention required.",
+                severity="critical",
+                context={
+                    "issue": f"#{issue_number}",
+                    "role": role,
+                    "retry_count": str(retry_count),
+                    "max_retries": str(max_retries),
+                },
+            )
+            send_webhook_notification(payload)
+        except Exception as exc:
+            logger.warning("webhook notification failed for #%s (%s): %s", issue_number, role, exc)
+
+    thread = threading.Thread(target=_fire, daemon=True)
+    thread.start()
 
 
 def _send_retry_attempt_notification(
