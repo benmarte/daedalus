@@ -169,6 +169,23 @@ def _install_cron_wrapper() -> tuple[bool, str]:
         "fi\n"
         "# ---------------------------------------------------------------------------\n"
         "\n"
+        "# --- Enhanced gateway watchdog (silently-dead detection + safeguards) ----\n"
+        "# The watchdog script provides:\n"
+        "# - STOP marker support (~/.hermes/gateway-stop inhibits restarts)\n"
+        "# - Rate limiting (max 3 restarts per hour by default)\n"
+        "# - Exponential backoff (10s, 20s, 40s... capped at 300s)\n"
+        "# - Persistent state tracking (~/.hermes/gateway-watchdog-state.json)\n"
+        "# - Crash log detection (~/.hermes/logs/gateway*.log or hermes.*.log)\n"
+        "#\n"
+        "# The watchdog script must be installed by postinstall.py.\n"
+        "WATCHDOG_SCRIPT=\"$DISPATCH_HOME/scripts/gateway_watchdog.py\"\n"
+        "if [ -f \"$WATCHDOG_SCRIPT\" ]; then\n"
+        "  echo \"daedalus-cron: running enhanced gateway watchdog\" >&2\n"
+        "  python3 \"$WATCHDOG_SCRIPT\" --no-dispatch || \\\n"
+        "    echo \"daedalus-cron: watchdog exited with code $?\" >&2\n"
+        "fi\n"
+        "# ---------------------------------------------------------------------------\n"
+        "\n"
         'exec python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"\n'
     )
 
@@ -204,6 +221,30 @@ def _install_webhook_handler() -> tuple[bool, str]:
         return True, f"OK: webhook handler installed at {target}"
     except OSError as exc:
         return False, f"FAIL: could not install webhook handler at {target}: {exc}"
+
+
+def _install_watchdog_script() -> tuple[bool, str]:
+    """Install the gateway watchdog script to ~/.hermes/plugins/daedalus/scripts/ (idempotent).
+
+    Copies scripts/gateway_watchdog.py from the repo to the plugin's scripts dir.
+    The watchdog detects silent gateway death and restarts with safeguards.
+    """
+    source_dir = Path(__file__).resolve().parent
+    source = source_dir / "gateway_watchdog.py"
+
+    if not source.is_file():
+        return False, f"MISSING: watchdog script not found at {source}"
+
+    target = _HERMES_HOME / "plugins" / "daedalus" / "scripts"
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        target_file = target / "gateway_watchdog.py"
+        target_file.write_text(source.read_text())
+        target_file.chmod(0o755)
+        return True, f"OK: watchdog script installed at {target_file}"
+    except OSError as exc:
+        return False, f"FAIL: could not install watchdog script at {target}: {exc}"
 
 
 # ── provision ────────────────────────────────────────────────────────────────
@@ -276,9 +317,14 @@ def main(check_only: bool = False) -> int:
     print(msg)
     print()
     # Note: non-fatal — a wrapper failure is logged but doesn't block setup.
-
+    
     # Install the webhook handler script (idempotent, non-fatal)
     ok, msg = _install_webhook_handler()
+    print(msg)
+    print()
+
+    # Install the enhanced gateway watchdog script (idempotent, non-fatal)
+    ok, msg = _install_watchdog_script()
     print(msg)
     print()
 
