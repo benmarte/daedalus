@@ -55,6 +55,8 @@ REQUIRED_LABELS: List[Dict[str, str]] = [
      "description": "Large issue requiring decomposition into sub-issues"},
     {"name": "subtask", "color": "0075ca",
      "description": "Child issue created from an epic decomposition"},
+    {"name": "Ready",   "color": "a2eeef",
+     "description": "Issue ready for developer work — no outstanding dependencies blockers"},
 ]
 
 # Canonical pipeline statuses → default provider-facing names. Overridable per
@@ -207,7 +209,7 @@ _CLOSING_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\
 # provider-agnostic fallback for dependency-aware ready-gating (issue #139) when
 # native issue links aren't present. Leading list/quote markers are tolerated so
 # it works inside markdown bullets.
-_DEPENDS_RE = re.compile(r"(?im)^[ \t>*\-]*(?:depends[ -]on|blocked[ -]by)\s*:?[ \t]*(.+)$")
+_DEPENDS_RE = re.compile(r"(?im)^[ \t>*\-]*(?:depends[ _-]on|blocked[ _-]by)\s*:?[ \t]*(.+)$")
 _ISSUE_REF_RE = re.compile(r"#(\d+)")
 
 
@@ -307,6 +309,41 @@ class VCSProvider(abc.ABC):
     def add_label(self, issue_number: int, label_name: str) -> bool:
         """Apply a label to an issue. Returns True on success. Default no-op."""
         return False
+
+    def has_label(self, issue_number: int, label_name: str) -> bool:
+        """Return True if ``issue_number`` has ``label_name`` applied.
+
+        Base implementation returns False. Providers override to query the
+        VCS API. Never raises — returns False on any provider error.
+        """
+        return False
+
+    def sub_issues_of(self, epic_number: int) -> List[int]:
+        """Return issue numbers that are sub-issues of the given epic.
+
+        Base implementation scans all open issues for ``Epic: #<N>`` /
+        ``Part of: #<N>`` in the body (portable fallback). Providers with
+        native sub-issue links override to use the VCS API first.
+        Never raises — returns ``[]`` on any provider error.
+        """
+        import re as _re
+        results: List[int] = []
+        try:
+            all_issues = self.list_issues(state="open")
+        except Exception:
+            return []
+        pattern = _re.compile(rf"(?im)(?:epic|part\s+of)\s*:\s*#{epic_number}\b")
+        for issue in all_issues:
+            body = ""
+            if isinstance(issue, dict):
+                body = issue.get("body", "")
+            else:
+                body = getattr(issue, "body", "") or ""
+            if pattern.search(body):
+                n = issue.get("number") if isinstance(issue, dict) else getattr(issue, "number", None)
+                if n is not None:
+                    results.append(int(n))
+        return results
 
     def ensure_labels(self) -> List[str]:
         """Create required Daedalus labels if missing. Returns newly created names.
