@@ -184,13 +184,26 @@ Unblocking the card is not optional—it is the critical handoff that resumes pi
 
 **Timing:** Unblock the original card immediately after posting your clarification comment on the GitHub issue. The sequence is:
 
-1. Read the blocker summary in your consultation task
-2. Post a clarification comment on the original issue using the `agent_comment` helper
-3. Call `kanban_unblock` on the original blocked card with a brief reason like `"PM consultation responded"` or `"Blocker resolved via comment on issue #N"`
+1. Read the blocker summary in your consultation task.
+2. Post a clarification comment on the original issue using the `agent_comment` helper.
+3. Unblock the original card via terminal:
+   ```bash
+   hermes kanban unblock <original_card_id> --reason "Blocker resolved via comment on issue #N"
+   ```
+   Alternatively, via Python API in `execute_code`:
+   ```python
+   from core import kanban
+   kanban.unblock_task("<board_slug>", "<original_card_id>", "Blocker resolved via comment on issue #N")
+   ```
+   Brief, accurate reasons keep the audit trail useful for downstream workers reading the event log.
 
-**How to identify the original card:** The consultation task body typically references the original card ID (e.g., `Resolve the block on card t_XXX`) or you can infer it from the issue number. Use `kanban_list --status blocked` to find cards blocked on that issue, then call `kanban_unblock <card_id> "reason"`.
+**How to identify the original card:** The consultation task body typically references the original card ID (e.g., `Resolve the block on card t_XXX`) or you can infer it from the issue number. Use `kanban_show()` on the consultation task — its `worker_context` usually names the blocked card and its ID. You can also list blocked cards via terminal:
+```bash
+hermes kanban list --status blocked
+```
+Then unblock the matching card as shown above.
 
-**Verification:** After unblocking, the card should move from `blocked` to `ready` or `running` (depending on its previous status). The dispatcher will pick it up on the next tick and resume the pipeline.
+**Verification:** After unblocking, the card transitions from `blocked` back to `running` (preserving its previous claimed state) so the original agent resumes, or it returns to `ready` for a fresh dispatch cycle. The dispatcher will pick it up on the next tick and continue the pipeline.
 
 **What NOT to do:**
 - Do NOT complete the consultation task without unblocking the original card
@@ -228,7 +241,7 @@ If the PM blocks (which should not happen under normal operation), `classify_blo
 
 **Critical PM-specific behaviours:**
 
-1. **Consultation cards — unblock the original card.** When you finish a *consultation* card (a card created by the dispatcher so you can resolve another agent's block — e.g. to annotate a PR fix branch with fix details), you MUST call `kanban_unblock` on the original blocked card after responding. Without this, the original card remains blocked and the pipeline stalls. Consultation cards typically arrive with body text like "Resolve the block on card t_XXX".
+1. **Consultation cards — unblock the original card.** When you finish a *consultation* card (a card created by the dispatcher so you can resolve another agent's block — e.g. to annotate a PR fix branch with fix details), you MUST call `hermes kanban unblock <original_card_id> --reason "..."` (or `kanban.unblock_task(...)` via Python API) on the original blocked card after responding. Without this, the original card remains blocked and the pipeline stalls. Consultation cards typically arrive with body text like "Resolve the block on card t_XXX".
 
 2. **`awaiting-fix:` blocks are self-healing.** When a developer fix card is spawned to address review feedback, the PM's own blocker on the reviewer card is annotated with `awaiting-fix: <fix_card_id>`. The dispatcher ignores these as non-escalations. You do NOT need to unblock the reviewer — that is handled automatically by `_execute_advance` in `core/iterate.py` when the fix card completes.
 
