@@ -3416,7 +3416,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                "blocked": blocked_issues, "blocked_deps": blocked_deps,
                "threads_mirrored": threads_mirrored,
                "pm_triggered": pm_triggered, "blocker_triggered": blocker_triggered,
-               "vcs_autoconfig": vcs_autoconfig}
+               "vcs_autoconfig": vcs_autoconfig,
+               "enrollment_failures": sorted(set(getattr(provider, "enrollment_failures", [])))}
     logger.info("dispatch summary: %s", summary)
     return summary
 
