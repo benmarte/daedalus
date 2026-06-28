@@ -140,6 +140,79 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 ---
 
+## Timeout & Escalation Behavior
+
+You are a pipeline stage, not a standalone worker. When you fail, crash, or emit an
+unexpected signal, the dispatcher responds automatically. Understanding these paths
+keeps your outputs unambiguous and prevents the pipeline from stalling.
+
+### Signals you emit
+
+The dispatcher classifies your block reason via `core/iterate.py:classify_blocked`:
+
+| Handoff text contains | Signal | Dispatcher action |
+|------------------------|--------|-------------------|
+| `qa-passed` (case-insensitive) | `ADVANCE` | Pipeline moves to reviewer/security |
+| `qa-failed` | `DEV_FIX_CI` | Creates a developer-daedalus fix card |
+| any other text (agent still running, crash, typo) | `PENDING_CI` | Card idles — dispatcher waits for next tick |
+
+### Self-healing escalation sequence
+
+1. **`qa-failed`** → dispatcher spawns a `developer-daedalus` fix card with the PR
+   link. The card title reads `Fix attempt N/3`.
+2. **Developer fix completes** → the card re-enters the dispatcher. CI status is
+   re-checked. If still red or QA still fails, another fix card is spawned
+   (fix-attempt counter increments).
+3. **`MAX_FIX_ATTEMPTS` (3) exceeded** → dispatcher calls `_execute_escalate`:
+   posts `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. The
+   card parks — no further automation touches it. A human must intervene.
+4. **Infrastructure failure** (your agent crashes, gateway dies, permission error,
+   coding-agent timeout) → handoff matches a crash marker
+   (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
+   `coding_agent_timeout`, `exited with code`, `agent crash`). For developer cards
+   this is a no-op (manual intervention); for QA cards the same markers are *not*
+   special-cased — a QA crash leaves the card stuck in `PENDING_CI` until the
+   sweeper notices.
+5. **Unrecognized signal** (typo in verdict, missing `qa-passed:` / `qa-failed:`
+   keyword) → dispatcher cannot classify, falls through to `PENDING_CI`. The card
+   idles until the sweeper alerts or a human unblocks.
+
+### Sweeper thresholds (stale-card detection)
+
+The sweeper (`core/sweeper.py`) runs on every dispatcher tick and warns about cards
+that have made no forward progress:
+
+- **`DEFAULT_STALE_HOURS = 48h`** on `blocked` cards with no heartbeat — fires for
+  you if your agent dies before posting a verdict.
+- **`DEFAULT_RUNNING_STALE_HOURS = 24h`** on `running` cards — fires if a QA worker
+  wedges without emitting a heartbeat.
+
+The sweeper warns (log line) and can optionally archive blocked cards. It does *not*
+auto-fix you — it is a notification mechanism, not a recovery mechanism.
+
+### Constants reference
+
+| Name | Value | Source |
+|------|-------|--------|
+| `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:37` |
+| `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
+| `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
+| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:150` |
+
+### What breaks self-healing
+
+- Emitting a non-canonical verdict (typo, missing `qa-passed`/`qa-failed`). The
+  dispatcher falls through to `PENDING_CI` and your card idles.
+- Not blocking with `review-required` after posting your verdict. The dispatcher
+  reads block reasons, not PR comments.
+- Crashing before `qa-passed` / `qa-failed` is written to the handoff. The sweeper
+  eventually notices (at 48h) but the PR sits with no record in the meantime.
+- A fix-attempt loop that flips between unrelated failure modes without progress —
+  the `_count_fix_attempts` counter is per-PR across all fix cards, so the third
+  attempt on *any* fix card for the same PR triggers escalation.
+
+---
+
 ## Dispatcher Signal Reference (authoritative)
 
 This SOUL is consumed by the `qa-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the block/handoff reason text.

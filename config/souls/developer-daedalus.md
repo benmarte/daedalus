@@ -198,7 +198,7 @@ If you complete the task yourself instead of blocking it, the downstream review 
 
 ### 6.1 Pipeline Self-Healing — Developer Behavior
 
-- **PENDING_PR timeout:** When you block with `review-required: PR #N`, the dispatcher waits up to ~8h for you to actually open the PR. If no PR appears after ~8 hours, a warning comment is posted on your card. You must create the PR before blocking.
+- **PENDING_PR handling:** When you block with `review-required: awaiting-pr`, the dispatcher searches GitHub for an open PR linked to the issue number on each cron tick. If found, it updates the block reason to `review-required: PR #N — awaiting CI` so the pipeline can advance. If not found, the card stays blocked until the next cron tick searches again. You must create the PR before blocking.
   
 - **awaiting-fix: auto-unblock (self-healing pipeline):** When QA/tests fail or a reviewer requests changes on your PR, a fix card is dispatched (either through a PM routing card or directly in the legacy path). Your card — the one that originally requested review — is then blocked with `awaiting-fix: <fix_card_id>` so its state is visible on the board. When the fix card completes successfully, the dispatcher (`_execute_advance` in `core/iterate.py`) scans every blocked card and automatically unblocks any whose block reason contains both `awaiting-fix` AND the completed fix card's task ID; your card is then re-queued for re-review.
 
