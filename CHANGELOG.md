@@ -1,3 +1,5 @@
+## [feat: --plugin-dir flag for daedalus-cron.sh to load local dev plugin without reinstalling](https://github.com/benmarte/daedalus/issues/233) — [PR #249](https://github.com/benmarte/daedalus/pull/249)
+
 ## [docs: update README, user guide, and all feature documentation for current release](https://github.com/benmarte/daedalus/issues/234) — [PR #258](https://github.com/benmarte/daedalus/pull/258)
 
 # Changelog
