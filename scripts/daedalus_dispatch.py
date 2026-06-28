@@ -3029,6 +3029,149 @@ def _check_completed_planner(
     return triggered
 
 
+_NOT_SUITABLE_RE = re.compile(r"not\s+suitable(?:\s+for\s+decomposition)?", re.IGNORECASE)
+
+
+def _check_planner_not_suitable(
+    slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]], workdir: str,
+    base_branch: str, provider_name: str,
+    profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
+    coding_agent: str = "none", coding_agent_cmd: str = "",
+    notify_targets: Optional[List[str]] = None,
+    *, dry_run: bool = False, provider=None,
+) -> List[int]:
+    """Reroute a planner card signaling 'NOT SUITABLE FOR DECOMPOSITION'.
+
+    When the planner completes a parent/epic issue but concludes it should not
+    go through the decomposition path (already small, blocking dep, etc.), no
+    downstream child task is produced and the parent issue would be left
+    In-Progress with no active work. This handler detects that signal and
+    creates a validator task for the parent issue so the pipeline keeps moving
+    (refs issue #931 / epic #918).
+
+    Idempotency is enforced via the ``planner-fallback-validator-{n}``
+    idempotency key — re-running on the next tick returns the existing task id
+    rather than creating a duplicate.
+
+    Returns the issue numbers that were (or would be, in dry_run) routed to
+    the validator path.
+    """
+    p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
+    triggered: List[int] = []
+
+    for task in kanban.list_tasks(slug, status="done"):
+        if (task.get("assignee") or "").strip() != p["planner"]:
+            continue
+        summary_raw = _get_task_summary(task, slug)
+        summary_upper = summary_raw.upper()
+        # Happy path is handled by _check_completed_planner — skip to avoid overlap.
+        if "PLANNING COMPLETE" in summary_upper:
+            continue
+        if not _NOT_SUITABLE_RE.search(summary_raw or ""):
+            continue
+
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            logger.debug(
+                "dispatch: planner NOT SUITABLE #%s — no issue number in title, skipping",
+                task.get("title", "<untitled>"),
+            )
+            continue
+
+        logger.info(
+            "dispatch: planner NOT SUITABLE #%s — routing to validator (fallback)",
+            n,
+        )
+
+        issue = issues_map.get(n)
+        if not issue and provider is not None:
+            fetched = _fetch_issue_with_retry(provider, n)
+            if fetched:
+                issue = fetched.as_dict()
+                logger.info(
+                    "dispatch: planner-fallback #%s not in issues_map window, "
+                    "fetched directly from provider", n,
+                )
+        if not issue:
+            logger.warning(
+                "dispatch: planner NOT SUITABLE #%s but issue not in current scope — skipping",
+                n,
+            )
+            continue
+
+        if dry_run:
+            logger.info("[dry-run] planner NOT SUITABLE #%s — would create validator task", n)
+            triggered.append(n)
+            continue
+
+        ikey = f"planner-fallback-validator-{n}"
+        vid = kanban.create_task(
+            slug, f"#{n} {issue.get('title', '')}",
+            body=_planner_not_suitable_validator_body(
+                repo, issue, summary_raw, workdir, base_branch, provider_name,
+                coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd,
+                security_targets=notify_targets,
+            ),
+            assignee=p["validator"],
+            idempotency_key=ikey,
+            workspace=f"dir:{workdir}" if workdir else "",
+            skills=rs.get("validator") or None,
+        )
+        if vid:
+            logger.info(
+                "dispatch: planner NOT SUITABLE #%s — validator task %s created",
+                n, vid,
+            )
+            triggered.append(n)
+    return triggered
+
+
+def _planner_not_suitable_validator_body(
+    repo: str, issue: Dict[str, Any], planner_summary: str, workdir: str,
+    base_branch: str, provider_name: str,
+    *, coding_agent: str = "none", coding_agent_cmd: str = "",
+    security_targets: Optional[List[str]] = None,
+) -> str:
+    """Validator body for the planner-fallback path.
+
+    The parent issue was routed to the planner, who decided it is not suitable
+    for decomposition. We re-validate the issue as a regular (non-epic) bug
+    or feature, then continue through the normal validator → PM → developer
+    flow rather than stalling.
+    """
+    n, title, body, _ = _unpack_issue(issue)
+    _h = _resolve_howtos(provider_name, repo, n)
+    security_notify_cmds = _build_security_notify_cmds(
+        repo, n, title, security_targets or [])
+    _body = (
+        f"Validate issue {repo}#{n}: {title}\n"
+        f"Repo at {workdir} (read only — cd there for git/grep). Base branch: {base_branch}.\n\n"
+        f"⛔ READ-ONLY — You may run existing tests to verify bug reproduction but MUST NOT write, "
+        f"modify, or commit any code. DO NOT create or modify files. DO NOT run `git commit`, "
+        f"`git add`, or any git write command. DO NOT open pull requests.\n\n"
+        f"📋 PROGRESS COMMENTS ARE AUTOMATIC: Do NOT post GitHub comments yourself. When you "
+        f"complete (or block) your kanban card, the dispatcher mirrors your summary to GitHub "
+        f"issue #{n} automatically.\n\n"
+        f"You are the VALIDATOR for issue #{n}. This issue was originally routed to the planner "
+        f"for epic decomposition, but the planner determined it is NOT suitable for that path:\n\n"
+        f"    {planner_summary.strip()}\n\n"
+        f"Treat it as a standard (non-epic) issue and classify using the normal rules:\n\n"
+        f"CONFIRMED — issue is real, unaddressed, and safe to proceed. "
+        f"Complete with summary starting 'CONFIRMED: ' + 1–2 sentence reproduction note.\n\n"
+        f"CANNOT_REPRODUCE — POST comment on #{n} via {_h['comment']} then STOP.\n\n"
+        f"ALREADY_FIXED — POST comment naming the fix then STOP.\n\n"
+        f"DUPLICATE — POST comment linking the original then STOP.\n\n"
+        f"NEEDS_MORE_INFO — POST comment listing required info, then BLOCK.\n\n"
+        f"--- Issue #{n} ---\n{body}\n"
+    )
+    return _prepend_delegation(
+        _body, coding_agent, coding_agent_cmd,
+        role="validator", issue_number=n, append=True,
+    )
+
+
 _GET_ISSUE_RETRY_DELAYS = (1.0, 2.0)  # seconds; len == extra attempts after the first
 
 
@@ -3776,6 +3919,15 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         slug, workdir, profiles=profiles, dry_run=dry_run, provider=provider,
     )
     if planner_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    planner_not_suitable_triggered = _check_planner_not_suitable(
+        slug, repo, issues_map, workdir, base_branch, provider.name,
+        profiles=profiles, role_skills=role_skills,
+        coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd,
+        notify_targets=_sec_targets, dry_run=dry_run, provider=provider,
+    )
+    if planner_not_suitable_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     pm_triggered = _check_completed_pm(
