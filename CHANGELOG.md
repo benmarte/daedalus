@@ -1,5 +1,7 @@
 ## [fix: retry GitHub Projects GraphQL enrollment with backoff when node ID resolution fails](https://github.com/benmarte/daedalus/issues/236) — [PR #245](https://github.com/benmarte/daedalus/pull/245)
 
+## [fix: retry GitHub Projects GraphQL enrollment with backoff when node ID resolution fails](https://github.com/benmarte/daedalus/issues/236) — [PR #245](https://github.com/benmarte/daedalus/pull/245)
+
 ## [Validator retry cap exhausted → same notification](https://github.com/benmarte/daedalus/issues/183) — [PR #226](https://github.com/benmarte/daedalus/pull/226)
 
 ## [fix: _fetch_issues limit=20 silently skips older issues when >20 open issues](https://github.com/benmarte/daedalus/issues/203) — [PR #224](https://github.com/benmarte/daedalus/pull/224)
