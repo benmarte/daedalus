@@ -2490,7 +2490,9 @@ def _check_confirmed_validators(
                 continue
             # Intermediate retry — send a distinct "retry-attempt" notification before retrying (#287).
             # Fires only when we are actually about to create a new retry task (not at cap exhaustion).
-            if resolved is not None:
+            # SUPPRESSED at the boundary (retry_count >= max_retries): cap-exhausted fires on the
+            # next tick, avoiding a duplicate "manual intervention required" notification — issue t_928bfae8.
+            if resolved is not None and retry_count < _MAX_VALIDATOR_RETRIES:
                 _send_retry_attempt_notification(
                     role="validator", issue_number=n_nr,
                     retry_count=retry_count, max_retries=_MAX_VALIDATOR_RETRIES,
