@@ -1,3 +1,5 @@
+## [feat(e2e): make e2e target + CI nightly schedule](https://github.com/benmarte/daedalus/issues/903) — [PR #910](https://github.com/benmarte/daedalus/pull/910)
+
 ## [bug: agents silently fail to post issue comments when GITHUB_TOKEN not set in cron env](https://github.com/benmarte/daedalus/issues/894) — [PR #895](https://github.com/benmarte/daedalus/pull/895)
 
 ## [bug: concurrent dispatcher ticks re-decompose epics when idempotency marker format changed](https://github.com/benmarte/daedalus/issues/891) — [PR #893](https://github.com/benmarte/daedalus/pull/893)
