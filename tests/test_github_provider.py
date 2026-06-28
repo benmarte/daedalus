@@ -456,3 +456,16 @@ def test_board_add_item_all_retries_fail_records_failure(sleep, provider):
     assert provider.enrollment_failures == [99]
     # 3 attempts → 2 backoff sleeps (0s, 2s, 4s).
     assert sleep.call_args_list == [mock.call(2), mock.call(4)]
+
+
+@mock.patch("core.providers.github.time.sleep")
+def test_board_add_item_exhaustion_logs_error(sleep, provider, caplog):
+    """Exhausted retries escalate to ERROR (not WARNING) naming the issue number."""
+    import logging
+    _gql_mock(provider)
+    _fail_node_id_n_times(provider, 99)  # always fails
+    with caplog.at_level(logging.ERROR, logger="daedalus.providers"):
+        assert provider._board_add_item(99) is None
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("99" in r.getMessage() and "manually" in r.getMessage()
+               for r in errors), f"expected ERROR naming issue #99: {[r.getMessage() for r in errors]}"
