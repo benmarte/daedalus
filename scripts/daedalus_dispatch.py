@@ -2400,9 +2400,11 @@ def _check_confirmed_validators(
                 else:
                     triggered.append(n_nr)
                 continue
-            if not issue_nr:
-                continue
             # Count existing validator tasks (original + retries) to enforce retry cap.
+            # NOTE: this check runs BEFORE the `if not issue_nr: continue` guard,
+            # so we can emit the retry-cap-exhausted notification even when the issue
+            # is missing from issues_map. Otherwise, a stale validator task with no
+            # resolvable issue would never trigger the notification (#378).
             retry_count = sum(
                 1 for t in kanban.list_tasks(slug)
                 if (t.get("assignee") or "") == p["validator"]
@@ -2458,6 +2460,10 @@ def _check_confirmed_validators(
                                 "retry-cap comment failed",
                                 n_nr, exc,
                             )
+                continue
+            if not issue_nr:
+                # issue_nr not in issues_map — skip retry, but the cap check above
+                # has already emitted the notification if retries are exhausted (#378)
                 continue
             # Intermediate retry — send a distinct "retry-attempt" notification before retrying (#287).
             # Fires only when we are actually about to create a new retry task (not at cap exhaustion).
