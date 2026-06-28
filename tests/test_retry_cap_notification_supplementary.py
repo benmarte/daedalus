@@ -76,14 +76,12 @@ def test_validator_intermediate_retry_triggers_retry_attempt_not_cap_exhausted(d
             profiles=_default_profile(),
         )
 
-        # retry_count=2, max_retries=2 → 2 >= 3 为 False，应触发 retry-attempt
-        assert mock_cap.call_count == 0, "retry_count=2 < max+1=3，不应触发 cap-exhausted"
-        assert mock_attempt.called, "retry_count=2 > 0，应触发 retry-attempt"
-        kw = mock_attempt.call_args.kwargs
-        assert kw["role"] == "validator"
-        assert kw["issue_number"] == 42
-        assert kw["retry_count"] == 2
-        assert kw["max_retries"] == 2
+        # retry_count=2, max_retries=2 → 2 >= 3 为 False，but retry_count >= max_retries (boundary fix t_928bfae8)
+        # So retry-attempt is suppressed, cap-exhausted will fire next tick
+        assert mock_cap.call_count == 0, "retry_count=2 < max+1=3, shouldn't trigger cap-exhausted yet"
+        assert mock_attempt.call_count == 0, "retry_count=2 >= max_retries=2, retry-attempt suppressed at boundary"
+        kw = mock_attempt.call_args
+        assert kw is None, "no retry-attempt call should be made at cap boundary"
 
 
 def test_pm_intermediate_retry_triggers_retry_attempt_not_cap_exhausted(disp):
