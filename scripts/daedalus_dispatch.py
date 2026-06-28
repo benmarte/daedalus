@@ -2030,6 +2030,16 @@ def _send_retry_cap_notification(
     filter). When no targets are configured, returns silently. Failures are
     logged but not raised.
     """
+    # Fire webhook notification asynchronously (non-blocking) — independent of
+    # whether ``hermes send`` targets are configured.
+    _fire_webhook_notification(
+        role=role,
+        issue_number=issue_number,
+        retry_count=retry_count,
+        max_retries=max_retries,
+        dry_run=dry_run,
+    )
+
     targets = _notify_targets(resolved, "retry-cap-exhausted")
     if not targets:
         return
@@ -2064,15 +2074,6 @@ def _send_retry_cap_notification(
             logger.info("sent retry-cap notification to %s for #%s (role=%s)", target, issue_number, role)
         else:
             logger.warning("failed to send retry-cap notification to %s for #%s", target, issue_number)
-
-    # Fire webhook notification asynchronously (non-blocking)
-    _fire_webhook_notification(
-        role=role,
-        issue_number=issue_number,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        dry_run=dry_run,
-    )
 
 
 def _fire_webhook_notification(
