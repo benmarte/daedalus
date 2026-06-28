@@ -7,6 +7,7 @@ metadata:read, projects:write (boards only).
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 from .base import (BoardSummary, CIStatus, Comment, FieldDef, FieldOption,
@@ -16,6 +17,12 @@ from .http import HTTPClient, ProviderError
 
 API_URL = "https://api.github.com"
 GRAPHQL_PATH = "/graphql"
+
+# Backoff delays (seconds) before each issue node-id resolution attempt during
+# board enrollment. Newly-created issues sometimes haven't propagated through
+# GitHub's GraphQL layer yet, yielding transient "could not resolve to an
+# Issue" errors; retry a few times before giving up. 3 attempts: 0s, 2s, 4s.
+_ENROLLMENT_RETRY_DELAYS = (0, 2, 4)
 
 
 class GitHubProvider(VCSProvider):
@@ -46,6 +53,9 @@ class GitHubProvider(VCSProvider):
         self._board_number = (self._cfg.get("tracking") or {}).get("github_project_number")
         self._board_meta: Optional[Dict[str, Any]] = None   # project_id/status_field_id/options
         self._board_items: Optional[List[Dict[str, Any]]] = None
+        # Issue numbers whose board enrollment failed (node id never resolved).
+        # Surfaced in the dispatch summary under ``enrollment_failures``.
+        self.enrollment_failures: List[int] = []
 
     # ── issues ───────────────────────────────────────────────────────────────
     def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
@@ -559,6 +569,32 @@ class GitHubProvider(VCSProvider):
         self._board_meta = None  # clear cache so next call reloads with the new option
         return True
 
+    def _resolve_issue_node_id(self, issue_number: int) -> Optional[str]:
+        """Resolve an issue's GraphQL node id, retrying with exponential backoff.
+
+        Newly-created issues sometimes haven't propagated through GitHub's
+        GraphQL infrastructure yet, yielding transient "could not resolve to an
+        Issue" errors. Retry per ``_ENROLLMENT_RETRY_DELAYS`` before giving up.
+        Returns the node id, or None if every attempt fails.
+        """
+        repo_name = self.repo.split("/", 1)[1]
+        q = """query($owner:String!,$name:String!,$number:Int!){
+                 repository(owner:$owner,name:$name){
+                   issue(number:$number){ id } } }"""
+        attempts = len(_ENROLLMENT_RETRY_DELAYS)
+        for attempt, delay in enumerate(_ENROLLMENT_RETRY_DELAYS, start=1):
+            if delay:
+                time.sleep(delay)
+            data = self._graphql(
+                q, {"owner": self.owner, "name": repo_name, "number": issue_number})
+            issue_id = (((data or {}).get("repository") or {}).get("issue") or {}).get("id")
+            if issue_id:
+                return issue_id
+            self._log.warning(
+                "board: issue #%s node id unresolved (attempt %d/%d)",
+                issue_number, attempt, attempts)
+        return None
+
     def _board_add_item(self, issue_number: int) -> Optional[str]:
         """Enroll an issue into the project via addProjectV2ItemById.
 
@@ -572,15 +608,14 @@ class GitHubProvider(VCSProvider):
         if not meta:
             return None
         project_id = meta["project_id"]
-        # Resolve the issue's GraphQL node id.
-        repo_name = self.repo.split("/", 1)[1]
-        q = """query($owner:String!,$name:String!,$number:Int!){
-                 repository(owner:$owner,name:$name){
-                   issue(number:$number){ id } } }"""
-        data = self._graphql(q, {"owner": self.owner, "name": repo_name, "number": issue_number})
-        issue_id = (((data or {}).get("repository") or {}).get("issue") or {}).get("id")
+        # Resolve the issue's GraphQL node id (retries transient propagation lag).
+        issue_id = self._resolve_issue_node_id(issue_number)
         if not issue_id:
-            self._log.warning("board: cannot resolve issue #%s node id for enrollment", issue_number)
+            self._log.error(
+                "board: failed to resolve issue #%s node id after %d attempts — "
+                "enroll it manually on project #%s",
+                issue_number, len(_ENROLLMENT_RETRY_DELAYS), self._board_number)
+            self.enrollment_failures.append(issue_number)
             return None
         m = """mutation($project:ID!,$content:ID!){
                  addProjectV2ItemById(input:{projectId:$project,contentId:$content}){
