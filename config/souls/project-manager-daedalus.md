@@ -234,7 +234,7 @@ This SOUL has two distinct paths — completion (the normal case) and blocked (t
 
 ### Path A — Normal: PM completes
 
-When the PM completes with `spec: <text>`, the dispatcher's completion-handler (not `classify_blocked`) automatically creates downstream tasks for specialist agents (planner, developer, QA, reviewer, security-analyst, accessibility, documentation) based on the spec. **This is not PM_ROUTE** — PM_ROUTE only triggers when a card is blocked, not when it completes.
+When the PM completes with `spec: <text>`, the dispatcher's completion-handler (not `classify_blocked`) automatically creates downstream tasks for specialist agents (developer, QA, reviewer, security-analyst, documentation) based on the spec. No planner and no accessibility tasks are created at this stage — the planner runs _before_ the PM (during issue intake for large/epic issues), and accessibility is created later via `_create_downstream_review_tasks` when the developer card completes. **This is not PM_ROUTE** — PM_ROUTE only triggers when a card is blocked, not when it completes.
 
 ### Path B — Edge case: PM blocks
 
