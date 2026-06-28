@@ -3357,7 +3357,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     # closure of a blocker should promote its dependents to Ready idempotently.
     # Called after the completed list is fully populated so all just-closed issues
     # participate in one pass. Never raises — logs and records errors in the result.
-    if completed and not dry_run:
+    if completed and not dry_run and provider is not None:
         try:
             promo_result = tier_promotion.promote_waiting_tiers(provider, list(completed))
             if promo_result.promoted:
