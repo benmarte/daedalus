@@ -2409,6 +2409,32 @@ def _check_confirmed_validators(
                             slug, n_nr, validator_profile=p["validator"],
                             marker=_RETRY_CAP_MARKER,
                         )
+                    # Post a GitHub comment so humans see the failure on the issue (t_dee62e1a).
+                    # Matches the pattern used in all other validator completion paths
+                    # (STOP/BLOCKED/ESCALATE) which post comments via provider.post_issue_comment.
+                    if provider is not None and not dry_run:
+                        try:
+                            cap_comment = (
+                                f"⚠️ **Validator retry cap exhausted** for issue #{n_nr}\n\n"
+                                f"The validator has completed {retry_count} times "
+                                f"(max: {_MAX_VALIDATOR_RETRIES}) without a CONFIRMED outcome.\n\n"
+                                f"**Manual intervention required.**\n\n"
+                                f"Likely cause: Validator agent completed without CONFIRMED summary "
+                                f"(context window overflow, agent crash, or silent failure).\n\n"
+                                f"Recovery: Check agent logs, verify issue context, then manually "
+                                f"requeue validator or escalate to human review."
+                            )
+                            if not provider.post_issue_comment(n_nr, cap_comment):
+                                logger.warning(
+                                    "dispatch: failed to post retry-cap comment on #%s",
+                                    n_nr,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "dispatch: post_issue_comment #%s raised %s — "
+                                "retry-cap comment failed",
+                                n_nr, exc,
+                            )
                 continue
             # Intermediate retry — send a distinct "retry-attempt" notification before retrying (#287).
             # Fires only when we are actually about to create a new retry task (not at cap exhaustion).
@@ -2470,6 +2496,32 @@ def _check_confirmed_validators(
                             slug, n, validator_profile=p["validator"],
                             marker=_RETRY_CAP_MARKER,
                         )
+                    # Post a GitHub comment so humans see the failure on the issue (t_dee62e1a).
+                    # Matches the pattern used in all other validator/PM completion paths
+                    # which post comments via provider.post_issue_comment.
+                    if provider is not None and not dry_run:
+                        try:
+                            cap_comment = (
+                                f"⚠️ **Project Manager retry cap exhausted** for issue #{n}\n\n"
+                                f"The PM has completed {stale_count} times "
+                                f"(max: {_MAX_PM_RETRIES}) without a SPEC: outcome.\n\n"
+                                f"**Manual intervention required.**\n\n"
+                                f"Likely cause: PM agent completed without SPEC: summary "
+                                f"(context window overflow, agent crash, or silent failure).\n\n"
+                                f"Recovery: `hermes kanban edit <task-id>` and add `SPEC:` "
+                                f"summary, or manually requeue with fresh context."
+                            )
+                            if not provider.post_issue_comment(n, cap_comment):
+                                logger.warning(
+                                    "dispatch: failed to post retry-cap comment on #%s",
+                                    n,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "dispatch: post_issue_comment #%s raised %s — "
+                                "retry-cap comment failed",
+                                n, exc,
+                            )
                 continue
             # Intermediate PM retry — send a distinct "retry-attempt" notification before retrying (#287).
             if resolved is not None:
