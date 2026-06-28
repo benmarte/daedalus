@@ -223,6 +223,8 @@ Every time the cron job fires, Daedalus runs its dispatch loop:
 7. Closes issues and marks cards **Done** when their PRs are merged.
 8. Cleans up kanban tasks for any issue the validator closed as already-fixed or a duplicate.
 
+**Gateway self-healing:** before each dispatch loop, the cron wrapper (`~/.hermes/scripts/daedalus-cron.sh`) runs a lightweight watchdog. The dispatcher only nudges the kanban board — the Hermes gateway is what actually spawns the agent processes — so if the gateway has died silently the loop would otherwise run clean while no work ever starts. The watchdog parses `hermes gateway status` (which always exits 0) for the `not running` marker and, if the gateway is down, attempts a single `hermes gateway restart` before dispatching. It is best-effort: a missing `hermes` CLI or a failed restart only logs to stderr and never blocks the dispatch run. Each tick re-checks, so a gateway that crashes between ticks is recovered on the next one.
+
 View the cron job for your project in the Hermes **Cron** page:
 
 ![Hermes Cron page — daedalus-daedalus job for the installed project](screenshots/guide/11-cron-job.png)
