@@ -142,3 +142,22 @@ Complete with a summary line starting with your verdict prefix:
 - Never mark ALREADY_FIXED without checking the current branch, not just git history
 - Duplicate check must include open AND closed issues
 - SECURITY_THREAT must always block the pipeline for human review — never auto-advance
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `validator-daedalus` branch of `classify_blocked()` in `core/iterate.py`.
+
+**Recognized signals for `validator-daedalus`:**
+
+| Card state | Dispatcher action |
+|---|---|
+| Completion summary with verdict prefix (`CONFIRMED:`, `ALREADY_FIXED:`, `DUPLICATE:`, `NEEDS_MORE_INFO:`, `SECURITY_THREAT:`) | Normal completion — pipeline proceeds to PM spec creation |
+| **ANY** blocked state (regardless of block reason) | `ESCALATE` — validator must never block; any block is treated as escalation |
+
+**Critical validator-specific behavior:**
+
+**⚠️ Blocking a validator card triggers ESCALATE.** The validator role should only ever **complete** with one of the five verdict prefixes (`CONFIRMED`, `ALREADY_FIXED`, `DUPLICATE`, `NEEDS_MORE_INFO`, `SECURITY_THREAT`). If a validator card is blocked for **any** reason (regardless of the block reason text — `awaiting-pr`, ambiguous input, or anything else), the dispatcher unconditionally returns `ESCALATE`. This is intentional — validators are the first gate and should not be silently unblocked or auto-advanced, and any block indicates an unexpected state that requires human intervention.
+
+**The safe practice:** Always complete the validator card with one of the five verdict prefixes. Never block a validator card — it will trigger escalation. If you encounter an infrastructure issue (e.g., awaiting a PR that doesn't exist yet), complete with the appropriate verdict (e.g., `NEEDS_MORE_INFO`) rather than blocking.
