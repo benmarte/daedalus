@@ -3,7 +3,7 @@
 This guide documents all new user-facing behaviors introduced since v1.0.0-beta.30. Each section explains what the behavior does, how you interact with it, and any relevant configuration or prerequisites.
 
 **Last updated:** 2026-06-28  
-**Coverage:** 31 behaviors across 6 feature areas
+**Coverage:** 32 behaviors across 6 feature areas
 
 ---
 
@@ -16,6 +16,7 @@ This guide documents all new user-facing behaviors introduced since v1.0.0-beta.
    - 1.4 [Epic-Context-Informed Source Reading](#14-epic-context-informed-source-reading)
    - 1.5 [File/Module References Embedded in Sub-issue Bodies](#15-filemodule-references-embedded-in-sub-issue-bodies)
    - 1.6 [Decomposition Idempotency Marker Detection](#16-decomposition-idempotency-marker-detection)
+   - 1.7 [Planner Not-Suitable Fallback](#17-planner-not-suitable-fallback)
 2. [Dependency-Aware Dispatch](#2-dependency-aware-dispatch)
    - 2.1 [Dependency-Aware Ready-Gating](#21-dependency-aware-ready-gating)
    - 2.2 [Tier Promotion](#22-tier-promotion)
@@ -189,6 +190,26 @@ No user-facing configuration. Idempotency is enforced automatically.
 
 **Source implementation:**  
 `core/iterate.py:has_decomposed_marker()` (line 905), `core/iterate.py:_strip_code_blocks()` (line 896)
+
+---
+
+### 1.7 Planner Not-Suitable Fallback
+
+**What it does:**  
+When the planner agent completes its kanban card but concludes the parent issue is not suitable for decomposition (e.g., the issue is already small, blocked on a dependency, or already simple enough for direct implementation), it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The dispatcher detects this via a case-insensitive regex match, skips the planner's normal decomposition path, looks up the parent issue, and creates a validator task for it — routing the issue through the standard validator → PM → developer flow rather than leaving it stuck in In Progress with no active child task.
+
+**How you interact with it:**  
+No manual intervention required. If the planner determines an issue doesn't need decomposition, the system automatically reassigns it to the validator for normal pipeline processing. The parent issue will not get stuck — it will continue through the standard flow.
+
+**Prerequisites:**  
+- The parent issue must have been routed to the planner (via epic detection or manual assignment).
+- The planner must complete its kanban card with `NOT SUITABLE FOR DECOMPOSITION` in the summary.
+
+**Configuration:**  
+No user-facing configuration. Detection is automatic via case-insensitive regex matching of the planner's summary signal.
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py:_check_planner_not_suitable()` (line ~3030)
 
 ---
 

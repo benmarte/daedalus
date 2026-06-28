@@ -207,6 +207,16 @@ Enrollment failures are logged and non-fatal so sibling sub-issues still get pro
 This ensures sub-issues are visible on the board immediately after decomposition, not just
 after they pick up the `Ready` label via tier promotion.
 
+**Not-suitable fallback.** When the planner completes its card but concludes the parent
+issue is not suitable for decomposition (e.g., already small, blocked on a dependency),
+it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The
+dispatcher detects this via a case-insensitive regex, skips the planner's normal
+`PLANNING COMPLETE:` handler, looks up the parent issue, and creates a validator task
+for it — routing the issue through the standard validator → PM → developer flow rather
+than leaving it stuck In Progress with no active child task. Idempotency is enforced
+via a `planner-fallback-validator-{n}` idempotency key so re-runs on subsequent ticks
+return the existing task instead of creating duplicates.
+
 ### Tier promotion: dependency-aware sub-issue Ready-gating
 
 Phase-3 sub-issues can declare `Depends on: #N` (or the planner emits `depends_on:` in its
