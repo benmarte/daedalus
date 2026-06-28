@@ -768,6 +768,34 @@ def test_task_body_no_slack():
           "**Agent: documentation**" in body)
 
 
+class _LimitRecordingProvider:
+    """Records the ``limit`` kwarg passed to ``list_issues`` (issue #203)."""
+
+    def __init__(self):
+        self.seen_limit = None
+
+    def list_issues(self, state="open", labels=None, limit=50):
+        self.seen_limit = limit
+        return []
+
+
+def test_fetch_issues_default_limit_is_100():
+    """_fetch_issues defaults to limit=100 so boards with >20 open issues are
+    not silently truncated (issue #203)."""
+    disp = _load_dispatch()
+    prov = _LimitRecordingProvider()
+    disp._fetch_issues(prov, {})
+    check("_fetch_issues default limit is 100", prov.seen_limit == 100)
+
+
+def test_fetch_issues_respects_configured_limit():
+    """An explicit issues.filters.limit still overrides the default."""
+    disp = _load_dispatch()
+    prov = _LimitRecordingProvider()
+    disp._fetch_issues(prov, {"limit": 250})
+    check("_fetch_issues honors configured limit", prov.seen_limit == 250)
+
+
 def test_dispatch_summary_has_slack_delivered():
     """run() includes slack_delivered in both kanban-only and github summaries."""
     disp = _load_dispatch()
@@ -2473,6 +2501,8 @@ if __name__ == "__main__":
                test_resolve_pr_from_parents,
                test_human_summary_slack_delivered,
                test_task_body_no_slack,
+               test_fetch_issues_default_limit_is_100,
+               test_fetch_issues_respects_configured_limit,
                test_dispatch_summary_has_slack_delivered,
                test_notify_targets,
                test_summary_events,
