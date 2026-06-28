@@ -1,3 +1,5 @@
+## [bug: planner_decompose injects source-file context into sub-issue bodies, causing 422 body-too-long from GitHub](https://github.com/benmarte/daedalus/issues/899) — [PR #912](https://github.com/benmarte/daedalus/pull/912)
+
 ## [feat(e2e): make e2e target + CI nightly schedule](https://github.com/benmarte/daedalus/issues/903) — [PR #910](https://github.com/benmarte/daedalus/pull/910)
 
 ## [bug: agents silently fail to post issue comments when GITHUB_TOKEN not set in cron env](https://github.com/benmarte/daedalus/issues/894) — [PR #895](https://github.com/benmarte/daedalus/pull/895)
