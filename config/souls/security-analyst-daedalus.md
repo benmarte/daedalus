@@ -171,7 +171,7 @@ This SOUL is consumed by `classify_blocked()` in `core/iterate.py`. The dispatch
 | ANY OTHER PHRASING | `""` — **silent permanent stall** (no escalation, no recovery) |
 
 **Full approve synonyms** (any one triggers `APPROVE_ADVANCE`, case-insensitive — authoritative list in `core/iterate.py:_parse_handoff`):
-- `approved` (e.g. `security-approved: PR #N`)
+- `approved` (e.g. `security-approved: PR #N`) — also matches `approved.` (defensive substring in source)
 - `sign-off`, `signoff`
 - `lgtm`
 - `looks good`

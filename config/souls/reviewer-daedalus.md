@@ -141,7 +141,7 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 **Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
 
-⛔ **Only two signal prefixes produce pipeline progress:** `review-approved:` (contains `approved`) and `review-changes-requested:` (contains `changes-requested`). ANY OTHER PHRASING — e.g. `review-needs-work:`, `review-commented:`, `review-discussion:` — falls to `""` (silent permanent stall, no escalation, no recovery). The dispatcher does not re-route or prompt you; the card simply sits in `review-required` state forever.
+⛔ **Only recognised substrings produce pipeline progress.** The canonical prefixes are `review-approved:` (contains `approved`) and `review-changes-requested:` (contains `changes-requested`), but the full set of recognised synonyms (see below — e.g. `review-lgtm`, `review-sign-off`) will also advance the pipeline. Only phrasing outside the recognise synonym set — e.g. `review-needs-work:`, `review-commented:`, `review-discussion:` — falls to `""` (silent permanent stall, no escalation, no recovery). The dispatcher does not re-route or prompt you; the card simply sits in `review-required` state forever.
 
 ---
 
@@ -160,7 +160,7 @@ This SOUL is consumed by the `reviewer-daedalus` branch of `classify_blocked()` 
 | ANY OTHER PHRASING | `""` — **silent permanent stall** (no escalation, no recovery) |
 
 **Full approve synonyms** (any one triggers `APPROVE_ADVANCE`, case-insensitive — authoritative list in `core/iterate.py:_parse_handoff`):
-- `approved` (e.g. `review-approved: PR #N`)
+- `approved` (e.g. `review-approved: PR #N`) — also matches `approved.` (defensive substring in source)
 - `sign-off`, `signoff`
 - `lgtm`
 - `looks good`
