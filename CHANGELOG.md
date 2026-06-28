@@ -1,3 +1,5 @@
+## [Unit tests / integration tests: planner creates sub-issues with file-specific acceptance criteria when source is available; graceful fallback when source is not](https://github.com/benmarte/daedalus/issues/806) — [PR #871](https://github.com/benmarte/daedalus/pull/871)
+
 ## [docs: clarify epic #180 line references and document deferred behaviors](https://github.com/benmarte/daedalus/issues/180) — PR #866
 
 ### Documentation
