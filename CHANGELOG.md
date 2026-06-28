@@ -1,3 +1,5 @@
+## [feat(e2e): regression assertions for #891 (no duplicate sub-issues) and #894 (agent comments posted)](https://github.com/benmarte/daedalus/issues/902) — [PR #917](https://github.com/benmarte/daedalus/pull/917)
+
 ## [feat(e2e): dry-run mode flag for dispatcher — seed test issues/tasks without touching real GitHub](https://github.com/benmarte/daedalus/issues/900) — [PR #914](https://github.com/benmarte/daedalus/pull/914)
 
 ## [feat(e2e): multi-tick pipeline harness — run N dispatcher ticks and assert stage progression](https://github.com/benmarte/daedalus/issues/901) — [PR #913](https://github.com/benmarte/daedalus/pull/913)
