@@ -482,6 +482,131 @@ def _resolve_max_dispatch(execution: Dict[str, Any], default: int = 5) -> int:
     return val if val > 0 else default
 
 
+def _resolve_max_validator_retries(execution: Dict[str, Any], default: int = 2) -> int:
+    """Return validator retry cap from ``execution.max_validator_retries``.
+
+    The validator is the gatekeeper role — its failures are rare and usually
+    indicate a deeper problem (bad issue, broken tooling). A cap of 2 keeps the
+    loop tight while giving a second chance on transient glitches.
+    """
+    raw = (execution or {}).get("max_validator_retries")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def _resolve_max_pm_retries(execution: Dict[str, Any], default: int = 3) -> int:
+    """Return PM retry cap from ``execution.max_pm_retries``.
+
+    The PM role produces spec artifacts; three attempts gives a reasonable window
+    for transient failures (context limits, tool flakiness) before we surface a
+    manual-intervention signal via the retry-cap notification.
+    """
+    raw = (execution or {}).get("max_pm_retries")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def _resolve_history_max_lines(execution: Dict[str, Any], default: int = 1000) -> int:
+    """Return history-log rotation size from ``execution.history_max_lines``.
+
+    The history JSONL file grows unboundedly unless rotated; the default of 1000
+    lines covers ~days of activity on an active project while keeping file I/O
+    cheap. Tune upward for audit-heavy deployments.
+    """
+    raw = (execution or {}).get("history_max_lines")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def _resolve_stall_minutes(kanban_section: Dict[str, Any], default: int = 30) -> int:
+    """Return stall-detection threshold (minutes) from ``kanban.dispatch_stale_timeout_seconds``.
+
+    Cards stuck in ``in_progress`` longer than this threshold get demoted to
+    ``blocked`` so the team-blockers handler can surface them to PM. Expressed
+    in seconds in the YAML (more natural for timeouts) but resolved to minutes
+    here because comparison logic uses minutes.
+    """
+    raw = (kanban_section or {}).get("dispatch_stale_timeout_seconds")
+    if raw is None:
+        # Fall back to a minutes-native key for users who prefer that shape
+        raw = (kanban_section or {}).get("dispatch_stale_timeout_minutes")
+        if raw is None:
+            return default
+    try:
+        secs = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if secs <= 0:
+        return default
+    return max(1, secs // 60)
+
+
+def _resolve_follow_up_scan_limit(follow_up: Dict[str, Any], default: int = 50) -> int:
+    """Return PR scan window from ``follow_up_extraction.scan_pr_limit``.
+
+    Each dispatch tick scans the N most recent PRs for reviewer/QA comments and
+    extracts follow-up issues. Fifty PRs is a comfortable window for active
+    projects; reduce for repos with huge PR volume where a full scan is slow.
+    """
+    raw = (follow_up or {}).get("scan_pr_limit")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def _resolve_checklist_threshold(execution: Dict[str, Any], default: int = 5) -> int:
+    """Return checklist-item threshold from ``execution.checklist_threshold``.
+
+    Issues with >= threshold checklist items are auto-flagged for planner
+    involvement (large structural changes deserve explicit plans). Five is a
+    sweet spot; smaller issues don't warrant planning overhead.
+    """
+    raw = (execution or {}).get("checklist_threshold")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def _resolve_github_issue_limit(execution: Dict[str, Any], default: int = 100) -> int:
+    """Return GitHub issues-per-page limit from ``execution.github_issue_limit``.
+
+    GitHub caps per-page at 100, so this is an upper bound. Repos with very few
+    open issues can reduce to save API budget; repos with hundreds can set 100
+    and rely on pagination below.
+    """
+    raw = (execution or {}).get("github_issue_limit")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
 
 
 def _hermes_profile_exists(name: str) -> bool:
@@ -1451,7 +1576,6 @@ _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
 _RETRY_CAP_MARKER = "<!-- daedalus:retry-cap-notified -->"
 
 _RETRY_CAP_NOTIFICATION_MARKER = "RETRY_CAP_NOTIFICATION_SENT"
-_MAX_VALIDATOR_RETRIES = 2
 
 
 def _validator_github_comment_outcome(
@@ -2433,11 +2557,12 @@ def _check_confirmed_validators(
                 if (t.get("assignee") or "") == p["validator"]
                 and f"#{n_nr}" in (t.get("title") or "")
             )
-            if retry_count >= _MAX_VALIDATOR_RETRIES + 1:
+            max_validator_retries = _resolve_max_validator_retries((resolved or {}).get("execution") or {})
+            if retry_count >= max_validator_retries + 1:
                 logger.error(
                     "dispatch: validator for #%s has %d runs (cap %d) with no CONFIRMED — "
                     "manual intervention required",
-                    n_nr, retry_count, _MAX_VALIDATOR_RETRIES,
+                    n_nr, retry_count, max_validator_retries,
                 )
                 # Notify once: this branch re-runs on every tick (no new task is
                 # created past the cap), so guard against re-sending the identical
@@ -2449,7 +2574,7 @@ def _check_confirmed_validators(
                 ):
                     _send_retry_cap_notification(
                         role="validator", issue_number=n_nr,
-                        retry_count=retry_count, max_retries=_MAX_VALIDATOR_RETRIES,
+                        retry_count=retry_count, max_retries=max_validator_retries,
                         resolved=resolved, dry_run=dry_run,
                     )
                     if not dry_run:
@@ -2465,7 +2590,7 @@ def _check_confirmed_validators(
                             cap_comment = (
                                 f"⚠️ **Validator retry cap exhausted** for issue #{n_nr}\n\n"
                                 f"The validator has completed {retry_count} times "
-                                f"(max: {_MAX_VALIDATOR_RETRIES}) without a CONFIRMED outcome.\n\n"
+                                f"(max: {max_validator_retries}) without a CONFIRMED outcome.\n\n"
                                 f"**Manual intervention required.**\n\n"
                                 f"Likely cause: Validator agent completed without CONFIRMED summary "
                                 f"(context window overflow, agent crash, or silent failure).\n\n"
@@ -2492,16 +2617,16 @@ def _check_confirmed_validators(
             # Fires only when we are actually about to create a new retry task (not at cap exhaustion).
             # SUPPRESSED at the boundary (retry_count >= max_retries): cap-exhausted fires on the
             # next tick, avoiding a duplicate "manual intervention required" notification — issue t_928bfae8.
-            if resolved is not None and retry_count < _MAX_VALIDATOR_RETRIES:
+            if resolved is not None and retry_count < max_validator_retries:
                 _send_retry_attempt_notification(
                     role="validator", issue_number=n_nr,
-                    retry_count=retry_count, max_retries=_MAX_VALIDATOR_RETRIES,
+                    retry_count=retry_count, max_retries=max_validator_retries,
                     resolved=resolved, dry_run=dry_run,
                 )
             retry_key = f"validator-retry-{n_nr}-r{retry_count}"
             if dry_run:
                 logger.info("[dry-run] validator empty summary #%s — would retry (run %d/%d)",
-                            n_nr, retry_count, _MAX_VALIDATOR_RETRIES)
+                            n_nr, retry_count, max_validator_retries)
                 triggered.append(n_nr)
                 continue
             vbody = _validator_body(repo, issue_nr, workdir, base_branch, provider_name,
@@ -2518,7 +2643,7 @@ def _check_confirmed_validators(
                 logger.warning(
                     "dispatch: validator done with empty summary for #%s — "
                     "retrying (run %d/%d, key=%s)",
-                    n_nr, retry_count, _MAX_VALIDATOR_RETRIES, retry_key,
+                    n_nr, retry_count, max_validator_retries, retry_key,
                 )
                 triggered.append(n_nr)
             continue
@@ -2529,8 +2654,8 @@ def _check_confirmed_validators(
         if pm_state in ("running", "complete"):
             continue  # PM task active or properly done
         if pm_state == "stale":
-            _MAX_PM_RETRIES = 3
-            if stale_count >= _MAX_PM_RETRIES:
+            max_pm_retries = _resolve_max_pm_retries((resolved or {}).get("execution") or {})
+            if stale_count >= max_pm_retries:
                 logger.error(
                     "dispatch: PM for #%s has %d stale premature completions — "
                     "manual intervention required (hermes kanban edit + SPEC: summary)",
@@ -2542,7 +2667,7 @@ def _check_confirmed_validators(
                 ):
                     _send_retry_cap_notification(
                         role="pm", issue_number=n,
-                        retry_count=stale_count, max_retries=_MAX_PM_RETRIES,
+                        retry_count=stale_count, max_retries=max_pm_retries,
                         resolved=resolved, dry_run=dry_run,
                     )
                     if not dry_run:
@@ -2558,7 +2683,7 @@ def _check_confirmed_validators(
                             cap_comment = (
                                 f"⚠️ **Project Manager retry cap exhausted** for issue #{n}\n\n"
                                 f"The PM has completed {stale_count} times "
-                                f"(max: {_MAX_PM_RETRIES}) without a SPEC: outcome.\n\n"
+                                f"(max: {max_pm_retries}) without a SPEC: outcome.\n\n"
                                 f"**Manual intervention required.**\n\n"
                                 f"Likely cause: PM agent completed without SPEC: summary "
                                 f"(context window overflow, agent crash, or silent failure).\n\n"
@@ -2581,13 +2706,13 @@ def _check_confirmed_validators(
             if resolved is not None:
                 _send_retry_attempt_notification(
                     role="pm", issue_number=n,
-                    retry_count=stale_count, max_retries=_MAX_PM_RETRIES,
+                    retry_count=stale_count, max_retries=max_pm_retries,
                     resolved=resolved, dry_run=dry_run,
                 )
             logger.warning(
                 "dispatch: PM task for #%s prematurely completed without SPEC: "
                 "(attempt %d/%d) — re-creating with retry key",
-                n, stale_count + 1, _MAX_PM_RETRIES,
+                n, stale_count + 1, max_pm_retries,
             )
         ikey = f"pm-{n}" if pm_state == "none" else f"pm-{n}-r{stale_count}"
         issue = issues_map.get(n)
@@ -4255,7 +4380,6 @@ def _resolve_repo_from_cwd() -> Optional[str]:
 # summary (plus a UTC timestamp + project name) as a JSON line to a rotating
 # history log, and expose ``--history`` to print the last N entries as a table.
 
-_HISTORY_MAX_LINES = 1000
 
 # Columns rendered by ``--history``, in order: (summary key, header). List-valued
 # fields are shown as counts; scalars verbatim. ``timestamp``/``project`` are the
@@ -4287,12 +4411,13 @@ def _history_path() -> Path:
 
 def _append_history(summary: Dict[str, Any], *, project: str = "",
                     path: Optional[Path] = None,
-                    timestamp: Optional[str] = None) -> None:
+                    timestamp: Optional[str] = None,
+                    resolved: Optional[Dict[str, Any]] = None) -> None:
     """Append one dispatch-tick summary as a JSON line, capped at the line limit.
 
     The record is the ``summary`` dict prefixed with a UTC ``timestamp`` (ISO-8601)
     and the ``project`` name, so ``--history`` can show recent throughput without
-    tailing logs (issue #235). When the file exceeds :data:`_HISTORY_MAX_LINES`
+    tailing logs (issue #235). When the file exceeds configured history max lines
     the oldest lines are rotated out. Writes atomically (temp + replace) and never
     raises — history is best-effort auditing and must never break a dispatch tick.
     """
@@ -4308,8 +4433,9 @@ def _append_history(summary: Dict[str, Any], *, project: str = "",
         lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()] \
             if p.exists() else []
         lines.append(json.dumps(record, default=str))
-        if len(lines) > _HISTORY_MAX_LINES:
-            lines = lines[-_HISTORY_MAX_LINES:]
+        history_max_lines = _resolve_history_max_lines(resolved or {})
+        if len(lines) > history_max_lines:
+            lines = lines[-history_max_lines:]
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
         tmp.replace(p)
@@ -4449,7 +4575,7 @@ def main() -> int:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
         if not dry_run:
-            _append_history(summaries[name], project=name)
+            _append_history(summaries[name], project=name, resolved=resolved)
         if _notify_project_summary(name, summaries[name], resolved, dry_run=dry_run):
             return 0
         try:
@@ -4488,7 +4614,7 @@ def main() -> int:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
         if not dry_run:
-            _append_history(summaries[name], project=name)
+            _append_history(summaries[name], project=name, resolved=resolved)
 
     # Projects with cron.notifications self-deliver their summary (multi-target,
     # any platform); the rest flow through stdout, which the no-agent cron
