@@ -2126,6 +2126,14 @@ def _check_confirmed_validators(
                 # Check if issue is already closed before attempting to close
                 issue_state = provider.get_issue_state(n_nr) if hasattr(provider, 'get_issue_state') else "open"
                 if issue_state == "closed":
+                    # Already closed — record idempotency marker so future ticks skip it
+                    kanban.create_task(
+                        slug, f"validator-stop #{n_nr}",
+                        body=f"Issue #{n_nr} was already closed (validator STOP directive)",
+                        assignee=p["validator"],
+                        idempotency_key=ikey,
+                        workspace=f"dir:{workdir}" if workdir else "",
+                    )
                     triggered.append(n_nr)
                     continue
                 if provider.close_issue(n_nr):
