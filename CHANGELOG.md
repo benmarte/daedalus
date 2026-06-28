@@ -1,3 +1,5 @@
+## [feat: auto-advance sub-issues to Ready after planner decomposition, respecting dependency order](https://github.com/benmarte/daedalus/issues/915) — [PR #937](https://github.com/benmarte/daedalus/pull/937)
+
 ## [feat(e2e): regression assertions for #891 (no duplicate sub-issues) and #894 (agent comments posted)](https://github.com/benmarte/daedalus/issues/902) — [PR #917](https://github.com/benmarte/daedalus/pull/917)
 
 ## [feat(e2e): dry-run mode flag for dispatcher — seed test issues/tasks without touching real GitHub](https://github.com/benmarte/daedalus/issues/900) — [PR #914](https://github.com/benmarte/daedalus/pull/914)
