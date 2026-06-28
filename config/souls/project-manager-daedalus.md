@@ -153,14 +153,14 @@ This section explains the consultation workflow in the self-healing pipeline and
 
 ### What is a Consultation?
 
-A consultation is a PM intervention triggered when another agent (developer, reviewer, security analyst, QA, accessibility, or documentation) encounters a blocker that requires product clarification or decision-making. The self-healing pipeline in `scripts/daedalus_dispatch.py` automatically creates a consultation task assigned to you when:
+A consultation is a PM intervention triggered when another agent (developer, reviewer, security analyst, QA, accessibility, or documentation) encounters a blocker that requires product clarification or decision-making. The self-healing pipeline in `core/iterate.py` (classifier branch `consultation`) automatically creates a consultation task assigned to you when:
 
 - A developer is blocked on implementation ambiguity (missing requirements, unclear acceptance criteria)
 - A reviewer needs product guidance on acceptable design trade-offs
 - A security analyst is blocked on risk acceptance decisions
 - Any team member hits a blocker that is not technical but product-related
 
-The consultation task appears with a title like `consult: #<issue> <title>` and contains the blocker summary reported by the stuck agent.
+The consultation task appears with a title like `consult: #<issue> <title>` and contains the blocker summary reported by the stuck agent. This is one of the five self-healing behaviors introduced in epic #180 — see the "Self-healing behaviors (epic #180)" section in the project README for how it composes with the other four (awaiting-fix auto-unblock, crash-marker silent no-op, PENDING_PR VCS search, PM awaiting-fix silent no-op).
 
 ### Why Unblocking is Critical
 
@@ -199,13 +199,13 @@ Unblocking the card is not optional—it is the critical handoff that resumes pi
 
 ### Self-Healing Pipeline Context
 
-This consultation flow is part of the broader self-healing architecture in `scripts/daedalus_dispatch.py`. The pipeline automatically detects blockers and routes them to the appropriate agent:
+This consultation flow is part of the broader self-healing architecture in `core/iterate.py` (described in epic #180 in the README under "Self-healing behaviors (epic #180)"). The pipeline automatically detects blockers and routes them to the appropriate agent:
 
-- **Technical blockers** (CI failures, merge conflicts) → developer fix cards
+- **Technical blockers** (CI failures, merge conflicts) → developer fix cards (handled by the `awaiting-fix:` auto-unblock behavior)
 - **Review feedback** (changes requested) → PM routing cards to decide fix owner
-- **Product ambiguity** (unclear requirements, design decisions) → PM consultation cards
+- **Product ambiguity** (unclear requirements, design decisions) → PM consultation cards (this path)
 
-The consultation path handles the third category: blocks that require human judgment and product ownership, not code changes. Your unblock action is the bridge between PM clarification and pipeline continuation.
+The consultation path handles the third category: blocks that require human judgment and product ownership, not code changes. Your unblock action is the bridge between PM clarification and pipeline continuation — without it, the self-healing loop cannot recover the stuck card and a human must intervene.
 
 ---
 
