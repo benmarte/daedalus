@@ -13,7 +13,29 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any, Dict, List, Optional
 import re
+
+# ---------------------------------------------------------------------------
+# Module-level threshold storage
+# Populated by dispatcher via set_thresholds(), read by helpers without
+# needing the config dict threaded through every call.
+# ---------------------------------------------------------------------------
+
+# Module-level threshold dictionary. Populated at dispatcher startup via
+# set_thresholds(). Never imported directly; access via _th() helper.
+_TH: Dict[str, Any] = {}
+
+
+def set_thresholds(thresholds: Dict[str, Any]) -> None:
+    """Store threshold values at module level. Called once by dispatcher.run()."""
+    global _TH
+    _TH = thresholds or {}
+
+
+def _th(key: str, default: Any = None) -> Any:
+    """Read a threshold value from module-level storage."""
+    return _TH.get(key, default)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -932,10 +954,12 @@ def has_decomposed_marker(text: Optional[str]) -> bool:
     return bool(_DECOMPOSED_MARKER_RE.search(stripped_text))
 
 
-def _extract_sub_issues_from_body(body: str) -> List[str]:
-    """Return checklist item texts from an epic body (capped at _MAX_SUB_ISSUES)."""
+def _extract_sub_issues_from_body(body: str, max_sub_issues: Optional[int] = None) -> List[str]:
+    """Return checklist item texts from an epic body (capped at max_sub_issues or config)."""
     items = [m.group(1).strip() for m in _CHECKLIST_RE.finditer(body or "")]
-    return [i for i in items if i][:_MAX_SUB_ISSUES]
+    # Cap: explicit parameter -> config via _TH -> module default
+    cap = max_sub_issues if max_sub_issues is not None else _th("max_sub_issues", _MAX_SUB_ISSUES)
+    return [i for i in items if i][:int(cap)]
 
 
 def _default_sub_issue_titles(parent_n: int, parent_title: str) -> List[str]:
@@ -1518,6 +1542,7 @@ def _execute_planner_decompose(
     workdir: str = "",
     dry_run: bool = False,
     provider: Any = None,
+    max_sub_issues: Optional[int] = None,
     **_kwargs: Any,
 ) -> bool:
     """Create sub-issues from an epic when the planner completes with PLANNING COMPLETE."""
@@ -1561,7 +1586,7 @@ def _execute_planner_decompose(
             kanban.complete(slug, tid, summary=f"Already decomposed epic #{parent_n}")
             return True
 
-    checklist_items = _extract_sub_issues_from_body(parent_body)
+    checklist_items = _extract_sub_issues_from_body(parent_body, max_sub_issues=max_sub_issues)
     if checklist_items:
         sub_titles = checklist_items
         sub_scopes = checklist_items

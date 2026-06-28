@@ -1142,7 +1142,7 @@ def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
             scope_text = f"{title}\n{body}"
             file_paths, _meta = identify_relevant_files(scope_text, workdir, max_files=10)
             if file_paths:
-                file_contents = read_source_files(file_paths, workdir, max_size=50_000)
+                file_contents = read_source_files(file_paths, workdir, max_size=int(_TH.get("source_file_max_size", 50_000)))
                 if file_contents:
                     source_context = build_sub_issue_context(file_contents)
                     # Enforce 100KB total context cap (measure in bytes, not chars)
@@ -2967,9 +2967,13 @@ def _check_completed_planner(
         card = dict(task)
         if f"#{n}" not in (card.get("body") or ""):
             card["body"] = f"Issue #{n}\n" + (card.get("body") or "")
+        # Extract and convert: dispatcher's _TH carries numeric values read from
+        # YAML (float by default for some keys); cast to int for type safety.
+        msi_raw = _TH.get("max_sub_issues", 10)
         ok = _execute_planner_decompose(
             slug, card, "", summary_raw,
             workdir=workdir, dry_run=dry_run, provider=provider,
+            max_sub_issues=int(msi_raw),
         )
         if ok:
             triggered.append(n)
@@ -3488,7 +3492,17 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     # module global rather than threading it through every signature (issue #141).
     global _CODING_AGENT_MAX_WAIT
     _CODING_AGENT_MAX_WAIT = _resolve_coding_agent_max_wait(execution)
+    # Resolve threshold values into the module-level _TH registry
+    # and propagate to core.iterate so both modules see the same values.
+    global _TH
+    _TH = _resolve_thresholds(execution)
+    try:
+        from core.iterate import set_thresholds as _set_iterate_thresholds
+        _set_iterate_thresholds(_TH)
+    except Exception as exc:
+        logger.warning("Failed to propagate thresholds to core.iterate: %s", exc)
     role_agents: Dict[str, str] = {
+        role: _resolve_agent_for_role(execution, role) for role in _DEFAULT_PROFILES
     }
     
     # Resolve epic detection config (issue #455) with soft validation
@@ -3499,7 +3513,6 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         epic_config = {"enabled": True, "min_deliverables": 6, "size_threshold": 1000,
                       "epic_label": "epic", "child_label": "subtask"}
     
-    # Inject the correct autonomous-ai-agents skill for every role that delegates to a cloud agent.
     # Inject the correct autonomous-ai-agents skill for every role that delegates to a cloud agent.
     _AGENT_SKILL: Dict[str, str] = {
         "claude-code": "autonomous-ai-agents/claude-code",
@@ -4156,7 +4169,7 @@ def _hermes_send(
             tmp = tf.name
         r = subprocess.run(
             ["hermes", "send", "-t", target, "--file", tmp, "--json"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=int(_TH.get("hermes_send_timeout", 30)),
         )
 
         # Broadcast: post as root message to channel feed when broadcast=True
@@ -4173,7 +4186,7 @@ def _hermes_send(
                 channel_target = notify_target
                 subprocess.run(
                     ["hermes", "send", "-t", channel_target, "--file", broadcast_tmp, "--json"],
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True, text=True, timeout=int(_TH.get("hermes_send_timeout", 30)),
                 )
             except Exception as e:
                 # Broadcast failure is non-fatal, just log it
