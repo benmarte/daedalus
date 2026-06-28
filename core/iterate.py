@@ -952,13 +952,54 @@ def _default_sub_issue_titles(parent_n: int, parent_title: str) -> List[str]:
     ]
 
 
-def _sub_issue_body(parent_n: int, parent_title: str, scope: str, depends_on: list[int]) -> str:
+_FILE_SYMBOL_CAP = 50
+
+
+def _render_affected_files_section(
+    file_paths,
+    identifiers,
+):
+    """Return a markdown block listing files and symbols, or \'\' if both are empty."""
+    files = sorted(f for f in (file_paths or []) if f)
+    syms = sorted(s for s in (identifiers or []) if s)
+    if not files and not syms:
+        return ""
+    parts = ["### Affected files & symbols\n"]
+    if files:
+        shown = files[:_FILE_SYMBOL_CAP]
+        overflow = len(files) - len(shown)
+        parts.append("**Files:**\n")
+        parts.extend(f"- `{f}`\n" for f in shown)
+        if overflow:
+            parts.append(f"- \u2026 and {overflow} additional file(s)\n")
+        parts.append("\n")
+    if syms:
+        shown = syms[:_FILE_SYMBOL_CAP]
+        overflow = len(syms) - len(shown)
+        parts.append("**Symbols:**\n")
+        parts.extend(f"- `{s}`\n" for s in shown)
+        if overflow:
+            parts.append(f"- \u2026 and {overflow} additional symbol(s)\n")
+        parts.append("\n")
+    return "".join(parts)
+
+
+def _sub_issue_body(
+    parent_n,
+    parent_title,
+    scope,
+    depends_on,
+    file_paths=None,
+    identifiers=None,
+):
     deps_str = ", ".join(f"#{n}" for n in depends_on) if depends_on else ""
     depends_line = f"depends_on: {deps_str}"
+    affected = _render_affected_files_section(file_paths, identifiers)
     return (
         f"Part of epic #{parent_n}: {parent_title}\n\n"
         f"{depends_line}\n\n"
         f"## Scope\n{scope}\n\n"
+        f"{affected}"
         f"## Acceptance Criteria\n"
         f"- [ ] Implementation complete per scope\n"
         f"- [ ] Tests pass (unit + integration where applicable)\n"
