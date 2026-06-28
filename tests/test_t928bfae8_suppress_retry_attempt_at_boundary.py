@@ -119,10 +119,12 @@ def test_validator_below_boundary_fires_retry_attempt(disp):
 
 def test_validator_over_boundary_fires_cap_exhausted(disp):
     """retry_count == max_retries + 1 (3/2) → cap-exhausted fires, retry-attempt suppressed."""
+    # #916: a run only burns the cap with a real non-CONFIRMED verdict — empty summaries no longer do.
+    _v = "ran but produced no clear verdict"
     fake_tasks = [
-        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
+        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
+        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
+        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
     ]
 
     resolved = _minimal_resolved(notifications=[

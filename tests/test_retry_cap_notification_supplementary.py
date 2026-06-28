@@ -163,10 +163,13 @@ def test_validator_retry_count_one_over_boundary(disp):
     show_card 返回空 comments → _has_notified_block 始终为 False，循环里每个 task 都会触发通知。
     实际使用中通过 _mark_notified_block 保证只通知一次；这里只验证“边界值=3 时会触发”。
     """
+    # #916: a run only burns the cap with a real non-CONFIRMED verdict — give each
+    # done task such a summary so the boundary (3 >= max+1) is genuinely exercised.
+    _verdict = "ran but produced no clear verdict"
     fake_tasks = [
-        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
+        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _verdict},
+        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _verdict},
+        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _verdict},
     ]
 
     resolved = _minimal_resolved()
@@ -369,13 +372,15 @@ def test_mark_notified_block_only_marks_matching_profile(disp):
 
 def test_multiple_issues_marker_isolation(disp):
     """marker for issue #42 does not affect issue #43"""
+    # #916: real non-CONFIRMED verdicts so each run burns the cap (empty summaries no longer do).
+    _v = "ran but produced no clear verdict"
     fake_tasks = [
-        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t2", "title": "#43 fix another bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t4", "title": "#43 fix another bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t5", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t6", "title": "#43 fix another bug", "assignee": "validator-daedalus", "status": "done"},
+        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
+        {"id": "t2", "title": "#43 fix another bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
+        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
+        {"id": "t4", "title": "#43 fix another bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
+        {"id": "t5", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
+        {"id": "t6", "title": "#43 fix another bug", "assignee": "validator-daedalus", "status": "done", "summary": _v},
     ]
 
     # Per-task comments store: #42 already marked, #43 is not.

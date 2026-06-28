@@ -1,12 +1,16 @@
 """
 Tests for issue #378: Validator retry-cap notification when issue_nr is missing.
 
-Scenario: A validator task has completed (status="done") with empty summary.
-The dispatcher tries to fetch the GitHub issue but fails (issue_nr remains None).
-Previously, the `if not issue_nr: continue` guard would skip the retry-cap check
-entirely, so retry-cap exhaustion notifications would never fire.
+Scenario: A validator task has completed (status="done") with a non-CONFIRMED
+verdict. The dispatcher tries to fetch the GitHub issue but fails (issue_nr
+remains None). Previously, the `if not issue_nr: continue` guard would skip the
+retry-cap check entirely, so retry-cap exhaustion notifications would never fire.
 
 Fix: Move the retry-cap check BEFORE the `if not issue_nr: continue` guard.
+
+Note (#916): the validator runs here carry a real non-CONFIRMED verdict summary
+so they legitimately burn the cap. Empty/None summaries are failed delegations
+and no longer count toward the cap — see test_retry_cap_github_comment.py.
 """
 import sys
 from pathlib import Path
@@ -34,11 +38,11 @@ def test_retry_cap_notification_fires_when_issue_nr_missing():
     Before fix: notification never fires because `if not issue_nr: continue` skips cap check.
     After fix: notification fires even when issue_nr is None.
     """
-    # Simulate validator tasks with empty summary — retry_count at cap (3 done tasks)
+    # Simulate validator tasks with a real non-CONFIRMED verdict — cap reached (3 done tasks)
     fake_tasks = [
-        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
+        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
+        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
+        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
     ]
 
     # Empty issues_map — issue_nr will be None
@@ -75,9 +79,9 @@ def test_dedup_marker_stamped_when_issue_nr_missing():
     issue_nr is None, so the next dispatcher tick doesn't re-fire the alert.
     """
     fake_tasks = [
-        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done"},
+        {"id": "t1", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
+        {"id": "t2", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
+        {"id": "t3", "title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
     ]
 
     comments_store = []
@@ -128,9 +132,9 @@ def test_no_duplicate_notifications_with_concurrent_retries():
     """
     # Simulate multiple validator tasks for the same issue, all with empty summaries
     fake_tasks = [
-        {"id": "t1", "title": "#42 fix bug attempt 1", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t2", "title": "#42 fix bug attempt 2", "assignee": "validator-daedalus", "status": "done"},
-        {"id": "t3", "title": "#42 fix bug attempt 3", "assignee": "validator-daedalus", "status": "done"},
+        {"id": "t1", "title": "#42 fix bug attempt 1", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
+        {"id": "t2", "title": "#42 fix bug attempt 2", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
+        {"id": "t3", "title": "#42 fix bug attempt 3", "assignee": "validator-daedalus", "status": "done", "summary": "ran but produced no clear verdict"},
     ]
 
     comments_store = []
