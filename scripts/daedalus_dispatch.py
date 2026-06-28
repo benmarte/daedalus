@@ -1379,6 +1379,10 @@ def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
 
 _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
 
+# Stamped on the validator task once a retry-cap-exhausted notification has been
+# sent, so subsequent dispatcher ticks don't re-send the identical alert (#183).
+_RETRY_CAP_MARKER = "<!-- daedalus:retry-cap-notified -->"
+
 _MAX_VALIDATOR_RETRIES = 2
 
 
@@ -1415,11 +1419,14 @@ def _validator_github_comment_outcome(
 
 
 def _has_notified_block(slug: str, issue_number: int,
-                        validator_profile: str = "validator-daedalus") -> bool:
-    """Return True if we already sent a block-escalation notification for this issue.
+                        validator_profile: str = "validator-daedalus",
+                        marker: str = _ESCALATION_MARKER) -> bool:
+    """Return True if we already sent ``marker``'s notification for this issue.
 
     Uses the validator kanban task's comments as a persistent, zero-overhead
-    idempotency store — no local JSON files needed.
+    idempotency store — no local JSON files needed. ``marker`` selects which
+    one-shot notification to check (block-escalation by default, or
+    ``_RETRY_CAP_MARKER`` for retry-cap exhaustion — #183).
     """
     pattern = f"#{issue_number}"
     for task in kanban.list_tasks(slug):
@@ -1434,14 +1441,15 @@ def _has_notified_block(slug: str, issue_number: int,
         if not card:
             continue
         for c in card.get("comments") or []:
-            if _ESCALATION_MARKER in (c.get("body") or ""):
+            if marker in (c.get("body") or ""):
                 return True
     return False
 
 
 def _mark_notified_block(slug: str, issue_number: int,
-                         validator_profile: str = "validator-daedalus") -> None:
-    """Stamp the validator task so future ticks skip re-sending the escalation."""
+                         validator_profile: str = "validator-daedalus",
+                         marker: str = _ESCALATION_MARKER) -> None:
+    """Stamp the validator task with ``marker`` so future ticks skip re-sending."""
     pattern = f"#{issue_number}"
     for task in kanban.list_tasks(slug):
         if pattern not in (task.get("title") or ""):
@@ -1450,7 +1458,7 @@ def _mark_notified_block(slug: str, issue_number: int,
             continue
         tid = str(task.get("id") or task.get("task_id") or "")
         if tid:
-            kanban.comment(slug, tid, _ESCALATION_MARKER)
+            kanban.comment(slug, tid, marker)
             return
 
 
@@ -2203,12 +2211,24 @@ def _check_confirmed_validators(
                     "manual intervention required",
                     n_nr, retry_count, _MAX_VALIDATOR_RETRIES,
                 )
-                if resolved is not None:
+                # Notify once: this branch re-runs on every tick (no new task is
+                # created past the cap), so guard against re-sending the identical
+                # alert each tick (#183). The marker is stamped on the validator
+                # task and outlives the dispatcher process.
+                if resolved is not None and not _has_notified_block(
+                    slug, n_nr, validator_profile=p["validator"],
+                    marker=_RETRY_CAP_MARKER,
+                ):
                     _send_retry_cap_notification(
                         role="validator", issue_number=n_nr,
                         retry_count=retry_count, max_retries=_MAX_VALIDATOR_RETRIES,
                         resolved=resolved, dry_run=dry_run,
                     )
+                    if not dry_run:
+                        _mark_notified_block(
+                            slug, n_nr, validator_profile=p["validator"],
+                            marker=_RETRY_CAP_MARKER,
+                        )
                 continue
             retry_key = f"validator-retry-{n_nr}-r{retry_count}"
             if dry_run:

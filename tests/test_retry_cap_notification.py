@@ -223,6 +223,7 @@ def test_validator_retry_cap_exhaustion_triggers_notification():
 
     with mock.patch.object(disp.kanban, "list_tasks", return_value=fake_tasks), \
          mock.patch.object(disp.kanban, "show_card", return_value={"latest_summary": None}), \
+         mock.patch.object(disp.kanban, "comment"), \
          mock.patch.object(disp, "_validator_github_comment_outcome", return_value=""), \
          mock.patch.object(disp, "_send_retry_cap_notification") as mock_notify:
         disp._check_confirmed_validators(
@@ -357,6 +358,83 @@ def test_send_retry_cap_notification_delivery_failure():
             check(f"delivery failure raised unexpectedly: {e}", False)
 
 
+# ── Test 13: dedup — validator retry-cap notification sent only once (#183) ──────
+
+def test_validator_retry_cap_notification_sent_once_across_ticks():
+    """Issue #183: the exhaustion branch re-runs on every dispatcher tick (no new
+    task is created past the cap), but the retry-cap notification must be sent only
+    once — subsequent ticks see the marker and skip the duplicate alert."""
+    disp = _load_dispatch()
+
+    fake_tasks = [
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "id": "t1"},
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "id": "t2"},
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "id": "t3"},
+    ]
+    # Shared comment store that persists across simulated ticks; show_card reads it
+    # and kanban.comment appends to it, mirroring the real idempotency mechanism.
+    comments_store: list = []
+
+    def fake_comment(slug, tid, body):
+        comments_store.append({"body": body})
+
+    def run_tick():
+        disp._check_confirmed_validators(
+            "slug", "owner/repo",
+            {42: {"number": 42, "title": "fix bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+            provider=None,
+            resolved=_minimal_resolved(),
+        )
+
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=fake_tasks), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"comments": comments_store}), \
+         mock.patch.object(disp.kanban, "comment", side_effect=fake_comment), \
+         mock.patch.object(disp, "_validator_github_comment_outcome", return_value=""), \
+         mock.patch.object(disp, "_send_retry_cap_notification") as mock_notify:
+        # Tick 1: cap exhausted for the first time → notification fires + marker stamped.
+        run_tick()
+        check("retry-cap notification sent on first tick",
+              mock_notify.call_count == 1)
+        check("retry-cap marker stamped after first tick",
+              any(disp._RETRY_CAP_MARKER in c["body"] for c in comments_store))
+        # Tick 2: marker present → no duplicate notification.
+        run_tick()
+        check("retry-cap notification NOT re-sent on second tick (no duplicate)",
+              mock_notify.call_count == 1)
+
+
+# ── Test 14: dry_run does not stamp the dedup marker ────────────────────────────
+
+def test_validator_retry_cap_dry_run_does_not_mark():
+    """In dry_run the notification is previewed but the marker is NOT stamped, so
+    the board is never mutated during a dry run."""
+    disp = _load_dispatch()
+
+    fake_tasks = [
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "id": "t1"},
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "id": "t2"},
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done", "id": "t3"},
+    ]
+
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=fake_tasks), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"comments": []}), \
+         mock.patch.object(disp.kanban, "comment") as mock_comment, \
+         mock.patch.object(disp, "_validator_github_comment_outcome", return_value=""), \
+         mock.patch.object(disp, "_send_retry_cap_notification") as mock_notify:
+        disp._check_confirmed_validators(
+            "slug", "owner/repo",
+            {42: {"number": 42, "title": "fix bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+            provider=None,
+            resolved=_minimal_resolved(),
+            dry_run=True,
+        )
+        check("dry_run still previews the notification", mock_notify.called)
+        check("dry_run does not stamp the marker (no board mutation)",
+              not mock_comment.called)
+
+
 # ── Main runner ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -373,6 +451,8 @@ if __name__ == "__main__":
     test_pm_retry_cap_exhaustion_triggers_notification()
     test_event_filtering_retry_cap_exhausted()
     test_send_retry_cap_notification_delivery_failure()
+    test_validator_retry_cap_notification_sent_once_across_ticks()
+    test_validator_retry_cap_dry_run_does_not_mark()
     print(f"\n{'='*60}")
     print(f"Passed: {conftest._passed}  Failed: {conftest._failed}")
     print(f"{'='*60}\n")
