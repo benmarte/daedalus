@@ -1764,12 +1764,13 @@ def _execute_planner_decompose_inner(
                         logger.warning("iterate: planner_decompose — board_set_status(#%s, Ready) failed: %s", sub_n, exc)
                 logger.info("iterate: planner_decompose — applied Ready label to sub-issue #%s (no dependencies)", sub_n)
             else:
-                logger.info("iterate: planner_decompose — sub-issue #%s has %d dependencies, skipping Ready label", sub_n, len(dependencies))
+                # Has dependencies = add to board in Backlog status (not yet actionable)
                 if getattr(provider, "board_configured", lambda: False)():
                     try:
-                        provider.board_set_status(sub_n, "Todo")
+                        provider.board_ensure_backlog(sub_n)
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning("iterate: planner_decompose — board_set_status(#%s, Todo) failed: %s", sub_n, exc)
+                        logger.warning("iterate: planner_decompose — board_ensure_backlog(#%s) failed: %s", sub_n, exc)
+                logger.info("iterate: planner_decompose — sub-issue #%s has %d dependencies, skipping Ready label", sub_n, len(dependencies))
         else:
             logger.warning("iterate: planner_decompose — create_issue failed for %r", title)
 

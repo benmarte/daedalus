@@ -105,14 +105,15 @@ class TestSubIssueBoardEnrollment:
 
         assert ok is True
         assert prov.create_issue.call_count == 3
-        # board_set_status called once per sub-issue with correct tier-based status.
-        assert prov.board_set_status.call_count == 3
+        # board_set_status called only for the tier-0 sub-issue (no deps → Ready).
+        # Dependent sub-issues go through board_ensure_backlog instead.
+        assert prov.board_set_status.call_count == 1
         calls = prov.board_set_status.call_args_list
-        assert [c.args[0] for c in calls] == [201, 202, 203]
-        # First sub-issue (no deps) → "Ready"; subsequent (have deps) → "Todo"
+        assert calls[0].args[0] == 201
         assert calls[0].args[1] == "Ready"
-        assert calls[1].args[1] == "Todo"
-        assert calls[2].args[1] == "Todo"
+        # Sub-issues with deps enrolled via board_ensure_backlog
+        backlog_calls = prov.board_ensure_backlog.call_args_list
+        assert [c.args[0] for c in backlog_calls] == [202, 203]
 
     def test_no_board_call_when_board_not_configured(self, tmp_path):
         prov = _make_provider(board_configured=False, created_numbers=[301])
@@ -134,7 +135,7 @@ class TestSubIssueBoardEnrollment:
         prov = _make_provider(
             board_configured=True,
             created_numbers=[401, 402, 403],
-            board_status_ret=[False, True, True],  # first fails, others succeed
+            board_status_ret=[False],  # only one board_set_status call (for tier-0 Ready)
         )
         with _patch_kanban():
             ok = _execute_planner_decompose(
@@ -144,7 +145,9 @@ class TestSubIssueBoardEnrollment:
             )
 
         assert ok is True
-        # All three sub-issues were attempted, regardless of the first failure
-        assert prov.board_set_status.call_count == 3
+        # board_set_status only called once (tier-0 sub-issue #401, failed but non-fatal)
+        assert prov.board_set_status.call_count == 1
+        # Dependent sub-issues still enrolled via board_ensure_backlog
+        assert prov.board_ensure_backlog.call_count == 2
         # All three sub-issues were still created
         assert prov.create_issue.call_count == 3
