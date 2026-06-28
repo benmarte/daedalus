@@ -1,3 +1,5 @@
+## [docs: update README, user guide, and all feature documentation for current release](https://github.com/benmarte/daedalus/issues/234) — [PR #258](https://github.com/benmarte/daedalus/pull/258)
+
 # Changelog
 
 All notable changes to Daedalus are documented here. The format loosely follows
