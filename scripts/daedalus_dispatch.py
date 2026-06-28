@@ -2095,15 +2095,31 @@ def _fire_webhook_notification(
 
     def _fire():
         try:
+            # Match _send_retry_cap_notification format (issue #283)
+            if role == "validator":
+                diagnosis = "validator completed without CONFIRMED summary"
+                recovery = "check agent logs, verify issue context, then manually requeue validator or escalate to human review"
+            else:  # pm
+                diagnosis = "PM completed without SPEC: summary"
+                recovery = "manually requeue with fresh context or add SPEC: summary via comment"
+            
+            body = (
+                f"Issue #{issue_number} has failed {retry_count}/{max_retries} retries.\n"
+                f"Manual intervention required.\n\n"
+                f"Likely cause: {diagnosis}\n"
+                f"Recovery: {recovery}"
+            )
+            
             payload = NotificationPayload(
-                title=f"Retry Cap Exhausted: {role}",
-                body=f"Issue #{issue_number} has failed {retry_count}/{max_retries} retries. Manual intervention required.",
+                title=f"Retry Cap Exhausted: {role.upper()}",
+                body=body,
                 severity="critical",
                 context={
                     "issue": f"#{issue_number}",
                     "role": role,
-                    "retry_count": str(retry_count),
+                    "retry_count": f"{retry_count}/{max_retries}",
                     "max_retries": str(max_retries),
+                    "recovery": recovery,
                 },
             )
             send_webhook_notification(payload)
@@ -2205,6 +2221,14 @@ def _check_confirmed_validators(
             if summary.startswith("blocked:"):
                 # Validator couldn't proceed with a blocking issue — PM consultation.
                 issue_nt = issues_map.get(n_nr)
+                if not issue_nt and provider is not None:
+                    fetched = _fetch_issue_with_retry(provider, n_nr)
+                    if fetched:
+                        issue_nt = fetched.as_dict()
+                        logger.info(
+                            "dispatch: validator BLOCKED #%s — not in issues_map window, "
+                            "fetched directly from provider", n_nr,
+                        )
                 if issue_nt:
                     if dry_run:
                         logger.info("[dry-run] validator BLOCKED #%s — would create PM consultation", n_nr)
@@ -2787,7 +2811,7 @@ def _check_team_blockers(
     workdir: str, base_branch: str, provider_name: str,
     profiles: Optional[Dict[str, str]] = None,
     role_skills: Optional[Dict[str, List[str]]] = None,
-    *, dry_run: bool = False,
+    *, dry_run: bool = False, provider=None,
 ) -> List[int]:
     """PM re-activation trigger: for every blocked team triage card, create a PM
     consultation task if no active one already exists.
@@ -2824,6 +2848,15 @@ def _check_team_blockers(
         if _has_active_pm_consultation(slug, n, p["pm"]):
             continue  # PM consultation already open for this issue
         issue = issues_map.get(n)
+        if not issue and provider is not None:
+            fetched = _fetch_issue_with_retry(provider, n)
+            if fetched:
+                issue = fetched.as_dict()
+                logger.info(
+                    "dispatch: #%s not in issues_map — fell back to get_issue()", n
+                )
+            else:
+                logger.warning("dispatch: #%s not found in issues_map or via get_issue() fallback", n)
         if not issue:
             logger.debug("dispatch: team blocked #%s but issue not in current scope", n)
             continue
