@@ -64,7 +64,8 @@ _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-S
 
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready",
-                 "security-escalation", "comment-mirror", "retry-cap-exhausted")
+                 "security-escalation", "comment-mirror", "retry-cap-exhausted",
+                 "retry-attempt")
 
 # Priority label ordering — P0 dispatched before P1 before P2 before unlabeled.
 _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
@@ -2062,6 +2063,57 @@ def _send_retry_cap_notification(
             logger.warning("failed to send retry-cap notification to %s for #%s", target, issue_number)
 
 
+
+def _send_retry_attempt_notification(
+    *,
+    role: str,
+    issue_number: int,
+    retry_count: int,
+    max_retries: int,
+    resolved: Dict[str, Any],
+    dry_run: bool,
+) -> None:
+    """Send notification when a retry attempt is being made (before cap exhaustion).
+
+    Distinct from _send_retry_cap_notification (which fires at cap): different title,
+    different event type ('retry-attempt'), different status message.  Routes through
+    ``hermes send`` to every target subscribed to the ``retry-attempt`` event.
+    Failures are logged but not raised.
+    """
+    targets = _notify_targets(resolved, "retry-attempt")
+    if not targets:
+        return
+
+    body = (
+        f"\U0001f504 **Retry Attempt: {role.upper()}**\n\n"
+        f"Issue #{issue_number} has been retried (run {retry_count} of {max_retries}).\n\n"
+        f"**Role**: {role}\n"
+        f"**Retry count**: {retry_count}/{max_retries}\n"
+        f"**Status**: Retry queued — dispatcher will spawn another attempt\n\n"
+    )
+    if role == "pm":
+        body += (
+            "**Context**: PM agent completed without `SPEC:` summary. "
+            "Retrying with a fresh PM task to generate proper specification."
+        )
+    else:  # validator
+        body += (
+            "**Context**: Validator agent completed without `CONFIRMED` "
+            "summary (context window overflow, agent timeout, or silent failure). "
+            "Retrying with a fresh validator task to obtain confirmation."
+        )
+
+    for target in targets:
+        if dry_run:
+            logger.info("[dry-run] would send retry-attempt notification to %s for #%s", target, issue_number)
+            continue
+        ok, _anchor = _hermes_send(target, body)
+        if ok:
+            logger.info("sent retry-attempt notification to %s for #%s (role=%s)", target, issue_number, role)
+        else:
+            logger.warning("failed to send retry-attempt notification to %s for #%s", target, issue_number)
+
+
 def _check_confirmed_validators(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -2248,6 +2300,14 @@ def _check_confirmed_validators(
                             marker=_RETRY_CAP_MARKER,
                         )
                 continue
+            # Intermediate retry — send a distinct "retry-attempt" notification before retrying (#287).
+            # Fires only when we are actually about to create a new retry task (not at cap exhaustion).
+            if resolved is not None:
+                _send_retry_attempt_notification(
+                    role="validator", issue_number=n_nr,
+                    retry_count=retry_count, max_retries=_MAX_VALIDATOR_RETRIES,
+                    resolved=resolved, dry_run=dry_run,
+                )
             retry_key = f"validator-retry-{n_nr}-r{retry_count}"
             if dry_run:
                 logger.info("[dry-run] validator empty summary #%s — would retry (run %d/%d)",
@@ -2301,6 +2361,13 @@ def _check_confirmed_validators(
                             marker=_RETRY_CAP_MARKER,
                         )
                 continue
+            # Intermediate PM retry — send a distinct "retry-attempt" notification before retrying (#287).
+            if resolved is not None:
+                _send_retry_attempt_notification(
+                    role="pm", issue_number=n,
+                    retry_count=stale_count, max_retries=_MAX_PM_RETRIES,
+                    resolved=resolved, dry_run=dry_run,
+                )
             logger.warning(
                 "dispatch: PM task for #%s prematurely completed without SPEC: "
                 "(attempt %d/%d) — re-creating with retry key",
