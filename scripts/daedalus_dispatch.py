@@ -22,6 +22,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
@@ -2300,6 +2301,30 @@ def _check_completed_planner(
     return triggered
 
 
+_GET_ISSUE_RETRY_DELAYS = (1.0, 2.0)  # seconds; len == extra attempts after the first
+
+
+def _fetch_issue_with_retry(provider, n: int):
+    """Fetch an issue not in the list window, retrying on transient failure.
+
+    ``get_issue`` collapses transient (exhausted 429/5xx, transport) and
+    permanent (404/PR/deleted) failures into ``None``. For a confirmed-spec
+    issue the issue almost always exists, so a ``None`` is treated as likely
+    transient and retried a bounded number of times with short backoff before
+    falling through to the caller's warn-and-skip path.
+    """
+    fetched = provider.get_issue(n)
+    if fetched:
+        return fetched
+    for delay in _GET_ISSUE_RETRY_DELAYS:
+        time.sleep(delay)
+        fetched = provider.get_issue(n)
+        if fetched:
+            logger.info("dispatch: get_issue #%s succeeded on retry", n)
+            return fetched
+    return None
+
+
 def _check_completed_pm(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -2349,7 +2374,7 @@ def _check_completed_pm(
             continue  # team triage already exists
         issue = issues_map.get(n)
         if not issue and provider is not None:
-            fetched = provider.get_issue(n)
+            fetched = _fetch_issue_with_retry(provider, n)
             if fetched:
                 issue = fetched.as_dict()
                 logger.info(

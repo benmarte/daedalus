@@ -259,6 +259,7 @@ class FakeProvider:
         branch_prs: Optional[Dict[str, int]] = None,
         supports_ci_status: bool = True,
         blockers: Optional[Dict[int, List[int]]] = None,
+        get_issue_failures: int = 0,
     ) -> None:
         self.name = name
         self._ci = ci_status
@@ -266,6 +267,10 @@ class FakeProvider:
         self._branch_prs = branch_prs or {}
         self.supports_ci_status = supports_ci_status
         self._blockers = blockers or {}
+        # Number of leading get_issue calls that return None before serving the
+        # issue — models a transient outage that recovers (issue #185).
+        self._get_issue_failures = get_issue_failures
+        self.get_issue_calls = 0
         self.posted_issue_comments: List[tuple] = []
         self.posted_pr_comments: List[tuple] = []
         self.merged: List[tuple] = []
@@ -282,6 +287,10 @@ class FakeProvider:
         return self._branch_prs.get(branch)
 
     def get_issue(self, issue_number: int) -> Any:
+        self.get_issue_calls += 1
+        if self._get_issue_failures > 0:
+            self._get_issue_failures -= 1
+            return None
         return self._issues.get(issue_number)
 
     def blockers(self, issue_number: int) -> List[int]:
