@@ -829,8 +829,8 @@ dedicated tests.
 ### Self-healing behaviors (epic #180)
 
 Five concrete behaviors make the pipeline recover from agent failures without
-manual intervention. Each one is verified in `core/iterate.py`'s
-`classify_blocked()` function:
+manual intervention. Each one is implemented in `core/iterate.py` — verified
+on `origin/dev` at commit `4f99b26`.
 
 1. **`awaiting-fix:` auto-unblock.** When developer QA/tests fail or a reviewer
    flags changes, a dedicated fix card is created and assigned to
@@ -843,40 +843,36 @@ manual intervention. Each one is verified in `core/iterate.py`'s
 2. **Crash-marker silent no-op.** If a developer agent crashes with
    infrastructure-failure markers (`coding-agent-failed:`, `permission-error:`,
    `coding_agent_died`, `coding_agent_timeout`, `exited with code`,
-   `agent crash`) in the block reason, `classify_blocked()` returns an empty
-   string. The dispatcher skips the card entirely (`if not action: continue` at
-   line 1478). This prevents the infinite PM consultation loop where each cron
-   tick would spawn `PM_ROUTE` → PM completes as "no-op" → next tick spawns
-   another `PM_ROUTE` → repeat. A human must fix the environment and manually
-   unblock.
+   `agent crash`) in the block reason, `classify_blocked()` (lines 160–165)
+   returns empty string instead of routing to PM. This prevents the infinite
+   PM consultation loop where every cron tick would spawn `PM_ROUTE` → PM
+   completes as "no-op" → next tick spawns another `PM_ROUTE` → repeat. A
+   human must fix the environment and manually unblock.
 
 3. **`awaiting-fix:` concurrency guard.** When a reviewer or security-analyst
    card is already blocked with `awaiting-fix:` in the block reason,
    `classify_blocked()` (lines 175–177 for reviewer, lines 193–195 for
-   security) returns an empty string. This prevents concurrent dispatcher ticks
-   from spawning duplicate fix cards for the same reviewer card. The first tick
-   that annotates the card with `awaiting-fix:` wins; subsequent ticks see the
-   marker and skip.
+   security) returns empty string. This prevents concurrent dispatcher ticks
+   from spawning duplicate fix cards for the same reviewer card. The first
+   tick that annotates the card with `awaiting-fix:` wins; subsequent ticks
+   see the marker and skip.
 
-4. **QA/a11y silent retry via `PENDING_CI`.** When QA or accessibility agents
-   crash or block with non-canonical signals (anything other than `qa-passed:`/
-   `qa-failed:` for QA, or `approved:`/`a11y-approved:`/`a11y-na:`/
-   `a11y-changes-requested:` for accessibility), `classify_blocked()` returns
-   `PENDING_CI`. The card enters `pending_ci_cards` (line 1484) and waits for
-   the retry cron in `scripts/daedalus_dispatch.py` (lines 1278–1293). After 8
-   cron ticks the sweeper checks whether CI is green; if not, it escalates with
-   a comment on the card. This gives agents up to 8 retries before a human must
-   intervene. **Caveat:** non-canonical signals (e.g., QA blocking with
-   `qa-blocked:` instead of `qa-failed:`) will never advance — the agent must
-   use the exact canonical phrasing.
+4. **`PENDING_PR` VCS search.** When a developer card blocks with
+   `review-required: awaiting-pr`, the dispatcher has not yet seen a GitHub
+   PR. Every cron tick calls `_execute_pending_pr()` (lines 571–618), which
+   searches open PRs via `provider.list_prs()` and matches them against the
+   issue number in the PR title/body/branch. Once a PR appears, the block
+   reason is updated to `review-required: PR #N — awaiting CI` so CI checks
+   can drive the next stage. This eliminates the race where the agent opens a
+   PR but the dispatcher keeps classifying the card as "no PR found."
 
-5. **Silent no-op for unrecognized assignees.** `classify_blocked()` (lines
-   230–231) returns empty string for any assignee not explicitly handled
-   (documentation, developer, reviewer, security-analyst, QA, accessibility,
-   validator). This is the default fallback: unrecognized agents don't trigger
-   PM routes, don't spawn fix cards, and don't escalate. They stay blocked
-   silently until a human investigates. This prevents runaway automation on
-   cards assigned to custom profiles or agents added mid-project.
+5. **PM `awaiting-fix:` silent no-op.** The project-manager profile's
+   classifier branch (lines 133–136) returns empty string when the PM's own
+   block reason contains `awaiting-fix:`. This happens when a PM routing card
+   dispatches a developer fix — the PM is then blocked waiting for the fix
+   card to complete, which is a legitimate wait, not a real escalation.
+   Without this guard the dispatcher would escalate the PM to a human every
+   time a developer fix was in flight.
 
 ### What breaks self-healing
 
@@ -895,9 +891,11 @@ resolve them:
 - **Non-canonical QA/a11y signals.** QA must block with `qa-passed:` or
   `qa-failed:` (lowercase, with the colon). Accessibility must use
   `approved:`, `a11y-approved:`, `a11y-na:`, or `a11y-changes-requested:`. Any
-  other phrasing (e.g., `qa-blocked:`, `a11y-failed:`) results in `PENDING_CI`
-  retry, which never advances unless CI becomes green. After 8 ticks the
-  sweeper escalates.
+  other phrasing (e.g., `qa-blocked:`, `a11y-failed:`) results in `PENDING_CI`,
+  which stays in the pending queue indefinitely until CI actually resolves.
+  The stale-blocked sweeper eventually fires at 48h and archives the card if
+  configured, but the dispatcher itself never escalates a non-canonical QA/a11y
+  signal without first getting a terminal signal from the agent.
 
 ---
 
