@@ -248,10 +248,14 @@ There is no infrastructure-failure special case for documentation — a crash (i
 
 ### Self-healing escalation sequence
 
+Documentation does **not** participate in fix-attempt loops like earlier pipeline stages (developer, reviewer, security-analyst) where `MAX_FIX_ATTEMPTS = 3` triggers escalation. Documentation is terminal—once `docs posted` is emitted, the issue is complete and no retry cycle applies.
+
 1. **`docs posted`** → dispatcher calls `_execute_approve_advance`. When `execution.auto_merge=true`, this triggers the PR merge automatically. The issue is considered complete.
 2. **Unrecognized completion signal** (e.g., `documentation complete:`, `docs updated:`) → dispatcher falls through to `PM_ROUTE`. The PM is notified and can re-route or escalate.
 3. **Infrastructure failure** (agent crash, gateway death, permission error, or the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing `coding_agent_timeout`) → card dies in `running` with no summary. There is no crash-marker silent path for documentation because docs complete rather than block. The sweeper warns at 24 h (`DEFAULT_RUNNING_STALE_HOURS`).
 4. **Crash before completion** → card dies in `running`. Sweeper warns at 24 h.
+
+**Contrast with developer/reviewer/security-analyst**: Those roles have `MAX_FIX_ATTEMPTS = 3` before escalation. Documentation has no such retry loop—it's all-or-nothing at the final stage.
 
 ### Sweeper thresholds (stale-card detection)
 
