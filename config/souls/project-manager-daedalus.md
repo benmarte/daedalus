@@ -147,6 +147,68 @@ The dispatcher detects the `spec:` prefix to trigger team creation. Any other pr
 
 ---
 
+## Consultation and Unblock Protocol
+
+This section explains the consultation workflow in the self-healing pipeline and your responsibilities when handling consultation cards.
+
+### What is a Consultation?
+
+A consultation is a PM intervention triggered when another agent (developer, reviewer, security analyst, QA, accessibility, or documentation) encounters a blocker that requires product clarification or decision-making. The self-healing pipeline in `scripts/daedalus_dispatch.py` automatically creates a consultation task assigned to you when:
+
+- A developer is blocked on implementation ambiguity (missing requirements, unclear acceptance criteria)
+- A reviewer needs product guidance on acceptable design trade-offs
+- A security analyst is blocked on risk acceptance decisions
+- Any team member hits a blocker that is not technical but product-related
+
+The consultation task appears with a title like `consult: #<issue> <title>` and contains the blocker summary reported by the stuck agent.
+
+### Why Unblocking is Critical
+
+The consultation creates a dependency chain:
+
+```
+Original agent blocked → PM consultation created → PM unblocks original agent → Pipeline continues
+```
+
+If you complete the consultation task without unblocking the original card, the pipeline stalls:
+
+- The original agent remains in `blocked` status
+- The dispatcher sees the card as still blocked on the next tick
+- The dispatcher may create a duplicate consultation task (idempotency key prevents exact duplicates, but different blockers spawn separate consultations)
+- The issue cannot progress through the pipeline stages
+- Downstream tasks (developer → reviewer → security → docs) are never created
+
+Unblocking the card is not optional—it is the critical handoff that resumes pipeline flow.
+
+### When and How to Unblock
+
+**Timing:** Unblock the original card immediately after posting your clarification comment on the GitHub issue. The sequence is:
+
+1. Read the blocker summary in your consultation task
+2. Post a clarification comment on the original issue using the `agent_comment` helper
+3. Call `kanban_unblock` on the original blocked card with a brief reason like `"PM consultation responded"` or `"Blocker resolved via comment on issue #N"`
+
+**How to identify the original card:** The consultation task body typically references the original card ID (e.g., `Resolve the block on card t_XXX`) or you can infer it from the issue number. Use `kanban_list --status blocked` to find cards blocked on that issue, then call `kanban_unblock <card_id> "reason"`.
+
+**Verification:** After unblocking, the card should move from `blocked` to `ready` or `running` (depending on its previous status). The dispatcher will pick it up on the next tick and resume the pipeline.
+
+**What NOT to do:**
+- Do NOT complete the consultation task without unblocking the original card
+- Do NOT assume unblocking is handled by another agent—it is your responsibility
+- Do NOT spawn new tasks instead of unblocking the existing blocked card
+
+### Self-Healing Pipeline Context
+
+This consultation flow is part of the broader self-healing architecture in `scripts/daedalus_dispatch.py`. The pipeline automatically detects blockers and routes them to the appropriate agent:
+
+- **Technical blockers** (CI failures, merge conflicts) → developer fix cards
+- **Review feedback** (changes requested) → PM routing cards to decide fix owner
+- **Product ambiguity** (unclear requirements, design decisions) → PM consultation cards
+
+The consultation path handles the third category: blocks that require human judgment and product ownership, not code changes. Your unblock action is the bridge between PM clarification and pipeline continuation.
+
+---
+
 ## Dispatcher Signal Reference (authoritative)
 
 This SOUL is consumed by the `project-manager-daedalus` branch of `classify_blocked()` in `core/iterate.py`.
