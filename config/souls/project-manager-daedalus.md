@@ -220,6 +220,12 @@ This consultation flow is part of the broader self-healing architecture. When an
 
 The consultation path handles the third category: blocks that require human judgment and product ownership, not code changes. Your unblock action is the bridge between PM clarification and pipeline continuation — without it, the self-healing loop cannot recover the stuck card and a human must intervene.
 
+### Epic Tier Promotion
+
+When an epic is decomposed into sub-issues with ``Depends on:`` dependencies, only tier-0 (dependency-free) sub-issues are labelled Ready immediately. As each sub-issue's PR merges, the dispatcher calls `promote_waiting_tiers()` in `core/tier_promotion.py` to re-evaluate the epic's siblings and label the next eligible tier (whose dependencies are all closed) as Ready.
+
+**What this means for you:** When you write specs for epics, consider the dependency order. Sub-issues with no dependencies become actionable first. As each merges, the dispatcher automatically unlocks the next tier — you do not need to manually re-route or label anything. The tier promotion logic runs on every dispatcher tick when issues are closed.
+
 ---
 
 ## Dispatcher Signal Reference (authoritative)

@@ -151,7 +151,6 @@ def _install_cron_wrapper() -> tuple[bool, str]:
         'WATCHDOG_HTTP_LOCK="$HOME/.hermes/gateway-watchdog-http.lock"\n'
         "if [ -f \"$WATCHDOG_HTTP_SCRIPT\" ]; then\n"
         "  if mkdir \"$WATCHDOG_HTTP_LOCK\" 2>/dev/null; then\n"
-        '    trap \'rmdir "$WATCHDOG_HTTP_LOCK" 2>/dev/null\' EXIT\n'
         "    echo \"daedalus-cron: running HTTP watchdog (#383)\" >&2\n"
         "    python3 \"$WATCHDOG_HTTP_SCRIPT\" || \\\n"
         "      echo \"daedalus-cron: HTTP watchdog exited with code $?\" >&2\n"
@@ -166,12 +165,15 @@ def _install_cron_wrapper() -> tuple[bool, str]:
         'WATCHDOG_LOCK="$HOME/.hermes/gateway-watchdog.lock"\n'
         "if [ -f \"$WATCHDOG_SCRIPT\" ]; then\n"
         "  if mkdir \"$WATCHDOG_LOCK\" 2>/dev/null; then\n"
-        '    trap \'rmdir "$WATCHDOG_LOCK" 2>/dev/null\' EXIT\n'
         "    echo \"daedalus-cron: running gateway watchdog (#799)\" >&2\n"
         "    python3 \"$WATCHDOG_SCRIPT\" --no-dispatch || \\\n"
         "      echo \"daedalus-cron: gateway watchdog exited with code $?\" >&2\n"
         "  fi\n"
         "fi\n"
+        "# ---------------------------------------------------------------------------\n"
+        "\n"
+        "# Combined EXIT trap to clean up BOTH watchdog locks\n"
+        'trap \'rmdir "$WATCHDOG_HTTP_LOCK" 2>/dev/null; rmdir "$WATCHDOG_LOCK" 2>/dev/null\' EXIT\n'
         "# ---------------------------------------------------------------------------\n"
         "\n"
         'exec python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"\n'
