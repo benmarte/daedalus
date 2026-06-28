@@ -362,3 +362,121 @@ def test_promotion_idempotent():
     # 20 already has Ready → should not be re-promoted
     assert 20 not in result.promoted
     assert all(n != 20 for n, _ in provider.label_calls)
+
+
+# ── Board-status dispatch-trigger tests (issue #208) ────────────────────────
+
+class _StubProviderWithBoard(_StubProvider):
+    """StubProvider extended with board_configured / board_set_status tracking."""
+    name = "stub-tier-board"
+
+    def __init__(self):
+        super().__init__()
+        self.board_status_calls: list[tuple] = []  # (issue_number, status_name)
+        self._board_configured = True
+
+    def board_configured(self) -> bool:
+        return self._board_configured
+
+    def board_set_status(self, issue_number: int, status_name: str) -> bool:
+        self.board_status_calls.append((issue_number, status_name))
+        return True
+
+    def status_name(self, canonical: str) -> str:
+        # Mirror the GitHub/GitLab convention: canonical "ready" → "Ready".
+        return {"ready": "Ready", "in_progress": "In progress", "done": "Done"}.get(
+            canonical, canonical
+        )
+
+
+def test_promotion_also_sets_board_status_to_ready():
+    """After applying the Ready label, board status must be set to Ready so
+    the dispatch loop (which filters by board status) picks the issue up."""
+    provider = _StubProviderWithBoard()
+    provider.set_issue(10, "Epic")
+    provider.set_issue(20, "Epic: #10\nDepends on: #30")  # tier 1
+    provider.set_issue(30, "Epic: #10")  # tier 0, just closed
+    provider._states[30] = "closed"
+    provider.set_blockers(20, [])
+
+    result = tier_promotion.promote_waiting_tiers(provider, just_closed=[30])
+    assert 20 in result.promoted
+    assert (20, "Ready") in provider.label_calls
+    # Board status must have been set to the canonical Ready status.
+    assert (20, "Ready") in provider.board_status_calls
+
+
+def test_promotion_sets_board_status_for_multiple_subissues():
+    """Several sub-issues promoted in the same tick each get board status set."""
+    provider = _StubProviderWithBoard()
+    provider.set_issue(10, "Epic")
+    for n in [20, 21, 22]:
+        provider.set_issue(n, "Epic: #10\nDepends on: #30")
+    provider.set_issue(30, "Epic: #10")
+    provider._states[30] = "closed"
+    for n in [20, 21, 22]:
+        provider.set_blockers(n, [])
+
+    result = tier_promotion.promote_waiting_tiers(provider, just_closed=[30])
+    assert set(result.promoted) == {20, 21, 22}
+    # Every promoted issue must also have board status set.
+    promoted_board_calls = {(n, s) for (n, s) in provider.board_status_calls if n in result.promoted}
+    assert promoted_board_calls == {(20, "Ready"), (21, "Ready"), (22, "Ready")}
+
+
+def test_no_board_status_applied_when_promotion_does_not_occur():
+    """Dependency still open → no board status set (no premature dispatch)."""
+    provider = _StubProviderWithBoard()
+    provider.set_issue(10, "Epic")
+    provider.set_issue(20, "Epic: #10\nDepends on: #30")
+    provider.set_issue(30, "Epic: #10")
+    # 30 still open → 20 NOT promotable
+    provider.set_blockers(20, [30])
+
+    result = tier_promotion.promote_waiting_tiers(provider, just_closed=[])
+    assert result.promoted == []
+    assert (20, "Ready") not in provider.label_calls
+    assert all(n != 20 for n, _ in provider.board_status_calls)
+
+
+def test_promotion_still_succeeds_when_no_board_configured():
+    """When provider has no board, promotion must still work (label-only fallback)."""
+    provider = _StubProviderWithBoard()
+    provider._board_configured = False  # no board
+    provider.set_issue(10, "Epic")
+    provider.set_issue(20, "Epic: #10\nDepends on: #30")
+    provider.set_issue(30, "Epic: #10")
+    provider._states[30] = "closed"
+    provider.set_blockers(20, [])
+
+    result = tier_promotion.promote_waiting_tiers(provider, just_closed=[30])
+    assert 20 in result.promoted
+    assert (20, "Ready") in provider.label_calls
+    # No board calls should have been made.
+    assert provider.board_status_calls == []
+
+
+def test_promotion_tolerates_board_set_status_failure():
+    """board_set_status raising should not abort the whole promotion batch."""
+    provider = _StubProviderWithBoard()
+    provider.set_issue(10, "Epic")
+    provider.set_issue(20, "Epic: #10\nDepends on: #30")
+    provider.set_issue(21, "Epic: #10\nDepends on: #30")  # second to promote
+    provider.set_issue(30, "Epic: #10")
+    provider._states[30] = "closed"
+    provider.set_blockers(20, [])
+    provider.set_blockers(21, [])
+
+    real_board_set = provider.board_set_status
+
+    def flaky_board_set(issue_number, status_name):
+        if issue_number == 20:
+            raise RuntimeError("simulated board API error")
+        return real_board_set(issue_number, status_name)
+
+    provider.board_set_status = flaky_board_set
+    result = tier_promotion.promote_waiting_tiers(provider, just_closed=[30])
+    # Both issues must still be recorded as promoted despite #20's board failure.
+    assert {20, 21} == set(result.promoted)
+    # #21's board status should still have been set normally.
+    assert (21, "Ready") in provider.board_status_calls
