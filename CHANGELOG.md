@@ -1,3 +1,5 @@
+## [bug: concurrent dispatcher ticks re-decompose epics when idempotency marker format changed](https://github.com/benmarte/daedalus/issues/891) — [PR #893](https://github.com/benmarte/daedalus/pull/893)
+
 ## [docs: update SOUL.md profiles and user guide with self-healing pipeline behavior](https://github.com/benmarte/daedalus/issues/180) — [PR #866](https://github.com/benmarte/daedalus/pull/866)
 
 ## [docs: update SOUL.md profiles and user guide with self-healing pipeline behavior](https://github.com/benmarte/daedalus/issues/180) — [PR #866](https://github.com/benmarte/daedalus/pull/866)
