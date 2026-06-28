@@ -1,3 +1,5 @@
+## [feat: extend sweeper to detect stale 'running' cards stuck without updates >24h](https://github.com/benmarte/daedalus/issues/232) — [PR #259](https://github.com/benmarte/daedalus/pull/259)
+
 ## [feat: --plugin-dir flag for daedalus-cron.sh to load local dev plugin without reinstalling](https://github.com/benmarte/daedalus/issues/233) — [PR #249](https://github.com/benmarte/daedalus/pull/249)
 
 ## [docs: update README, user guide, and all feature documentation for current release](https://github.com/benmarte/daedalus/issues/234) — [PR #258](https://github.com/benmarte/daedalus/pull/258)
