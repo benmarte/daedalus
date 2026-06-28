@@ -4788,7 +4788,20 @@ def main() -> int:
     parser.add_argument("--history", nargs="?", const=10, type=int, default=None,
                         metavar="N",
                         help="Print the last N dispatch-history entries (default 10) and exit.")
+    parser.add_argument("--self-test", action="store_true",
+                        help="Run an offline pipeline self-test (seeds fake "
+                             "issues/tasks, drives a real tick, asserts state "
+                             "transitions) without touching real GitHub, then exit.")
     args = parser.parse_args()
+
+    # --self-test is a hermetic, GitHub-free smoke of the pipeline wiring: seed
+    # fake data, drive a real tick, print PASS/FAIL, and exit non-zero on failure
+    # so CI can gate on it (issue #900). Runs before any real dispatch work.
+    if args.self_test:
+        from core import dispatch_selftest
+        report = dispatch_selftest.run_selftest(sys.modules[__name__])
+        print(report.format())
+        return 0 if report.ok else 1
 
     # --history is a read-only report: print and exit before any dispatch work.
     if args.history is not None:

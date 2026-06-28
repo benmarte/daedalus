@@ -23,6 +23,7 @@ PIP    ?= $(PYTHON) -m pip
 E2E_TESTS := tests/test_e2e_full_pipeline.py \
              tests/test_e2e_multi_tick.py \
              tests/test_e2e_smoke.py \
+             tests/test_dispatch_selftest.py \
              tests/test_pipeline_scenarios.py
 
 .DEFAULT_GOAL := help
@@ -54,6 +55,8 @@ e2e: ## Run the offline E2E regression suite (seed issue -> full pipeline -> pas
 	$(PYTHON) -m pytest $(E2E_TESTS) -v
 	@echo "--- Standalone smoke runner (dual-mode parity check) ---"
 	$(PYTHON) tests/test_e2e_smoke.py
+	@echo "--- Dispatcher --self-test (offline, no real GitHub) ---"
+	$(PYTHON) scripts/daedalus_dispatch.py --self-test
 	@echo "=== E2E suite PASSED ==="
 
 e2e-live: ## Run the live smoke test against the REAL dispatcher (requires GITHUB_TOKEN)
