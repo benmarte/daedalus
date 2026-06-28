@@ -2342,7 +2342,7 @@ def _check_confirmed_validators(
                     triggered.append(n_nr)
                     continue
                 if provider.close_issue(n_nr):
-                    stop_reason = summary_raw[4:].strip()
+                    stop_reason = summary_raw[5:].strip()
                     logger.info(
                         "dispatch: validator done with STOP:%s for #%s — auto-closed issue",
                         stop_reason, n_nr,
