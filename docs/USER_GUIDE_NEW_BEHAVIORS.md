@@ -108,7 +108,7 @@ No user-facing configuration. Strategy selection (Case A vs Case B) is automatic
 ### 1.3 Source File Reading for Sub-issue Context
 
 **What it does:**  
-When decomposing epics, the planner reads relevant source files from the codebase and injects their content into sub-issue bodies. Constraints:
+When decomposing epics, the planner reads relevant source files from the codebase and analyzes them to derive per-sub-issue context (file paths and symbols). The source file *contents* are deliberately not injected into sub-issue bodies — doing so blew past GitHub's 65,536-char body limit and produced a 422 "body is too long" (issue #899). Instead, bodies carry only the concise checklist-derived scope plus capped affected-files/symbols metadata. Constraints:
 - Up to 10 files per sub-issue
 - 50KB per file maximum
 - Binary file detection (skips binary files)
@@ -116,7 +116,7 @@ When decomposing epics, the planner reads relevant source files from the codebas
 - Graceful fallback when files are unavailable
 
 **How you interact with it:**  
-Sub-issues include relevant code context so assignees can start implementation without re-discovering the codebase. This reduces the cognitive load on downstream workers — they see the actual code that needs to change, not just a high-level description.
+Sub-issues include relevant code context (file paths and symbol names) so assignees can start implementation without re-discovering the codebase. This reduces the cognitive load on downstream workers — they see the actual files and functions that need to change, not just a high-level description.
 
 **Prerequisites:**  
 - Files must exist in the repository at the paths referenced in the epic or planner output.
@@ -247,10 +247,10 @@ No user-facing configuration. Tier promotion is automatic and cascading.
 ### 2.3 Conditional Ready Labeling for Sub-issues
 
 **What it does:**  
-On creation, sub-issues with no dependencies (`depends_on` empty) are immediately labeled `Ready` and their board status set to `Ready`. Sub-issues with unmet dependencies skip labeling until tier promotion fires (see 2.2).
+On creation, sub-issues with no dependencies (`depends_on` empty) are immediately labeled `Ready` and enrolled on the project board with `Ready` status. Sub-issues with unmet dependencies are enrolled on the board with `Todo` status and skip the Ready label until tier promotion fires (see 2.2). Board enrollment failures are non-fatal and logged — sibling sub-issues still get processed.
 
 **How you interact with it:**  
-Independent sub-tasks start immediately; dependent ones wait correctly. You don't need to manually label sub-issues as `Ready` — the system applies the label based on dependency status at creation time.
+Independent sub-tasks start immediately and appear on the project board in the Ready column; dependent sub-tasks appear in the Todo column and move to Ready automatically when their blockers close. You don't need to manually label sub-issues as `Ready` or drag cards between columns — the system handles both based on dependency status.
 
 **Prerequisites:**  
 - Sub-issues must be created via epic decomposition (see 1.2).

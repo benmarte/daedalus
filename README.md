@@ -146,8 +146,8 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    - **reviewer** reviews, **security-analyst** audits, **accessibility** audits the PR for
      WCAG 2.1 AA compliance (only when the issue references UI/frontend work), and
      **documentation** writes a completion report and posts it to the **PR and your chat
-     channels**. All roles post a summary comment on the GitHub issue after completing
-     their step.
+     channels**. The dispatcher mirrors every role's kanban completion summary as a
+     comment on the GitHub issue after each tick — agents don't post to VCS themselves.
 4. Each tick **auto-advances** any stage that's blocked on review once its PR's CI is
    green. When `_execute_advance()` completes the developer card, it also calls
    `_create_downstream_review_tasks()` — a safety net that auto-creates reviewer,
@@ -186,11 +186,11 @@ issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
 **Source file context injection.** When the dispatcher detects a planner task completion
 with the `PLANNING COMPLETE:` prefix (which triggers the decompose), the dispatcher reads
 up to 10 source files from the codebase (hardcoded limits: max 10 files, max 50KB per file)
-and injects their contents into the planner's task body. This gives the planner concrete
-context about existing implementations when scoping sub-issues. The dispatcher scans the
-repo's source tree and picks the most relevant files (config files, entry points, modules
-matching the epic's keywords). Sub-issue bodies always include an explicit `depends_on:`
-metadata line (even when empty), making tier-graph parsing consistent.
+and analyzes their contents to derive per-sub-issue context (file paths and symbols). This
+gives the planner concrete context about existing implementations when scoping sub-issues.
+The dispatcher scans the repo's source tree and picks the most relevant files (config files,
+entry points, modules matching the epic's keywords). Sub-issue bodies always include an
+explicit `depends_on:` metadata line (even when empty), making tier-graph parsing consistent.
 
 **Sub-issue file &amp; symbol references.** Each auto-generated sub-issue body includes a
 `### Affected files &amp; symbols` block listing up to 50 file paths and 50 function/class
@@ -199,6 +199,13 @@ are pulled from `def` and `class` statements; file paths from explicit reference
 scope; component names from `load_known_components(workdir)` cross-referenced against the
 scope text. This gives downstream agents concrete starting points without re-reading the
 whole repo.
+
+**Project board enrollment.** After each sub-issue is created, the dispatcher automatically
+enrolls it on the configured project board (when present) with dependency-aware status:
+tier-0 sub-issues (no dependencies) land in **Ready**; dependent sub-issues land in **Todo**.
+Enrollment failures are logged and non-fatal so sibling sub-issues still get processed.
+This ensures sub-issues are visible on the board immediately after decomposition, not just
+after they pick up the `Ready` label via tier promotion.
 
 ### Tier promotion: dependency-aware sub-issue Ready-gating
 
@@ -1005,7 +1012,8 @@ Each piece exists because the obvious approach failed:
   approval ticket; posts comment listing exactly what's missing, fires `security-escalation`, blocks).
   All blocking outcomes also auto-move the VCS board card to a "Blocked" column, creating it
   automatically if it doesn't exist.
-  Every role posts a mandatory summary comment on the GitHub issue after completing — the issue
+  The dispatcher mirrors every role's kanban completion summary as an issue comment after
+  each tick (agents do not post to VCS themselves — see PR #897). The issue
   history always reflects the current pipeline state, not just the internal kanban board.
 - **Ready-gating** — the dispatcher works *only* issues you put in `Ready`. You stay in
   control of what the fleet touches; it never surprises you by grabbing the backlog.
@@ -1123,7 +1131,7 @@ on its board.
 
 | Path | What it is |
 |------|------------|
-| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`. |
+| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
