@@ -1,3 +1,19 @@
+# Phase 3 (#151) — Epic Sub-Issue Creation
+
+## Tasks
+- [ ] T1: `core/providers/base.py` — add `add_label()` stub
+- [ ] T2: `core/providers/github.py` — implement `add_label()` via Labels API
+- [ ] T3: `core/iterate.py` — PLANNER_DECOMPOSE constant + `_execute_planner_decompose()` (pass provider to executors)
+- [ ] T4: `scripts/daedalus_dispatch.py` — update `_planner_body()` to instruct agent to output `PLANNING COMPLETE:`
+- [ ] T5: `tests/test_subissue_creation.py` — 13-test suite covering both template paths, idempotency, dry-run, regressions
+
+## Checkpoints
+- [ ] After T1+T2: existing tests still pass
+- [ ] After T3+T5: all 13 new tests pass
+- [ ] Final: full `pytest tests/ -v` — no regressions
+
+---
+
 # Issue #137 — thread/dedupe dispatch summaries + scope crons to --repo
 
 ## Spec / Acceptance

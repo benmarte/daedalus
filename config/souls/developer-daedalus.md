@@ -22,8 +22,6 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
 5. Once a PR is found, verify it with `terminal("gh pr view <pr_number>")`.
 6. Block YOUR kanban card with `review-required: PR #<pr_number> — <branch>`.
-7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
-
 ⛔ **DO NOT write any code yourself. DO NOT open any PR yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -81,17 +79,7 @@ Every comment you post on a VCS issue or PR **must begin with this exact line** 
 This applies to all comments: implementation summaries, status updates, and any notes. Do not omit it.
 
 # Pipeline Advancement
-Run the daedalus dispatcher **whenever your task run reaches any terminal state**: marking it **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state. This triggers the next pipeline phase without waiting for the hourly cron:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-This is mandatory after **every** state transition — done, blocked, or otherwise. Do not skip it. The pipeline stalls until this runs.
-
-**If the state transition returns an error** ("already terminal", "task already complete", "task is in a terminal state", or any similar message): the platform already changed your task state early — this is a known platform behavior. Do NOT retry the call. Run the dispatcher immediately anyway:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-The pipeline depends on this running after every state change, whether the call succeeded or not. Skipping it causes a multi-hour stall.
+The dispatcher runs automatically when your session ends — no manual trigger needed.
 
 # Your Role: Developer
 
@@ -176,7 +164,28 @@ Expected: `<expected output>`""",
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 
-### 6. Block your kanban task with review-required
+### 6. Complete or block — depends on card type
+
+#### If your task body contains "Review card ID:" — this is a PR fix card
+
+You were created by the PM to fix review feedback on an existing PR. The original reviewer is already waiting. Do NOT block with review-required (that spawns 5 new review agents on top of the existing one — a waste and a mess).
+
+Instead:
+1. Push your fixes to the existing PR branch.
+2. Unblock the original reviewer card using its ID from "Review card ID: t_XXXXX":
+   ```
+   kanban_unblock("t_XXXXX", "re-review: PR #N — fixes applied, all tests passing")
+   ```
+3. **Complete** your own card directly:
+   ```
+   kanban_complete()
+   ```
+4. Run the dispatcher: `bash ~/.hermes/scripts/daedalus-cron.sh`
+
+Do NOT block with review-required. Do NOT create new downstream review tasks. The existing reviewer will pick up the updated PR.
+
+#### For all other developer cards — block with review-required
+
 **Do NOT complete your task.** Block it so the dispatcher can complete it and automatically create QA/reviewer/security/docs tasks:
 
 Block with summary: `review-required: PR #<pr_number> — fix/issue-N-<slug>`
@@ -186,11 +195,6 @@ The dispatcher reads this signal, waits for CI to pass, then:
 2. Creates QA, reviewer, security-analyst, accessibility, and documentation tasks automatically
 
 If you complete the task yourself instead of blocking it, the downstream review agents will never be created and the pipeline stalls at your card.
-
-### 7. Run the dispatcher
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
 
 ## Quality bar
 - No type errors, no lint errors before committing

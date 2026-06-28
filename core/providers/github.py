@@ -313,6 +313,36 @@ class GitHubProvider(VCSProvider):
             return False
         return True
 
+    def add_label(self, issue_number: int, label_name: str) -> bool:
+        try:
+            self._http.post_json(
+                f"/repos/{self.repo}/issues/{issue_number}/labels",
+                {"labels": [label_name]},
+            )
+            return True
+        except ProviderError as e:
+            self._log.warning("add_label #%s %r failed: %s", issue_number, label_name, e)
+            return False
+
+    def ensure_labels(self) -> List[str]:
+        """Create required Daedalus labels in this repo if they don't exist yet."""
+        from .base import REQUIRED_LABELS
+        created: List[str] = []
+        for ldef in REQUIRED_LABELS:
+            try:
+                self._http.post_json(
+                    f"/repos/{self.repo}/labels",
+                    {"name": ldef["name"], "color": ldef["color"],
+                     "description": ldef["description"]},
+                )
+                created.append(ldef["name"])
+                self._log.info("ensure_labels: created %r", ldef["name"])
+            except ProviderError as e:
+                if e.status_code == 422:
+                    continue  # label already exists — idempotent
+                self._log.warning("ensure_labels: create %r failed: %s", ldef["name"], e)
+        return created
+
     def append_changelog(self, base_branch: str, entry: str) -> bool:
         """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the Contents API.
 

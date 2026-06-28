@@ -140,3 +140,11 @@ def test_errors_degrade_gracefully(provider):
     assert provider.close_issue(1) is False
     assert provider.get_pr_ci_status(1) == CIStatus.UNKNOWN
     assert provider.list_branches() == []
+
+
+def test_add_label_graceful_noop(provider):
+    """Azure DevOps doesn't override add_label — base impl returns False (no-op for Phase 3)."""
+    assert provider.add_label(10, "epic") is False
+    # Verify no API calls were made (no-op behavior)
+    provider._http.post_json.assert_not_called()
+    provider._http.patch_json.assert_not_called()

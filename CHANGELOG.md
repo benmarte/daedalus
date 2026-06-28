@@ -20,6 +20,19 @@ All notable changes to Daedalus are documented here. The format loosely follows
 
 ### Added
 
+- **Epic sub-issue creation (Phase 3)** (#151, PR #179) — when the planner agent
+  completes its kanban card with `PLANNING COMPLETE:`, the dispatcher automatically
+  decomposes the parent epic into sub-issues, posts an idempotency marker
+  (`<!-- daedalus:sub-issues:[N1,N2,...] -->`) on the parent, applies the `epic`
+  label, and creates triage cards so each sub-issue enters the validator pipeline
+  on the next tick. Two decomposition strategies: Case A (checklist items in the
+  epic body → one sub-issue per item, capped at 10) and Case B (no checklist →
+  three fixed default sub-issues: Research & Scoping, Implementation, Testing &
+  Documentation). Sub-issues inherit parent labels (minus `epic`) and add
+  `subtask`. `VCSProvider.add_label()` added to base with GitHub implementation
+  via the Issues API; no-op on GitLab/Azure DevOps. 18 new tests in
+  `tests/test_subissue_creation.py`.
+
 - **Dependency-aware ready-gating** (#139, PR #148) — the dispatch sweep now refuses
   to start a `Ready` issue while any of its blockers are still open, re-checking
   every tick so a dependent auto-unblocks once its blockers' PRs merge. Blockers

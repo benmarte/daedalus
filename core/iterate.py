@@ -31,6 +31,7 @@ PENDING_PR = "pending_pr"     # dev card with awaiting-pr block → search VCS f
 PM_ROUTE = "pm_route"         # reviewer flagged changes → create PM routing card
 APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
 ESCALATE = "escalate"         # max iterations exceeded → log + notify
+PLANNER_DECOMPOSE = "planner_decompose"  # planner completed → create sub-issues
 
 # Maximum fix attempts per PR before escalation
 MAX_FIX_ATTEMPTS = 3
@@ -64,6 +65,7 @@ def _parse_handoff(handoff_text: str) -> Dict[str, Any]:
     change_signals = [
         "changes requested", "changes required", "blocking findings",
         "request changes", "needs fixes", "need fixes",
+        "changes-requested",  # hyphenated form used by reviewer SOUL: "review-changes-requested:"
     ]
     if any(s in lower for s in change_signals):
         result["is_changes_requested"] = True
@@ -112,9 +114,11 @@ def classify_blocked(
     # Resolve PR number: handoff first, then the explicit fallback.
     effective_pr = handoff["pr_number"] or pr_number
 
-    # ── planner → PM route ───────────────────────────────────────────────
+    # ── planner → decompose or PM ────────────────────────────────────────
     if assignee == "planner-daedalus":
-        return PM_ROUTE
+        if "PLANNING COMPLETE" in (handoff_text or "").upper():
+            return PLANNER_DECOMPOSE
+        return PM_ROUTE  # unexpected planner output → escalate to PM
 
     # ── documentation-daedalus → terminal complete ────────────────────────
     # Docs is the last pipeline stage. When it blocks with 'docs posted:'
@@ -126,6 +130,9 @@ def classify_blocked(
 
     # ── project-manager blocked → escalate (human gate — PM can't consult itself) ──
     if assignee == "project-manager-daedalus":
+        # PM blocked while waiting for a developer fix — not a real escalation.
+        if "awaiting-fix:" in (handoff_text or "").lower():
+            return ""
         return ESCALATE
 
     # ── developer card ───────────────────────────────────────────────────
@@ -147,7 +154,16 @@ def classify_blocked(
         # The executor will search VCS for a matching PR and update the block reason.
         if handoff["is_review_required"] and "awaiting-pr" in (handoff_text or "").lower():
             return PENDING_PR
-        # No PR or not review-required → PM route (was: silent drop returning "")
+        # Infrastructure / system crash — agent never ran or died at startup.
+        # PM routing cannot fix a gateway/OS crash and only creates a loop where
+        # each PM-ROUTE completes as "no-op" but a new one is spawned next tick.
+        _crash_markers = (
+            "coding-agent-failed:", "permission-error:", "coding_agent_died",
+            "coding_agent_timeout", "exited with code", "agent crash",
+        )
+        if any(m in (handoff_text or "").lower() for m in _crash_markers):
+            return ""  # infrastructure failure — human must fix env and unblock
+        # No PR or not review-required → PM route
         return PM_ROUTE
 
     # ── reviewer / security-analyst card ─────────────────────────────────
@@ -155,6 +171,11 @@ def classify_blocked(
         # Exceeded max fix attempts → escalate
         if fix_attempts >= MAX_FIX_ATTEMPTS:
             return ESCALATE
+        # A developer fix card is already in flight — don't create another PM-ROUTE.
+        # Concurrent cron ticks would otherwise each spawn a separate PM-ROUTE
+        # before any of them has time to annotate the card with "awaiting-fix:".
+        if "awaiting-fix:" in (handoff_text or "").lower():
+            return ""
         if handoff["is_changes_requested"]:
             return PM_ROUTE
         if handoff["is_approved"]:
@@ -260,16 +281,19 @@ def _count_fix_attempts(card: dict, slug: str = "", workdir: str = "") -> int:
 
     # Secondary: count fix cards on the board by idempotency-key pattern
     # (catches fix cards created by other dispatchers or manual runs)
+    # Only count PENDING/active tasks — completed fix cards are already spent
+    # and should not permanently block the counter from resetting.
     if tid and slug:
         tasks = kanban.list_tasks(slug)
         board_count = 0
         for task in tasks:
             ikey = (task.get("idempotency_key") or "")
+            status = (task.get("status") or "").lower()
             # Fix card idempotency keys:
             #   fix-ci-{tid}-attempt-N   (dev fix for CI-red)
             #   fix-review-{tid}-attempt-N  (legacy direct-dev review fix)
             #   pm-route-{tid}-attempt-N   (PM routing card)
-            if f"-{tid}-attempt-" in ikey:
+            if f"-{tid}-attempt-" in ikey and status not in ("done", "completed"):
                 board_count += 1
         attempts = max(attempts, board_count)
 
@@ -657,9 +681,16 @@ def _execute_pm_route(
         f"- developer — code fix\n"
         f"- security-analyst — security hardening\n"
         f"- re-spec — the request itself was wrong\n\n"
-        f"Create the appropriate fix card (pinned, assigned to the chosen profile) "
-        f"with the findings. When the fix lands green, unblock and re-engage the "
-        f"original reviewer/security-analyst cards."
+        f"Create the appropriate fix card (assigned to the chosen profile) "
+        f"with the findings. Include 'Review card ID: {tid}' in the fix card body "
+        f"so the developer knows to unblock the reviewer directly instead of spawning "
+        f"a new review pipeline.\n\n"
+        f"IMPORTANT rules for the fix card:\n"
+        f"- Do NOT set {tid} as a parent — circular dependency (fix waits for reviewer, reviewer waits for fix).\n"
+        f"- The fix card must be independent (no parent link to the review card).\n"
+        f"- When the developer finishes, they must kanban_unblock({tid}, 're-review: PR #N') "
+        f"and then kanban_complete() their own card — NOT block with 'review-required:' "
+        f"(that spawns 5 redundant review agents on top of the existing reviewer)."
     )
 
     idem_key = f"pm-route-{tid}-attempt-{fix_attempts}"
@@ -679,6 +710,15 @@ def _execute_pm_route(
         goal=True,
     )
     if pm_tid:
+        # Idempotency guard: create_task returns the existing task ID when a task
+        # with the same key already exists (even if done). If it's already done,
+        # the PM already handled this routing — don't re-increment fix_attempts or
+        # flood the card with duplicate comments.
+        pm_detail = kanban.show_card(slug, pm_tid)
+        pm_status = ((pm_detail or {}).get("task") or {}).get("status", "")
+        if pm_status in ("done", "completed"):
+            logger.info("iterate: PM-ROUTE %s already resolved (done) — skipping increment", pm_tid)
+            return True
         kanban.comment(slug, tid,
                        f"Created PM routing card {pm_tid} (attempt {fix_attempts}/{MAX_FIX_ATTEMPTS})")
         # Mark the reviewer card as blocked (awaiting-fix) so pending state is visible
@@ -815,6 +855,152 @@ def _execute_escalate(
     return True
 
 
+# ── planner decompose ───────────────────────────────────────────────────────
+
+_CHECKLIST_RE = re.compile(r"^\s*[-*+]\s*\[[ xX]\]\s*(.+)", re.MULTILINE)
+_MAX_SUB_ISSUES = 10
+_DECOMPOSE_MARKER_PREFIX = "<!-- daedalus:sub-issues:"
+
+
+def _extract_sub_issues_from_body(body: str) -> List[str]:
+    """Return checklist item texts from an epic body (capped at _MAX_SUB_ISSUES)."""
+    items = [m.group(1).strip() for m in _CHECKLIST_RE.finditer(body or "")]
+    return [i for i in items if i][:_MAX_SUB_ISSUES]
+
+
+def _default_sub_issue_titles(parent_n: int, parent_title: str) -> List[str]:
+    """Three default sub-issues for epics without checklist items."""
+    return [
+        f"Research & Scoping — #{parent_n}: {parent_title}",
+        f"Implementation — #{parent_n}: {parent_title}",
+        f"Testing & Documentation — #{parent_n}: {parent_title}",
+    ]
+
+
+def _sub_issue_body(parent_n: int, parent_title: str, scope: str) -> str:
+    return (
+        f"Part of epic #{parent_n}: {parent_title}\n\n"
+        f"## Scope\n{scope}\n\n"
+        f"## Acceptance Criteria\n"
+        f"- [ ] Implementation complete per scope\n"
+        f"- [ ] Tests pass (unit + integration where applicable)\n"
+        f"- [ ] PR opened and passing CI\n\n"
+        f"## Notes\nAuto-generated by Daedalus Phase 3 epic decomposition.\n"
+    )
+
+
+def _execute_planner_decompose(
+    slug: str,
+    card: dict,
+    repo: str,
+    handoff_text: str,
+    *,
+    workdir: str = "",
+    dry_run: bool = False,
+    provider: Any = None,
+    **_kwargs: Any,
+) -> bool:
+    """Create sub-issues from an epic when the planner completes with PLANNING COMPLETE."""
+    tid = card.get("id")
+    parent_n = _extract_issue_number_from_card(card)
+    if parent_n is None:
+        logger.warning("iterate: planner_decompose — cannot parse issue number from card %s", tid)
+        return False
+
+    if provider is None:
+        logger.warning("iterate: planner_decompose #%s — no provider (kanban-only mode), skipping", parent_n)
+        return False
+
+    parent = provider.get_issue(parent_n)
+    if parent is None:
+        logger.warning("iterate: planner_decompose #%s — get_issue returned None", parent_n)
+        return False
+
+    parent_dict = parent.as_dict() if hasattr(parent, "as_dict") else parent
+    parent_title = parent_dict.get("title") or ""
+    parent_body = parent_dict.get("body") or ""
+    parent_labels = [
+        (lbl if isinstance(lbl, str) else lbl.get("name", ""))
+        for lbl in (parent_dict.get("labels") or [])
+    ]
+
+    # Idempotency: skip if marker already posted
+    existing_comments = provider.get_issue_comments(parent_n) or []
+    for c in existing_comments:
+        body = c.get("body") or "" if isinstance(c, dict) else getattr(c, "body", "")
+        if _DECOMPOSE_MARKER_PREFIX in body:
+            logger.info("iterate: planner_decompose #%s — already decomposed, skipping", parent_n)
+            kanban.complete(slug, tid, summary=f"Already decomposed epic #{parent_n}")
+            return True
+
+    checklist_items = _extract_sub_issues_from_body(parent_body)
+    if checklist_items:
+        sub_titles = checklist_items
+        sub_scopes = checklist_items
+    else:
+        sub_titles = _default_sub_issue_titles(parent_n, parent_title)
+        sub_scopes = [t.split(" — ", 1)[0] for t in sub_titles]
+
+    if dry_run:
+        logger.info("[dry-run] planner_decompose #%s: would create %d sub-issues: %s",
+                    parent_n, len(sub_titles), sub_titles)
+        return True
+
+    inherit_labels = [l for l in parent_labels if l and l.lower() != "epic"]
+    created_numbers: List[int] = []
+    for title, scope in zip(sub_titles, sub_scopes):
+        sub_body = _sub_issue_body(parent_n, parent_title, scope)
+        sub_labels = inherit_labels + ["subtask"]
+        sub_n = provider.create_issue(title, sub_body, labels=sub_labels)
+        if sub_n is not None:
+            created_numbers.append(sub_n)
+            logger.info("iterate: planner_decompose — created sub-issue #%s: %s", sub_n, title)
+        else:
+            logger.warning("iterate: planner_decompose — create_issue failed for %r", title)
+
+    # Post idempotency marker on parent
+    marker_numbers = f"[{','.join(str(n) for n in created_numbers)}]"
+    provider.post_issue_comment(
+        parent_n,
+        f"{_DECOMPOSE_MARKER_PREFIX}{marker_numbers} -->\n"
+        f"Daedalus created {len(created_numbers)} sub-issue(s): "
+        + ", ".join(f"#{n}" for n in created_numbers),
+    )
+
+    # Apply epic label to parent
+    provider.add_label(parent_n, "epic")
+
+    # Create kanban triage card per sub-issue and invoke decompose immediately
+    ws = f"dir:{workdir}" if workdir else ""
+    for sub_n in created_numbers:
+        sub_issue = provider.get_issue(sub_n)
+        if sub_issue is None:
+            continue
+        sub_dict = sub_issue.as_dict() if hasattr(sub_issue, "as_dict") else sub_issue
+        triage_tid = kanban.create_triage(
+            slug, sub_n, sub_dict.get("title", f"sub-issue #{sub_n}"),
+            body=sub_dict.get("body", ""),
+            idempotency_key=f"epic-sub-{sub_n}",
+            workspace=ws,
+        )
+        # Decompose immediately so the fan-out happens now rather than waiting
+        # for the next dispatcher tick's decompose_all_triage() sweep.
+        if triage_tid:
+            decomposed = kanban.decompose(slug, triage_tid)
+            if not decomposed:
+                logger.warning(
+                    "iterate: planner_decompose — decompose(%s) failed for sub-issue #%s; "
+                    "triage card will be swept on next tick",
+                    triage_tid, sub_n,
+                )
+
+    kanban.complete(slug, tid,
+                    summary=f"Decomposed epic #{parent_n} into {len(created_numbers)} sub-issues")
+    logger.info("iterate: planner_decompose — completed #%s with %d sub-issues",
+                parent_n, len(created_numbers))
+    return True
+
+
 # ── action lookup ───────────────────────────────────────────────────────────
 
 _ACTION_EXECUTORS = {
@@ -824,6 +1010,7 @@ _ACTION_EXECUTORS = {
     PM_ROUTE: _execute_pm_route,
     APPROVE_ADVANCE: _execute_approve_advance,
     ESCALATE: _execute_escalate,
+    PLANNER_DECOMPOSE: _execute_planner_decompose,
 }
 
 
@@ -866,6 +1053,7 @@ def run_iterate(
         PM_ROUTE: 0,
         APPROVE_ADVANCE: 0,
         ESCALATE: 0,
+        PLANNER_DECOMPOSE: 0,
     }
     advance_prs: List[int] = []  # PR numbers for cards that were advanced
     pending_ci_cards: List[Dict[str, Any]] = []  # Cards skipped due to PENDING CI
@@ -1005,6 +1193,7 @@ def run_iterate(
                 router_profile=router_profile,
                 dry_run=dry_run,
                 pr_number=pr,
+                provider=provider,
             )
             if ok:
                 counts[action] += 1

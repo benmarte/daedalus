@@ -158,6 +158,24 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
 The kanban board and VCS board status are bookkept **in code on every tick**, so tracking is
 deterministic — never dependent on an agent remembering to update anything.
 
+### Epic decomposition (Phase 3)
+
+When an issue is flagged as epic-sized (≥4 checklist items, an `epic` label, or body ≥2000
+chars), the dispatcher routes it to the planner agent for scoping instead of splitting it
+across the team directly. The planner confirms readiness by completing its kanban card with
+`PLANNING COMPLETE:`. The dispatcher then decomposes the epic into sub-issues:
+
+- **Case A** (parent has checklist items): one sub-issue per item, capped at 10.
+- **Case B** (no checklist): three default sub-issues — Research & Scoping,
+  Implementation, Testing & Documentation.
+
+Each sub-issue inherits the parent's labels (minus `epic`) and adds `subtask`, uses a
+standard body template with a backlink to the parent, and gets its own triage card so it
+enters the validator pipeline independently. An idempotency marker comment
+(`<!-- daedalus:sub-issues:[N1,N2,...] -->`) is posted on the parent to prevent
+re-creation on subsequent dispatcher ticks. The `epic` label is applied to the parent
+issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
+
 ### Dependency-aware ready-gating
 
 Marking an issue `Ready` is necessary but **not sufficient** — daedalus also checks
@@ -191,7 +209,7 @@ a different perspective.
 |---|---|---|
 | `validator-daedalus` | **Phase 1 — runs alone before any other agent.** Validates the issue: reproduces the bug, checks git history, detects duplicates. Scans for security threats (prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks). Six possible outcomes: **CONFIRMED** (proceeds; summary prefix `CONFIRMED:` triggers Phase 2), **ALREADY_FIXED** (closes issue, pipeline ends), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, sends `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege request lacks verifiable context — blocks, posts comment listing missing details, sends `security-escalation` notification). Posts a summary comment to the GitHub issue regardless of outcome. | No |
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. Creates the conditional accessibility task when the issue references UI/frontend work. | No |
-| `planner-daedalus` | Task graph, interface contracts, architecture decisions. | No |
+| `planner-daedalus` | Task graph, interface contracts, architecture decisions. **Phase 3:** reviews epic-sized issues and signals readiness with `PLANNING COMPLETE:`, triggering automated sub-issue decomposition. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
 | `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Runs the test suite, analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). | No |
 | `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. Runs after QA passes. | No |
@@ -522,27 +540,17 @@ The template is applied to all dispatcher-posted comments (PR size warnings, for
 
 ## Autonomous pipeline advancement
 
-Each phase transition is triggered by a **completion hook** in every agent's SOUL.md.
-When an agent reaches any terminal state — marking its task **done**, blocking with
-**review-required**, blocking with **awaiting-fix**, or any other blocked state — it
-immediately runs:
+The dispatcher runs **automatically** when each agent's session ends. When an agent
+reaches any terminal state — marking its task **done**, blocking with **review-required**,
+blocking with **awaiting-fix**, or any other blocked state — the dispatcher fires at the
+end of the session, triggering the next phase within seconds rather than waiting for
+the next cron tick.
 
-```bash
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-
-This means each phase transition starts within seconds rather than waiting for the
-next cron tick. For example, as soon as the developer blocks with `review-required`,
-the dispatcher fires, detects CI green, and promotes the reviewer task — all within
-seconds.
-
-**Error recovery:** If the state-transition call itself fails ("already terminal" —
-a known platform bug where Hermes marks tasks done prematurely), agents are instructed
-to run the dispatcher anyway. The pipeline never waits for a human to manually trigger
-recovery.
+For example, as soon as the developer blocks with `review-required`, the session ends,
+the dispatcher fires, detects CI green, and promotes the reviewer task.
 
 The cron job is still present as a last-resort safety net (in case an agent crashes
-before reaching its final step), but it is no longer the primary advancement mechanism.
+before reaching its terminal state), but it is no longer the primary advancement mechanism.
 
 The result is a fully autonomous pipeline: once an issue is marked Ready, the entire
 validator → PM → developer → QA → reviewer + security-analyst + accessibility chain runs
@@ -553,22 +561,22 @@ issue marked Ready
       │
       ▼
 validator runs → CONFIRMED: <note>
-      │   └─ agent runs daedalus-cron.sh on any terminal state
+      │   └─ session ends → dispatcher triggers next phase
       ▼
 PM / project-manager runs → SPEC: <note>
-      │   └─ agent runs daedalus-cron.sh on any terminal state
+      │   └─ session ends → dispatcher triggers next phase
       ▼
 developer → review-required
-      │   └─ agent runs daedalus-cron.sh → dispatcher detects CI green → QA starts
+      │   └─ session ends → dispatcher detects CI green → QA starts
       ▼
 QA → qa-passed (or qa-failed → dev fix card)
-      │   └─ agent runs daedalus-cron.sh → dispatcher creates reviewer + security-analyst
+      │   └─ session ends → dispatcher creates reviewer + security-analyst
       │       + accessibility (only when UI/frontend keywords present in issue)
       ▼
 reviewer → approved
 security-analyst → cleared
 accessibility → approved (or accessibility-na if no frontend files changed)
-      │   └─ all three run in parallel; each agent runs daedalus-cron.sh on its terminal state
+      │   └─ all three run in parallel; each session end triggers dispatcher on its terminal state
       ▼
 documentation → done → report posted
 ```

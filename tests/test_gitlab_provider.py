@@ -173,3 +173,11 @@ def test_errors_degrade_gracefully(provider):
     provider._http.get_paginated.side_effect = ProviderError("500")
     assert provider.list_branches() == []
     assert provider.list_labels() == []
+
+
+def test_add_label_graceful_noop(provider):
+    """GitLab doesn't override add_label — base impl returns False (no-op for Phase 3)."""
+    assert provider.add_label(3, "epic") is False
+    # Verify no API calls were made (no-op behavior)
+    provider._http.post_json.assert_not_called()
+    provider._http.patch_json.assert_not_called()

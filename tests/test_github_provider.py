@@ -48,6 +48,18 @@ def test_close_issue_false_on_error(provider):
     assert provider.close_issue(7) is False
 
 
+def test_add_label_success(provider):
+    assert provider.add_label(42, "epic") is True
+    path, body = provider._http.post_json.call_args[0]
+    assert path == "/repos/octo/repo/issues/42/labels"
+    assert body == {"labels": ["epic"]}
+
+
+def test_add_label_failure_returns_false(provider):
+    provider._http.post_json.side_effect = ProviderError("404", status_code=404)
+    assert provider.add_label(42, "epic") is False
+
+
 # ── PRs ───────────────────────────────────────────────────────────────────────
 
 def _pr(number, state="open", merged_at=None, head="x", body="", base="dev"):

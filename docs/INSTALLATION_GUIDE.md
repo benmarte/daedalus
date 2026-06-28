@@ -426,23 +426,19 @@ The template applies to all dispatcher warnings (PR too large, forbidden files, 
 
 Daedalus advances the pipeline in two ways:
 
-**1. Terminal-state triggers (primary):** Every agent's system prompt includes an instruction to run the daedalus dispatcher script immediately after reaching any terminal state — whether that's marking a task **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state:
-
-```bash
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
+**1. Session-end triggers (primary):** When each agent's session ends, the daedalus dispatcher runs automatically. This happens whenever an agent reaches any terminal state — whether that's marking a task **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state.
 
 This means each phase transition happens within seconds. For example:
-- Developer blocks with `review-required` → dispatcher fires → detects CI green → QA task starts (seconds, not 60 minutes)
-- QA blocks with `qa-passed` → dispatcher fires → reviewer + security + accessibility (conditional) tasks start
-- QA blocks with `qa-failed` → dispatcher fires → developer fix card created
-- Reviewer blocks with `awaiting-fix` → dispatcher fires → developer fix card created
-- Accessibility blocks with `changes requested` → dispatcher fires → PM routing card created
-- Any agent marks done → dispatcher fires → next phase begins
+- Developer blocks with `review-required` → session ends → dispatcher fires → detects CI green → QA task starts (seconds, not 60 minutes)
+- QA blocks with `qa-passed` → session ends → dispatcher fires → reviewer + security + accessibility (conditional) tasks start
+- QA blocks with `qa-failed` → session ends → dispatcher fires → developer fix card created
+- Reviewer blocks with `awaiting-fix` → session ends → dispatcher fires → developer fix card created
+- Accessibility blocks with `changes requested` → session ends → dispatcher fires → PM routing card created
+- Any agent marks done → session ends → dispatcher fires → next phase begins
 
-**Error recovery:** If the state-transition call returns "already terminal" (a known Hermes platform behavior where tasks are sometimes marked done prematurely), agents are instructed to run the dispatcher anyway. The pipeline recovers immediately instead of stalling.
+**Error recovery:** If the state-transition call returns "already terminal" (a known Hermes platform behavior where tasks are sometimes marked done prematurely), the dispatcher still runs at session end. The pipeline recovers immediately instead of stalling.
 
-**2. Cron job (last-resort safety net):** The scheduled cron job (configured per project) catches anything the terminal-state trigger misses — for example, if an agent crashed before its final step. When the dispatcher runs on a cron tick, it also detects PM tasks that completed without a `SPEC:` summary (premature completion) and re-creates them with a new retry key — up to 3 attempts.
+**2. Cron job (last-resort safety net):** The scheduled cron job (configured per project) catches anything the session-end trigger misses — for example, if an agent crashed before reaching its terminal state. When the dispatcher runs on a cron tick, it also detects PM tasks that completed without a `SPEC:` summary (premature completion) and re-creates them with a new retry key — up to 3 attempts.
 
 Together these make the pipeline fully autonomous: once an issue is marked Ready, the entire chain runs end-to-end without any manual intervention between phases.
 

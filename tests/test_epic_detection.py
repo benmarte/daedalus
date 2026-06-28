@@ -76,6 +76,24 @@ class TestChecklistHeuristic:
 
 
 class TestEpicLabelHeuristic:
+    def test_subtask_label_excludes_non_epic(self):
+        """Issues labelled 'subtask' must never be classified as epics.
+
+        Sub-issues created by Phase 3 decomposition are never epics themselves;
+        without this guard, a large sub-issue body or inherited labels could
+        trigger the heuristic and cause infinite decomposition loops.
+        """
+        # Subtask + epic-like label → still excluded
+        assert is_epic(_make_issue(labels=[{"name": "subtask"}])) is False
+        assert is_epic(_make_issue(labels=[{"name": "subtask"}, {"name": "epic"}])) is False
+        assert is_epic(_make_issue(labels=[{"name": "SUBTASK"}])) is False
+        assert is_epic(_make_issue(labels=["subtask"])) is False
+        # Subtask + huge body → still excluded (body-size heuristic must not fire)
+        assert is_epic(_make_issue(body="x" * 5000, labels=[{"name": "subtask"}])) is False
+        # Subtask + checklist → still excluded
+        body = "\n".join(f"- [ ] task {i}" for i in range(10))
+        assert is_epic(_make_issue(body=body, labels=[{"name": "subtask"}])) is False
+
     def test_exact_epic_label(self):
         assert is_epic(_make_issue(labels=[{"name": "epic"}])) is True
 
@@ -184,10 +202,10 @@ class TestPlannerBody:
         body = disp._planner_body("org/repo", issue, "/work", "main", "github")
         assert "Big Task Title" in body
 
-    def test_mentions_phase_1(self):
+    def test_mentions_planning_complete(self):
         issue = _make_issue(number=300, body="- [ ] t\n" * 5)
         body = disp._planner_body("org/repo", issue, "/work", "main", "github")
-        assert "Phase 1" in body
+        assert "PLANNING COMPLETE" in body
 
     def test_lists_detection_reasons(self):
         issue = _make_issue(number=400, body="- [ ] t\n" * 5, labels=[{"name": "epic"}])

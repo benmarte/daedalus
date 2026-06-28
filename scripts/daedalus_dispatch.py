@@ -168,7 +168,7 @@ _AGENT_FAILED_NOTE = (
     "If that output contains 'CODING_AGENT_DIED' or 'CODING_AGENT_TIMEOUT', the coding agent "
     "failed to produce a result — do NOT proceed and do NOT complete your card. Block it with "
     "kanban_block(\"coding-agent-failed: <CODING_AGENT_DIED|CODING_AGENT_TIMEOUT> — see stderr above\") "
-    "then run: bash ~/.hermes/scripts/daedalus-cron.sh so the dispatcher retries per failure_limit."
+    "The dispatcher will retry automatically on your next session end."
 )
 
 
@@ -233,7 +233,6 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4b. {failed_note}\n"
         "  5. On success the agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
         "  6. Block your card: kanban_block(\"review-required: PR #<n> — <branch>\")\n"
-        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do NOT open the PR yourself. Wait for coding agent output then block with the real PR number.\n"
     ),
     "validator": (
@@ -241,7 +240,6 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4b. {failed_note}\n"
         "  5. On success the agent will have posted the validation report to GitHub and output its verdict.\n"
         "  6. Complete your card with the exact verdict line: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
-        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block unless the agent failed. Output CONFIRMED/BLOCKED as plain text only.\n"
     ),
     "pm": (
@@ -249,7 +247,6 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4b. {failed_note}\n"
         "  5. On success the agent will have posted the spec to GitHub and output \"spec: <summary>\".\n"
         "  6. Complete your card with: 'spec: <one-line summary from the output>'\n"
-        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not write the spec yourself.\n"
     ),
     "qa": (
@@ -257,7 +254,6 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4b. {failed_note}\n"
         "  5. On success the agent will have posted a QA report to GitHub and output its verdict.\n"
         "  6. Complete your card: 'qa-passed: PR #N' or block with 'qa-failed: <reason>'\n"
-        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not run the tests yourself.\n"
     ),
     "reviewer": (
@@ -265,7 +261,6 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4b. {failed_note}\n"
         "  5. On success the agent will have posted review findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'reviewed: approved' or 'reviewed: changes-requested: <reason>'\n"
-        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not review the PR yourself.\n"
     ),
     "security": (
@@ -273,7 +268,6 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4b. {failed_note}\n"
         "  5. On success the agent will have posted security findings to GitHub and output its verdict.\n"
         "  6. Complete your card: 'security: cleared' or 'security: flagged: <finding>'\n"
-        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not audit the PR yourself.\n"
     ),
     "documentation": (
@@ -281,7 +275,6 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         "  4b. {failed_note}\n"
         "  5. On success the agent will have posted the completion report to GitHub.\n"
         "  6. Complete your card: 'docs: posted completion report for PR #N'\n"
-        "  7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
         "  STOP — do not write the report yourself.\n"
     ),
 }
@@ -745,17 +738,12 @@ def _is_epic(issue: Dict[str, Any]) -> bool:
 
 def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
                   base_branch: str, provider_name: str) -> str:
-    """Task body for the planner role — Phase 1: epic detection stub.
-
-    Phase 2+ will add codebase analysis, sub-issue creation, and dependency
-    tracking. For now the planner stub only logs why the issue was flagged.
-    """
+    """Task body for the planner role — Phase 3: confirm epic is ready for decomposition."""
     n = issue.get("number", "?")
     title = issue.get("title", "")
     body = issue.get("body") or ""
     url = issue.get("url", "")
 
-    # Build reasons list for logging
     reasons = []
     if len(body) > 1000:
         reasons.append(f"body size ({len(body)} chars)")
@@ -773,9 +761,9 @@ def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
     truncation_note = "\n\n(Body truncated — see full issue for remainder)" if len(body) > 1000 else ""
 
     return (
-        f"# Epic Issue #{n} — Phase 1 Detection\n\n"
-        f"This issue was routed to the planner because it appears too large for a\n"
-        f"single developer session.\n\n"
+        f"# Epic Issue #{n} — Ready for Decomposition\n\n"
+        f"This issue was routed to you because it appears too large for a single\n"
+        f"developer session and should be broken into sub-issues.\n\n"
         f"**Repository:** {repo}\n"
         f"**Title:** {title}\n"
         f"**Workdir:** {workdir}\n"
@@ -784,12 +772,14 @@ def _planner_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"**URL:** {url}\n\n"
         f"## Detection Reasons\n\n"
         f"{reason_str}\n\n"
-        f"## Phase 1 Scope\n\n"
-        f"**Current scope:** detection only. Log the detection, summarize the scope,\n"
-        f"and complete your card:\n\n"
-        f"  `planner-detected: #{n} — <scope summary>`\n\n"
-        f"Phase 2+ will add codebase analysis, automatic sub-issue decomposition,\n"
-        f"and dependency tracking.\n\n"
+        f"## Your Task\n\n"
+        f"Review the issue below and confirm it is ready for automated decomposition.\n"
+        f"The dispatcher will create sub-issues automatically once you signal completion.\n\n"
+        f"When done, complete your card with:\n\n"
+        f"  `PLANNING COMPLETE: ready for decomposition`\n\n"
+        f"If the issue is NOT suitable for decomposition (e.g. it is already small enough\n"
+        f"or has a blocking dependency), complete with a different summary explaining why\n"
+        f"and the PM will be notified.\n\n"
         f"---\n\n"
         f"## Issue Body\n\n"
         f"{body_excerpt}{truncation_note}\n"
@@ -1107,14 +1097,13 @@ def _pm_body(repo: str, issue: Dict[str, Any], validator_summary: str, workdir: 
         f"The dispatcher creates all downstream tasks automatically after you complete.\n"
         f"Your ONLY job: write the implementation spec and post it to GitHub.\n\n"
         f"Steps (follow exactly):\n"
-        f"   1) Read the issue body below.\n"
+        f"   1) Invoke /spec — use it to structure your requirements and acceptance criteria.\n"
         f"   2) Post a spec comment to issue #{n} via: {comment_howto}\n"
         f"      The spec MUST include: root cause, fix strategy, acceptance criteria,\n"
         f"      branch name (`fix/issue-{n}-<slug>`), and PR target (`{base_branch}`).\n"
         f"   3) Complete your kanban card with summary starting EXACTLY:\n"
         f"      'spec: <one-line summary of what to implement>'\n"
-        f"      The dispatcher detects this EXACT prefix to trigger the team.\n"
-        f"   4) Run: bash ~/.hermes/scripts/daedalus-cron.sh\n\n"
+        f"      The dispatcher detects this EXACT prefix to trigger the team.\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     ), coding_agent, coding_agent_cmd, role="pm", issue_number=n)
     return _body
@@ -1267,11 +1256,18 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
         f"The PM has written the spec — read it on GitHub issue #{n} before starting.\n\n"
         f"## Steps\n\n"
-        f"### 1. Implement\n"
-        f"Follow the agent-skills lifecycle ({_LIFECYCLE}).\n"
+        f"### 1. Implement using agent-skills\n"
+        f"Work through each skill in order — invoke each one explicitly:\n"
+        f"  /spec          → read the PM spec on issue #{n}, define acceptance criteria\n"
+        f"  /plan          → break implementation into ordered, verifiable tasks\n"
+        f"  /build         → implement one thin slice at a time, verify before expanding\n"
+        f"  /test          → write the failing test first, then make it pass\n"
+        f"  /review        → five-axis quality gate (correctness, readability, arch, security, perf)\n"
+        f"  /code-simplify → reduce complexity with no behavior change\n"
+        f"⛔ Do NOT run /ship — the dispatcher owns the merge step.\n"
         f"Branch: `git checkout {base_branch} && git pull && git checkout -b fix/issue-{n}-<slug>`\n"
         f"Always branch off `{base_branch}`, never off main or any other branch.\n"
-        f"Write code + tests. Iterate up to {iterations}x if review fails.\n\n"
+        f"Iterate up to {iterations}x if review fails.\n\n"
         f"### 2. Lint before pushing\n"
         f"Run whichever is configured, skip gracefully if absent:\n"
         f"  .pre-commit-config.yaml → `pre-commit run --all-files`\n"
@@ -1288,8 +1284,6 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
         f"### 5. Block your kanban card\n"
         f"Block with: `review-required: PR #<pr_number> — fix/issue-{n}-<slug>`\n"
         f"⛔ Do NOT complete your card — the dispatcher completes it after QA passes.\n\n"
-        f"### 6. Run dispatcher\n"
-        f"```\nbash ~/.hermes/scripts/daedalus-cron.sh\n```\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     ), coding_agent, coding_agent_cmd, issue_number=n)
     return _body
@@ -1306,13 +1300,12 @@ def _qa_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"The developer has opened a PR. Your job:\n"
         f"1. Find the PR linked to issue #{n} (check GitHub issue comments or open PRs).\n"
         f"2. Read the PR diff and issue #{n}.\n"
-        f"3. Run the test suite and verify the fix resolves the issue.\n"
-        f"4. Write any missing tests.\n"
+        f"3. Run the full test suite and verify the fix resolves the issue.\n"
+        f"4. Write any missing tests — invoke /test (failing test first, then make it pass).\n"
         f"5. Post a QA summary comment on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"6. Complete your kanban card:\n"
         f"   - Tests pass: summary 'qa-passed: PR #N'\n"
         f"   - Tests fail: block with 'qa-failed: <reason>' — developer will fix\n"
-        f"7. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     ), coding_agent, coding_agent_cmd, role="qa", issue_number=n)
     return _body
 
@@ -1327,12 +1320,14 @@ def _reviewer_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"Work in the existing git repo at {workdir}.\n\n"
         f"QA has passed. Review the developer's PR for correctness, quality, and performance.\n"
         f"1. Find the PR linked to issue #{n}.\n"
-        f"2. Review: correctness, edge cases, error handling, performance, readability.\n"
-        f"3. Post review findings on the PR (not the issue), using the PR number: {comment_howto}\n"
-        f"4. Complete your kanban card:\n"
+        f"2. Invoke /review — five-axis quality gate:\n"
+        f"   correctness, readability, architecture, security, performance.\n"
+        f"3. Invoke /code-simplify — flag or fix anything that can be simplified\n"
+        f"   with no behavior change. Commit simplifications to the PR branch if any.\n"
+        f"4. Post review findings on the PR (not the issue), using the PR number: {comment_howto}\n"
+        f"5. Complete your kanban card:\n"
         f"   - 'reviewed: approved' if ready to merge\n"
         f"   - 'reviewed: changes-requested: <reason>' if fixes needed\n"
-        f"5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     ), coding_agent, coding_agent_cmd, role="reviewer", issue_number=n)
     return _body
 
@@ -1349,12 +1344,11 @@ def _security_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"Check: auth/authz, secrets/credentials, injection (SQL/XSS/cmd),\n"
         f"input validation, path traversal, SSRF, dependency vulnerabilities.\n"
         f"1. Find the PR linked to issue #{n}.\n"
-        f"2. Audit the diff.\n"
+        f"2. Invoke /review with security focus — OWASP top 10, input validation, least privilege.\n"
         f"3. Post findings or sign-off on the PR (not the issue), using the PR number: {comment_howto}\n"
         f"4. Complete your kanban card:\n"
         f"   - 'security: cleared' if no issues\n"
         f"   - 'security: flagged: <finding>' if human review needed\n"
-        f"5. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     ), coding_agent, coding_agent_cmd, role="security", issue_number=n)
     return _body
 
@@ -1376,7 +1370,6 @@ def _docs_task_body(repo: str, issue: Dict[str, Any], workdir: str,
         f"Replace every <placeholder> with the real value.\n"
         f"NOTE: messaging-platform delivery is handled by the dispatcher — do NOT attempt to send it yourself.\n"
         f"3. Complete with summary: 'docs: posted completion report for PR #N'\n"
-        f"4. Run: bash ~/.hermes/scripts/daedalus-cron.sh\n"
     ), coding_agent, coding_agent_cmd, role="documentation", issue_number=n)
     return _body
 
@@ -2166,6 +2159,42 @@ def _check_confirmed_validators(
     return triggered
 
 
+def _check_completed_planner(
+    slug: str, workdir: str,
+    profiles: Optional[Dict[str, str]] = None,
+    *, dry_run: bool = False, provider=None,
+) -> List[int]:
+    """Phase-3 epic trigger: planner PLANNING COMPLETE → create sub-issues + triage cards.
+
+    Runs each tick. Idempotency is handled inside _execute_planner_decompose
+    via the <!-- daedalus:sub-issues:[...] --> marker comment on the parent issue.
+    """
+    from core.iterate import _execute_planner_decompose
+    p = profiles or _DEFAULT_PROFILES
+    triggered: List[int] = []
+    for task in kanban.list_tasks(slug, status="done"):
+        if (task.get("assignee") or "").strip() != p["planner"]:
+            continue
+        summary_raw = _get_task_summary(task, slug)
+        if "PLANNING COMPLETE" not in summary_raw.upper():
+            continue
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            continue
+        logger.info("dispatch: planner PLANNING COMPLETE #%s — triggering decompose", n)
+        # Ensure issue number is present in body for _extract_issue_number_from_card.
+        card = dict(task)
+        if f"#{n}" not in (card.get("body") or ""):
+            card["body"] = f"Issue #{n}\n" + (card.get("body") or "")
+        ok = _execute_planner_decompose(
+            slug, card, "", summary_raw,
+            workdir=workdir, dry_run=dry_run, provider=provider,
+        )
+        if ok:
+            triggered.append(n)
+    return triggered
+
+
 def _check_completed_pm(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -2582,14 +2611,21 @@ def _reconcile_vcs_board(resolved: Dict[str, Any], provider,
             provider = providers.get_provider(resolved) or provider
             notes.append("board mode enabled")
 
-    # ── 2. Ensure status labels exist (only meaningful once board mode is on) ──
+    # ── 2. Ensure required labels exist (epic, subtask + board lanes for GitLab) ──
+    if provider is not None:
+        if dry_run:
+            notes.append("would ensure labels exist")
+        else:
+            created = provider.ensure_labels()
+            if created:
+                notes.append("created labels: " + ", ".join(created))
+    # Legacy path: GitLab board status labels when not using ensure_labels
     if (provider is not None and provider.board_configured()
-            and hasattr(provider, "ensure_status_labels")):
+            and hasattr(provider, "ensure_status_labels")
+            and not hasattr(provider, "ensure_labels")):
         status_names = [provider.status_name(k)
                         for k in ("ready", "in_progress", "in_review", "done")]
-        if dry_run:
-            notes.append("would ensure status labels exist")
-        else:
+        if not dry_run:
             created = provider.ensure_status_labels(status_names)
             if created:
                 notes.append("created labels " + ", ".join(created))
@@ -2828,6 +2864,12 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         dry_run=dry_run, provider=provider,
     )
     if confirmed_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    planner_triggered = _check_completed_planner(
+        slug, workdir, profiles=profiles, dry_run=dry_run, provider=provider,
+    )
+    if planner_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     pm_triggered = _check_completed_pm(
