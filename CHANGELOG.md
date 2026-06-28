@@ -1,3 +1,5 @@
+## [fix: tier promotion guard — max one promotion per parent epic per dispatcher tick](https://github.com/benmarte/daedalus/issues/231) — [PR #349](https://github.com/benmarte/daedalus/pull/349)
+
 ## [feat: extend sweeper to detect stale 'running' cards stuck without updates >24h](https://github.com/benmarte/daedalus/issues/232) — [PR #259](https://github.com/benmarte/daedalus/pull/259)
 
 ## [feat: --plugin-dir flag for daedalus-cron.sh to load local dev plugin without reinstalling](https://github.com/benmarte/daedalus/issues/233) — [PR #249](https://github.com/benmarte/daedalus/pull/249)
