@@ -1,3 +1,18 @@
+## [docs: clarify epic #180 line references and document deferred behaviors](https://github.com/benmarte/daedalus/issues/180) — PR #866
+
+### Documentation
+
+- README "Self-healing behaviors (epic #180)" line references corrected to
+  current `core/iterate.py` (drifted 13–27 lines since PR #816 landed).
+- Added explicit note that three epic #180 behaviors are deferred
+  (`MAX_PENDING_PR_TICKS` timeout, `PENDING_CI` fix-attempt escalation for
+  QA/a11y, and empty-summary developer skip) and what the dispatcher actually
+  does today in each case.
+- Added `a11y-skipped:` to the canonical accessibility signals list.
+- "What breaks self-healing" paragraph for QA/a11y corrected to say these
+  signals stay pending indefinitely (no sweep escalation for non-canonical
+  signals yet).
+
 ## [PM SOUL.md explains the importance of unblocking the original card after consultation](https://github.com/benmarte/daedalus/issues/785) — [PR #812](https://github.com/benmarte/daedalus/pull/812)
 
 ## [feat: end-to-end integration test driving a full 7-stage pipeline scenario](https://github.com/benmarte/daedalus/issues/230) — [PR #445](https://github.com/benmarte/daedalus/pull/445)
