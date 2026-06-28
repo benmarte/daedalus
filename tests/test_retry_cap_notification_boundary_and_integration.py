@@ -201,7 +201,7 @@ def test_concurrent_webhook_notifications_thread_safe():
     def capture_webhook(payload):
         with lock:
             webhook_calls.append(payload)
-        time.sleep(0.05)  # Simulate slow webhook
+        time.sleep(0.01)  # Simulate slow webhook
         return {"slack": True}
 
     # Fire 5 concurrent notifications
@@ -225,7 +225,7 @@ def test_concurrent_webhook_notifications_thread_safe():
             t.join(timeout=1.0)
 
         # Wait for webhook threads to complete
-        time.sleep(0.3)
+        time.sleep(0.05)
 
     check("all 5 concurrent webhooks fired",
           len(webhook_calls) == 5)
@@ -377,7 +377,7 @@ def test_webhook_payload_handles_empty_context():
             max_retries=2,
             dry_run=False,
         )
-        time.sleep(0.2)
+        time.sleep(0.03)
         
         check("webhook payload created", len(captured) > 0)
         

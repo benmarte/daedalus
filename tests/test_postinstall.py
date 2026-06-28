@@ -550,7 +550,7 @@ class TestCronWrapperIntegration:
             ["bash", "-c", hold_lock_cmd],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        import time; time.sleep(0.3)  # let flock settle
+        import time; time.sleep(0.05)  # let flock settle
 
         try:
             result = subprocess.run(

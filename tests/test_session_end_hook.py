@@ -50,7 +50,7 @@ class TestOnSessionEnd(unittest.TestCase):
                 **kwargs,
             )
             # Give the daemon thread a moment to fire
-            time.sleep(0.1)
+            time.sleep(0.02)
 
         return mock_run, fired
 
@@ -90,7 +90,7 @@ class TestOnSessionEnd(unittest.TestCase):
                      patch("subprocess.run", side_effect=fake_run):
                     _on_session_end(session_id="s", completed=True, interrupted=False,
                                     model="x", platform="cli")
-                    time.sleep(0.1)
+                    time.sleep(0.02)
             finally:
                 os.chdir(orig)
 
@@ -120,7 +120,7 @@ class TestOnSessionEnd(unittest.TestCase):
                 session_id="s1", completed=True, interrupted=False,
                 model="x", platform="cli",
             )
-            time.sleep(0.1)  # let thread run
+            time.sleep(0.02)  # let thread run
 
     def test_extra_kwargs_accepted(self):
         """Hook must accept arbitrary **kwargs without error."""

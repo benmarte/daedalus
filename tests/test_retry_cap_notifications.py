@@ -213,7 +213,7 @@ class TestFireWebhookNotification:
                 dry_run=False,
             )
             # Give thread time to complete
-            time.sleep(0.1)
+            time.sleep(0.02)
             mock_send.assert_called_once()
             payload = mock_send.call_args[0][0]
             assert "VALIDATOR" in payload.title
@@ -232,7 +232,7 @@ class TestFireWebhookNotification:
                 max_retries=2,
                 dry_run=False,
             )
-            time.sleep(0.1)
+            time.sleep(0.02)
             mock_send.assert_called_once()
             payload = mock_send.call_args[0][0]
             assert "PM" in payload.title
@@ -253,7 +253,7 @@ class TestFireWebhookNotification:
                 dry_run=False,
             )
             # Give thread time to attempt and fail
-            time.sleep(0.1)
+            time.sleep(0.02)
 
 
 # ── _send_retry_attempt_notification tests ──────────────────────────────────

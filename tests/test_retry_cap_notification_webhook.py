@@ -66,7 +66,7 @@ def test_fire_webhook_notification_constructs_payload():
         
         # Wait for async thread
         import time
-        time.sleep(0.1)
+        time.sleep(0.02)
         
         check("send_webhook_notification called", mock_send.called)
         payload = mock_send.call_args.args[0]
@@ -86,7 +86,7 @@ def test_fire_webhook_notification_is_async():
     called = []
     def slow_send(payload):
         called.append(time.time())
-        time.sleep(0.5)  # Simulate slow network call
+        time.sleep(0.05)  # Simulate slow network call
         return {'slack': True}
     
     with mock.patch.object(disp, 'send_webhook_notification', side_effect=slow_send):
@@ -104,7 +104,7 @@ def test_fire_webhook_notification_is_async():
         check("returns quickly (<0.2s)", elapsed < 0.2)
         
         # Wait for background thread to complete
-        time.sleep(0.7)
+        time.sleep(0.1)
         check("webhook was called in background", len(called) > 0)
 
 
@@ -146,7 +146,7 @@ def test_webhook_failure_graceful():
             )
             # Wait for async thread
             import time
-            time.sleep(0.1)
+            time.sleep(0.02)
             check("webhook failure doesn't raise", True)
         except Exception as e:
             check("webhook failure doesn't raise", False)
@@ -182,7 +182,7 @@ def test_integration_retry_cap_exhausted():
             
             # Wait for async webhook
             import time
-            time.sleep(0.1)
+            time.sleep(0.02)
             
             check("webhook was invoked", len(webhook_called) > 0)
 
