@@ -524,10 +524,153 @@ def test_pm_retry_cap_notification_sent_once_across_ticks():
               mock_notify.call_count == 1)
 
 
-# ── Main runner ──────────────────────────────────────────────────────────────────
+
+
+# ── Tests 17-27: Intermediate Retry Notifications ──
+
+def test_retry_attempt_in_notify_events():
+    """NOTIFY_EVENTS includes 'retry-attempt' event type."""
+    disp = _load_dispatch()
+    check("retry-attempt in NOTIFY_EVENTS", "retry-attempt" in disp.NOTIFY_EVENTS)
+
+
+def test_send_retry_attempt_notification_exists():
+    """_send_retry_attempt_notification function exists."""
+    disp = _load_dispatch()
+    check("has _send_retry_attempt_notification", hasattr(disp, "_send_retry_attempt_notification"))
+
+
+def test_send_retry_attempt_notification_calls_notify_targets():
+    """Intermediate retry notification uses 'retry-attempt' event."""
+    disp = _load_dispatch()
+    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C1"]) as mock_targets, \
+         mock.patch.object(disp, "_hermes_send", return_value=(True, "ts-1")):
+        disp._send_retry_attempt_notification(
+            role="validator", issue_number=42, retry_count=1, max_retries=3,
+            resolved=_minimal_resolved(notifications=[
+                {"platform": "Slack", "target": "slack:C1", "events": ["retry-attempt"]}
+            ]),
+            dry_run=False,
+        )
+        check(
+            "retry-attempt notification uses retry-attempt event",
+            mock_targets.called and mock_targets.call_args[0][1] == "retry-attempt"
+        )
+
+
+def test_send_retry_attempt_notification_sends_to_all_targets():
+    """Intermediate retry notification sends to all configured targets."""
+    disp = _load_dispatch()
+    targets = ["slack:C1", "slack:C2"]
+    with mock.patch.object(disp, "_notify_targets", return_value=targets), \
+         mock.patch.object(disp, "_hermes_send", return_value=(True, "ts-1")) as mock_send:
+        disp._send_retry_attempt_notification(
+            role="validator", issue_number=42, retry_count=1, max_retries=3,
+            resolved=_minimal_resolved(notifications=[
+                {"platform": "Slack", "target": "slack:C1", "events": ["retry-attempt"]},
+                {"platform": "Slack", "target": "slack:C2", "events": ["retry-attempt"]}
+            ]),
+            dry_run=False,
+        )
+        check("retry-attempt sends to all targets", mock_send.call_count == len(targets))
+
+
+def test_send_retry_attempt_notification_validator_message():
+    """Validator intermediate retry message has correct content."""
+    disp = _load_dispatch()
+    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C1"]), \
+         mock.patch.object(disp, "_hermes_send", return_value=(True, "ts-1")) as mock_send:
+        disp._send_retry_attempt_notification(
+            role="validator", issue_number=42, retry_count=2, max_retries=3,
+            resolved=_minimal_resolved(), dry_run=False,
+        )
+        body = mock_send.call_args[0][1]
+        check("validator retry attempt contains issue number", "#42" in body)
+        check("validator retry attempt contains retry count", "2/3" in body)
+        check("validator retry attempt has role indicator", "validator" in body.lower())
+
+
+def test_send_retry_attempt_notification_pm_message():
+    """PM intermediate retry message has correct content."""
+    disp = _load_dispatch()
+    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C1"]), \
+         mock.patch.object(disp, "_hermes_send", return_value=(True, "ts-1")) as mock_send:
+        disp._send_retry_attempt_notification(
+            role="pm", issue_number=123, retry_count=1, max_retries=5,
+            resolved=_minimal_resolved(), dry_run=False,
+        )
+        body = mock_send.call_args[0][1]
+        check("PM retry attempt contains issue number", "#123" in body)
+        check("PM retry attempt contains retry count", "1/5" in body)
+        check("PM retry attempt has role indicator", "pm" in body.lower())
+
+
+def test_send_retry_attempt_notification_no_targets():
+    """Intermediate retry notification is no-op when no targets configured."""
+    disp = _load_dispatch()
+    with mock.patch.object(disp, "_notify_targets", return_value=[]), \
+         mock.patch.object(disp, "_hermes_send") as mock_send:
+        disp._send_retry_attempt_notification(
+            role="validator", issue_number=42, retry_count=1, max_retries=3,
+            resolved=_minimal_resolved(), dry_run=False,
+        )
+        check("retry-attempt no-op when no targets", not mock_send.called)
+
+
+def test_send_retry_attempt_notification_dry_run():
+    """Intermediate retry notification respects dry_run mode."""
+    disp = _load_dispatch()
+    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C1"]), \
+         mock.patch.object(disp, "_hermes_send") as mock_send:
+        disp._send_retry_attempt_notification(
+            role="validator", issue_number=42, retry_count=1, max_retries=3,
+            resolved=_minimal_resolved(), dry_run=True,
+        )
+        check("retry-attempt dry_run prevents send", not mock_send.called)
+
+
+def test_send_retry_attempt_notification_delivery_failure():
+    """Intermediate retry notification handles delivery failure gracefully."""
+    disp = _load_dispatch()
+    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C1"]), \
+         mock.patch.object(disp, "_hermes_send", return_value=(False, None)):
+        try:
+            disp._send_retry_attempt_notification(
+                role="validator", issue_number=42, retry_count=1, max_retries=3,
+                resolved=_minimal_resolved(), dry_run=False,
+            )
+            check("retry-attempt handles delivery failure", True)
+        except Exception as e:
+            check(f"retry-attempt raised on failure: {e}", False)
+
+
+def test_retry_notifications_are_distinct():
+    """retry-attempt and retry-cap-exhausted have different content."""
+    disp = _load_dispatch()
+    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C1"]), \
+         mock.patch.object(disp, "_hermes_send", return_value=(True, "ts-1")) as mock_send:
+        # Cap exhausted
+        mock_send.reset_mock()
+        disp._send_retry_cap_notification(
+            role="validator", issue_number=42, retry_count=3, max_retries=3,
+            resolved=_minimal_resolved(), dry_run=False,
+        )
+        cap_body = mock_send.call_args[0][1]
+
+        # Intermediate retry
+        mock_send.reset_mock()
+        disp._send_retry_attempt_notification(
+            role="validator", issue_number=42, retry_count=2, max_retries=3,
+            resolved=_minimal_resolved(), dry_run=False,
+        )
+        attempt_body = mock_send.call_args[0][1]
+
+        check("retry notifications have distinct content", cap_body != attempt_body)
+        check("cap exhausted has 'Cap Exhausted' title", "Cap Exhausted" in cap_body)
+        check("retry attempt has 'Retry' title", "Retry" in attempt_body)
+
 
 if __name__ == "__main__":
-    print("\n=== Retry Cap Notification Tests ===\n")
     test_retry_cap_exhausted_in_notify_events()
     test_send_retry_cap_notification_exists()
     test_send_retry_cap_notification_calls_notify_targets()
@@ -544,6 +687,17 @@ if __name__ == "__main__":
     test_validator_retry_cap_dry_run_does_not_mark()
     test_pm_retry_cap_dry_run_does_not_mark()
     test_pm_retry_cap_notification_sent_once_across_ticks()
+    # Tests 17-27: Intermediate retry notifications
+    test_retry_attempt_in_notify_events()
+    test_send_retry_attempt_notification_exists()
+    test_send_retry_attempt_notification_calls_notify_targets()
+    test_send_retry_attempt_notification_sends_to_all_targets()
+    test_send_retry_attempt_notification_validator_message()
+    test_send_retry_attempt_notification_pm_message()
+    test_send_retry_attempt_notification_no_targets()
+    test_send_retry_attempt_notification_dry_run()
+    test_send_retry_attempt_notification_delivery_failure()
+    test_retry_notifications_are_distinct()
     print(f"\n{'='*60}")
     print(f"Passed: {conftest._passed}  Failed: {conftest._failed}")
     print(f"{'='*60}\n")
