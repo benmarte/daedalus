@@ -336,7 +336,7 @@ def test_idempotency_marker_still_posted_after_fallback(reset_fallback_counter, 
     assert ok is True
     # Idempotency marker posted on parent
     marker_posts = [(n, t) for n, t in provider._comments_posted
-                    if n == 999 and "daedalus:sub-issues" in t]
+                    if n == 999 and "daedalus:decomposed" in t]
     assert marker_posts, (
         f"expected sub-issue marker on parent; got comments: {provider._comments_posted}"
     )

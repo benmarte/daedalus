@@ -295,11 +295,11 @@ def test_marker_comment_posted():
 
     assert prov.post_issue_comment.call_count == 1
     posted_body = prov.post_issue_comment.call_args[0][1]
-    assert "<!-- daedalus:sub-issues:" in posted_body
+    assert "<!-- daedalus:decomposed:" in posted_body
 
 
 def test_marker_format_matches_spec():
-    """Verify marker format is exactly <!-- daedalus:sub-issues:[N1,N2,...] -->"""
+    """Verify marker format is <!-- daedalus:decomposed:<timestamp> -->"""
     issue = _make_issue_obj(1, "Epic", "- [ ] t\n" * 3)
     prov = _make_provider(issue_obj=issue, created_numbers=[10, 11, 12])
 
@@ -312,15 +312,14 @@ def test_marker_format_matches_spec():
         )
 
     posted_body = prov.post_issue_comment.call_args[0][1]
-    # Must start with exact prefix and format
-    assert posted_body.startswith("<!-- daedalus:sub-issues:[10,11,12] -->")
-    # Verify no spaces between numbers
-    assert "[10,11,12]" in posted_body
-    assert "[10, 11, 12]" not in posted_body
+    assert posted_body.startswith("<!-- daedalus:decomposed:")
+    assert "#10" in posted_body
+    assert "#11" in posted_body
+    assert "#12" in posted_body
 
 
 def test_marker_format_single_number():
-    """Verify single number format: <!-- daedalus:sub-issues:[N] -->"""
+    """Verify new marker format for single sub-issue"""
     issue = _make_issue_obj(1, "Epic", "- [ ] t\n" * 1)
     prov = _make_provider(issue_obj=issue, created_numbers=[42])
 
@@ -333,11 +332,12 @@ def test_marker_format_single_number():
         )
 
     posted_body = prov.post_issue_comment.call_args[0][1]
-    assert "<!-- daedalus:sub-issues:[42] -->" in posted_body
+    assert "<!-- daedalus:decomposed:" in posted_body
+    assert "#42" in posted_body
 
 
 def test_marker_format_many_numbers():
-    """Verify format with multiple numbers still has no spaces"""
+    """Verify new marker format includes all sub-issue numbers"""
     issue = _make_issue_obj(1, "Epic", "- [ ] t\n" * 5)
     prov = _make_provider(issue_obj=issue, created_numbers=[101, 102, 103, 104, 105])
 
@@ -350,7 +350,9 @@ def test_marker_format_many_numbers():
         )
 
     posted_body = prov.post_issue_comment.call_args[0][1]
-    assert "<!-- daedalus:sub-issues:[101,102,103,104,105] -->" in posted_body
+    assert "<!-- daedalus:decomposed:" in posted_body
+    for n in [101, 102, 103, 104, 105]:
+        assert f"#{n}" in posted_body
 
 
 def test_idempotency_detects_correct_format():
@@ -587,7 +589,7 @@ def test_integration_subissue_creation_with_template():
     # Marker comment posted on parent
     assert prov.post_issue_comment.call_count == 1
     marker_body = prov.post_issue_comment.call_args[0][1]
-    assert "<!-- daedalus:sub-issues:" in marker_body
+    assert "<!-- daedalus:decomposed:" in marker_body
 
     # Epic label applied to parent
     # Verify labels applied
