@@ -103,6 +103,12 @@ class _FakeProvider:
     def add_label(self, number: int, label: str) -> None:
         self._labels_added.append((number, label))
 
+    def board_configured(self) -> bool:
+        return False
+
+    def board_set_status(self, number: int, status: str) -> bool:
+        return True
+
     def post_issue_comment(self, number: int, text: str) -> None:
         self._comments_posted.append((number, text))
 

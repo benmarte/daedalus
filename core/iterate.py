@@ -1754,12 +1754,22 @@ def _execute_planner_decompose_inner(
             dependencies = parse_depends_on(sub_body)
             
             if not dependencies:
-                # No dependencies = immediately actionable, apply Ready label
+                # No dependencies = immediately actionable, apply Ready label + enroll on board
                 provider.add_label(sub_n, "Ready")
                 ready_numbers.append(sub_n)
+                if getattr(provider, "board_configured", lambda: False)():
+                    try:
+                        provider.board_set_status(sub_n, "Ready")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("iterate: planner_decompose — board_set_status(#%s, Ready) failed: %s", sub_n, exc)
                 logger.info("iterate: planner_decompose — applied Ready label to sub-issue #%s (no dependencies)", sub_n)
             else:
                 logger.info("iterate: planner_decompose — sub-issue #%s has %d dependencies, skipping Ready label", sub_n, len(dependencies))
+                if getattr(provider, "board_configured", lambda: False)():
+                    try:
+                        provider.board_set_status(sub_n, "Todo")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("iterate: planner_decompose — board_set_status(#%s, Todo) failed: %s", sub_n, exc)
         else:
             logger.warning("iterate: planner_decompose — create_issue failed for %r", title)
 
