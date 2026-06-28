@@ -1,5 +1,7 @@
 ## [docs: update SOUL.md profiles and user guide with self-healing pipeline behavior](https://github.com/benmarte/daedalus/issues/180) — [PR #866](https://github.com/benmarte/daedalus/pull/866)
 
+## [docs: update SOUL.md profiles and user guide with self-healing pipeline behavior](https://github.com/benmarte/daedalus/issues/180) — [PR #866](https://github.com/benmarte/daedalus/pull/866)
+
 ## [feat: auto-paginate _fetch_issues to prevent silent truncation on large boards](https://github.com/benmarte/daedalus/issues/228) — [PR #846](https://github.com/benmarte/daedalus/pull/846)
 
 ## [feat: auto-paginate _fetch_issues to prevent silent truncation on large boards](https://github.com/benmarte/daedalus/issues/228) — [PR #846](https://github.com/benmarte/daedalus/pull/846)
