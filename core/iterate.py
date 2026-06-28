@@ -51,20 +51,6 @@ def reset_source_reading_fallback_count() -> None:
     global _source_reading_fallback_count
     _source_reading_fallback_count = 0
 
-# Source-reading fallback counter for observability
-_source_reading_fallback_count: int = 0
-
-
-def get_source_reading_fallback_count() -> int:
-    """Return the count of Phase 4 fallback events (for testing/monitoring)."""
-    return _source_reading_fallback_count
-
-
-def reset_source_reading_fallback_count() -> None:
-    """Reset the source-reading fallback counter to zero (for tests)."""
-    global _source_reading_fallback_count
-    _source_reading_fallback_count = 0
-
 
 # ── pure helpers ────────────────────────────────────────────────────────────
 
@@ -1575,9 +1561,6 @@ def _execute_planner_decompose(
         sub_scopes = [t.split(" — ", 1)[0] for t in sub_titles]
 
     # Phase 4: source-file reading & context injection
-    # If reading fails or workdir is unavailable, fall back to Phase 3
-    # behavior (template-only generation without analysis).
-    global _source_reading_fallback_count
     # If reading fails or workdir is unavailable, fall back to Phase 3
     # behavior (template-only generation without analysis).
     global _source_reading_fallback_count
