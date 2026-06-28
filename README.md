@@ -182,13 +182,13 @@ re-creation on subsequent dispatcher ticks. The `epic` label is applied to the p
 issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
 
 **Source file context injection.** When the dispatcher detects a planner task completion
-with the `PLANNING COMPLETE:` prefix (which triggers the decompose), the planner now reads
-up to 10 source files from the codebase (configurable via `planner.source_files.max_files`
-and `planner.source_files.max_bytes`) and injects their contents into the planner's task body.
-This gives the planner concrete context about existing implementations when scoping sub-issues.
-The dispatcher scans the repo's source tree and picks the most relevant files (config files,
-entry points, modules matching the epic's keywords). Sub-issue bodies always include an
-explicit `depends_on:` metadata line (even when empty), making tier-graph parsing consistent.
+with the `PLANNING COMPLETE:` prefix (which triggers the decompose), the dispatcher reads
+up to 10 source files from the codebase (hardcoded limits: max 10 files, max 50KB per file)
+and injects their contents into the planner's task body. This gives the planner concrete
+context about existing implementations when scoping sub-issues. The dispatcher scans the
+repo's source tree and picks the most relevant files (config files, entry points, modules
+matching the epic's keywords). Sub-issue bodies always include an explicit `depends_on:`
+metadata line (even when empty), making tier-graph parsing consistent.
 
 ### Tier promotion: dependency-aware sub-issue Ready-gating
 
@@ -1196,6 +1196,21 @@ How it works:
 - **Per-platform anchor.** The first event for a target posts a *root* message;
   every later event replies under it. Slack anchors on `thread_ts`, Discord on
   `message_id` — both captured automatically via `hermes send --json`.
+- **`thread_broadcast` (Slack only).** Slack supports a `reply_broadcast` flag
+  that mirrors a threaded reply into the parent channel as well. The dispatcher
+  honors this per-target via the boolean `thread_broadcast` field on each
+  `cron.notifications` entry — when `true` (the default), replies are also
+  broadcast; when `false`, they stay thread-only. Discord has no equivalent and
+  ignores the field.
+
+  ```yaml
+  cron:
+    notifications:
+      - platform: Slack
+        target: "slack:C0ABC"
+        events: [doc-report, dispatch-summary]
+        thread_broadcast: false   # keep it thread-only
+  ```
 - **Cross-tick dedup.** Each event has a stable key; once mirrored to a target it
   is never resent, so repeated cron ticks don't repost the same comment.
 - **Self-healing anchor.** If a thread's root message is deleted, the next event
