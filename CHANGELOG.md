@@ -1,3 +1,5 @@
+## [When a planner task completes with `NOT SUITABLE FOR DECOMPOSITION` in summary, a validator task is created for the parent issue](https://github.com/benmarte/daedalus/issues/931) — [PR #941](https://github.com/benmarte/daedalus/pull/941)
+
 ## [feat: auto-advance sub-issues to Ready after planner decomposition, respecting dependency order](https://github.com/benmarte/daedalus/issues/915) — [PR #937](https://github.com/benmarte/daedalus/pull/937)
 
 ## [feat(e2e): regression assertions for #891 (no duplicate sub-issues) and #894 (agent comments posted)](https://github.com/benmarte/daedalus/issues/902) — [PR #917](https://github.com/benmarte/daedalus/pull/917)
