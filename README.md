@@ -187,6 +187,18 @@ spec). The dispatcher uses that DAG to roll sub-issues out in **tiers** rather t
 them all `Ready` at once — only dependency-free issues go to the board immediately;
 downstream tiers wait for their blockers to close and then get promoted automatically.
 
+
+Sub-issues are linked to their parent epic via a body-reference convention. The discovery regex is aligned between `VCSProvider.sub_issues_of()` (`core/providers/base.py`) and `EPIC_REF_RE` (`core/tier_promotion.py`) so both code paths agree on what counts as a parent-epic reference. Recognised formats (case-insensitive, with or without colon):
+
+- `Epic: #N`, `Epic #N`
+- `Part of: #N`, `Part of #N`
+- `Part of epic: #N`, `Part of epic #N`
+- `Part-of #N`, `Part-of-epic #N` (hyphenated variants)
+
+A single issue reference matches regardless of which format the author chose. Providers with native sub-issue links (GitHub's dependency API) override `sub_issues_of` to prefer the API, then fall back to the regex scan for portability.
+
+Promotion is **idempotent**: `promote_waiting_tiers` queries `provider.has_label(n, "Ready")` before adding the label, so each promotable issue is labeled and commented exactly once. `VCSProvider.has_label()` defaults to returning `False`; the GitHub provider implements it via the issue's `labels` field (never raises).
+
 **Three tiers of gating** combine to scope what dispatches when:
 
 1. **Phase-1 detection** — `VCSProvider.is_epic()` flags the parent epic via the three
