@@ -1,5 +1,7 @@
 ## [`daedalus-cron.sh` detects silent gateway death and attempts restart](https://github.com/benmarte/daedalus/issues/187) — [PR #215](https://github.com/benmarte/daedalus/pull/215)
 
+## [`daedalus-cron.sh` detects silent gateway death and attempts restart](https://github.com/benmarte/daedalus/issues/187) — [PR #215](https://github.com/benmarte/daedalus/pull/215)
+
 ## [fix: remaining self-healing gaps — retry cap notifications, gateway watchdog, and orphaned cards](https://github.com/benmarte/daedalus/issues/181) — [PR #204](https://github.com/benmarte/daedalus/pull/204)
 
 ## [fix: remaining self-healing gaps — retry cap notifications, gateway watchdog, and orphaned cards](https://github.com/benmarte/daedalus/issues/181) — [PR #204](https://github.com/benmarte/daedalus/pull/204)
