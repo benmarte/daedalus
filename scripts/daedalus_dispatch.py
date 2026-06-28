@@ -1200,6 +1200,22 @@ def _get_task_summary(task: Dict[str, Any], slug: str) -> str:
     return summary_raw
 
 
+def _validator_summary_burns_cap(summary: str) -> bool:
+    """Return True if a done validator summary counts toward the retry cap.
+
+    A validator run only burns a retry when it actually completed and produced a
+    real, non-CONFIRMED verdict (STOP/BLOCKED/ESCALATE or any other non-empty
+    output). An empty/None summary means the delegated Claude Code agent died or
+    timed out before writing a verdict — a *failed delegation*, not a decision —
+    which must be retried without counting against the cap (#916). A CONFIRMED
+    run is a success and likewise never burns the cap.
+    """
+    s = (summary or "").strip().lower()
+    if not s:
+        return False
+    return not s.startswith("confirmed")
+
+
 def _format_completion_comment(role: str, title: str, summary: str) -> str:
     """Render a role's kanban completion summary as a GitHub issue comment body.
 
@@ -2796,18 +2812,29 @@ def _check_confirmed_validators(
                 else:
                     triggered.append(n_nr)
                 continue
-            # Count existing validator tasks (original + retries) to enforce retry cap.
-            # NOTE: this check runs BEFORE the `if not issue_nr: continue` guard,
-            # so we can emit the retry-cap-exhausted notification even when the issue
-            # is missing from issues_map. Otherwise, a stale validator task with no
-            # resolvable issue would never trigger the notification (#378).
-            retry_count = sum(
-                1 for t in kanban.list_tasks(slug)
+            # Count existing validator tasks (original + retries) for this issue.
+            # NOTE: this runs BEFORE the `if not issue_nr: continue` guard, so we can
+            # emit the retry-cap-exhausted notification even when the issue is missing
+            # from issues_map. Otherwise, a stale validator task with no resolvable
+            # issue would never trigger the notification (#378).
+            #
+            # `retry_count` (all runs) drives the unique retry idempotency key below.
+            # `cap_count` (runs that produced a real, non-CONFIRMED verdict) drives the
+            # cap gate: a run that completed with an empty/None summary means the
+            # delegated agent died/timed out before deciding (a failed delegation, not
+            # a wasted decision) and must be retried without burning the cap (#916).
+            validator_tasks = [
+                t for t in kanban.list_tasks(slug)
                 if (t.get("assignee") or "") == p["validator"]
                 and f"#{n_nr}" in (t.get("title") or "")
+            ]
+            retry_count = len(validator_tasks)
+            cap_count = sum(
+                1 for t in validator_tasks
+                if _validator_summary_burns_cap(_get_task_summary(t, slug))
             )
             max_validator_retries = _resolve_max_validator_retries((resolved or {}).get("execution") or {})
-            if retry_count >= max_validator_retries + 1:
+            if cap_count >= max_validator_retries + 1:
                 logger.error(
                     "dispatch: validator for #%s has %d runs (cap %d) with no CONFIRMED — "
                     "manual intervention required",

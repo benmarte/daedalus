@@ -2,6 +2,11 @@
 
 When PM or validator exhausts its retry cap, a comment must be posted on the
 GitHub issue — matching the pattern used in the STOP/BLOCKED/ESCALATE paths.
+
+Note (#916): a validator run only burns a retry when it completes with a real,
+non-CONFIRMED verdict. Empty/None summaries are failed delegations (the agent
+died before deciding) and must NOT count toward the cap — so these cap-exhaustion
+tests use a non-empty, non-CONFIRMED summary that legitimately burns the cap.
 """
 from __future__ import annotations
 
@@ -10,6 +15,10 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+
+# A done validator summary that is non-empty and not CONFIRMED — a real run that
+# failed to confirm, which counts toward the retry cap (unlike a None summary).
+_NO_VERDICT_SUMMARY = "validator ran but produced no clear verdict"
 
 
 def _load_dispatch():
@@ -68,7 +77,7 @@ class TestValidatorRetryCapGithubComment(unittest.TestCase):
 
         with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
              mock.patch.object(self.disp.kanban, "show_card",
-                               return_value={"latest_summary": None}), \
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
              mock.patch.object(self.disp.kanban, "comment"), \
              mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
              mock.patch.object(self.disp, "_send_retry_cap_notification"), \
@@ -106,7 +115,7 @@ class TestValidatorRetryCapGithubComment(unittest.TestCase):
 
         with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
              mock.patch.object(self.disp.kanban, "show_card",
-                               return_value={"latest_summary": None}), \
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
              mock.patch.object(self.disp.kanban, "comment"), \
              mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
              mock.patch.object(self.disp, "_send_retry_cap_notification"), \
@@ -134,7 +143,7 @@ class TestValidatorRetryCapGithubComment(unittest.TestCase):
 
         with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
              mock.patch.object(self.disp.kanban, "show_card",
-                               return_value={"latest_summary": None}), \
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
              mock.patch.object(self.disp.kanban, "comment"), \
              mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
              mock.patch.object(self.disp, "_send_retry_cap_notification"), \
@@ -160,7 +169,7 @@ class TestValidatorRetryCapGithubComment(unittest.TestCase):
 
         with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
              mock.patch.object(self.disp.kanban, "show_card",
-                               return_value={"latest_summary": None}), \
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
              mock.patch.object(self.disp.kanban, "comment"), \
              mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
              mock.patch.object(self.disp, "_send_retry_cap_notification"), \
@@ -253,7 +262,7 @@ class TestGithubCommentFailsGracefully(unittest.TestCase):
 
         with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
              mock.patch.object(self.disp.kanban, "show_card",
-                               return_value={"latest_summary": None}), \
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
              mock.patch.object(self.disp.kanban, "comment"), \
              mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
              mock.patch.object(self.disp, "_send_retry_cap_notification"), \
@@ -285,7 +294,7 @@ class TestGithubCommentFailsGracefully(unittest.TestCase):
 
         with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
              mock.patch.object(self.disp.kanban, "show_card",
-                               return_value={"latest_summary": None}), \
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
              mock.patch.object(self.disp.kanban, "comment"), \
              mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
              mock.patch.object(self.disp, "_send_retry_cap_notification"), \
@@ -299,6 +308,78 @@ class TestGithubCommentFailsGracefully(unittest.TestCase):
                 provider=CrashProvider(),
                 resolved=_minimal_resolved(),
             )
+
+
+class TestEmptySummaryDoesNotBurnCap(unittest.TestCase):
+    """#916: validator runs with empty/None summaries are failed delegations.
+
+    They must be retried, not counted toward the retry cap — otherwise a series
+    of agent crashes silently exhausts the cap and strands the issue even though
+    a later run would have produced a valid CONFIRMED verdict.
+    """
+
+    def setUp(self):
+        self.disp = _load_dispatch()
+
+    def test_cap_does_not_fire_when_all_runs_have_empty_summaries(self):
+        """N done validator tasks all with summary=None → no cap exhaustion."""
+        # Well past the default cap of 2 (cap fires at >= max+1 == 3).
+        fake_tasks = [
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": f"t{i}"}
+            for i in range(5)
+        ]
+        provider = FakeProvider()
+
+        created: list = []
+
+        def fake_create_task(*args, **kwargs):
+            created.append(kwargs.get("idempotency_key", ""))
+            return "new_task_id"
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": None}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp.kanban, "create_task", side_effect=fake_create_task), \
+             mock.patch.object(self.disp, "_validator_body", return_value="body"), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification") as send_cap, \
+             mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+             mock.patch.object(self.disp, "_mark_notified_block"):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {902: {"number": 902, "title": "fix bug", "body": ""}},
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        # No cap-exhaustion notification and no GitHub cap comment were emitted.
+        send_cap.assert_not_called()
+        self.assertEqual(
+            [c for c in provider.comments if c[0] == 902], [],
+            "Empty-summary runs must not post a retry-cap-exhausted comment",
+        )
+        # Instead, the failed delegation is retried.
+        self.assertTrue(
+            any(k.startswith("validator-retry-902") for k in created),
+            "Empty-summary run should be retried, not capped",
+        )
+
+    def test_helper_classifies_summaries(self):
+        """_validator_summary_burns_cap: empty/CONFIRMED don't count, verdicts do."""
+        burns = self.disp._validator_summary_burns_cap
+        self.assertFalse(burns(None))
+        self.assertFalse(burns(""))
+        self.assertFalse(burns("   "))
+        self.assertFalse(burns("CONFIRMED: reproduced on main"))
+        self.assertFalse(burns("confirmed: lower-case prefix"))
+        self.assertTrue(burns("STOP: duplicate of #5"))
+        self.assertTrue(burns("BLOCKED: needs more info"))
+        self.assertTrue(burns("ESCALATE: security threat"))
+        self.assertTrue(burns("ran but produced no clear verdict"))
 
 
 if __name__ == "__main__":
