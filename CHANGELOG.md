@@ -1,3 +1,5 @@
+## [fix: remaining self-healing gaps — retry cap notifications, gateway watchdog, and orphaned cards](https://github.com/benmarte/daedalus/issues/181) — [PR #204](https://github.com/benmarte/daedalus/pull/204)
+
 ## [Detect epic-sized issues and analyze+decompose into sub-issues before the developer stage](https://github.com/benmarte/daedalus/issues/138) — [PR #155](https://github.com/benmarte/daedalus/pull/155)
 
 ## [Dependency-aware ready-gating: don't dispatch an issue until its blockers are closed (native GitLab/GitHub issue links + Depends-on fallback)](https://github.com/benmarte/daedalus/issues/139) — [PR #148](https://github.com/benmarte/daedalus/pull/148)
