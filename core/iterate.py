@@ -37,6 +37,35 @@ PLANNER_DECOMPOSE = "planner_decompose"  # planner completed → create sub-issu
 # Maximum fix attempts per PR before escalation
 MAX_FIX_ATTEMPTS = 3
 
+# Source-reading fallback counter for observability
+_source_reading_fallback_count: int = 0
+
+
+def get_source_reading_fallback_count() -> int:
+    """Return the count of Phase 4 fallback events (for testing/monitoring)."""
+    return _source_reading_fallback_count
+
+
+def reset_source_reading_fallback_count() -> None:
+    """Reset the source-reading fallback counter to zero (for tests)."""
+    global _source_reading_fallback_count
+    _source_reading_fallback_count = 0
+
+# Source-reading fallback counter for observability
+_source_reading_fallback_count: int = 0
+
+
+def get_source_reading_fallback_count() -> int:
+    """Return the count of Phase 4 fallback events (for testing/monitoring)."""
+    return _source_reading_fallback_count
+
+
+def reset_source_reading_fallback_count() -> None:
+    """Reset the source-reading fallback counter to zero (for tests)."""
+    global _source_reading_fallback_count
+    _source_reading_fallback_count = 0
+
+
 # ── pure helpers ────────────────────────────────────────────────────────────
 
 
@@ -871,6 +900,21 @@ _DECOMPOSED_MARKER_RE = re.compile(
     r"<!--\s*daedalus:decomposed(?::\d+)?\s*-->", re.IGNORECASE
 )
 
+# Regex to match fenced code blocks (``` or ~~~) with optional language tag.
+_CODE_BLOCK_RE = re.compile(
+    r"(?:^```[^\n]*\n.*?^```)|(?:^~~~[^\n]*\n.*?^~~~)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _strip_code_blocks(text: str) -> str:
+    """Remove fenced code blocks from markdown text.
+
+    Code blocks (```...``` or ~~~...~~~) are documentation examples and should
+    not trigger idempotency detection.
+    """
+    return _CODE_BLOCK_RE.sub("", text)
+
 
 def has_decomposed_marker(text: Optional[str]) -> bool:
     """Return True if *text* contains the ``<!-- daedalus:decomposed:... -->`` marker.
@@ -879,13 +923,18 @@ def has_decomposed_marker(text: Optional[str]) -> bool:
     a posted comment), re-running the dispatcher must skip decomposition entirely
     and create zero sub-issues. Detection is tolerant of whitespace variations
     and optional Unix-timestamp suffix.
+
+    Markers inside fenced code blocks (``` or ~~~) are ignored to prevent false
+    positives from documentation examples.
     """
     if not text:
         return False
     # Fast path: substring presence before regex (cheap check)
     if "daedalus:decomposed" not in text.lower():
         return False
-    return bool(_DECOMPOSED_MARKER_RE.search(text))
+    # Strip code blocks to avoid false positives from documentation examples
+    stripped_text = _strip_code_blocks(text)
+    return bool(_DECOMPOSED_MARKER_RE.search(stripped_text))
 
 
 def _extract_sub_issues_from_body(body: str) -> List[str]:
@@ -903,13 +952,54 @@ def _default_sub_issue_titles(parent_n: int, parent_title: str) -> List[str]:
     ]
 
 
-def _sub_issue_body(parent_n: int, parent_title: str, scope: str, depends_on: list[int]) -> str:
+_FILE_SYMBOL_CAP = 50
+
+
+def _render_affected_files_section(
+    file_paths,
+    identifiers,
+):
+    """Return a markdown block listing files and symbols, or \'\' if both are empty."""
+    files = sorted(f for f in (file_paths or []) if f)
+    syms = sorted(s for s in (identifiers or []) if s)
+    if not files and not syms:
+        return ""
+    parts = ["### Affected files & symbols\n"]
+    if files:
+        shown = files[:_FILE_SYMBOL_CAP]
+        overflow = len(files) - len(shown)
+        parts.append("**Files:**\n")
+        parts.extend(f"- `{f}`\n" for f in shown)
+        if overflow:
+            parts.append(f"- \u2026 and {overflow} additional file(s)\n")
+        parts.append("\n")
+    if syms:
+        shown = syms[:_FILE_SYMBOL_CAP]
+        overflow = len(syms) - len(shown)
+        parts.append("**Symbols:**\n")
+        parts.extend(f"- `{s}`\n" for s in shown)
+        if overflow:
+            parts.append(f"- \u2026 and {overflow} additional symbol(s)\n")
+        parts.append("\n")
+    return "".join(parts)
+
+
+def _sub_issue_body(
+    parent_n,
+    parent_title,
+    scope,
+    depends_on,
+    file_paths=None,
+    identifiers=None,
+):
     deps_str = ", ".join(f"#{n}" for n in depends_on) if depends_on else ""
     depends_line = f"depends_on: {deps_str}"
+    affected = _render_affected_files_section(file_paths, identifiers)
     return (
         f"Part of epic #{parent_n}: {parent_title}\n\n"
         f"{depends_line}\n\n"
         f"## Scope\n{scope}\n\n"
+        f"{affected}"
         f"## Acceptance Criteria\n"
         f"- [ ] Implementation complete per scope\n"
         f"- [ ] Tests pass (unit + integration where applicable)\n"
@@ -1485,6 +1575,12 @@ def _execute_planner_decompose(
         sub_scopes = [t.split(" — ", 1)[0] for t in sub_titles]
 
     # Phase 4: source-file reading & context injection
+    # If reading fails or workdir is unavailable, fall back to Phase 3
+    # behavior (template-only generation without analysis).
+    global _source_reading_fallback_count
+    # If reading fails or workdir is unavailable, fall back to Phase 3
+    # behavior (template-only generation without analysis).
+    global _source_reading_fallback_count
     full_issue_text = f"{parent_title}\n\n{parent_body}"
     source_context = ""
     file_contents: dict[str, str] = {}
@@ -1511,6 +1607,13 @@ def _execute_planner_decompose(
                 "iterate: planner_decompose #%s — source-reading failed (degrading gracefully): %s",
                 parent_n, exc,
             )
+            _source_reading_fallback_count += 1
+    else:
+        logger.info(
+            "iterate: planner_decompose #%s — workdir unavailable (%s), skipping codebase reading (Phase 3 fallback)",
+            parent_n, workdir or "<empty>",
+        )
+        _source_reading_fallback_count += 1
 
     if dry_run:
         logger.info("[dry-run] planner_decompose #%s: would create %d sub-issues: %s",
@@ -1535,7 +1638,15 @@ def _execute_planner_decompose(
         # Each sub-issue depends on all previously created sub-issues in this epic
         # (sequential tier ordering). The first sub-issue has empty depends_on and
         # is immediately actionable — labeled Ready below.
-        sub_body = _sub_issue_body(parent_n, parent_title, enhanced_scope, list(created_numbers))
+        # Pass per-sub-issue file_paths and identifiers from epic context analysis
+        sub_body = _sub_issue_body(
+            parent_n,
+            parent_title,
+            enhanced_scope,
+            list(created_numbers),
+            file_paths=sub_ctx.file_paths,
+            identifiers=sub_ctx.identifiers,
+        )
         sub_labels = inherit_labels + ["subtask"]
         sub_n = provider.create_issue(title, sub_body, labels=sub_labels)
         if sub_n is not None:
@@ -1826,3 +1937,4 @@ def run_iterate(
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
 
     return counts, advance_prs, pending_ci_cards
+

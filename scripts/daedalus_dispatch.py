@@ -3599,15 +3599,33 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # Epic routing (Phase 1 of #149): large issues go to planner first.
         # Phase 2+ will add codebase analysis + sub-issue decomposition.
         if _is_epic(issue):
-            logger.info("dispatch: #%s detected as epic — routing to planner", n)
-            vid = kanban.create_task(
-                slug, f"#{n} {issue.get('title', '')}",
-                body=_planner_body(repo, issue, workdir, base_branch, provider.name),
-                assignee=profiles["planner"],
-                idempotency_key=f"planner-{n}",
-                workspace=f"dir:{workdir}" if workdir else "",
-                skills=role_skills.get("planner") or None,
+            planner_key = f"planner-{n}"
+            # Idempotency check (#181): query for existing planner card BEFORE
+            # creation. The CLI's --idempotency-key returns the existing task ID
+            # when the key matches, but the Python code below would still record
+            # dispatch state and add to 'created' list. An explicit check here
+            # prevents duplicates on re-tick when the key already exists.
+            existing_planner = next(
+                (t for t in kanban.list_tasks(slug)
+                 if (t.get("idempotency_key") or "") == planner_key),
+                None
             )
+            if existing_planner is not None:
+                logger.info("dispatch: #%s planner card already exists (%s) — skipping duplicate",
+                            n, planner_key)
+                # Do NOT 'continue' — fall through to the `if vid:` check with
+                # vid=None so dispatch state is not re-recorded.
+                vid = None
+            else:
+                logger.info("dispatch: #%s detected as epic — routing to planner", n)
+                vid = kanban.create_task(
+                    slug, f"#{n} {issue.get('title', '')}",
+                    body=_planner_body(repo, issue, workdir, base_branch, provider.name),
+                    assignee=profiles["planner"],
+                    idempotency_key=planner_key,
+                    workspace=f"dir:{workdir}" if workdir else "",
+                    skills=role_skills.get("planner") or None,
+                )
         else:
             # Phase 1: dispatch ONLY the validator. The dispatcher creates developer/
             # reviewer/security/documentation tasks ONLY after the validator completes
