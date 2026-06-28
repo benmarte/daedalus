@@ -1,5 +1,7 @@
 ## [After planner decomposition, all sub-issues appear on the project board](https://github.com/benmarte/daedalus/issues/919) — [PR #947](https://github.com/benmarte/daedalus/pull/947)
 
+## [After planner decomposition, all sub-issues appear on the project board](https://github.com/benmarte/daedalus/issues/919) — [PR #947](https://github.com/benmarte/daedalus/pull/947)
+
 ## [Integration test: issue routed to planner → planner returns NOT SUITABLE → validator created automatically](https://github.com/benmarte/daedalus/issues/935) — [PR #946](https://github.com/benmarte/daedalus/pull/946)
 
 ## [Integration test: issue routed to planner → planner returns NOT SUITABLE → validator created automatically](https://github.com/benmarte/daedalus/issues/935) — [PR #946](https://github.com/benmarte/daedalus/pull/946)
