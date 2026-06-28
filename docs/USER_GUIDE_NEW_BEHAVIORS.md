@@ -101,7 +101,7 @@ Epics are automatically broken into actionable sub-issues that enter the pipelin
 No user-facing configuration. Strategy selection (Case A vs Case B) is automatic based on checklist presence.
 
 **Source implementation:**  
-`core/iterate.py:_execute_planner_decompose()` (line 1503), `core/iterate.py:has_decomposed_marker()` (line 905), `core/iterate.py:_default_sub_issue_titles()` (line 932), `core/iterate.py:_sub_issue_body()` (line 973)
+`core/iterate.py:_execute_planner_decompose()` (line 1536), `core/iterate.py:has_decomposed_marker()` (line 936), `core/iterate.py:_default_sub_issue_titles()` (line 965), `core/iterate.py:_sub_issue_body()` (line 1006)
 
 ---
 

@@ -230,7 +230,7 @@ same PR triggers escalation.
 **Stage 2 — Fix-attempt counter validation**
 After the developer fix completes and CI is re-checked, the dispatcher validates
 the fix-attempt counter against `MAX_FIX_ATTEMPTS` (currently 3). This validation
-occurs in `classify_blocked()` at `core/iterate.py:157-158`: if
+occurs in `classify_blocked()` at `core/iterate.py:179` (developer) and `core/iterate.py:210` (reviewer/security): if
 `fix_attempts >= MAX_FIX_ATTEMPTS`, the action is `ESCALATE` (Stage 3) rather than
 `DEV_FIX_CI` (spawn another fix card). The counter increments after each spawned
 fix card and persists in `.hermes/daedalus-fix-attempts.json`. When the threshold
@@ -287,7 +287,7 @@ The sweeper warns and can optionally archive blocked cards. It does *not* auto-f
 
 | Name | Value | Source |
 |------|-------|--------|
-| `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:38` |
+| `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:60` |
 | `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
 | `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
 | `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:154` |
