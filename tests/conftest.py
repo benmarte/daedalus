@@ -87,6 +87,7 @@ class FakeKanban:
         self.created: List[Dict[str, Any]] = []
         self.comments: List[tuple] = []
         self.archived: List[str] = []
+        self.decomposed: List[str] = []
 
     # ---- seeding (not counted as pipeline mutations) ----
 
@@ -231,6 +232,54 @@ class FakeKanban:
         self.archived.append(task_id)
         return True
 
+    def create_triage(
+        self,
+        slug: str,
+        issue_number: Optional[int],
+        title: str,
+        body: str = "",
+        idempotency_key: Optional[str] = None,
+        workspace: Optional[str] = None,
+        **_kwargs: Any,
+    ) -> Optional[str]:
+        """Create a TRIAGE card for a (sub-)issue and return its id (#891).
+
+        Honours ``idempotency_key`` like the real CLI so a re-issued decompose
+        returns the existing card rather than a duplicate.
+        """
+        if idempotency_key:
+            for t in self.tasks.values():
+                if t.get("idempotency_key") == idempotency_key:
+                    return t["id"]
+        self._counter += 1
+        tid = f"t{self._counter}"
+        rec = {
+            "id": tid,
+            "title": title,
+            "body": body,
+            "assignee": "",
+            "status": "triage",
+            "summary": "",
+            "latest_summary": "",
+            "idempotency_key": idempotency_key or "",
+            "workspace": workspace or "",
+            "issue_number": issue_number,
+            "reason": "",
+            "comments": [],
+        }
+        self.tasks[tid] = rec
+        self.created.append(dict(rec))
+        return tid
+
+    def decompose(self, slug: str, task_id: str) -> bool:
+        """Fan a triage card out into role sub-tasks. Records the call (#891)."""
+        t = self.tasks.get(task_id)
+        if not t:
+            return False
+        t["status"] = "decomposed"
+        self.decomposed.append(task_id)
+        return True
+
     # ---- assertion helpers ----
 
     def created_with_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
@@ -286,6 +335,11 @@ class FakeProvider:
         self._closed_issues: set[int] = set(closed_issues or [])
         self._close_issue_fail_for: set[int] = set(close_issue_fail_for or [])
         self._post_comment_fail_for: set[int] = set(post_issue_comment_fail_for or [])
+        # Sub-issue decomposition (#891 / #902): create_issue registers a fresh
+        # issue into ``_issues`` (so get_issue/get_issue_comments see it) and
+        # records it here; add_label tracks labels per issue number.
+        self.created_issues: List[Dict[str, Any]] = []
+        self.labels: Dict[int, List[str]] = {}
 
     def get_pr_ci_status(self, pr_number: int) -> str:
         if isinstance(self._ci, dict):
@@ -310,6 +364,35 @@ class FakeProvider:
 
     def list_issues(self, *args: Any, **kwargs: Any) -> List[Any]:
         return list(self._issues.values())
+
+    def create_issue(self, title: str, body: str = "", labels: Optional[List[str]] = None) -> int:
+        """Allocate the next issue number, register and record the new issue.
+
+        Mirrors the provider call ``_execute_planner_decompose_inner`` makes for
+        each sub-issue (#891). The new issue is added to ``_issues`` so a later
+        ``get_issue``/``get_issue_comments`` for the triage step resolves it, and
+        appended to ``created_issues`` so tests can assert how many were created.
+        """
+        n = (max(self._issues) if self._issues else 1000) + 1
+        rec = {"number": n, "title": title, "body": body, "labels": list(labels or [])}
+        self._issues[n] = rec
+        self.created_issues.append(rec)
+        if labels:
+            self.labels.setdefault(n, []).extend(labels)
+        return n
+
+    def add_label(self, issue_number: int, label: str) -> bool:
+        """Record a label applied to an issue (e.g. ``Ready`` / ``epic``, #891)."""
+        self.labels.setdefault(issue_number, []).append(label)
+        return True
+
+    def get_issue_comments(self, issue_number: int) -> List[Dict[str, str]]:
+        """Return comments previously posted to *issue_number* via this provider.
+
+        Decompose's second-pass idempotency check reads these to detect the
+        marker comment it posted on the first pass (#891).
+        """
+        return [{"body": body} for (n, body) in self.posted_issue_comments if n == issue_number]
 
     def post_issue_comment(self, issue_number: int, body: str) -> bool:
         self.posted_issue_comments.append((issue_number, body))
