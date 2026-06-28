@@ -270,20 +270,9 @@ auto-fix you — it is a notification mechanism, not a recovery mechanism.
   the `_count_fix_attempts` counter is per-PR across all fix cards, so the third
   attempt on *any* fix card for the same PR triggers escalation.
 
----
-
-## Self-healing escalation sequence
-
-- **`qa-passed`** → `ADVANCE` — pipeline continues to reviewer/security.
-- **`qa-failed`** → `DEV_FIX_CI` — creates a developer fix card.
-- **Neither signal** → `PENDING_CI` — card idles.
-- After 3 fix attempts (`MAX_FIX_ATTEMPTS = 3`) → `ESCALATE` — human intervention.
-
 ### Epic Tier Promotion
 
 When a sub-issue belonging to an epic with dependency DAGs is completed, the dispatcher calls `promote_waiting_tiers()` in `core/tier_promotion.py`. This re-evaluates the epic's other sub-issues and labels the next tier as Ready. This is automatic; QA does not need to act on it.
-
-### What breaks self-healing
 
 ## Dispatcher Signal Reference (authoritative)
 
