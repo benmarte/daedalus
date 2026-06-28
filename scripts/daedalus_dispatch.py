@@ -833,22 +833,21 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     return issues
 
 
-# API-based instructions only — no gh/glab/az CLIs are installed for workers.
+# GitHub comments use the authenticated `gh` CLI (already logged in for the dispatch
+# environment, e.g. daedalus-detect-pr.sh runs `gh pr list`); GitLab/Azure use stdlib
+# API calls because no glab/az CLI is installed for workers.
 _PR_COMMENT_HOWTO = {
     "github": (
-        "your GITHUB_TOKEN env var. "
-        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal for this, "
-        "as markdown content with backticks and quotes breaks shell escaping. "
-        "Python example:\n"
-        "```python\n"
-        "import os, urllib.request, json\n"
-        "body = '''<your full report markdown here>'''\n"
-        "req = urllib.request.Request(\n"
-        "    'https://api.github.com/repos/{repo}/issues/<number>/comments',\n"
-        "    data=json.dumps({{'body': body}}).encode(),\n"
-        "    headers={{'Authorization': f'Bearer {{os.environ[\"GITHUB_TOKEN\"]}}',\n"
-        "             'Accept': 'application/vnd.github+json'}}, method='POST')\n"
-        "print(urllib.request.urlopen(req).read())\n"
+        "the authenticated `gh` CLI — gh is already logged in here, so no auth token "
+        "needs to be set in the environment (the previous API approach failed silently "
+        "when no token was exported). "
+        "To avoid shell-escaping problems with backticks and quotes in markdown, write "
+        "your report to a file first (use the create_file/Write tool), then post it:\n"
+        "```bash\n"
+        "# issue comment — use the ISSUE number:\n"
+        "gh issue comment <number> --repo {repo} --body-file <path-to-report.md>\n"
+        "# PR comment — use the PR number instead:\n"
+        "gh pr comment <number> --repo {repo} --body-file <path-to-report.md>\n"
         "```"
     ),
     "gitlab": (
