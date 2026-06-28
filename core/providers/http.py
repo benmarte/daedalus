@@ -81,7 +81,14 @@ class HTTPClient:
                     time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
                     continue
                 raise last_exc
-            if resp.status_code in RETRY_STATUSES and attempt < MAX_RETRIES:
+            # GitHub secondary rate-limit returns 403 with a Retry-After header
+            # or a body containing "rate limit". Treat these as retryable.
+            _is_ratelimit_403 = (
+                resp.status_code == 403
+                and ("rate limit" in resp.text.lower()
+                     or "Retry-After" in resp.headers)
+            )
+            if (resp.status_code in RETRY_STATUSES or _is_ratelimit_403) and attempt < MAX_RETRIES:
                 time.sleep(self._retry_delay(resp, attempt))
                 continue
             if resp.status_code >= 400:
