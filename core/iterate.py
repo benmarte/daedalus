@@ -918,6 +918,252 @@ def _sub_issue_body(parent_n: int, parent_title: str, scope: str, depends_on: li
     )
 
 
+# ── Phase 4: source file reading & context injection ────────────────────────
+
+
+def _extract_keywords(text: str, max_keywords: int = 10) -> List[str]:
+    """Extract meaningful identifiers from *text*, skipping stop-words."""
+    stop_words = {
+        "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of",
+        "with", "by", "from", "is", "are", "was", "were", "be", "been",
+        "being", "have", "has", "had", "do", "does", "did", "will", "would",
+        "could", "should", "may", "might", "must", "shall", "can", "need",
+        "dare", "ought", "used", "as", "if", "then", "than", "when", "where",
+        "while", "how", "what", "which", "who", "whom", "this", "that",
+        "these", "those", "i", "me", "my", "we", "our", "you", "your", "he",
+        "him", "his", "she", "her", "it", "its", "they", "them", "their",
+        "not", "no", "nor", "but", "about", "up", "down", "out", "off",
+        "over", "under", "again", "further", "into", "through", "during",
+        "before", "after", "above", "below", "any", "all", "each", "every",
+        "both", "few", "more", "most", "other", "some", "such", "only",
+        "own", "same", "so", "just", "new", "add", "update", "fix", "part",
+    }
+    words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]+\b", text)
+    keywords: List[str] = []
+    for w in words:
+        lw = w.lower()
+        if len(lw) > 3 and lw not in stop_words and lw not in keywords:
+            keywords.append(lw)
+            if len(keywords) >= max_keywords:
+                break
+    return keywords
+
+
+def identify_relevant_files(
+    scope_text: str,
+    workdir: str,
+    max_files: int = 10,
+    max_depth: int = 5,
+) -> tuple[List[Path], dict]:
+    """Identify source files in *workdir* relevant to *scope_text*.
+
+    Four strategies, each gated so they only fire when the scope actually
+    provides a signal — otherwise we return nothing (graceful degradation).
+
+    1. **Path extraction** — explicit ``src/foo.py`` mentions in the scope.
+    2. **Function/class scan** — ``def X`` / ``class Y`` patterns, grepped.
+    3. **Directory heuristic** — scan common dirs (src/lib/app/core/tests)
+       only when the scope mentions one of those names.
+    4. **Extension fallback** — only if earlier strategies already found
+       candidates and we're below *max_files*.
+    """
+    import subprocess as _sp
+
+    workdir_path = Path(workdir)
+    if not workdir_path.exists():
+        logger.warning("identify_relevant_files: workdir %s does not exist", workdir)
+        return ([], {})
+
+    candidates: Set[Path] = set()
+    metadata: dict[str, str] = {}
+
+    def _add(p: Path, why: str) -> bool:
+        if p in candidates:
+            return False
+        candidates.add(p)
+        metadata[str(p)] = why
+        return len(candidates) >= max_files
+
+    # Strategy 1 — explicit file paths mentioned in scope text.
+    # Matches things like ``src/foo.py``, ``./lib/utils.js``, ``core/iterate.py``.
+    path_re = re.compile(
+        r"(?:^|(?<=\s)|(?<=[\"'`(]))"
+        r"([a-zA-Z0-9_][\w\-./]*[a-zA-Z0-9_\-]"
+        r"\.(?:py|js|ts|jsx|tsx|java|go|rs|rb|c|cpp|h|md|yaml|yml|json|toml|sh))"
+        r"(?:\b|$)",
+    )
+    for m in path_re.finditer(scope_text or ""):
+        fp = workdir_path / m.group(1)
+        try:
+            if fp.exists() and fp.is_file() and fp.resolve().is_relative_to(workdir_path.resolve()):
+                if _add(fp, "path_extraction"):
+                    break
+        except (OSError, ValueError):
+            continue
+
+    # Strategy 2 — grep for def/class declarations named in the scope.
+    func_re = re.compile(r"\b(?:def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b")
+    for m in func_re.finditer(scope_text or ""):
+        name = m.group(1)
+        try:
+            res = _sp.run(
+                ["grep", "-rl", f"--include=*.py", "-e", f"def {name}", "-e", f"class {name}", workdir],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (_sp.SubprocessError, _sp.TimeoutExpired, OSError):
+            continue
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                fp = Path(line.strip())
+                try:
+                    if fp.exists() and fp.resolve().is_relative_to(workdir_path.resolve()):
+                        if _add(fp, f"definition_scan:{name}"):
+                            break
+                except (OSError, ValueError):
+                    continue
+            if len(candidates) >= max_files:
+                break
+
+    # Strategy 3 — directory heuristic. Only fires when scope mentions
+    # one of the common directory names, so "Add new feature" returns
+    # empty rather than dumping the whole repo.
+    common_dirs = ["src", "lib", "app", "core", "tests"]
+    scope_lower = (scope_text or "").lower()
+    scope_mentions_dir = any(
+        re.search(rf"\b{re.escape(d)}\b", scope_lower) for d in common_dirs
+    )
+    if scope_mentions_dir:
+        code_exts = ("*.py", "*.js", "*.ts", "*.jsx", "*.tsx", "*.java", "*.go", "*.rs")
+        for dir_name in common_dirs:
+            if not re.search(rf"\b{re.escape(dir_name)}\b", scope_lower):
+                continue
+            dir_path = workdir_path / dir_name
+            if not (dir_path.exists() and dir_path.is_dir()):
+                continue
+            # BFS up to max_depth, but cap total files aggressively.
+            for ext in code_exts:
+                for fp in dir_path.rglob(ext):
+                    # Respect max_depth
+                    try:
+                        rel = fp.resolve().relative_to(dir_path.resolve())
+                        if len(rel.parts) > max_depth:
+                            continue
+                    except (OSError, ValueError):
+                        continue
+                    if fp.is_file():
+                        if _add(fp, f"directory_scan:{dir_name}"):
+                            break
+                if len(candidates) >= max_files:
+                    break
+            if len(candidates) >= max_files:
+                break
+
+    # Strategy 4 — extension fallback. Only if we already have signal AND
+    # haven't hit max_files yet. Walks the repo once.
+    if 0 < len(candidates) < max_files:
+        code_exts = ("*.py", "*.js", "*.ts", "*.jsx", "*.tsx", "*.java", "*.go", "*.rs")
+        for ext in code_exts:
+            if len(candidates) >= max_files:
+                break
+            for fp in workdir_path.rglob(ext):
+                try:
+                    if not fp.is_file() or not fp.resolve().is_relative_to(workdir_path.resolve()):
+                        continue
+                    # Skip common non-source dirs
+                    rel = str(fp.relative_to(workdir_path))
+                    if any(seg in rel for seg in ("node_modules", ".git", "__pycache__", ".venv", "venv", ".tox")):
+                        continue
+                except (OSError, ValueError):
+                    continue
+                if _add(fp, f"extension_fallback:{ext}"):
+                    break
+            if len(candidates) >= max_files:
+                break
+
+    return (list(candidates), metadata)
+
+
+def read_source_files(
+    file_paths: List[Path],
+    workdir: str,
+    max_size: int = 50_000,
+) -> dict[str, str]:
+    """Read source files with safety checks.
+
+    - **Binary detection** — skip files whose first 1 KiB contains a NUL byte.
+    - **Size limit** — truncate UTF-8 output to *max_size* bytes.
+    - **Symlink safety** — resolve symlinks before reading.
+    - **Path traversal** — refuse files outside *workdir*.
+    """
+    contents: dict[str, str] = {}
+    try:
+        workdir_path = Path(workdir).resolve()
+    except (OSError, ValueError):
+        return contents
+
+    for file_path_obj in file_paths:
+        try:
+            resolved = file_path_obj.resolve()
+            # Path-traversal guard
+            if not resolved.is_relative_to(workdir_path):
+                logger.warning("read_source_files: path traversal blocked: %s", file_path_obj)
+                continue
+            if not resolved.exists() or not resolved.is_file():
+                logger.warning("read_source_files: file not found: %s", file_path_obj)
+                continue
+            # Binary detection — NUL byte in first 1 KiB
+            with open(resolved, "rb") as fh:
+                head = fh.read(1024)
+                if b"\x00" in head:
+                    logger.info("read_source_files: skipping binary file: %s", file_path_obj)
+                    continue
+            raw = resolved.read_text(encoding="utf-8", errors="ignore")
+            # Truncate to max_size bytes (not chars)
+            encoded_len = len(raw.encode("utf-8"))
+            if encoded_len > max_size:
+                # Binary-search the char cutoff that produces ≤ max_size bytes
+                cutoff = max_size
+                raw = raw[:cutoff]
+                while len(raw.encode("utf-8")) > max_size and cutoff > 0:
+                    cutoff = max(0, cutoff - max(1, (len(raw.encode("utf-8")) - max_size)))
+                    raw = raw[:cutoff]
+                logger.info(
+                    "read_source_files: truncated %s from %d to %d bytes",
+                    file_path_obj, encoded_len, len(raw.encode("utf-8")),
+                )
+            # Dict keys use the original string form for stable lookups.
+            contents[str(file_path_obj)] = raw
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("read_source_files: error reading %s: %s", file_path_obj, exc)
+    return contents
+
+
+def build_sub_issue_context(file_contents: dict[str, str]) -> str:
+    """Format file contents into a markdown context block."""
+    if not file_contents:
+        return ""
+    lines = ["## Relevant Source Context", ""]
+    for file_path, content in file_contents.items():
+        lines.append(f"### `{file_path}`")
+        lines.append("")
+        lines.append("```")
+        lines.append(content)
+        lines.append("```")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_enhanced_scope(original_scope: str, source_context: str) -> str:
+    """Combine *original_scope* with *source_context*.
+
+    If *source_context* is empty, return the original unchanged (graceful
+    degradation). Otherwise append the context as an additional section.
+    """
+    if not source_context:
+        return original_scope
+    return f"{original_scope}\n\n{source_context}"
+
+
 def _execute_planner_decompose(
     slug: str,
     card: dict,
@@ -978,6 +1224,26 @@ def _execute_planner_decompose(
         sub_titles = _default_sub_issue_titles(parent_n, parent_title)
         sub_scopes = [t.split(" — ", 1)[0] for t in sub_titles]
 
+    # Phase 4: source-file reading & context injection
+    full_issue_text = f"{parent_title}\n\n{parent_body}"
+    source_context = ""
+    file_contents: dict[str, str] = {}
+    if workdir and Path(workdir).exists():
+        try:
+            rel_files, _meta = identify_relevant_files(full_issue_text, workdir)
+            if rel_files:
+                file_contents = read_source_files(rel_files, workdir)
+                source_context = build_sub_issue_context(file_contents)
+                logger.info(
+                    "iterate: planner_decompose #%s — injected context from %d source files",
+                    parent_n, len(file_contents),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "iterate: planner_decompose #%s — source-reading failed (degrading gracefully): %s",
+                parent_n, exc,
+            )
+
     if dry_run:
         logger.info("[dry-run] planner_decompose #%s: would create %d sub-issues: %s",
                     parent_n, len(sub_titles), sub_titles)
@@ -986,10 +1252,12 @@ def _execute_planner_decompose(
     created_numbers: List[int] = []
     ready_numbers: List[int] = []
     for title, scope in zip(sub_titles, sub_scopes):
+        # Inject enhanced scope only when source context was found.
+        enhanced_scope = build_enhanced_scope(scope, source_context) if source_context else scope
         # Each sub-issue depends on all previously created sub-issues in this epic
         # (sequential tier ordering). The first sub-issue has empty depends_on and
         # is immediately actionable — labeled Ready below.
-        sub_body = _sub_issue_body(parent_n, parent_title, scope, list(created_numbers))
+        sub_body = _sub_issue_body(parent_n, parent_title, enhanced_scope, list(created_numbers))
         sub_labels = inherit_labels + ["subtask"]
         sub_n = provider.create_issue(title, sub_body, labels=sub_labels)
         if sub_n is not None:
