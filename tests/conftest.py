@@ -32,6 +32,11 @@ def _load_dispatch():
     p = ROOT / "scripts" / "daedalus_dispatch.py"
     spec = importlib.util.spec_from_file_location("disp", str(p))
     mod = importlib.util.module_from_spec(spec)
+    # Register before exec so the module can resolve itself via sys.modules
+    # (e.g. main()'s ``sys.modules[__name__]`` for the --self-test harness) — the
+    # idiomatic importlib pattern. Each call replaces the entry with a fresh
+    # module; callers keep their own reference, so isolation is unchanged.
+    sys.modules["disp"] = mod
     spec.loader.exec_module(mod)
     return mod
 
