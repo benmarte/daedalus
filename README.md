@@ -809,17 +809,33 @@ The sweeper also runs as a standalone CLI for manual invocation (e.g., scheduled
 python -m core.sweeper_cli <board_slug> [--threshold-hours 48] [--archive] [--dry-run]
 ```
 
-**Retry-cap exhaustion notifications.** Per-attempt counters for validator retries
+**Retry-cap notifications.** Per-attempt counters for validator retries
 (`validator-retry-N-r*`) and PM stale-task recovery (`pm-{n}-r*`) each cap at a
-maximum (2 for validator, 3 for PM). When an attempt counter exhausts the cap,
-the dispatcher fires a one-time `retry-cap-exhausted` notification — idempotently
-deduped on the issue via an `<!-- daedalus:retry-cap-notified -->` marker comment
-so the same cap-exhaustion is never messaged twice per issue — and posts a
-comment on the card instructing a human to investigate. Route this event to a
-high-visibility channel in the Notifications editor alongside
-`security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
-is unchanged: it posts a per-card comment and stops escalating, but does not
-fire a chat notification.
+maximum (2 for validator, 3 for PM). Daedalus surfaces retry progress at two
+stages:
+
+1. **`retry-attempt`** — fires on every intermediate retry (before the cap is
+   hit), so operators can watch a flaky agent approach its limit in real time.
+   Routed through `hermes send` to `cron.notifications` targets subscribed to the
+   `retry-attempt` event.
+2. **`retry-cap-exhausted`** — fires once when the cap is hit, idempotently
+   deduped on the issue via an `<!-- daedalus:retry-cap-notified -->` marker
+   comment so the same cap-exhaustion is never messaged twice per issue. Routes
+   through **two independent channels**:
+   - **`hermes send`** to `cron.notifications` targets subscribed to the
+     `retry-cap-exhausted` event (or catch-all targets with no `events` filter).
+   - **Outbound webhook** — set `SLACK_WEBHOOK_URL` and/or `DISCORD_WEBHOOK_URL`
+     in the dispatcher environment and the dispatcher POSTs a structured
+     critical-severity payload (Slack Block Kit / Discord embed, context fields:
+     `issue`, `role`, `retry_count`, `max_retries`, `recovery`) directly to each
+     URL in a daemon thread. Webhook delivery is best-effort: failures are logged
+     but never raise. This channel fires regardless of whether any
+     `cron.notifications` targets exist.
+
+Route both events to a high-visibility channel in the Notifications editor
+alongside `security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing
+fix cards is unchanged: it posts a per-card comment and stops escalating, but
+does not fire a chat notification.
 
 **Gateway watchdog (`daedalus-cron.sh`).** The per-project cron wrapper script
 (`~/.hermes/scripts/daedalus-cron.sh`, installed by `postinstall.py`) detects a
@@ -1023,9 +1039,12 @@ Each piece exists because the obvious approach failed:
   three minutes.
 - **Retry-cap notifications** — validator and PM retry caps exist so a broken issue
   doesn't loop forever. But a cap with no notification means the operator only
-  learns about it days later by scrolling the board. A one-time `retry-cap-exhausted`
-  notification (deduped per issue via a marker comment) surfaces the wedge the
-  moment it happens, routed to the same channels as `security-escalation`.
+  learns about it days later by scrolling the board. Two notification events
+  surface the problem at different stages: `retry-attempt` fires on intermediate
+  retries, and `retry-cap-exhausted` fires once when the cap is hit (deduped
+  per issue via a marker comment). The exhaustion event routes through both
+  `hermes send` and an independent outbound webhook channel (set
+  `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`).
 - **Fetch limit raised to 100** — the original page limit of 20 silently truncated
   boards with more than 20 open issues: validator sweep missed work, merged-PR
   archival missed completions, and the board looked healthy while issues rotted in
@@ -1083,6 +1102,7 @@ on its board.
 | `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `core/notify_templates.py` | Rich markdown notification templates (dispatch summary, doc report envelope, PR-ready, pipeline-failure) with clickable issue/PR links for every Hermes messaging platform. |
+| `core/notification_sender.py` | Outbound webhook notifications to Slack/Discord on retry-cap exhaustion. Loads webhook URLs from `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` env vars, formats Slack Block Kit / Discord embed payloads with severity and context fields. |
 | `scripts/provision_roster.sh` | Provisions the 9-agent Hermes roster. |
 | `core/providers/` | VCS provider layer: GitHub (REST + GraphQL Projects v2), GitLab (REST), Azure DevOps (REST/WIQL) — token-authenticated HTTPS APIs, extensible via `register_provider()`. |
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
@@ -1191,11 +1211,13 @@ modes per project:
 - **Multi-target** (`cron.notifications`) — a list of `{platform, target,
   events}` entries; each channel picks which events it receives
   (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`,
-  `security-escalation`, `comment-mirror`; omit `events` to receive everything).
-  Route `security-escalation` to a high-visibility channel (e.g. `#security-alerts`)
-  — it fires on SECURITY_THREAT and BLOCK_FOR_REVIEW for immediate human review.
-  Configure it in the dashboard's **Notifications** editor — channels are discovered
-  from `hermes send --list`, with manual entry as fallback.
+  `security-escalation`, `retry-cap-exhausted`, `retry-attempt`, `comment-mirror`;
+  omit `events` to receive everything). Route `security-escalation` and
+  `retry-cap-exhausted` to a high-visibility channel (e.g. `#security-alerts`)
+  — they fire on SECURITY_THREAT/BLOCK_FOR_REVIEW and retry-cap exhaustion for
+  immediate human review. Configure them in the dashboard's **Notifications**
+  editor — channels are discovered from `hermes send --list`, with manual entry
+  as fallback.
 
 All notifications are rendered as **rich structured markdown** with clickable
 links to issues and PRs — `[#15](url)` links that render as hyperlinks on Slack,
