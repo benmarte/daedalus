@@ -208,23 +208,61 @@ notices at 48 h.
 
 ### Self-healing escalation sequence
 
-1. **`changes requested`** → dispatcher creates a `project-manager-daedalus` routing
-   card. The PM reads the PR findings and spawns either a new developer fix or
-   re-routes to you with better context.
-2. **PM routes back, you re-review** → another round begins. Each round increments
-   the per-PR fix-attempt counter.
-3. **`MAX_FIX_ATTEMPTS` (3) exceeded** → dispatcher calls `_execute_escalate`: posts
-   `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. Human must intervene.
-4. **Infrastructure failure** (agent crash, gateway death, permission error, or
-   the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing
-   `coding_agent_timeout`) → handoff matches a crash marker
-   (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
-   `coding_agent_timeout`, `exited with code`, `agent crash`). There is no
-   special-case handler for accessibility — a crash (including a timeout)
-   leaves the card stuck in `PENDING_CI` until the sweeper notices at 48 h.
-5. **Unrecognized signal** → falls to `PENDING_CI`, card idles until sweeper alerts.
-6. **`a11y-skipped` / `accessibility-na`** (no UI changes) → card should `complete`
-   directly (not block). If you block instead, sweeper notices at 48 h.
+The escalation path progresses through 6 stages (matching the research in the
+parent task). You (accessibility) are the primary actor in stages 0, 4, and 5.
+Stages 1, 2, 3, and 6 involve other pipeline participants.
+
+**Stage 0 — Innermost wall-clock timeout**
+If your spawned agent exceeds `_CODING_AGENT_MAX_WAIT` (1 h default), the worker
+kills it and writes `coding_agent_timeout`. This matches a crash marker → Stage 4.
+
+**Stage 1 — PM route (re-routing / consultation)**
+When you emit `a11y-changes-requested: ... — changes requested`, the dispatcher
+creates a `project-manager-daedalus` routing card. The PM reads the PR findings
+and decides whether to:
+- Spawn a developer fix card (code bug)
+- Re-route back to you with better context (a11y misunderstanding)
+
+Each round increments the per-PR fix-attempt counter. The fix-attempt counter
+is **per-PR across all fix cards** — the third attempt on any fix card for the
+same PR triggers escalation.
+
+**Stage 3 — Formal escalation (MAX_FIX_ATTEMPTS exceeded)**
+When the retry loop is exhausted (3 fix attempts failed), the dispatcher calls
+`_execute_escalate`: posts `⚠️ ESCALATE` on the PR and stamps the card
+`escalated: issue #N`. The card parks — no further automation touches it.
+**Your role at this stage:** accessibility review is complete (you already failed
+3 times). The issue is now in human-review queue.
+
+**Stage 4 — Infrastructure-failure silent path (crash markers)**
+Infrastructure failure (your agent crashes, gateway dies, permission error, or
+the worker hits the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writes
+`coding_agent_timeout`) → handoff matches a crash marker
+(`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
+`coding_agent_timeout`, `exited with code`, `agent crash`). For accessibility
+cards these markers are *not* special-cased — an accessibility crash (including
+a timeout) leaves the card stuck in `PENDING_CI` until the sweeper notices.
+**Your role:** you crashed before emitting a verdict, so the pipeline halts.
+
+**Stage 5 — Stale-card sweeper (notification, not recovery)**
+The sweeper (`core/sweeper.py`) runs on every dispatcher tick and warns about
+cards that have made no forward progress. It detects your absence via heartbeat
+staleness. **Your role:** if you crash or wedge without emitting a heartbeat,
+the sweeper notices and logs a warning. Recovery must come from a human.
+
+**Stage 6 — Human intervention (terminal fallback)**
+After escalation + sweeper notification, the issue is parked awaiting manual
+intervention. No further auto-recovery exists. A human must resolve the
+environmental or product-level blocker, unblock or reassign the card, and
+optionally archive it if no longer actionable. **Your role:** you cannot
+self-recover at this stage. A human must assess whether accessibility review
+should be re-run, skipped, or the PR restructured.
+
+**Unrecognized signal (fallback to PENDING_CI)**
+Typo in verdict, missing `a11y-approved:` / `a11y-changes-requested:` keyword →
+dispatcher cannot classify, falls through to `PENDING_CI`. The card idles until
+the sweeper alerts (at 24h/48h) or a human unblocks. **Your role:** ensure your
+verdict uses the canonical forms exactly.
 
 ### Sweeper thresholds (stale-card detection)
 
