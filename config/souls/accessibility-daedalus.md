@@ -192,6 +192,18 @@ Note: unlike QA failures (which route directly to `DEV_FIX_CI`), accessibility
 findings route to `PM_ROUTE` — the PM then decides whether the fix belongs to a
 developer (code bug) or you (a11y misunderstanding).
 
+### The innermost timeout: CODING_AGENT_MAX_WAIT
+
+Before the pipeline-level escalation above kicks in, each spawned coding-agent
+invocation has a **wall-clock ceiling** enforced by the dispatcher worker
+(`scripts/daedalus_dispatch.py`). If the spawned agent (Claude Code / Codex /
+OpenCode) does not complete within `_CODING_AGENT_MAX_WAIT` (default
+**3600 s / 1 h**, overridable via `execution.coding_agent_max_wait` in project
+config), the worker kills the child, writes `coding_agent_timeout` into the
+card's handoff, and the card re-enters the blocked path. That signal matches the
+infrastructure-failure branch — the card parks in `PENDING_CI` and the sweeper
+notices at 48 h.
+
 ### Self-healing escalation sequence
 
 1. **`changes requested`** → dispatcher creates a `project-manager-daedalus` routing
@@ -201,12 +213,13 @@ developer (code bug) or you (a11y misunderstanding).
    the per-PR fix-attempt counter.
 3. **`MAX_FIX_ATTEMPTS` (3) exceeded** → dispatcher calls `_execute_escalate`: posts
    `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. Human must intervene.
-4. **Infrastructure failure** (agent crash, gateway death, permission error) → no
-   special-case handler for accessibility. Card stuck in `PENDING_CI` until sweeper
-   notices at 48h.
+4. **Infrastructure failure** (agent crash, gateway death, permission error, or
+   the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing
+   `coding_agent_timeout`) → no special-case handler for accessibility. Card stuck
+   in `PENDING_CI` until sweeper notices at 48 h.
 5. **Unrecognized signal** → falls to `PENDING_CI`, card idles until sweeper alerts.
 6. **`a11y-skipped` / `accessibility-na`** (no UI changes) → card should `complete`
-   directly (not block). If you block instead, sweeper notices at 48h.
+   directly (not block). If you block instead, sweeper notices at 48 h.
 
 ### Sweeper thresholds (stale-card detection)
 
@@ -224,7 +237,7 @@ The sweeper warns and can optionally archive blocked cards. It does *not* auto-f
 | `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:37` |
 | `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
 | `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
-| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:150` |
+| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:156` |
 
 ### What breaks self-healing
 

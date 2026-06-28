@@ -156,6 +156,19 @@ The dispatcher classifies your block reason via `core/iterate.py:classify_blocke
 | `qa-failed` | `DEV_FIX_CI` | Creates a developer-daedalus fix card |
 | any other text (agent still running, crash, typo) | `PENDING_CI` | Card idles — dispatcher waits for next tick |
 
+### The innermost timeout: CODING_AGENT_MAX_WAIT
+
+Before the pipeline-level escalation above kicks in, there is a **wall-clock
+ceiling on each spawned coding-agent invocation itself**. The worker process
+(`scripts/daedalus_dispatch.py`) waits for the spawned agent (Claude Code / Codex
+/ OpenCode) to write its output file — but it will not wait forever. If
+`_CODING_AGENT_MAX_WAIT` (default **3600 s / 1 h**, overridable via
+`execution.coding_agent_max_wait` in project config) elapses, the dispatcher
+kills the child, writes `coding_agent_timeout` into the card's handoff, and
+re-enters the blocked path. That signal is one of the crash markers listed
+below, so a timeout during a QA fix-attempt is handled identically to any other
+infrastructure failure — the card parks and the sweeper notices at 48 h.
+
 ### Self-healing escalation sequence
 
 1. **`qa-failed`** → dispatcher spawns a `developer-daedalus` fix card with the PR
@@ -167,12 +180,12 @@ The dispatcher classifies your block reason via `core/iterate.py:classify_blocke
    posts `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. The
    card parks — no further automation touches it. A human must intervene.
 4. **Infrastructure failure** (your agent crashes, gateway dies, permission error,
-   coding-agent timeout) → handoff matches a crash marker
+   or the worker hits the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writes
+   `coding_agent_timeout`) → handoff matches a crash marker
    (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
-   `coding_agent_timeout`, `exited with code`, `agent crash`). For developer cards
-   this is a no-op (manual intervention); for QA cards the same markers are *not*
-   special-cased — a QA crash leaves the card stuck in `PENDING_CI` until the
-   sweeper notices.
+   `coding_agent_timeout`, `exited with code`, `agent crash`). For QA cards the
+   same markers are *not* special-cased — a QA crash (including a timeout)
+   leaves the card stuck in `PENDING_CI` until the sweeper notices.
 5. **Unrecognized signal** (typo in verdict, missing `qa-passed:` / `qa-failed:`
    keyword) → dispatcher cannot classify, falls through to `PENDING_CI`. The card
    idles until the sweeper alerts or a human unblocks.
@@ -197,7 +210,7 @@ auto-fix you — it is a notification mechanism, not a recovery mechanism.
 | `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:37` |
 | `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
 | `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
-| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:150` |
+| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:156` |
 
 ### What breaks self-healing
 
