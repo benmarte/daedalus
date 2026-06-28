@@ -2334,6 +2334,13 @@ def _check_confirmed_validators(
             # When a validator's context window fills before kanban_complete runs,
             # its GitHub comment is the only record of its decision.
             issue_nr = issues_map.get(n_nr)
+            if not issue_nr and provider is not None:
+                fetched = _fetch_issue_with_retry(provider, n_nr)
+                if fetched:
+                    issue_nr = fetched.as_dict()
+                    logger.info(
+                        "dispatch: #%s not in issues_map (gh-comment) — fell back to get_issue()", n_nr
+                    )
             gh_outcome = _validator_github_comment_outcome(provider, n_nr, p["validator"])
             if gh_outcome == "confirmed" and issue_nr:
                 # GitHub comment confirms — advance to PM without another validator run.
@@ -2471,6 +2478,13 @@ def _check_confirmed_validators(
             )
         ikey = f"pm-{n}" if pm_state == "none" else f"pm-{n}-r{stale_count}"
         issue = issues_map.get(n)
+        if not issue and provider is not None:
+            fetched = _fetch_issue_with_retry(provider, n)
+            if fetched:
+                issue = fetched.as_dict()
+                logger.info(
+                    "dispatch: #%s not in issues_map (confirmed) — fell back to get_issue()", n
+                )
         if not issue:
             logger.debug("dispatch: validator confirmed #%s but issue not in current scope", n)
             continue
