@@ -1,3 +1,5 @@
+## [Stale blocked card sweeper logs warning after 48h (optional archive)](https://github.com/benmarte/daedalus/issues/186) — [PR #217](https://github.com/benmarte/daedalus/pull/217)
+
 ## [`daedalus-cron.sh` detects silent gateway death and attempts restart](https://github.com/benmarte/daedalus/issues/187) — [PR #215](https://github.com/benmarte/daedalus/pull/215)
 
 ## [`daedalus-cron.sh` detects silent gateway death and attempts restart](https://github.com/benmarte/daedalus/issues/187) — [PR #215](https://github.com/benmarte/daedalus/pull/215)
