@@ -153,7 +153,7 @@ This section explains the consultation workflow in the self-healing pipeline and
 
 ### What is a Consultation?
 
-A consultation is a PM intervention triggered when another agent (developer, reviewer, security analyst, QA, accessibility, or documentation) encounters a blocker that requires product clarification or decision-making. The self-healing pipeline in `core/iterate.py` (classifier branch `consultation`) automatically creates a consultation task assigned to you when:
+A consultation is a PM intervention triggered when another agent (developer, reviewer, security analyst, QA, accessibility, or documentation) encounters a blocker that requires product clarification or decision-making. The self-healing pipeline — specifically the dispatcher in `scripts/daedalus_dispatch.py`, invoked when an agent blocks and `classify_blocked()` in `core/iterate.py` returns `PM_ROUTE` or a validator blocks with a blocking issue — automatically creates a consultation task assigned to you when:
 
 - A developer is blocked on implementation ambiguity (missing requirements, unclear acceptance criteria)
 - A reviewer needs product guidance on acceptable design trade-offs
@@ -199,7 +199,7 @@ Unblocking the card is not optional—it is the critical handoff that resumes pi
 
 ### Self-Healing Pipeline Context
 
-This consultation flow is part of the broader self-healing architecture in `core/iterate.py` (described in epic #180 in the README under "Self-healing behaviors (epic #180)"). The pipeline automatically detects blockers and routes them to the appropriate agent:
+This consultation flow is part of the broader self-healing architecture. When an agent blocks, `classify_blocked()` in `core/iterate.py` categorises the block and the dispatcher in `scripts/daedalus_dispatch.py` acts on it (described in the README under "Self-healing behaviors (epic #180)"). The pipeline automatically detects blockers and routes them to the appropriate agent:
 
 - **Technical blockers** (CI failures, merge conflicts) → developer fix cards (handled by the `awaiting-fix:` auto-unblock behavior)
 - **Review feedback** (changes requested) → PM routing cards to decide fix owner
