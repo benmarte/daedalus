@@ -516,7 +516,10 @@ def _resolve_max_pm_retries(execution: Dict[str, Any], default: int = 3) -> int:
     return val if val > 0 else default
 
 
-def _resolve_history_max_lines(execution: Dict[str, Any], default: int = 1000) -> int:
+_HISTORY_MAX_LINES: int = 1000
+
+
+def _resolve_history_max_lines(execution: Dict[str, Any], default: int = _HISTORY_MAX_LINES) -> int:
     """Return history-log rotation size from ``execution.history_max_lines``.
 
     The history JSONL file grows unboundedly unless rotated; the default of 1000
