@@ -333,7 +333,7 @@ None. The self-healing loop runs automatically on every dispatcher tick.
 No user-facing configuration. Classification logic is automatic.
 
 **Source implementation:**  
-`core/iterate.py:classify_blocked()` (line 100), `core/iterate.py:_execute_advance()` (line 380), `core/iterate.py:_execute_dev_fix_ci()` (line 531), `core/iterate.py:_execute_pending_pr()` (line 587), `core/iterate.py:_execute_pm_route()` (line 645), `core/iterate.py:_execute_escalate()` (line 829), `core/iterate.py:_execute_planner_decompose()` (line 1503)
+`core/iterate.py:classify_blocked()` (line 122), `core/iterate.py:_execute_advance()` (line 402), `core/iterate.py:_execute_dev_fix_ci()` (line 553), `core/iterate.py:_execute_pending_pr()` (line 609), `core/iterate.py:_execute_pm_route()` (line 667), `core/iterate.py:_execute_escalate()` (line 851), `core/iterate.py:_execute_planner_decompose()` (line 1536)
 
 ---
 
