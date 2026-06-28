@@ -420,6 +420,199 @@ def test_repair_prefixes_title_from_parent():
           mk_rename.call_args == mock.call("slug", "t_child", "#420 Implement the feature"))
 
 
+# ── close_issue_tasks (core/kanban.py) ────────────────────────────────────────
+
+
+def test_close_issue_tasks_completes_non_done_and_skips_done():
+    """close_issue_tasks completes only non-done tasks matching #issue_number."""
+    from core.kanban import close_issue_tasks
+
+    tasks = [
+        {"id": "t1", "title": "#42 dev work", "status": "todo"},
+        {"id": "t2", "title": "#42 qa verify", "status": "running"},
+        {"id": "t3", "title": "#42 already done", "status": "done"},
+        {"id": "t4", "title": "#99 other issue", "status": "todo"},  # different issue
+    ]
+    with mock.patch("core.kanban.list_tasks", return_value=tasks), \
+         mock.patch("core.kanban.complete", return_value=True) as mk_complete:
+        result = close_issue_tasks("slug", 42)
+
+    check("only non-done #42 tasks completed", result == ["t1", "t2"])
+    check("complete called exactly twice (t1, t2)", mk_complete.call_count == 2)
+
+
+def test_close_issue_tasks_walks_children_with_review_required_summary():
+    """Second pass completes blocked review-required children when summary is given."""
+    from core.kanban import close_issue_tasks
+
+    tasks = [{"id": "t_parent", "title": "#42 parent task", "status": "running"}]
+    parent_card = {
+        "task": {"id": "t_parent", "status": "running"},
+        "children": ["t_child_a", "t_child_b"],
+    }
+    child_a = {
+        "task": {"id": "t_child_a", "status": "blocked"},
+        "latest_summary": "review-required: PR #99 — branch fix/issue-42",
+    }
+    child_b = {
+        "task": {"id": "t_child_b", "status": "blocked"},
+        "latest_summary": "blocked: dependency on t_other",  # not review-required
+    }
+
+    def _show(slug, tid):
+        if tid == "t_parent": return parent_card
+        if tid == "t_child_a": return child_a
+        if tid == "t_child_b": return child_b
+        return None
+
+    with mock.patch("core.kanban.list_tasks", return_value=tasks), \
+         mock.patch("core.kanban.complete", return_value=True) as mk_complete, \
+         mock.patch("core.kanban.show_card", side_effect=_show):
+        result = close_issue_tasks("slug", 42, summary="closed: parent issue #42 merged")
+
+    check("parent completed plus review-required child",
+          result == ["t_parent", "t_child_a"])
+    check("non-review-required child not completed", mk_complete.call_count == 2)
+
+
+def test_close_issue_tasks_dry_run_does_not_call_complete():
+    """dry_run returns ids without actually completing anything."""
+    from core.kanban import close_issue_tasks
+
+    tasks = [
+        {"id": "t1", "title": "#42 dev work", "status": "todo"},
+        {"id": "t2", "title": "#42 qa verify", "status": "running"},
+    ]
+    with mock.patch("core.kanban.list_tasks", return_value=tasks), \
+         mock.patch("core.kanban.complete") as mk_complete:
+        result = close_issue_tasks("slug", 42, dry_run=True)
+
+    check("dry_run returns ids of would-be-completed tasks", result == ["t1", "t2"])
+    check("complete never called in dry-run", not mk_complete.called)
+
+
+def test_close_issue_tasks_empty_board_returns_empty():
+    """No matching tasks → returns empty list, no side effects."""
+    from core.kanban import close_issue_tasks
+
+    with mock.patch("core.kanban.list_tasks", return_value=[]), \
+         mock.patch("core.kanban.complete") as mk_complete:
+        result = close_issue_tasks("slug", 42)
+
+    check("empty board returns empty list", result == [])
+    check("complete never called", not mk_complete.called)
+
+
+# ── _count_active_issue_tasks ─────────────────────────────────────────────────
+
+
+def test_count_active_issue_tasks_excludes_done_and_cancelled():
+    """Only todo/running/ready/blocked statuses count as active."""
+    tasks = [
+        {"id": "t1", "title": "#99 dev work", "status": "todo"},
+        {"id": "t2", "title": "#99 qa verify", "status": "running"},
+        {"id": "t3", "title": "#99 already done", "status": "done"},
+        {"id": "t4", "title": "#99 cancelled", "status": "cancelled"},
+        {"id": "t5", "title": "#100 unrelated", "status": "todo"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        active = disp._count_active_issue_tasks("slug", 99)
+    check("only 2 active (todo + running), not done/cancelled/unrelated", active == 2)
+
+
+def test_count_active_issue_tasks_zero_when_all_done():
+    tasks = [
+        {"id": "t1", "title": "#42 completed work", "status": "done"},
+        {"id": "t2", "title": "#42 also done", "status": "done"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        active = disp._count_active_issue_tasks("slug", 42)
+    check("all done → 0 active", active == 0)
+
+
+def test_count_active_issue_tasks_zero_for_unknown_issue():
+    """Issue with no kanban tasks at all → 0 active."""
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[]):
+        active = disp._count_active_issue_tasks("slug", 9999)
+    check("no tasks → 0 active", active == 0)
+
+
+# ── _repair_orphan_tasks: additional edge cases ──────────────────────────────
+
+
+def test_repair_skips_running_or_blocked_tasks():
+    """_repair_orphan_tasks only repairs todo/ready — running/blocked left alone."""
+    tasks = [
+        {"id": "t_run", "assignee": "developer", "title": "#50 running work", "status": "running"},
+        {"id": "t_block", "assignee": "developer", "title": "#50 blocked", "status": "blocked"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no repairs for running/blocked tasks", repaired == 0)
+    check("reassign never called", not mk_reassign.called)
+    check("rename never called", not mk_rename.called)
+
+
+def test_repair_unknown_assignee_skipped():
+    """Assignee that maps to no known generic role is logged and skipped."""
+    tasks = [{"id": "t_unknown", "assignee": "some-custom-agent",
+              "title": "Implement thing", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("unknown assignee skipped (no repair)", repaired == 0)
+    check("reassign not called for unknown assignee", not mk_reassign.called)
+
+
+def test_repair_idempotent_already_fixed_task():
+    """Re-running on a task already having #N in title and valid assignee → no-op."""
+    tasks = [{"id": "t_ok", "assignee": "developer-daedalus",
+              "title": "#42 fix the bug", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={}) as mk_show, \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("already-fixed task → 0 repairs", repaired == 0)
+    check("reassign never called", not mk_reassign.called)
+    check("show_card skipped (assignee valid)", not mk_show.called)
+    check("rename never called", not mk_rename.called)
+
+
+def test_repair_dry_run_does_not_mutate():
+    """dry_run=True counts repairs but never calls reassign/rename."""
+    tasks = [
+        {"id": "t1", "assignee": "developer", "title": "#42 fix bug", "status": "todo"},
+        {"id": "t2", "assignee": "developer-daedalus",
+         "title": "Implement feature", "status": "ready"},
+    ]
+    card_with_body = {"body": "Fix for issue #42"}
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value=card_with_body), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES, dry_run=True)
+    check("dry_run counts 2 repairs", repaired == 2)
+    check("reassign never called in dry_run", not mk_reassign.called)
+    check("rename never called in dry_run", not mk_rename.called)
+
+
+def test_repair_noop_when_no_issue_number_discoverable():
+    """Title has no #N, body has no #N, parents have no #N → repair skipped."""
+    tasks = [{"id": "t_orphan", "assignee": "developer-daedalus",
+              "title": "Implement something vague", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "no issue number here"}), \
+         mock.patch.object(disp, "_find_issue_n_from_parents", return_value=None), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no issue number discoverable → 0 repairs", repaired == 0)
+    check("rename never called", not mk_rename.called)
+
+
 def test_repair_noop_for_task_already_with_issue_number():
     """_repair_orphan_tasks leaves tasks with #N in title untouched."""
     tasks = [{"id": "t_ok", "assignee": "developer-daedalus",
