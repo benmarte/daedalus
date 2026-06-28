@@ -144,23 +144,32 @@ def _install_cron_wrapper() -> tuple[bool, str]:
         "fi\n"
         "# ---------------------------------------------------------------------------\n"
         "\n"
+        "# --- Gateway watchdog (#383) ---\n"
+        "# HTTP health probe + rate-limited restart + silent-death detection\n"
+        "# Overlap protection: mkdir-based lock\n"
+        'WATCHDOG_HTTP_SCRIPT="$DISPATCH_HOME/scripts/watchdog.py"\n'
+        'WATCHDOG_HTTP_LOCK="$HOME/.hermes/gateway-watchdog-http.lock"\n'
+        "if [ -f \"$WATCHDOG_HTTP_SCRIPT\" ]; then\n"
+        "  if mkdir \"$WATCHDOG_HTTP_LOCK\" 2>/dev/null; then\n"
+        '    trap \'rmdir "$WATCHDOG_HTTP_LOCK" 2>/dev/null\' EXIT\n'
+        "    echo \"daedalus-cron: running HTTP watchdog (#383)\" >&2\n"
+        "    python3 \"$WATCHDOG_HTTP_SCRIPT\" || \\\n"
+        "      echo \"daedalus-cron: HTTP watchdog exited with code $?\" >&2\n"
+        "  fi\n"
+        "fi\n"
+        "# ---------------------------------------------------------------------------\n"
+        "\n"
         "# --- Gateway watchdog (#799) ---\n"
-        "# The watchdog script provides:\n"
-        "# - STOP marker support (~/.hermes/gateway-stop inhibits restarts)\n"
-        "# - Rate limiting (max 3 restarts per hour by default)\n"
-        "# - Exponential backoff (10s, 20s, 40s... capped at 300s)\n"
-        "# - Persistent state tracking (~/.hermes/gateway-watchdog-state.json)\n"
-        "# - Crash log detection (~/.hermes/logs/gateway*.log or hermes.*.log)\n"
-        "# Overlap protection: mkdir-based lock — if another cron tick is already\n"
-        "# running the watchdog, this invocation exits 0 silently (#799).\n"
-        "WATCHDOG_SCRIPT=\"$DISPATCH_HOME/scripts/gateway_watchdog.py\"\n"
-        "WATCHDOG_LOCK=\"$HOME/.hermes/gateway-watchdog.lock\"\n"
+        "# STOP-marker + exponential backoff + crash-log detection\n"
+        "# Overlap protection: mkdir-based lock\n"
+        'WATCHDOG_SCRIPT="$DISPATCH_HOME/scripts/gateway_watchdog.py"\n'
+        'WATCHDOG_LOCK="$HOME/.hermes/gateway-watchdog.lock"\n'
         "if [ -f \"$WATCHDOG_SCRIPT\" ]; then\n"
         "  if mkdir \"$WATCHDOG_LOCK\" 2>/dev/null; then\n"
-        "    trap 'rmdir \"$WATCHDOG_LOCK\" 2>/dev/null' EXIT\n"
-        "    echo \"daedalus-cron: running gateway watchdog\" >&2\n"
+        '    trap \'rmdir "$WATCHDOG_LOCK" 2>/dev/null\' EXIT\n'
+        "    echo \"daedalus-cron: running gateway watchdog (#799)\" >&2\n"
         "    python3 \"$WATCHDOG_SCRIPT\" --no-dispatch || \\\n"
-        "      echo \"daedalus-cron: watchdog exited with code $?\" >&2\n"
+        "      echo \"daedalus-cron: gateway watchdog exited with code $?\" >&2\n"
         "  fi\n"
         "fi\n"
         "# ---------------------------------------------------------------------------\n"
@@ -224,6 +233,36 @@ def _install_watchdog_script() -> tuple[bool, str]:
         return True, f"OK: watchdog script installed at {target_file}"
     except OSError as exc:
         return False, f"FAIL: could not install watchdog script at {target}: {exc}"
+
+
+def _install_watchdog_http_script() -> tuple[bool, str]:
+    """Install scripts/watchdog.py (#383 HTTP /health probe) idempotently.
+
+    Source: scripts/watchdog.py (resolved via Path(__file__).parent).
+    Target: <HERMES_HOME>/plugins/daedalus/scripts/watchdog.py.
+
+    This watchdog complements gateway_watchdog.py — it probes the gateway's HTTP
+    /health endpoint on localhost, detects silent deaths (process alive but
+    goroutine stuck), and tracks restarts with rate limiting + cooldown. All
+    configuration is via DAEDALUS_GW_* env vars.
+    """
+    hermes_home = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+    source_dir = Path(__file__).resolve().parent
+    source = source_dir / "watchdog.py"
+
+    if not source.is_file():
+        return False, f"MISSING: HTTP watchdog script not found at {source}"
+
+    target = hermes_home / "plugins" / "daedalus" / "scripts"
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        target_file = target / "watchdog.py"
+        target_file.write_text(source.read_text())
+        target_file.chmod(0o755)
+        return True, f"OK: HTTP watchdog script installed at {target_file}"
+    except OSError as exc:
+        return False, f"FAIL: could not install HTTP watchdog script at {target}: {exc}"
 
 
 # ── provision ────────────────────────────────────────────────────────────────
@@ -304,6 +343,11 @@ def main(check_only: bool = False) -> int:
 
     # Install the enhanced gateway watchdog script (idempotent, non-fatal)
     ok, msg = _install_watchdog_script()
+    print(msg)
+    print()
+
+    # Install the HTTP /health probe watchdog (idempotent, non-fatal)
+    ok, msg = _install_watchdog_http_script()
     print(msg)
     print()
 
