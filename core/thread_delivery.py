@@ -31,6 +31,7 @@ returns ``(ok, anchor)`` — ``anchor`` is the posted message's thread anchor
 """
 from __future__ import annotations
 
+import inspect
 from typing import Callable, List, Optional, Tuple
 
 from core import dispatch_state
@@ -47,7 +48,7 @@ _SKIP_SUBSTRINGS = (
     "<!-- daedalus:follow-up-extracted",
 )
 
-SendFn = Callable[[str, str, Optional[str]], Tuple[bool, Optional[str]]]
+SendFn = Callable[..., Tuple[bool, Optional[str]]]
 
 
 def _is_agent_comment(body: str) -> bool:
@@ -68,6 +69,7 @@ def deliver_event(
     *,
     send: SendFn,
     dry_run: bool = False,
+    broadcast_thread_reply: bool = False,
 ) -> str:
     """Mirror one event (``body``) to *target*'s thread for *issue_number*.
 
@@ -89,14 +91,40 @@ def deliver_event(
 
     anchor = dispatch_state.get_thread_anchor(workdir, issue_number, target)
     if anchor:
-        ok, _ = send(target, body, anchor)
+        # Posting a reply — broadcast if requested. Use inspect to detect
+        # whether the send callable accepts a broadcast parameter.
+        broadcast = broadcast_thread_reply if broadcast_thread_reply else None
+        try:
+            sig = inspect.signature(send)
+            supports_broadcast = len(sig.parameters) >= 4
+        except (ValueError, TypeError):
+            supports_broadcast = False
+        
+        if supports_broadcast and broadcast:
+            ok, _ = send(target, body, anchor, broadcast)
+        else:
+            ok, _ = send(target, body, anchor)
+        
         if not ok:
             # Anchor may be stale/deleted — fall back to a fresh root thread.
-            ok, new_anchor = send(target, body, None)
+            if supports_broadcast:
+                ok, new_anchor = send(target, body, None, False)
+            else:
+                ok, new_anchor = send(target, body, None)
             if ok and new_anchor:
                 dispatch_state.set_thread_anchor(workdir, issue_number, target, new_anchor)
     else:
-        ok, new_anchor = send(target, body, None)
+        # Root post — never broadcast (already channel-visible)
+        try:
+            sig = inspect.signature(send)
+            supports_broadcast = len(sig.parameters) >= 4
+        except (ValueError, TypeError):
+            supports_broadcast = False
+        
+        if supports_broadcast:
+            ok, new_anchor = send(target, body, None, False)
+        else:
+            ok, new_anchor = send(target, body, None)
         if ok and new_anchor:
             dispatch_state.set_thread_anchor(workdir, issue_number, target, new_anchor)
 
