@@ -877,6 +877,15 @@ _CHECKLIST_RE = re.compile(r"^\s*[-*+]\s*\[[ xX]\]\s*(.+)", re.MULTILINE)
 _MAX_SUB_ISSUES = 10
 _DECOMPOSE_MARKER_PREFIX = "<!-- daedalus:sub-issues:"
 
+def _build_decomposed_marker() -> str:
+    """Build the new idempotency marker with current UTC timestamp.
+    
+    Returns a string like: <!-- daedalus:decomposed:1720000000 -->
+    """
+    import time
+    timestamp = int(time.time())
+    return f"<!-- daedalus:decomposed:{timestamp} -->"
+
 # Idempotency marker regex: matches any variation like
 #   <!-- daedalus:decomposed:123456789 -->
 #   <!--daedalus:decomposed:...-->
@@ -1650,11 +1659,14 @@ def _execute_planner_decompose(
             logger.warning("iterate: planner_decompose — create_issue failed for %r", title)
 
     # Post idempotency marker on parent
+    # Use the new timestamped marker format (<!-- daedalus:decomposed:<ts> -->)
+    # so subsequent runs detect it via has_decomposed_marker().
+    # Also include the sub-issue list for traceability.
     marker_numbers = f"[{','.join(str(n) for n in created_numbers)}]"
     provider.post_issue_comment(
         parent_n,
-        f"{_DECOMPOSE_MARKER_PREFIX}{marker_numbers} -->\n"
-        f"Daedalus created {len(created_numbers)} sub-issue(s): "
+        f"{_build_decomposed_marker()}\n"
+        f"Daedalus decomposed epic #{parent_n} into {len(created_numbers)} sub-issue(s): "
         + ", ".join(f"#{n}" for n in created_numbers),
     )
 

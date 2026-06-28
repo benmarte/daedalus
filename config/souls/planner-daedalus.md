@@ -152,7 +152,7 @@ This section covers what the dispatcher does in response to planner behavior. Tw
 
 ### Path A — Normal: Planner completes
 
-The planner should always **complete** (not block) with `PLAN:` summary. When the planner's kanban card transitions to `done`, the dispatcher's completion-handler (not `classify_blocked`) detects the completion and automatically creates downstream tasks: developer, QA, reviewer, security, accessibility, docs.
+The planner should always **complete** (not block) with `PLAN:` summary. When the planner's kanban card transitions to `done`, the dispatcher's completion-handler (not `classify_blocked`) detects the completion and invokes `_execute_planner_decompose` (in `core/iterate.py`). This function creates GitHub sub-issues from the parent epic (each sub-issue linked via `Depends on:` headers to establish tier ordering), labels dependency-free sub-issues with the `Ready` label, and creates triage cards for each sub-issue that are then decomposed via `kanban.decompose()`. The decompose step fans out to role-specific tasks (developer, QA, reviewer, security-analyst, and — non-deterministically — accessibility and documentation) through the LLM decomposer. Accessibility and documentation are not guaranteed downstream outputs of planner decomposition; their creation depends on the decomposer's routing.
 
 ### Path B — Edge case: Planner blocks
 
@@ -160,7 +160,7 @@ If the planner blocks (which should not happen under normal operation), `classif
 
 | Handoff substring | Dispatcher action |
 |---|---|
-| `PLANNING COMPLETE` (case-insensitive) | `PLANNER_DECOMPOSE` — breaks the plan into downstream specialist tasks (developer, QA, reviewer, security, docs) |
+| `PLANNING COMPLETE` (case-insensitive) | `PLANNER_DECOMPOSE` — creates epic sub-issues + triage cards; the triage→decompose step fans out non-deterministically to developer/QA/reviewer/security/accessibility/documentation via the LLM decomposer |
 | ANY OTHER block reason | `PM_ROUTE` — treated as unexpected planner output, escalated to PM |
 
 **Canonical form you must emit:**
@@ -178,7 +178,7 @@ Before the pipeline-level escalation below kicks in, each spawned coding-agent i
 
 ### Self-healing escalation sequence
 
-1. **Plan completion detected** → dispatcher's completion-handler fires `_execute_planner_decompose`. Downstream tasks (developer, QA, reviewer, security-analyst, accessibility when needed, documentation) are created automatically.
+1. **Plan completion detected** → dispatcher's completion-handler fires `_execute_planner_decompose` (in `core/iterate.py`). Sub-issues are created for the epic with `Depends on:` headers establishing tier ordering; dependency-free sub-issues are labelled `Ready`. Triage cards decompose via the LLM into specialist tasks (developer, QA, reviewer, security-analyst, and—non-deterministically—accessibility/documentation).
 2. **Agent crash mid-plan** → the planner worker's handoff contains `coding_agent_timeout` or another crash marker. There is no special-case handler for planner — a crash (including timeout) leaves the card in `PENDING_CI` or parks it in `blocked` depending on what was completed. The sweeper notices at 48 h on blocked cards, 24 h on running cards.
 3. **Unrecognized completion signal** (e.g., missing `PLAN:` prefix entirely, or garbled output) → dispatcher falls through to `PM_ROUTE`. The PM is notified and can re-route or escalate.
 4. **Planner blocks instead of completing** → `classify_blocked()` returns `PM_ROUTE` (for any block reason other than `PLANNING COMPLETE` or infrastructure failure). PM re-routes or escalates.

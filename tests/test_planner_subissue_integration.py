@@ -227,7 +227,7 @@ def test_integration_source_available_creates_file_specific_subissues(
     # Verify idempotency marker posted
     marker_posts = [
         (n, t) for n, t in provider._comments_posted
-        if n == 42 and "daedalus:sub-issues" in t
+        if n == 42 and "daedalus:decomposed" in t
     ]
     assert marker_posts, "Idempotency marker should be posted on parent issue"
 
@@ -554,7 +554,7 @@ def test_integration_idempotency_marker_posted(tmp_path):
     # Idempotency marker posted on parent
     marker_posts = [
         (n, t) for n, t in provider._comments_posted
-        if n == 33 and "daedalus:sub-issues" in t
+        if n == 33 and "daedalus:decomposed" in t
     ]
     assert marker_posts, (
         f"Expected idempotency marker on parent; got comments: {provider._comments_posted}"
