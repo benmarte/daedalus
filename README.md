@@ -866,10 +866,11 @@ on `origin/dev` at commit `4f99b26`.
    completes as "no-op" → next tick spawns another `PM_ROUTE` → repeat. A
    human must fix the environment and manually unblock.
 
-3. **`awaiting-fix:` concurrency guard.** When a reviewer or security-analyst
-   card is already blocked with `awaiting-fix:` in the block reason,
-   `classify_blocked()` (lines 175–177 for reviewer, lines 193–195 for
-   security) returns empty string. This prevents concurrent dispatcher ticks
+3. **`awaiting-fix:` concurrency guard.** Reviewer and security-analyst are
+   handled in one combined branch of `classify_blocked()` (lines 170–183:
+   `if assignee in (reviewer, security)`). When the card is already blocked
+   with `awaiting-fix:` in the block reason, the guard at lines 175–178
+   returns empty string. This prevents concurrent dispatcher ticks
    from spawning duplicate fix cards for the same reviewer card. The first
    tick that annotates the card with `awaiting-fix:` wins; subsequent ticks
    see the marker and skip.
