@@ -904,10 +904,11 @@ def _default_sub_issue_titles(parent_n: int, parent_title: str) -> List[str]:
 
 def _sub_issue_body(parent_n: int, parent_title: str, scope: str, depends_on: list[int]) -> str:
     deps_str = ", ".join(f"#{n}" for n in depends_on)
-    depends_line = f"depends_on: {deps_str}" if deps_str else "depends_on:"
+    depends_line = f"Depends on: {deps_str}" if deps_str else ""
+    depends_block = f"\n{depends_line}\n\n" if depends_line else ""
     return (
         f"Part of epic #{parent_n}: {parent_title}\n\n"
-        f"{depends_line}\n\n"
+        f"{depends_block}"
         f"## Scope\n{scope}\n\n"
         f"## Acceptance Criteria\n"
         f"- [ ] Implementation complete per scope\n"
