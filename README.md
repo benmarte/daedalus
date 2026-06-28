@@ -66,6 +66,8 @@ flowchart TD
 - [Design decisions](#design-decisions)
 - [Multi-repo: one Daedalus, many repos](#multi-repo-one-daedalus-many-repos)
 - [Repository layout](#repository-layout)
+- [Dashboard REST API](#dashboard-rest-api)
+- [Development references](#development-references)
 - [Prerequisites](#prerequisites)
 - [VCS providers](#vcs-providers)
   - [Creating the tokens (PAT scopes)](#creating-the-tokens-pat-scopes)
@@ -189,6 +191,14 @@ context about existing implementations when scoping sub-issues. The dispatcher s
 repo's source tree and picks the most relevant files (config files, entry points, modules
 matching the epic's keywords). Sub-issue bodies always include an explicit `depends_on:`
 metadata line (even when empty), making tier-graph parsing consistent.
+
+**Sub-issue file &amp; symbol references.** Each auto-generated sub-issue body includes a
+`### Affected files &amp; symbols` block listing up to 50 file paths and 50 function/class
+identifiers extracted from its scope text by the per-sub-issue `EpicContext`. Identifiers
+are pulled from `def` and `class` statements; file paths from explicit references in the
+scope; component names from `load_known_components(workdir)` cross-referenced against the
+scope text. This gives downstream agents concrete starting points without re-reading the
+whole repo.
 
 ### Tier promotion: dependency-aware sub-issue Ready-gating
 
@@ -819,7 +829,17 @@ comment on the card instructing a human to investigate. Route this event to a
 high-visibility channel in the Notifications editor alongside
 `security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
 is unchanged: it posts a per-card comment and stops escalating, but does not
-fire a chat notification.
+fire a chat notification. See
+[`design-retry-cap-notification.md`](design-retry-cap-notification.md) for the
+design rationale.
+
+**Intermediate retry-attempt notifications.** When a validator or PM retry is
+actually about to happen (retry_count < max_retries), the dispatcher first fires
+a distinct `retry-attempt` notification — separate from the cap-exhaustion event —
+so operators see each intermediate retry in real time. At the boundary
+(retry_count >= max_retries), retry-attempt is suppressed and `retry-cap-exhausted`
+fires on the next tick instead, preventing duplicate notifications. Both events
+are routed to the same configured channels.
 
 **Gateway watchdog (`daedalus-cron.sh`).** The per-project cron wrapper script
 (`~/.hermes/scripts/daedalus-cron.sh`, installed by `postinstall.py`) detects a
@@ -1103,10 +1123,21 @@ on its board.
 
 | Path | What it is |
 |------|------------|
-| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. |
+| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`. |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
+| `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
+| `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
 | `core/notify_templates.py` | Rich markdown notification templates (dispatch summary, doc report envelope, PR-ready, pipeline-failure) with clickable issue/PR links for every Hermes messaging platform. |
+| `core/registry.py` | Project registry read/write — `projects.yaml` CRUD for multi-repo onboarding. |
+| `core/source_specs.py` | `.hermes/pending/*.md` spec-file trigger — SHA-256 idempotency keys, lifecycle prefix injection, title from filename. |
+| `core/sweeper_cli.py` | Standalone sweeper CLI (`python -m core.sweeper_cli`) for manual stale-card cleanup. |
+| `core/thread_delivery.py` | Per-target thread anchors + comment mirroring for notification threading. |
+| `core/tier_promotion.py` | DAG tier computation + Ready-label promotion — rolls sub-issues out in dependency tiers, not all at once. |
+| `core/webhook_normalizer.py` | Inbound GitHub/GitLab/Azure DevOps/Hermes webhook → `ReadyEvent` normalizer. |
 | `scripts/provision_roster.sh` | Provisions the 9-agent Hermes roster. |
+| `scripts/agent_comment.py` | Helper for posting agent comments with mandatory `**Agent: <name>**` attribution header. |
+| `scripts/gateway_watchdog.py` | Enhanced gateway watchdog with rate limiting/backoff/STOP-marker detection. |
+| `scripts/watchdog.py` | HTTP health-probe mode for daemon deployments. |
 | `core/providers/` | VCS provider layer: GitHub (REST + GraphQL Projects v2), GitLab (REST), Azure DevOps (REST/WIQL) — token-authenticated HTTPS APIs, extensible via `register_provider()`. |
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
 | `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |
@@ -1116,6 +1147,45 @@ on its board.
 The **ship-gate hook**, **cron wrapper**, and **roster profiles** live in the Hermes
 home (`$HERMES_HOME`), not here — see [`SETUP.md`](SETUP.md) for how they're deployed
 and shared across a team.
+
+---
+
+## Dashboard REST API
+
+`dashboard/plugin_api.py` exposes a REST surface the dashboard UI (and any
+external tool) uses to manage projects. All endpoints live under
+`/api/plugins/daedalus/`:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/projects` | GET | List all registered projects with live kanban/PR/cron status. |
+| `/project/create` | POST | Onboard a new repo (creates config, cron job, kanban board). |
+| `/project/{name}/config` | GET | Read merged config. **Secrets are redacted** — keys matching `secret`, `api_key`, `password`, `token` are replaced with `***`. |
+| `/project/{name}/config` | POST | Persist config changes. |
+| `/meta/branches` | GET | Picker data: available branches for the project. |
+| `/meta/labels` | GET | Picker data: available labels (GitHub/GitLab/Azure). |
+| `/meta/boards` | GET | Picker data: available kanban boards. |
+| `/meta/statuses` | GET | Picker data: available status columns. |
+| `/meta/notifications` | GET | Picker data: configured notification channels. |
+| `/meta/channels` | GET | Picker data: discovered Slack/Discord/Telegram channels. |
+
+The `/meta/*` endpoints power the dashboard's dropdown selectors when editing
+project config. All config reads pass through `_strip_secrets()` to ensure
+tokens are never echoed back to the UI.
+
+---
+
+## Development references
+
+Standalone documents that describe design rationale, internals, or developer
+conventions:
+
+| Document | Purpose |
+|----------|---------|
+| [`SPEC.md`](SPEC.md) | Detailed specification of the pipeline's behavior — what each phase does, how agents interact, what the quality gates are. The README is an overview; SPEC.md is the reference. |
+| [`design-retry-cap-notification.md`](design-retry-cap-notification.md) | Design rationale for retry-cap exhaustion and intermediate retry-attempt notifications. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute: branch naming, commit conventions, PR process, code review. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes and notable changes per version. |
 
 ---
 
@@ -1370,7 +1440,7 @@ Export the provider token for the dispatcher's environment (see
 **4. Trigger work** — all three sources are **enabled by default** (toggle any
 off in the config):
 - **Prompt / spec file:** `hermes kanban create --triage --workspace dir:$PWD --body "$(cat spec.md)"`
-- **Spec drop:** put a `*.md` in `<repo>/.hermes/pending/` (when `sources.local_specs.enabled`)
+- **Spec drop:** put a `*.md` in `<repo>/.hermes/pending/` (when `sources.local_specs.enabled`). Title comes from the filename stem; body is prefixed with the project's lifecycle instruction and target branch. A SHA-256 of the file path is embedded in the card's idempotency key, so the same file never creates duplicate cards. Empty files are silently skipped; the directory need not exist.
 - **VCS issue:** move an issue/work item to **Ready** — GitHub Project column,
   GitLab `Ready` board label, or Azure DevOps work-item state
 
