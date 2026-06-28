@@ -536,6 +536,30 @@ def _resolve_history_max_lines(execution: Dict[str, Any], default: int = _HISTOR
     return val if val > 0 else default
 
 
+def _resolve_github_api_issue_limit(execution: Dict[str, Any], default: int = 100) -> int:
+    """Return GitHub API issue fetch limit from ``execution.github_api_issue_limit``."""
+    raw = (execution or {}).get("github_api_issue_limit")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def _resolve_github_api_pr_limit(execution: Dict[str, Any], default: int = 50) -> int:
+    """Return GitHub API PR fetch limit from ``execution.github_api_pr_limit``."""
+    raw = (execution or {}).get("github_api_pr_limit")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
 def _resolve_stall_minutes(kanban_section: Dict[str, Any], default: int = 30) -> int:
     """Return stall-detection threshold (minutes) from ``kanban.dispatch_stale_timeout_seconds``.
 
