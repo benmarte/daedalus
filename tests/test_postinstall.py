@@ -391,6 +391,28 @@ class TestInstallCronWrapper:
         # The watchdog must sit BEFORE the dispatcher exec.
         assert text.index("hermes gateway status") < text.index("exec python3")
 
+    def test_wrapper_documents_and_parses_plugin_dir(self, postinstall, tmp_path):
+        """Generated wrapper documents --plugin-dir and parses it before the exec (#233)."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            postinstall._install_cron_wrapper()
+        text = (fake_home / ".hermes" / "scripts" / "daedalus-cron.sh").read_text()
+
+        # Documented at the top of the script.
+        assert "--plugin-dir <path>" in text
+        # Parsed (both spaced and =form) and consumed into PLUGIN_DIR.
+        assert "--plugin-dir)" in text
+        assert "--plugin-dir=*)" in text
+        # Override prepends PYTHONPATH and redirects the dispatcher path.
+        assert 'export PYTHONPATH="$PLUGIN_DIR' in text
+        assert 'DISPATCH_HOME="$PLUGIN_DIR"' in text
+        # The exec resolves through DISPATCH_HOME, forwarding only the kept ARGS.
+        assert 'exec python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"' in text
+        # Parsing happens before the dispatcher is reached.
+        assert text.index("PLUGIN_DIR=") < text.index("exec python3")
+
 
 def _build_fake_bin(tmp_path, *, with_hermes: bool):
     """Create a bin dir with stub `sleep`/`python3` (+ optional `hermes`).
@@ -494,3 +516,108 @@ class TestCronWrapperIntegration:
             postinstall, tmp_path, gw_mode="down", with_hermes=False)
         assert log_text == ""  # hermes never ran
         assert marker.exists(), "dispatcher must run even without the hermes CLI"
+
+
+def _install_recording_dispatcher(plugin_root, marker, record):
+    """Stub daedalus_dispatch.py that touches `marker` and records argv + PYTHONPATH.
+
+    `record` gets two lines: repr(sys.argv[1:]) then the PYTHONPATH env value,
+    so a test can assert which args were forwarded and whether the dev checkout
+    was prepended to the import path.
+    """
+    disp = plugin_root / "scripts" / "daedalus_dispatch.py"
+    disp.parent.mkdir(parents=True, exist_ok=True)
+    disp.write_text(
+        "import os, sys\n"
+        f'open(r"{marker}", "w").close()\n'
+        f'with open(r"{record}", "w") as f:\n'
+        '    f.write(repr(sys.argv[1:]) + "\\n")\n'
+        '    f.write((os.environ.get("PYTHONPATH") or "") + "\\n")\n'
+    )
+    return disp
+
+
+class TestPluginDirFlag:
+    """--plugin-dir redirects the dispatcher to a local dev checkout (#233)."""
+
+    def _run(self, postinstall, tmp_path, extra_args):
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, _ = postinstall._install_cron_wrapper()
+        assert ok is True
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+
+        # Installed plugin location (the default source).
+        installed_marker = tmp_path / "installed_ran"
+        installed_rec = tmp_path / "installed_argv"
+        _install_recording_dispatcher(
+            fake_home / ".hermes" / "plugins" / "daedalus",
+            installed_marker, installed_rec)
+
+        # Local dev checkout (the override target).
+        local_dir = tmp_path / "localdev"
+        local_marker = tmp_path / "local_ran"
+        local_rec = tmp_path / "local_argv"
+        _install_recording_dispatcher(local_dir, local_marker, local_rec)
+
+        fake_bin, _, _ = _build_fake_bin(tmp_path, with_hermes=False)
+        env = {"HOME": str(fake_home), "PATH": f"{fake_bin}:/usr/bin:/bin"}
+        result = subprocess.run(
+            ["bash", str(wrapper), *extra_args],
+            env=env, capture_output=True, text=True, timeout=30)
+        return {
+            "stderr": result.stderr,
+            "local": (local_dir, local_marker, local_rec),
+            "installed": (installed_marker, installed_rec),
+        }
+
+    def test_plugin_dir_runs_local_checkout(self, postinstall, tmp_path):
+        """--plugin-dir runs the local dispatcher, warns, prepends PYTHONPATH, and
+        does NOT forward the flag while passing the remaining args through."""
+        local_dir = tmp_path / "localdev"
+        r = self._run(postinstall, tmp_path,
+                      ["--plugin-dir", str(local_dir), "--deliver", "slack"])
+
+        _, local_marker, local_rec = r["local"]
+        installed_marker, _ = r["installed"]
+        assert local_marker.exists(), "local dev dispatcher must run"
+        assert not installed_marker.exists(), "installed dispatcher must be bypassed"
+
+        assert "WARNING --plugin-dir active" in r["stderr"]
+
+        argv_line, pythonpath_line = local_rec.read_text().splitlines()[:2]
+        forwarded = eval(argv_line)
+        assert "--plugin-dir" not in forwarded, "flag must be consumed, not forwarded"
+        assert str(local_dir) not in forwarded
+        assert forwarded == ["--deliver", "slack"], "remaining args pass through verbatim"
+        assert pythonpath_line.split(":")[0] == str(local_dir), \
+            "local checkout must be prepended to PYTHONPATH"
+
+    def test_plugin_dir_accepts_equals_form(self, postinstall, tmp_path):
+        """--plugin-dir=<path> form is also honoured."""
+        local_dir = tmp_path / "localdev"
+        r = self._run(postinstall, tmp_path, [f"--plugin-dir={local_dir}"])
+        _, local_marker, _ = r["local"]
+        installed_marker, _ = r["installed"]
+        assert local_marker.exists()
+        assert not installed_marker.exists()
+
+    def test_plugin_dir_without_value_falls_back(self, postinstall, tmp_path):
+        """A trailing --plugin-dir with no path must not hang; falls back to installed."""
+        r = self._run(postinstall, tmp_path, ["--plugin-dir"])
+        _, local_marker, _ = r["local"]
+        installed_marker, _ = r["installed"]
+        assert installed_marker.exists(), "empty --plugin-dir must use the installed plugin"
+        assert not local_marker.exists()
+
+    def test_no_flag_uses_installed_plugin(self, postinstall, tmp_path):
+        """Without --plugin-dir, the installed plugin runs and nothing is warned."""
+        r = self._run(postinstall, tmp_path, ["--deliver", "slack"])
+        _, local_marker, _ = r["local"]
+        installed_marker, installed_rec = r["installed"]
+        assert installed_marker.exists(), "installed dispatcher must run by default"
+        assert not local_marker.exists()
+        assert "--plugin-dir active" not in r["stderr"]
+        forwarded = eval(installed_rec.read_text().splitlines()[0])
+        assert forwarded == ["--deliver", "slack"]
