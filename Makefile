@@ -22,6 +22,7 @@ PIP    ?= $(PYTHON) -m pip
 # Hermes install; test_pipeline_scenarios covers happy/block/escalate slices.
 E2E_TESTS := tests/test_e2e_full_pipeline.py \
              tests/test_e2e_multi_tick.py \
+             tests/test_e2e_regressions.py \
              tests/test_e2e_smoke.py \
              tests/test_dispatch_selftest.py \
              tests/test_pipeline_scenarios.py
