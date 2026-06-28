@@ -1,3 +1,5 @@
+## [feat: persist dispatch history to ~/.hermes/plugins/daedalus/history.jsonl](https://github.com/benmarte/daedalus/issues/235) — [PR #248](https://github.com/benmarte/daedalus/pull/248)
+
 ## [fix: retry GitHub Projects GraphQL enrollment with backoff when node ID resolution fails](https://github.com/benmarte/daedalus/issues/236) — [PR #245](https://github.com/benmarte/daedalus/pull/245)
 
 ## [fix: retry GitHub Projects GraphQL enrollment with backoff when node ID resolution fails](https://github.com/benmarte/daedalus/issues/236) — [PR #245](https://github.com/benmarte/daedalus/pull/245)
