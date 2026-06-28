@@ -1,3 +1,5 @@
+## [feat: auto-paginate _fetch_issues to prevent silent truncation on large boards](https://github.com/benmarte/daedalus/issues/228) — [PR #846](https://github.com/benmarte/daedalus/pull/846)
+
 ## [Unit tests / integration tests: planner creates sub-issues with file-specific acceptance criteria when source is available; graceful fallback when source is not](https://github.com/benmarte/daedalus/issues/806) — [PR #871](https://github.com/benmarte/daedalus/pull/871)
 
 ## [Unit tests / integration tests: planner creates sub-issues with file-specific acceptance criteria when source is available; graceful fallback when source is not](https://github.com/benmarte/daedalus/issues/806) — [PR #871](https://github.com/benmarte/daedalus/pull/871)
