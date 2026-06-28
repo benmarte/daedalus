@@ -196,7 +196,13 @@ The dispatcher reads this signal, waits for CI to pass, then:
 
 If you complete the task yourself instead of blocking it, the downstream review agents will never be created and the pipeline stalls at your card.
 
-### 6.1 Pipeline Self-Healing — Developer Behavior
+### 6.1 Epic Tier Promotion
+
+When you complete a sub-issue belonging to an epic with dependency DAGs (``Depends on:`` headers), the dispatcher calls `promote_waiting_tiers()` in `core/tier_promotion.py`. This re-evaluates the epic's other sub-issues and labels the next tier (whose dependencies are all closed) as Ready. Only tier-0 (dependency-free) sub-issues are labelled Ready initially; each merged PR unlocks the next tier.
+
+**What this means for you:** When you open a PR for a sub-issue, your work may unblock other developer cards. The dispatcher handles this automatically — you do not need to manually label or route anything. The tier promotion logic runs on every dispatcher tick when issues are closed.
+
+### 6.2 Pipeline Self-Healing — Developer Behavior
 
 - **PENDING_PR handling:** When you block with `review-required: awaiting-pr`, the dispatcher searches GitHub for an open PR linked to the issue number on each cron tick. If found, it updates the block reason to `review-required: PR #N — awaiting CI` so the pipeline can advance. If not found, the card stays blocked until the next cron tick searches again. You must create the PR before blocking.
   

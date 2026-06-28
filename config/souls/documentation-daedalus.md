@@ -282,6 +282,12 @@ The sweeper warns via log but does not auto-fix. Documentation cards stuck in `r
 - Crashing before completion. The sweeper eventually notices (at 24 h for `running` cards) but the issue sits in a limbo state — the pipeline is blocked but no fix-attempt loop will rescue it.
 - Not advancing the sweep cursor in `.hermes/doc_sweep_state.json`. While this does not block the current issue, it causes the next documentation run to re-sweep a larger range of PRs, increasing the chance of missed staleness or wasted effort.
 
+### Epic Tier Promotion
+
+When a sub-issue belonging to an epic with dependency DAGs (``Depends on:`` headers) is completed, the dispatcher calls `promote_waiting_tiers()` in `core/tier_promotion.py`. This re-evaluates the epic's other sub-issues and labels the next tier (whose dependencies are all closed) as Ready. Only tier-0 (dependency-free) sub-issues are labelled Ready initially; each merged PR unlocks the next tier.
+
+This behavior is part of the dispatcher's automatic pipeline advancement. You do not need to document tier promotion in your reports unless it's directly relevant to the issue you're documenting, but be aware that epic dependencies are automatically managed by the dispatcher.
+
 ## Quality bar
 - Every changed file in the diff must appear in the "Files Changed" table
 - Every doc file you updated must appear in the "Docs Updated" table
