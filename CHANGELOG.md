@@ -1,41 +1,3 @@
-## [fix: retry GitHub Projects GraphQL enrollment with backoff when node ID resolution fails](https://github.com/benmarte/daedalus/issues/236) — [PR #245](https://github.com/benmarte/daedalus/pull/245)
-
-## [fix: retry GitHub Projects GraphQL enrollment with backoff when node ID resolution fails](https://github.com/benmarte/daedalus/issues/236) — [PR #245](https://github.com/benmarte/daedalus/pull/245)
-
-## [fix: retry GitHub Projects GraphQL enrollment with backoff when node ID resolution fails](https://github.com/benmarte/daedalus/issues/236) — [PR #245](https://github.com/benmarte/daedalus/pull/245)
-
-## [Validator retry cap exhausted → same notification](https://github.com/benmarte/daedalus/issues/183) — [PR #226](https://github.com/benmarte/daedalus/pull/226)
-
-## [fix: _fetch_issues limit=20 silently skips older issues when >20 open issues](https://github.com/benmarte/daedalus/issues/203) — [PR #224](https://github.com/benmarte/daedalus/pull/224)
-
-## [`issues_map` miss → fallback `get_issue()` call, retry on transient failure](https://github.com/benmarte/daedalus/issues/185) — [PR #221](https://github.com/benmarte/daedalus/pull/221)
-
-## [Promotion applies the label that triggers the normal dispatch flow (validator → PM → dev team)](https://github.com/benmarte/daedalus/issues/208) — [PR #220](https://github.com/benmarte/daedalus/pull/220)
-
-## [Stale blocked card sweeper logs warning after 48h (optional archive)](https://github.com/benmarte/daedalus/issues/186) — [PR #217](https://github.com/benmarte/daedalus/pull/217)
-
-## [Stale blocked card sweeper logs warning after 48h (optional archive)](https://github.com/benmarte/daedalus/issues/186) — [PR #217](https://github.com/benmarte/daedalus/pull/217)
-
-## [`daedalus-cron.sh` detects silent gateway death and attempts restart](https://github.com/benmarte/daedalus/issues/187) — [PR #215](https://github.com/benmarte/daedalus/pull/215)
-
-## [`daedalus-cron.sh` detects silent gateway death and attempts restart](https://github.com/benmarte/daedalus/issues/187) — [PR #215](https://github.com/benmarte/daedalus/pull/215)
-
-## [fix: remaining self-healing gaps — retry cap notifications, gateway watchdog, and orphaned cards](https://github.com/benmarte/daedalus/issues/181) — [PR #204](https://github.com/benmarte/daedalus/pull/204)
-
-## [fix: remaining self-healing gaps — retry cap notifications, gateway watchdog, and orphaned cards](https://github.com/benmarte/daedalus/issues/181) — [PR #204](https://github.com/benmarte/daedalus/pull/204)
-
-## [Detect epic-sized issues and analyze+decompose into sub-issues before the developer stage](https://github.com/benmarte/daedalus/issues/138) — [PR #155](https://github.com/benmarte/daedalus/pull/155)
-
-## [Dependency-aware ready-gating: don't dispatch an issue until its blockers are closed (native GitLab/GitHub issue links + Depends-on fallback)](https://github.com/benmarte/daedalus/issues/139) — [PR #148](https://github.com/benmarte/daedalus/pull/148)
-
-## [Phase 1: Epic detection heuristic](https://github.com/benmarte/daedalus/issues/149) — [PR #156](https://github.com/benmarte/daedalus/pull/156)
-
-## [Auto-configure VCS board settings in daedalus.yaml during setup (GitLab: label_board + status labels + default branch)](https://github.com/benmarte/daedalus/issues/133) — [PR #135](https://github.com/benmarte/daedalus/pull/135)
-
-## [bug: _reconcile_cron skips schedule conversion, creating one-shot crons instead of repeating jobs](https://github.com/benmarte/daedalus/issues/134) — [PR #136](https://github.com/benmarte/daedalus/pull/136)
-
-## [docs: update README and user guide for beta.30 release](https://github.com/benmarte/daedalus/issues/127) — [PR #128](https://github.com/benmarte/daedalus/pull/128)
-
 # Changelog
 
 All notable changes to Daedalus are documented here. The format loosely follows
@@ -75,6 +37,57 @@ All notable changes to Daedalus are documented here. The format loosely follows
   raises. 34 tests in `tests/test_epic_detection.py` cover all three heuristics,
   boundary values, mixed input shapes, and the OR-combination contract. This is
   detection only — dispatcher wiring ships in Phase 2.
+
+### Changed
+
+- **Tier promotion applies Ready board status** (#208, PR #227) — when a sub-issue's
+  tier level drops to 0 (all blockers closed), the promotion pass now applies both
+  the `Ready` label *and* sets the issue's board status to `Ready`, triggering the
+  normal dispatch flow (validator → PM → dev team) on the next tick. Previously only
+  the label was applied, requiring manual board-status updates.
+
+- **Planner reads source files for sub-issue context** (#138, PR #242) — when
+  decomposing epics into sub-issues, the planner now reads relevant source files
+  from the codebase and injects their content into sub-issue bodies to provide
+  implementation context. Up to 10 files per sub-issue, 50KB per file, with binary
+  detection and path-traversal prevention.
+
+### Fixed
+
+- **Promotion idempotency: implement `has_label` to prevent duplicate labels/comments**
+  (#220, PR #244) — `VCSProvider.has_label()` was a no-op returning `False`; the
+  GitHub provider now implements it by inspecting the `labels` field from
+  `get_issue()`. Tier promotion is now idempotent: already-Ready issues are excluded
+  from re-promotion, preventing duplicate `add_label` and `post_issue_comment` calls
+  on every dispatcher tick. `sub_issues_of` base-class regex widened to match all
+  `EPIC_REF_RE` formats (`Epic #N`, `Epic: #N`, `Part of: #N`, `Part of #N`,
+  `Part of epic: #N`, `Part of epic #N`, hyphenated variants). Case-insensitive
+  throughout. 16 new regression tests in `tests/test_bugfixes_regex_and_haslabel.py`.
+
+- **GitHub Projects enrollment node-ID retry with backoff** (#236, PR #245) — when
+  the GitHub Projects GraphQL API returns a transient failure resolving the node ID
+  for an issue, the dispatcher now retries with exponential backoff instead of
+  failing the enrollment outright.
+
+- **Separate blocked/stop handlers** (#2075, PR #222) — the dispatcher previously
+  handled `blocked:` and `stop:` signals through the same code path. They are now
+  separate: `blocked:` cards stay in the pipeline (awaiting human intervention),
+  while `stop:` cards trigger the dedicated auto-close path that archives the card
+  and closes the issue.
+
+- **Validator retry-cap exhaustion notification deduplication** (#183, PR #226) —
+  when a validator exhausts its retry cap, the dispatcher now posts a single
+  `validator-retry-cap-exhausted` notification instead of posting once per
+  subsequent tick.
+
+- **`_fetch_issues` default limit raised to 100** (#203, PR #224) — the default
+  limit for `_fetch_issues()` was 20, which silently truncated boards with >20 open
+  issues. Default raised to 100 so larger boards are not silently skipped.
+
+- **`issues_map` miss → fallback `get_issue()` with retry** (#185, PR #221) — when
+  the dispatcher's `issues_map` cache misses an issue number, it now falls back to
+  a direct `get_issue()` call with retry on transient failure, instead of failing
+  outright.
 
 ## [1.0.0-beta.30] — 2026-06-26
 
