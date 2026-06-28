@@ -1,3 +1,5 @@
+## [fix: _fetch_issues limit=20 silently skips older issues when >20 open issues](https://github.com/benmarte/daedalus/issues/203) — [PR #224](https://github.com/benmarte/daedalus/pull/224)
+
 ## [`issues_map` miss → fallback `get_issue()` call, retry on transient failure](https://github.com/benmarte/daedalus/issues/185) — [PR #221](https://github.com/benmarte/daedalus/pull/221)
 
 ## [Promotion applies the label that triggers the normal dispatch flow (validator → PM → dev team)](https://github.com/benmarte/daedalus/issues/208) — [PR #220](https://github.com/benmarte/daedalus/pull/220)
