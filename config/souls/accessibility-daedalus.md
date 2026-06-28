@@ -208,7 +208,7 @@ notices at 48 h.
 
 ### Self-healing escalation sequence
 
-The escalation path progresses through 6 stages (matching the research in the
+The escalation path progresses through 7 stages (matching the research in the
 parent task). You (accessibility) are the primary actor in stages 0, 4, and 5.
 Stages 1, 2, 3, and 6 involve other pipeline participants.
 
@@ -226,6 +226,16 @@ and decides whether to:
 Each round increments the per-PR fix-attempt counter. The fix-attempt counter
 is **per-PR across all fix cards** — the third attempt on any fix card for the
 same PR triggers escalation.
+
+**Stage 2 — Fix-attempt counter validation**
+After the developer fix completes and CI is re-checked, the dispatcher validates
+the fix-attempt counter against `MAX_FIX_ATTEMPTS` (currently 3). This validation
+occurs in `classify_blocked()` at `core/iterate.py:157-158`: if
+`fix_attempts >= MAX_FIX_ATTEMPTS`, the action is `ESCALATE` (Stage 3) rather than
+`DEV_FIX_CI` (spawn another fix card). The counter increments after each spawned
+fix card and persists in `.hermes/daedalus-fix-attempts.json`. When the threshold
+is reached, no new fix cards are spawned — the dispatcher transitions directly to
+Stage 3.
 
 **Stage 3 — Formal escalation (MAX_FIX_ATTEMPTS exceeded)**
 When the retry loop is exhausted (3 fix attempts failed), the dispatcher calls
