@@ -2105,26 +2105,35 @@ def _check_confirmed_validators(
                     (t.get("idempotency_key") or "") == ikey
                     for t in kanban.list_tasks(slug)
                 )
-                if not already_handled:
-                    if provider and provider.close_issue(n_nr):
-                        logger.info(
-                            "dispatch: validator done with STOP:%s for #%s — auto-closed issue",
-                            summary_raw[4:].strip(), n_nr,
-                        )
-                        # Mark as handled so we don't re-close on future dispatches.
-                        kanban.create_task(
-                            slug, f"validator-stop #{n_nr}",
-                            body=f"Issue #{n_nr} auto-closed by validator STOP directive",
-                            assignee=p["validator"],
-                            idempotency_key=ikey,
-                            workspace=f"dir:{workdir}" if workdir else "",
-                        )
-                    elif provider:
-                        logger.warning(
-                            "dispatch: validator done with STOP:%s for #%s but close_issue failed",
-                            summary_raw[4:].strip(), n_nr,
-                        )
+                if already_handled:
                     triggered.append(n_nr)
+                    continue
+                if provider is None:
+                    logger.warning(
+                        "dispatch: validator STOP #%s but no provider — cannot auto-close",
+                        n_nr,
+                    )
+                    triggered.append(n_nr)
+                    continue
+                if provider.close_issue(n_nr):
+                    logger.info(
+                        "dispatch: validator done with STOP:%s for #%s — auto-closed issue",
+                        summary_raw[4:].strip(), n_nr,
+                    )
+                    # Mark as handled so we don't re-close on future dispatches.
+                    kanban.create_task(
+                        slug, f"validator-stop #{n_nr}",
+                        body=f"Issue #{n_nr} auto-closed by validator STOP directive",
+                        assignee=p["validator"],
+                        idempotency_key=ikey,
+                        workspace=f"dir:{workdir}" if workdir else "",
+                    )
+                else:
+                    logger.warning(
+                        "dispatch: validator done with STOP:%s for #%s but close_issue failed",
+                        summary_raw[4:].strip(), n_nr,
+                    )
+                triggered.append(n_nr)
                 continue
             # Empty or unrecognized summary — check GitHub comments before retrying.
             # When a validator's context window fills before kanban_complete runs,
