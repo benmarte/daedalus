@@ -18,9 +18,18 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pytest
+
 from core.iterate import _execute_planner_decompose
 from core.providers.base import VCSProvider, parse_depends_on
 from core import iterate
+
+
+@pytest.fixture(autouse=True)
+def _restore_kanban():
+    original = iterate.kanban
+    yield
+    iterate.kanban = original
 
 
 def _make_provider(
