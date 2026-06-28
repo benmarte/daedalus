@@ -381,15 +381,14 @@ class TestInstallCronWrapper:
         assert "daedalus_dispatch.py" in text
         assert "exec python3" in text
 
-        # Watchdog: liveness via stdout marker, single restart, best-effort guard.
-        assert "command -v hermes" in text
-        assert "hermes gateway status" in text
-        assert "not running" in text
-        assert "hermes gateway restart" in text
-        # Restart appears exactly once → single attempt, no retry loop.
-        assert text.count("hermes gateway restart") == 1
+        # Watchdog: Python-based detection with rate limiting and backoff (#799).
+        assert "gateway_watchdog.py" in text
+        assert "python3" in text
+        assert "--no-dispatch" in text
+        # Overlap protection via mkdir-based lock.
+        assert "mkdir" in text
         # The watchdog must sit BEFORE the dispatcher exec.
-        assert text.index("hermes gateway status") < text.index("exec python3")
+        assert text.index("gateway_watchdog.py") < text.index("exec python3")
 
     def test_wrapper_documents_and_parses_plugin_dir(self, postinstall, tmp_path):
         """Generated wrapper documents --plugin-dir and parses it before the exec (#233)."""
@@ -460,21 +459,32 @@ def _build_fake_bin(tmp_path, *, with_hermes: bool):
     return fake_bin, log, restart_flag
 
 
-def _install_stub_dispatcher(fake_home, marker):
-    """Place a stub daedalus_dispatch.py under fake_home that touches `marker`."""
-    disp = fake_home / ".hermes" / "plugins" / "daedalus" / "scripts" / "daedalus_dispatch.py"
-    disp.parent.mkdir(parents=True, exist_ok=True)
-    disp.write_text(
-        "import os\n"
-        f'open(r"{marker}", "w").close()\n'
-    )
-    return disp
-
-
 class TestCronWrapperIntegration:
-    """Run the generated wrapper end-to-end with a stubbed `hermes` on PATH."""
+    """Run the generated wrapper end-to-end with a stubbed gateway_watchdog.py."""
 
-    def _run(self, postinstall, tmp_path, *, gw_mode, with_hermes=True):
+    def _install_stub_watchdog(self, dispatch_home: Path, exit_code: int = 0):
+        """Place a stub gateway_watchdog.py that logs its invocation and exit code."""
+        wd = dispatch_home / "scripts" / "gateway_watchdog.py"
+        wd.parent.mkdir(parents=True, exist_ok=True)
+        wd.write_text(
+            "import sys\n"
+            f"print('watchdog invoked', file=sys.stderr)\n"
+            f"sys.exit({exit_code})\n"
+        )
+        return wd
+
+    def _install_stub_dispatcher(self, fake_home: Path, marker):
+        """Place a stub daedalus_dispatch.py that touches `marker`."""
+        disp = fake_home / ".hermes" / "plugins" / "daedalus" / "scripts" / "daedalus_dispatch.py"
+        disp.parent.mkdir(parents=True, exist_ok=True)
+        disp.write_text(
+            "import os\n"
+            f'open(r"{marker}", "w").close()\n'
+        )
+        return disp
+
+    def _run(self, postinstall, tmp_path, *, with_watchdog: bool = True,
+             wd_exit_code: int = 0, extra_args: str = ""):
         fake_home = tmp_path / "fake_home"
         fake_home.mkdir()
         with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
@@ -483,39 +493,79 @@ class TestCronWrapperIntegration:
         wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
 
         marker = tmp_path / "dispatched"
-        _install_stub_dispatcher(fake_home, marker)
-        fake_bin, log, restart_flag = _build_fake_bin(tmp_path, with_hermes=with_hermes)
+        self._install_stub_dispatcher(fake_home, marker)
+
+        if with_watchdog:
+            dispatch_home = fake_home / ".hermes" / "plugins" / "daedalus"
+            self._install_stub_watchdog(dispatch_home, exit_code=wd_exit_code)
 
         env = {
             "HOME": str(fake_home),
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            "GW_MODE": gw_mode,
+            "PATH": f"/usr/bin:/bin",
         }
-        subprocess.run(["bash", str(wrapper)], env=env,
-                       capture_output=True, text=True, timeout=30)
-        log_text = log.read_text() if log.exists() else ""
-        return marker, log_text
+        cmd = ["bash", str(wrapper)] + (extra_args.split() if extra_args else [])
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
+        return marker, result
 
-    def test_dead_gateway_triggers_restart(self, postinstall, tmp_path):
-        """A 'not running' status triggers exactly one restart; dispatcher still runs."""
-        marker, log_text = self._run(postinstall, tmp_path, gw_mode="down")
-        assert "gateway restart" in log_text
-        assert log_text.count("gateway restart") == 1
-        assert marker.exists(), "dispatcher must still be reached after the watchdog"
+    def test_watchdog_invoked_before_dispatcher(self, postinstall, tmp_path):
+        """The watchdog script runs before the dispatcher and dispatcher still runs."""
+        marker, result = self._run(postinstall, tmp_path)
+        assert marker.exists(), "dispatcher must be reached after the watchdog"
+        assert "watchdog invoked" in result.stderr
 
-    def test_live_gateway_skips_restart(self, postinstall, tmp_path):
-        """A running gateway is left alone — no restart invoked, dispatcher runs."""
-        marker, log_text = self._run(postinstall, tmp_path, gw_mode="up")
-        assert "gateway restart" not in log_text
-        assert "gateway status" in log_text
-        assert marker.exists()
+    def test_watchdog_missing_still_dispatches(self, postinstall, tmp_path):
+        """If gateway_watchdog.py is missing, dispatcher still runs (best-effort)."""
+        marker, result = self._run(postinstall, tmp_path, with_watchdog=False)
+        assert marker.exists(), "dispatcher must run even without the watchdog script"
+        assert "watchdog invoked" not in result.stderr
 
-    def test_missing_hermes_cli_is_best_effort(self, postinstall, tmp_path):
-        """No `hermes` on PATH: watchdog is skipped, dispatcher still reached."""
-        marker, log_text = self._run(
-            postinstall, tmp_path, gw_mode="down", with_hermes=False)
-        assert log_text == ""  # hermes never ran
-        assert marker.exists(), "dispatcher must run even without the hermes CLI"
+    def test_watchdog_failure_is_best_effort(self, postinstall, tmp_path):
+        """A non-zero watchdog exit does not block the dispatcher (best-effort)."""
+        marker, result = self._run(postinstall, tmp_path, wd_exit_code=1)
+        assert marker.exists(), "dispatcher must run even if the watchdog fails"
+
+    def test_flock_prevents_concurrent_watchdog(self, postinstall, tmp_path):
+        """Non-blocking flock: if lock is held, watchdog block exits silently."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            postinstall._install_cron_wrapper()
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+
+        # Pre-create the lock file and hold the lock for the duration of the run.
+        lock_path = fake_home / ".hermes" / "gateway-watchdog.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch()
+
+        marker = tmp_path / "dispatched"
+        self._install_stub_dispatcher(fake_home, marker)
+        dispatch_home = fake_home / ".hermes" / "plugins" / "daedalus"
+        self._install_stub_watchdog(dispatch_home)
+
+        # Hold the lock by exec-ing a background flock, then run the wrapper.
+        env = {"HOME": str(fake_home), "PATH": "/usr/bin:/bin"}
+        # Hold the lock via a subshell that sleeps with flock held
+        hold_lock_cmd = f"exec 9>{lock_path}; flock -n 9; sleep 30"
+        lock_holder = subprocess.Popen(
+            ["bash", "-c", hold_lock_cmd],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        import time; time.sleep(0.3)  # let flock settle
+
+        try:
+            result = subprocess.run(
+                ["bash", str(wrapper)], env=env,
+                capture_output=True, text=True, timeout=10,
+            )
+            # Watchdog must NOT have been invoked (lock held).
+            assert "watchdog invoked" not in result.stderr, (
+                "concurrent watchdog should be skipped under flock"
+            )
+            # Dispatcher must still run.
+            assert marker.exists(), "dispatcher must run even if watchdog is locked out"
+        finally:
+            lock_holder.terminate()
+            lock_holder.wait(timeout=5)
 
 
 def _install_recording_dispatcher(plugin_root, marker, record):
