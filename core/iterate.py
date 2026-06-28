@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from core import kanban, thresholds
+from core import kanban
 from core.providers.base import CIStatus, issue_linked_to_pr, parse_depends_on
 from core.util import extract_issue_number
 
@@ -36,8 +36,6 @@ APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
 ESCALATE = "escalate"         # max iterations exceeded → log + notify
 PLANNER_DECOMPOSE = "planner_decompose"  # planner completed → create sub-issues
 
-# Hardcoded constants have been moved to core/thresholds.py
-# Access them via thresholds.MAX_FIX_ATTEMPTS or thresholds.get('max_fix_attempts', 3)
 
 # Maximum fix attempts per PR before escalation
 MAX_FIX_ATTEMPTS = 3
