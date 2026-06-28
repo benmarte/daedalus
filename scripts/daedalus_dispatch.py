@@ -4168,17 +4168,37 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             # Phase 1: dispatch ONLY the validator. The dispatcher creates developer/
             # reviewer/security/documentation tasks ONLY after the validator completes
             # with a 'CONFIRMED:' summary. No other agent can start until then.
-            vid = kanban.create_task(
-                slug, f"#{n} {issue.get('title', '')}",
-                body=_validator_body(repo, issue, workdir, base_branch, provider.name,
-                                     _notify_targets(resolved, "security-escalation"),
-                                     coding_agent=_resolve_agent_for_role(execution, "validator"),
-                                     coding_agent_cmd=coding_agent_cmd),
-                assignee=profiles["validator"],
-                idempotency_key=f"validator-{n}",
-                workspace=f"dir:{workdir}" if workdir else "",
-                skills=role_skills.get("validator") or None,
+            # Idempotency check (t_a2f4bc9c): query for existing validator card BEFORE
+            # creation. If a validator task for this issue already exists and is
+            # pending/active, skip creation to prevent duplicate tasks on re-tick.
+            validator_key = f"validator-{n}"
+            # "Pending or active" covers every non-terminal state (todo/ready/running/
+            # blocked). Terminal states (done/cancelled) fall through so a fresh
+            # validator task can be created — the retry path uses distinct keys
+            # (validator-retry-{n}-rN) so this check does not interfere with it.
+            _ACTIVE_VALIDATOR_STATUSES = {"todo", "ready", "running", "in_progress", "blocked"}
+            existing_validator = next(
+                (t for t in kanban.list_tasks(slug)
+                 if (t.get("idempotency_key") or "") == validator_key
+                 and (t.get("status") or "").lower() in _ACTIVE_VALIDATOR_STATUSES),
+                None
             )
+            if existing_validator is not None:
+                logger.info("dispatch: #%s validator card already exists (%s, status=%s) — skipping duplicate",
+                            n, validator_key, existing_validator.get("status"))
+                vid = None
+            else:
+                vid = kanban.create_task(
+                    slug, f"#{n} {issue.get('title', '')}",
+                    body=_validator_body(repo, issue, workdir, base_branch, provider.name,
+                                         _notify_targets(resolved, "security-escalation"),
+                                         coding_agent=_resolve_agent_for_role(execution, "validator"),
+                                         coding_agent_cmd=coding_agent_cmd),
+                    assignee=profiles["validator"],
+                    idempotency_key=validator_key,
+                    workspace=f"dir:{workdir}" if workdir else "",
+                    skills=role_skills.get("validator") or None,
+                )
         if vid:
             created.append(n)
             existing.add(n)
