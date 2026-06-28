@@ -1756,16 +1756,6 @@ def _execute_planner_decompose_inner(
             if not dependencies:
                 # No dependencies = immediately actionable, apply Ready label + enroll on board
                 provider.add_label(sub_n, "Ready")
-                if hasattr(provider, "board_configured") and hasattr(provider, "board_set_status"):
-                    try:
-                        if provider.board_configured():
-                            ok = provider.board_set_status(sub_n, "Ready")
-                            if ok:
-                                logger.info("iterate: planner_decompose — added sub-issue #%s to board with Ready status", sub_n)
-                            else:
-                                logger.warning("iterate: planner_decompose — board_set_status(Ready) failed for sub-issue #%s", sub_n)
-                    except Exception as e:
-                        logger.warning("iterate: planner_decompose — board_set_status exception for sub-issue #%s: %s", sub_n, e)
                 ready_numbers.append(sub_n)
                 if getattr(provider, "board_configured", lambda: False)():
                     try:
@@ -1774,23 +1764,13 @@ def _execute_planner_decompose_inner(
                         logger.warning("iterate: planner_decompose — board_set_status(#%s, Ready) failed: %s", sub_n, exc)
                 logger.info("iterate: planner_decompose — applied Ready label to sub-issue #%s (no dependencies)", sub_n)
             else:
-                # Has dependencies = add to board in Backlog status
-                if hasattr(provider, "board_configured") and hasattr(provider, "board_ensure_backlog"):
-                    try:
-                        if provider.board_configured():
-                            ok = provider.board_ensure_backlog(sub_n)
-                            if ok:
-                                logger.info("iterate: planner_decompose — added sub-issue #%s to board with Backlog status", sub_n)
-                            else:
-                                logger.warning("iterate: planner_decompose — board_ensure_backlog failed for sub-issue #%s", sub_n)
-                    except Exception as e:
-                        logger.warning("iterate: planner_decompose — board_ensure_backlog exception for sub-issue #%s: %s", sub_n, e)
-                logger.info("iterate: planner_decompose — sub-issue #%s has %d dependencies, skipping Ready label", sub_n, len(dependencies))
+                # Has dependencies = add to board in Backlog status (not yet actionable)
                 if getattr(provider, "board_configured", lambda: False)():
                     try:
-                        provider.board_set_status(sub_n, "Todo")
+                        provider.board_ensure_backlog(sub_n)
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning("iterate: planner_decompose — board_set_status(#%s, Todo) failed: %s", sub_n, exc)
+                        logger.warning("iterate: planner_decompose — board_ensure_backlog(#%s) failed: %s", sub_n, exc)
+                logger.info("iterate: planner_decompose — sub-issue #%s has %d dependencies, skipping Ready label", sub_n, len(dependencies))
         else:
             logger.warning("iterate: planner_decompose — create_issue failed for %r", title)
 
