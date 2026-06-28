@@ -140,6 +140,8 @@ cron:
 
 ### Fixed
 
+PR #244 — implement `provider.has_label()` so tier promotion no longer re-labels and re-comments already-Ready issues on every dispatch tick. `sub_issues_of` regex in `core/providers/base.py` widened to accept the same format variants as `EPIC_REF_RE` (with/without colon, hyphens, `part of epic #N`). 16 regression tests added.
+
 - **Standalone test runner** (#124, closes #123) — internal fix to the standalone
   `__main__` test runner. No user-facing impact.
 
