@@ -1910,13 +1910,15 @@ def _mark_notified_block(slug: str, issue_number: int,
 
 def _has_downstream_tasks(slug: str, issue_number: int, *,
                           validator_profile: str = "validator-daedalus",
-                          pm_profile: str = "project-manager-daedalus") -> bool:
-    """Return True if any non-validator, non-PM kanban task exists for issue_number.
+                          pm_profile: str = "project-manager-daedalus",
+                          planner_profile: str = "planner-daedalus") -> bool:
+    """Return True if any non-validator, non-PM, non-planner kanban task exists for issue_number.
 
     Used by _check_completed_pm to avoid creating duplicate team triage cards.
+    Planner tasks are upstream dispatch artifacts, not downstream team tasks.
     """
     pattern = f"#{issue_number}"
-    pipeline_profiles = {validator_profile, pm_profile}
+    pipeline_profiles = {validator_profile, pm_profile, planner_profile}
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
