@@ -654,6 +654,240 @@ def test_repair_respects_custom_profiles():
           mk_reassign.call_args == mock.call("slug", "t_custom", "my-senior-dev"))
 
 
+# ── New orphan repair edge case tests ───────────────────────────────────────
+
+
+def test_repair_dry_run_does_not_mutate():
+    """_repair_orphan_tasks dry_run=True counts repairs but does not call reassign/rename."""
+    tasks = [{"id": "t_dry", "assignee": "developer", "title": "No prefix here", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #42"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES, dry_run=True)
+    check("dry run counts repairs", repaired > 0)
+    check("dry run does not call reassign", not mk_reassign.called)
+    check("dry run does not call rename", not mk_rename.called)
+
+
+def test_repair_both_bugs_on_single_task():
+    """A task with both generic assignee AND wrong title gets both repairs."""
+    tasks = [{"id": "t_both", "assignee": "developer", "title": "missing prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #55"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("both repairs applied", repaired == 2)
+    check("reassign called", mk_reassign.called)
+    check("rename called", mk_rename.called)
+
+
+def test_repair_skips_non_todo_ready_statuses():
+    """_repair_orphan_tasks only processes todo/ready tasks."""
+    tasks = [
+        {"id": "t_running", "assignee": "developer", "title": "no prefix", "status": "running"},
+        {"id": "t_blocked", "assignee": "developer", "title": "no prefix", "status": "blocked"},
+        {"id": "t_done", "assignee": "developer", "title": "no prefix", "status": "done"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no repairs for non-todo/ready", repaired == 0)
+    check("reassign not called", not mk_reassign.called)
+
+
+def test_repair_unknown_assignee_skips_reassign_but_still_renames():
+    """Unknown assignees are skipped for reassign but title fix still applies."""
+    tasks = [{"id": "t_unk", "assignee": "custom-dev", "title": "no prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #77"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("title fix still applied", repaired == 1)
+    check("reassign not called for unknown", not mk_reassign.called)
+    check("rename called", mk_rename.called)
+
+
+def test_repair_empty_task_id_skipped():
+    """Tasks with empty id are skipped."""
+    tasks = [{"id": "", "assignee": "developer", "title": "#42 fix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("empty id skipped", repaired == 0)
+    check("reassign not called", not mk_reassign.called)
+
+
+def test_repair_reassign_failure_not_counted():
+    """If reassign_task returns False, repair is not counted."""
+    tasks = [{"id": "t_fail", "assignee": "developer", "title": "#42 fix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=False):
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("reassign failure not counted", repaired == 0)
+
+
+def test_repair_valid_profile_assignee_skips_show_card():
+    """Valid profile assignees skip show_card call (optimization)."""
+    tasks = [{"id": "t_valid", "assignee": "developer-daedalus", "title": "no prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "show_card", return_value={}) as mk_show, \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("valid profile skips show_card", not mk_show.called)
+
+
+def test_repair_rename_failure_not_counted():
+    """If rename_task returns False, repair is not counted."""
+    tasks = [{"id": "t_rnfl", "assignee": "developer-daedalus", "title": "no prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #99"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=False), \
+         mock.patch.object(disp, "_find_issue_n_from_parents", return_value=None):
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("rename failure not counted", repaired == 0)
+
+
+def test_repair_multiple_tasks_all_fixed():
+    """Multiple orphan tasks all get repaired."""
+    tasks = [
+        {"id": "t1", "assignee": "developer", "title": "no prefix1", "status": "todo"},
+        {"id": "t2", "assignee": "qa", "title": "no prefix2", "status": "ready"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #11"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("all tasks repaired", repaired == 4)
+    check("reassign called twice", mk_reassign.call_count == 2)
+    check("rename called twice", mk_rename.call_count == 2)
+
+
+# ── _find_issue_n_from_parents tests ───────────────────────────────────────
+
+
+def test_find_issue_n_from_parents_no_db_returns_none(tmp_path):
+    """Missing DB returns None."""
+    result = disp._find_issue_n_from_parents(tmp_path / "missing.db", "t_child")
+    check("missing db returns None", result is None)
+
+
+def test_find_issue_n_from_parents_finds_issue_in_parent_title(tmp_path):
+    """Finds issue number in parent task title."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")  # Create empty file
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_parent', 'Fix #112', 'body')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_parent')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("found issue in parent title", result == 112)
+
+
+def test_find_issue_n_from_parents_finds_issue_in_parent_body(tmp_path):
+    """Falls back to parent body when title has no issue."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_parent', 'Some task', 'fix for #205')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_parent')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("found issue in parent body", result == 205)
+
+
+def test_find_issue_n_from_parents_no_parents_returns_none(tmp_path):
+    """Task with no parents returns None."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_child', 'Orphan', 'no parents')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("no parents returns None", result is None)
+
+
+def test_find_issue_n_from_parents_parent_without_issue_number_returns_none(tmp_path):
+    """Parent exists but has no issue number → returns None."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_parent', 'Parent task', 'no issue here')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_parent')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("parent without issue returns None", result is None)
+
+
+def test_find_issue_n_from_parents_multiple_parents_returns_first(tmp_path):
+    """Multiple parents → returns first issue number found."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_p1', 'Fix #201', 'first parent')")
+    conn.execute("INSERT INTO tasks VALUES ('t_p2', 'Fix #202', 'second parent')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_p1')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_p2')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("found first parent issue", result == 201)
+
+
+def test_find_issue_n_from_parents_db_error_returns_none(tmp_path):
+    """Invalid DB → returns None."""
+    db_path = tmp_path / "bad.db"
+    db_path.write_text("not a sqlite db")
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("db error returns None", result is None)
+
+
+def test_count_active_issue_tasks_empty_board_returns_zero():
+    """Empty board returns zero active tasks."""
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[]):
+        count = disp._count_active_issue_tasks("slug", 42)
+    check("empty board returns zero", count == 0)
+
+
+def test_count_active_issue_tasks_cancelled_not_counted():
+    """Cancelled tasks are not counted as active."""
+    tasks = [
+        {"id": "t1", "title": "Fix #42 bug", "status": "cancelled"},
+        {"id": "t2", "title": "Fix #42 bug", "status": "done"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        count = disp._count_active_issue_tasks("slug", 42)
+    check("cancelled tasks not counted", count == 0)
+
+
 # ── _downstream_body rules section (Fix 4) ───────────────────────────────────
 
 
