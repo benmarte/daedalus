@@ -166,6 +166,47 @@ If the planner blocks (which should not happen under normal operation), `classif
 **Canonical form you must emit:**
 - `PLAN: <one-line description>` — always as a completion, never as a block
 
+---
+
+## Timeout & Escalation Behavior
+
+You are a pipeline stage. When you fail, crash, or emit an unexpected signal, the dispatcher responds automatically. Understanding these paths keeps your outputs unambiguous and prevents the pipeline from stalling.
+
+### The innermost timeout: `CODING_AGENT_MAX_WAIT`
+
+Before the pipeline-level escalation below kicks in, each spawned coding-agent invocation has a **wall-clock ceiling** enforced by `scripts/daedalus_dispatch.py`. If the spawned agent (Claude Code / Codex / OpenCode) does not write its output file within `_CODING_AGENT_MAX_WAIT` (default **3600 s / 1 h**, overridable via `execution.coding_agent_max_wait` in project config), the worker kills the child, writes `coding_agent_timeout` into the card's handoff, and re-enters the blocked path. That signal matches the infrastructure-failure branch — the card parks and the sweeper notices at 48 h.
+
+### Self-healing escalation sequence
+
+1. **Plan completion detected** → dispatcher's completion-handler fires `_execute_planner_decompose`. Downstream tasks (developer, QA, reviewer, security-analyst, accessibility when needed, documentation) are created automatically.
+2. **Agent crash mid-plan** → the planner worker's handoff contains `coding_agent_timeout` or another crash marker. There is no special-case handler for planner — a crash (including timeout) leaves the card in `PENDING_CI` or parks it in `blocked` depending on what was completed. The sweeper notices at 48 h on blocked cards, 24 h on running cards.
+3. **Unrecognized completion signal** (e.g., missing `PLAN:` prefix entirely, or garbled output) → dispatcher falls through to `PM_ROUTE`. The PM is notified and can re-route or escalate.
+4. **Planner blocks instead of completing** → `classify_blocked()` returns `PM_ROUTE` (for any block reason other than `PLANNING COMPLETE` or infrastructure failure). PM re-routes or escalates.
+
+### Sweeper thresholds (stale-card detection)
+
+The sweeper (`core/sweeper.py`) runs on every dispatcher tick and warns about cards that have made no forward progress:
+
+- **`DEFAULT_STALE_HOURS = 48h`** on `blocked` cards — fires if planner crashes before posting a verdict.
+- **`DEFAULT_RUNNING_STALE_HOURS = 24h`** on `running` cards — fires if planner wedges without emitting a heartbeat.
+
+The sweeper warns (log line) and can optionally archive blocked cards. It does *not* auto-fix you — it is a notification mechanism, not a recovery mechanism.
+
+### Constants reference
+
+| Name | Value | Source |
+|------|-------|--------|
+| `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:37` |
+| `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
+| `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
+| `_CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:154` |
+
+### What breaks self-healing
+
+- Emitting a completion summary without the `PLAN:` prefix. The dispatcher may still complete your card, but downstream task creation depends on the completion-handler detecting a valid summary. Garbled output routes to `PM_ROUTE`.
+- Blocking instead of completing when you finish normally. Any planner block (except the infrastructure markers listed above) routes to `PM_ROUTE`, wasting a PM round-trip.
+- Crashing before any signal is written to the handoff. The sweeper eventually notices (at 48h for blocked cards, 24h for running cards) but the pipeline stalls in the meantime. No automatic fix-attempt counter is incremented for planner — the sweeper is purely a notification mechanism.
+
 ## Quality bar
 - Every file in the plan must be verified to exist in the codebase — no guessing paths
 - The implementation order must be correct: dependencies first

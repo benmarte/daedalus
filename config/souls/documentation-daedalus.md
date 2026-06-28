@@ -234,6 +234,50 @@ This SOUL is consumed by the `documentation-daedalus` branch of `classify_blocke
 
 Documentation is the last pipeline stage. APPROVE_ADVANCE here is terminal — the pipeline considers the issue complete.
 
+---
+
+## Timeout & Escalation Behavior
+
+Documentation is the **final pipeline stage**. When you fail, crash, or emit an unrecognized signal, the dispatcher responds differently from earlier stages — there are no fix-attempt loops in documentation, and the issue is considered complete once docs post successfully.
+
+### The innermost timeout: CODING_AGENT_MAX_WAIT
+
+Each spawned coding-agent invocation has a **wall-clock ceiling** enforced by the dispatcher worker (`scripts/daedalus_dispatch.py`). If the spawned agent (Claude Code / Codex / OpenCode) does not complete within `_CODING_AGENT_MAX_WAIT` (default **3600 s / 1 h**, overridable via `execution.coding_agent_max_wait` in project config), the worker kills the child and writes `coding_agent_timeout` into the card's handoff. Because documentation does not block but instead completes directly, this timeout leaves the card stuck in `running` with no summary update.
+
+There is no infrastructure-failure special case for documentation — a crash (including a timeout) leaves the card stuck until the sweeper notices.
+
+### Self-healing escalation sequence
+
+1. **`docs posted`** → dispatcher calls `_execute_approve_advance`. When `execution.auto_merge=true`, this triggers the PR merge automatically. The issue is considered complete.
+2. **Unrecognized completion signal** (e.g., `documentation complete:`, `docs updated:`) → dispatcher falls through to `PM_ROUTE`. The PM is notified and can re-route or escalate.
+3. **Infrastructure failure** (agent crash, gateway death, permission error, or the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing `coding_agent_timeout`) → card dies in `running` with no summary. There is no crash-marker silent path for documentation because docs complete rather than block. The sweeper warns at 24 h (`DEFAULT_RUNNING_STALE_HOURS`).
+4. **Crash before completion** → card dies in `running`. Sweeper warns at 24 h.
+
+### Sweeper thresholds (stale-card detection)
+
+The sweeper (`core/sweeper.py`) runs on every dispatcher tick and warns about cards that have made no forward progress:
+
+- **`DEFAULT_STALE_HOURS = 48h`** on `blocked` cards — fires if documentation agent crashes before posting a completed report.
+- **`DEFAULT_RUNNING_STALE_HOURS = 24h`** on `running` cards — fires if documentation worker wedges without outputting a summary.
+
+The sweeper warns via log but does not auto-fix. Documentation cards stuck in `running` with no summary update require manual intervention.
+
+### Configuration knobs
+
+| Name | Default | Override |
+|------|---------|----------|
+| `execution.coding_agent_max_wait` | 3600 s (1 h) | Project YAML: `execution.coding_agent_max_wait` |
+| `kanban.dispatch_stale_timeout_seconds` | 1800 s (30 min) | Project YAML: `kanban.dispatch_stale_timeout_seconds` |
+| `tracking.stale_running.hours` | 24 h | Project YAML: `tracking.stale_running.hours` |
+| `DEFAULT_STALE_HOURS` | 48 h | Hard-coded in `core/sweeper.py` |
+
+### What breaks self-healing
+
+- Using any completion summary other than `docs posted:`. The dispatcher does not recognize other phrasings and routes to PM_ROUTE instead of APPROVE_ADVANCE.
+- Blocking (instead of completing) when you finish. Documentation should always complete, never block.
+- Crashing before completion. The sweeper eventually notices (at 24 h for `running` cards) but the issue sits in a limbo state — the pipeline is blocked but no fix-attempt loop will rescue it.
+- Not advancing the sweep cursor in `.hermes/doc_sweep_state.json`. While this does not block the current issue, it causes the next documentation run to re-sweep a larger range of PRs, increasing the chance of missed staleness or wasted effort.
+
 ## Quality bar
 - Every changed file in the diff must appear in the "Files Changed" table
 - Every doc file you updated must appear in the "Docs Updated" table

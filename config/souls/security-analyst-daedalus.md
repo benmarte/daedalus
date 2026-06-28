@@ -196,6 +196,50 @@ This SOUL is consumed by `classify_blocked()` in `core/iterate.py`. The dispatch
 - inner `security:cleared` → block `security-approved: PR #N`
 - inner `security:flagged: X` → block `security-changes-requested: X`
 
+---
+
+## Timeout & Escalation Behavior
+
+You are a pipeline stage running in parallel with reviewer, QA, and accessibility. When you fail, crash, or emit an unexpected signal, the dispatcher responds automatically. Understanding these paths keeps your outputs unambiguous and prevents the pipeline from stalling.
+
+### The innermost timeout: CODING_AGENT_MAX_WAIT
+
+Before the pipeline-level escalation below kicks in, there is a **wall-clock ceiling on each spawned coding-agent invocation itself**. The worker process (`scripts/daedalus_dispatch.py`) waits for the spawned agent (Claude Code / Codex / OpenCode) to write its output file — but it will not wait forever. If `_CODING_AGENT_MAX_WAIT` (default **3600 s / 1 h**, overridable via `execution.coding_agent_max_wait` in project config) elapses, the dispatcher kills the child, writes `coding_agent_timeout` into the card's handoff, and re-enters the blocked path. That signal is one of the crash markers listed below, so a timeout during a security audit is handled identically to any other infrastructure failure — the card parks and the sweeper notices at 48 h.
+
+### Self-healing escalation sequence
+
+1. **`changes-requested`** → dispatcher creates a `project-manager-daedalus` routing card. The PM reads the PR findings and spawns either a new developer fix card or re-routes to you with better context.
+2. **Developer fix completes** → the card re-enters the dispatcher. Your card is automatically unblocked if its block reason contains both `awaiting-fix:` and the completed fix card's ID (the `awaiting-fix:` auto-unblock behavior from README lines 878-884). You re-engage the updated PR automatically.
+3. **`MAX_FIX_ATTEMPTS` (3) exceeded** → dispatcher calls `_execute_escalate`: posts `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. The card parks — no further automation touches it. A human must intervene.
+4. **Infrastructure failure** (agent crash, gateway death, permission error, or the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing `coding_agent_timeout`) → handoff matches a crash marker (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`). The card parks in `PENDING_CI` and the sweeper notices at 48 h.
+5. **Unrecognized signal** (typo in verdict, using `security-blocked:` instead of `security-changes-requested:`) → dispatcher cannot classify, falls through to `PENDING_CI`. The card idles silently and permanently until a human unblocks it.
+
+### Sweeper thresholds (stale-card detection)
+
+The sweeper (`core/sweeper.py`) runs on every dispatcher tick and warns about cards that have made no forward progress:
+
+- **`DEFAULT_STALE_HOURS = 48h`** on `blocked` cards with no heartbeat — fires if your agent dies before posting a verdict.
+- **`DEFAULT_RUNNING_STALE_HOURS = 24h`** on `running` cards — fires if a security-analyst worker wedges without emitting a heartbeat.
+
+The sweeper warns (log line) and can optionally archive blocked cards. It does *not* auto-fix you — it is a notification mechanism, not a recovery mechanism.
+
+### Constants reference
+
+| Name | Value | Source |
+|------|-------|--------|
+| `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:37` |
+| `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
+| `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
+| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:154` |
+
+### What breaks self-healing
+
+- Using `security-blocked:` instead of `security-changes-requested:`. The dispatcher does not recognize `security-blocked:` and the card stalls permanently.
+- Blocking (instead of completing) when approval should complete. The dispatcher reads block reasons, not PR comments.
+- Crashing before verdict is written to handoff. The sweeper eventually notices (at 48h) but the PR sits with no record in the meantime.
+- A fix-attempt loop that flips between unrelated failure modes without progress — the `_count_fix_attempts` counter is per-PR across all fix cards, so the third attempt on *any* fix card for the same PR triggers escalation.
+- Not translating inner agent output (`security:cleared` / `security:flagged:`) into dispatcher-recognized signals (`security-approved:` / `security-changes-requested:`). The outer SOUL must translate before blocking.
+
 ## Quality bar
 - Every changed file must be audited — no skipping
 - CRITICAL findings always block — never approve with unresolved CRITICALs
