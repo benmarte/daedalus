@@ -833,56 +833,23 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     return issues
 
 
-# API-based instructions only — no gh/glab/az CLIs are installed for workers.
+# Agents no longer post their own GitHub comments (#894). GITHUB_TOKEN is NOT
+# exported into the cron worker environment, so the old urllib/token snippets
+# raised KeyError and the progress comment was silently dropped. Instead, the
+# dispatcher mirrors each role's kanban completion summary to the issue via its
+# already-authenticated provider (see ``_post_completion_comments``). The
+# how-to string below therefore just tells the agent NOT to post — and to write
+# a clear kanban summary, which the dispatcher posts on its behalf.
+_AGENT_COMMENT_NOTE = (
+    "the dispatcher — it automatically posts your completion summary to the "
+    "issue when your kanban card completes, so you do NOT post GitHub comments "
+    "yourself. Just write a clear kanban completion summary stating your role, "
+    "your findings/decision, and the next steps"
+)
 _PR_COMMENT_HOWTO = {
-    "github": (
-        "your GITHUB_TOKEN env var. "
-        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal for this, "
-        "as markdown content with backticks and quotes breaks shell escaping. "
-        "Python example:\n"
-        "```python\n"
-        "import os, urllib.request, json\n"
-        "body = '''<your full report markdown here>'''\n"
-        "req = urllib.request.Request(\n"
-        "    'https://api.github.com/repos/{repo}/issues/<number>/comments',\n"
-        "    data=json.dumps({{'body': body}}).encode(),\n"
-        "    headers={{'Authorization': f'Bearer {{os.environ[\"GITHUB_TOKEN\"]}}',\n"
-        "             'Accept': 'application/vnd.github+json'}}, method='POST')\n"
-        "print(urllib.request.urlopen(req).read())\n"
-        "```"
-    ),
-    "gitlab": (
-        "your GITLAB_TOKEN env var. "
-        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
-        "Python example:\n"
-        "```python\n"
-        "import os, urllib.request, json\n"
-        "body = '''<your full report markdown here>'''\n"
-        "req = urllib.request.Request(\n"
-        "    'https://gitlab.com/api/v4/projects/<project-id>/issues/<number>/notes',\n"
-        "    data=json.dumps({{'body': body}}).encode(),\n"
-        "    headers={{'PRIVATE-TOKEN': os.environ['GITLAB_TOKEN'],\n"
-        "             'Content-Type': 'application/json'}}, method='POST')\n"
-        "print(urllib.request.urlopen(req).read())\n"
-        "```"
-    ),
-    "azuredevops": (
-        "your AZURE_DEVOPS_PAT env var. "
-        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
-        "Python example:\n"
-        "```python\n"
-        "import os, urllib.request, json, base64\n"
-        "pat = os.environ['AZURE_DEVOPS_PAT']\n"
-        "auth = base64.b64encode(f':{pat}'.encode()).decode()\n"
-        "body = '''<your full report markdown here>'''\n"
-        "payload = {{'comments': [{{'parentCommentId': 0, 'content': body, 'commentType': 1}}], 'status': 1}}\n"
-        "req = urllib.request.Request(\n"
-        "    'https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullRequests/<pr>/threads?api-version=7.1',\n"
-        "    data=json.dumps(payload).encode(),\n"
-        "    headers={{'Authorization': f'Basic {{auth}}', 'Content-Type': 'application/json'}}, method='POST')\n"
-        "print(urllib.request.urlopen(req).read())\n"
-        "```"
-    ),
+    "github": _AGENT_COMMENT_NOTE,
+    "gitlab": _AGENT_COMMENT_NOTE,
+    "azuredevops": _AGENT_COMMENT_NOTE,
 }
 
 _CLOSE_ISSUE_HOWTO = {
@@ -1233,6 +1200,89 @@ def _get_task_summary(task: Dict[str, Any], slug: str) -> str:
     return summary_raw
 
 
+def _format_completion_comment(role: str, title: str, summary: str) -> str:
+    """Render a role's kanban completion summary as a GitHub issue comment body.
+
+    Used by ``_post_completion_comments`` (#894). Leads with ``**Agent: <role>**``
+    so the issue thread mirrors the prior agent-posted convention.
+    """
+    summary = (summary or "").strip()
+    lines = [f"**Agent: {role}**", ""]
+    if title:
+        lines.append(f"**Task:** {title}")
+        lines.append("")
+    lines.append(summary or "_Completed — no summary was recorded on the kanban card._")
+    return "\n".join(lines)
+
+
+def _post_completion_comments(
+    slug: str, provider, profiles: Dict[str, str], workdir: str,
+    *, dry_run: bool = False,
+) -> List[int]:
+    """Mirror each completed pipeline role's kanban summary to its GitHub issue.
+
+    Replaces the old agent-side comment posting (#894): agents no longer
+    authenticate to GitHub themselves (``GITHUB_TOKEN`` is not exported into the
+    cron worker env, so the old ``urllib`` snippets raised ``KeyError`` and the
+    comment was silently dropped). On every tick the dispatcher scans DONE cards
+    and, for each pipeline role's card, posts the card's summary to the issue via
+    its already-authenticated ``provider`` — exactly once per ``(issue, role)``,
+    tracked with a ``dispatch_state`` flag so a comment is never re-posted.
+
+    Already-closed issues are skipped (and flagged) so a backlog of historical
+    DONE cards can't spam old/closed issues on first run after deploy.
+
+    Returns the issue numbers a comment was posted to (for the human summary).
+    """
+    if provider is None:
+        return []
+    role_by_assignee = {
+        (assignee or "").strip(): role
+        for role, assignee in (profiles or {}).items()
+        if (assignee or "").strip()
+    }
+    posted: List[int] = []
+    for card in kanban.list_tasks(slug, status="done"):
+        assignee = (card.get("assignee") or "").strip()
+        role = role_by_assignee.get(assignee)
+        if not role:
+            continue
+        n = extract_issue_number(card.get("title") or "")
+        if n is None:
+            continue
+        flag = f"completion_comment_{role}"
+        if dispatch_state.has_pr_flag(workdir, n, flag):
+            continue
+        # Don't spam historical/closed issues. Mark handled so the closed-state
+        # lookup isn't repeated for this card on every subsequent tick.
+        if hasattr(provider, "get_issue_state") and provider.get_issue_state(n) == "closed":
+            dispatch_state.set_pr_flag(workdir, n, flag)
+            continue
+        body = _format_completion_comment(
+            role, card.get("title") or "", _get_task_summary(card, slug),
+        )
+        if dry_run:
+            logger.info("dispatch: [dry-run] would post %s completion comment on #%s", role, n)
+            posted.append(n)
+            continue
+        try:
+            if provider.post_issue_comment(n, body):
+                dispatch_state.set_pr_flag(workdir, n, flag)
+                posted.append(n)
+                logger.info("dispatch: posted %s completion comment on #%s", role, n)
+            else:
+                logger.warning(
+                    "dispatch: post_issue_comment #%s (%s) returned falsy — will retry next tick",
+                    n, role,
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "dispatch: post_issue_comment #%s (%s) raised %s — will retry next tick",
+                n, role, exc,
+            )
+    return posted
+
+
 def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
                notify_target: str = "", base_branch: str = "dev",
                provider_name: str = "github",
@@ -1253,8 +1303,11 @@ def _task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: str,
     _body = (
         f"Deliver issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
-        f"🚨 MANDATORY FOR ALL ROLES: Upon completing your assigned step (whether finishing, requesting changes, or blocking), you MUST post a summary comment to the GitHub issue #{n} using: {comment_howto}.\n"
-        f"Your comment must clearly state: your role, your findings/decision, and the explicit next steps. This ensures the GitHub issue history accurately reflects the current state, keeping human reviewers informed directly in GitHub, not just on the internal Kanban board.\n\n"
+        f"📋 PROGRESS COMMENTS ARE AUTOMATIC FOR ALL ROLES: Do NOT post GitHub comments yourself. "
+        f"When you complete (or block) your kanban card, the dispatcher mirrors your completion summary "
+        f"to GitHub issue #{n} automatically, using credentials it already holds. Make that summary clear: "
+        f"state your role, your findings/decision, and the explicit next steps. This keeps the GitHub issue "
+        f"history in sync with the internal Kanban board for human reviewers.\n\n"
         f"Decompose this into the following role tasks IN ORDER — each depends on the previous:\n\n"
         f"0. VALIDATOR — before any code is written, validate that issue #{n} is real, "
         f"reproducible, and not already addressed. Work in {workdir}.\n"
@@ -1399,9 +1452,9 @@ def _validator_body(repo: str, issue: Dict[str, Any], workdir: str, base_branch:
         f"`git add`, or any git write command. DO NOT open pull requests. "
         f"Your ONLY deliverable is a classification decision written as your kanban card summary. "
         f"The developer agent will implement the fix AFTER you confirm the issue is valid and safe.\n\n"
-        f"🚨 MANDATORY: Upon completing validation (any outcome), post a summary comment to "
-        f"GitHub issue #{n} using: {comment_howto}. Your comment must state: role (VALIDATOR), "
-        f"findings/decision, and next steps.\n\n"
+        f"📋 PROGRESS COMMENTS ARE AUTOMATIC: Do NOT post GitHub comments yourself. When you complete "
+        f"(or block) your kanban card, the dispatcher mirrors your completion summary to GitHub issue "
+        f"#{n} automatically. Make that summary clear: role (VALIDATOR), findings/decision, and next steps.\n\n"
         f"You are the VALIDATOR for issue #{n}. Your task is to evaluate this issue BEFORE any code "
         f"is written. No developer, reviewer, or other agent starts until you complete your decision.\n\n"
         f"Steps (READ ONLY — no file writes):\n"
@@ -1604,9 +1657,9 @@ def _downstream_body(repo: str, issue: Dict[str, Any], iterations: int, workdir:
         f"The VALIDATOR confirmed this issue is real and safe. The PM has written the spec — "
         f"read it on GitHub issue #{n} before starting. "
         f"Work in the existing git repo at {workdir} (cd there first). Base branch: {base_branch}.\n\n"
-        f"🚨 MANDATORY FOR ALL ROLES: Upon completing your assigned step (whether finishing, "
-        f"requesting changes, or blocking), you MUST post a summary comment to GitHub issue #{n} "
-        f"using: {comment_howto}. Your comment must clearly state: your role, your findings/decision, "
+        f"📋 PROGRESS COMMENTS ARE AUTOMATIC FOR ALL ROLES: Do NOT post GitHub comments yourself. "
+        f"When you complete (or block) your kanban card, the dispatcher mirrors your completion summary "
+        f"to GitHub issue #{n} automatically. Make that summary clear: your role, your findings/decision, "
         f"and the explicit next steps.\n\n"
         f"⛔ HARD STOP FOR ALL ROLES: If you discover the validator card for issue #{n} was NOT "
         f"actually CONFIRMED (summary doesn't start with 'CONFIRMED:' AND no GitHub comment on "
@@ -1646,7 +1699,6 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
     n, title, body, _ = _unpack_issue(issue)
     _h = _resolve_howtos(provider_name, repo, n)
     pr_create_howto = _h["pr_create"]
-    comment_howto = _h["comment"]
     _body = _prepend_delegation((
         f"You are the DEVELOPER for issue {repo}#{n}: {title}\n"
         f"Work in the existing git repo at {workdir}. Base branch: {base_branch}.\n\n"
@@ -1675,8 +1727,9 @@ def _dev_task_body(repo: str, issue: Dict[str, Any], iterations: int, workdir: s
         f"⛔ NEVER merge — merging is human-only. Do NOT run `gh pr merge`.\n"
         f"PR body MUST include `Closes #{n}` on its own line.\n"
         f"Include sections: Problem, Fix, How to test, Manual testing.\n\n"
-        f"### 4. Post comment on issue\n"
-        f"Post implementation summary on GitHub issue #{n} using: {comment_howto}\n\n"
+        f"### 4. Progress comment (automatic)\n"
+        f"Do NOT post a GitHub comment yourself — the dispatcher posts your completion summary to "
+        f"issue #{n} when your card is completed. Just keep your kanban summary clear.\n\n"
         f"### 5. Block your kanban card\n"
         f"Block with: `review-required: PR #<pr_number> — fix/issue-{n}-<slug>`\n"
         f"⛔ Do NOT complete your card — the dispatcher completes it after QA passes.\n\n"
@@ -3734,6 +3787,11 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    # Mirror each completed role's kanban summary to its GitHub issue (#894).
+    # Agents no longer post their own comments (GITHUB_TOKEN is absent in the
+    # cron worker env); the dispatcher posts via its authenticated provider.
+    _post_completion_comments(slug, provider, profiles, workdir, dry_run=dry_run)
 
     follow_up_count = _check_follow_ups_from_reviewer_prs(
         slug, repo, provider, workdir, profiles, _follow_up_cfg, dry_run=dry_run,

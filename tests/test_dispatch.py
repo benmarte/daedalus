@@ -1885,7 +1885,11 @@ def test_unpack_issue_defaults():
 def test_resolve_howtos_keys_and_github_default():
     h = disp._resolve_howtos("github", "org/repo", 5)
     assert set(h) == {"comment", "pr_create", "close_completed", "close_wontfix"}
-    assert "org/repo" in h["comment"]
+    # #894: the comment how-to no longer tells agents to POST via GITHUB_TOKEN;
+    # it redirects them to the dispatcher (which posts on their behalf).
+    assert "GITHUB_TOKEN" not in h["comment"]
+    assert "urllib" not in h["comment"]
+    assert "dispatcher" in h["comment"]
     assert "org/repo/issues/5" in h["close_completed"]
     assert "completed" in h["close_completed"]
     assert "not_planned" in h["close_wontfix"]
