@@ -280,6 +280,33 @@ class TestStopAutoCloseComment:
         assert "already fixed" in body.lower(), f"Comment missing reason: {body[:80]}"
 
 
+    def test_stop_reason_has_no_leading_colon(self, disp, fake_kanban, monkeypatch):
+        """Regression: summary_raw slice must match the 'STOP:' prefix length (5).
+
+        Previously the slice was ``[4:]`` which left a stray ':' in the stop
+        reason and produced malformed comment text like
+        ``STOP: validator — : duplicate of #9``.
+        """
+        _seed_tasks(fake_kanban, [
+            {"assignee": VALIDATOR, "status": "done",
+             "title": "#76 duplicate", "summary": "STOP: duplicate of #9"},
+        ])
+        monkeypatch.setattr(disp, "kanban", fake_kanban)
+        provider = FakeProvider()
+
+        _call(disp, fake_kanban, {76: _issue(76)}, provider=provider)
+
+        comments = provider.posted_issue_comments
+        assert len(comments) == 1
+        body = comments[0][1]
+        # The reason text must appear without a leading colon.
+        marker = "Auto-closed by STOP: validator — "
+        assert marker in body, f"Comment missing STOP marker: {body[:120]}"
+        reason = body.split(marker, 1)[1].splitlines()[0].strip()
+        assert not reason.startswith(":"), f"Leading colon in reason: {reason!r}"
+        assert reason.lower().startswith("duplicate of #9"), f"Unexpected reason: {reason!r}"
+
+
     def test_stop_post_issue_comment_failure(self, disp, fake_kanban, monkeypatch, caplog):
         """If post_issue_comment returns False, close_issue still succeeds and
         the marker task is still created (no crash)."""
