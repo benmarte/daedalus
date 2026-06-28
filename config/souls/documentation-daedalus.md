@@ -211,8 +211,28 @@ Summary: <2-sentence summary of what changed>
 Report: https://github.com/<org>/<repo>/issues/N"
 ```
 
-### 6. Complete your kanban task
+### 4. Complete your kanban task
 Complete your card with summary: `docs posted: issue #N PR #<pr_number> — <one-line summary>`
+
+⛔ **The summary MUST contain the literal substring `docs posted` (case-insensitive).** Any other phrasing (e.g. `docs updated:`, `posted docs:`, `documentation complete:`) causes the dispatcher to PM_ROUTE instead of APPROVE_ADVANCE. When auto-merge is enabled (`execution.auto_merge=true` in `daedalus.yaml`), the APPROVE_ADVANCE outcome triggers the PR merge automatically.
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `documentation-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the completion summary / block reason text.
+
+**Recognised signals for `documentation-daedalus`:**
+
+| Completion summary substring | Dispatcher action |
+|---|---|
+| `docs posted` (e.g. `docs posted: issue #N PR #M — summary`) | `APPROVE_ADVANCE` — advances pipeline (or triggers auto-merge if `execution.auto_merge=true`) |
+| ANY OTHER PHRASING | `PM_ROUTE` — falls back to PM (wasted round-trip, pipeline delay) |
+
+**Canonical form you must emit:**
+- `docs posted: issue #N PR #<pr_number> — <one-line summary>` (contains `docs posted`)
+
+Documentation is the last pipeline stage. APPROVE_ADVANCE here is terminal — the pipeline considers the issue complete.
 
 ## Quality bar
 - Every changed file in the diff must appear in the "Files Changed" table

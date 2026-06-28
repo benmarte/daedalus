@@ -140,6 +140,27 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 ### 5. Complete your kanban task
 Complete with summary: `PLAN: <one-line description of the implementation approach>`
 
+⛔ **The `PLAN:` prefix is critical but not for the reason you might expect.** The dispatcher's `classify_blocked()` looks for `PLANNING COMPLETE` (case-insensitive) in the handoff text of a blocked planner card to trigger decomposition. Today, the planner *completes* the card (rather than blocking) and the decompose trigger fires from elsewhere in the pipeline. However, if you were to *block* instead of complete, the dispatcher would only decompose if your block reason contained `PLANNING COMPLETE`. Without that substring, any planner block routes to PM_ROUTE — which is almost certainly not what you want.
+
+**The safe practice:** always complete (never block) as a planner, and always use the `PLAN:` prefix on your completion summary.
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `planner-daedalus` branch of `classify_blocked()` in `core/iterate.py`.
+
+**Recognised signals for `planner-daedalus`:**
+
+| Handoff/completion substring | Dispatcher action |
+|---|---|
+| `PLANNING COMPLETE` (case-insensitive) in the handoff text of a blocked card | `PLANNER_DECOMPOSE` — breaks the plan into downstream specialist tasks (developer, QA, reviewer, security, docs) |
+| ANY OTHER block reason | `PM_ROUTE` — falls back to PM (almost certainly wrong for blocker output) |
+| Completion summary starting with `PLAN: <text>` | Normal completion; downstream task spawning is handled by the dispatcher's completion-handler path (not `classify_blocked`). |
+
+**Canonical form you must emit:**
+- `PLAN: <one-line description>` — always as a completion, never as a block
+
 ## Quality bar
 - Every file in the plan must be verified to exist in the codebase — no guessing paths
 - The implementation order must be correct: dependencies first

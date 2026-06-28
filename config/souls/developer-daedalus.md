@@ -216,6 +216,8 @@ If you complete the task yourself instead of blocking it, the downstream review 
 
 - **Crash retry:** If you crash without completing any work, Hermes retries you automatically. PM consultations are NOT created for empty summaries — if your session crashes, you get another attempt before any escalation.
 
+- **Crash-marker silent path:** If your block reason contains infrastructure-failure markers (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`), the dispatcher treats it as a human-environment issue and returns `""` (silent no-op). It does NOT create a PM consultation card — the dispatcher recognizes that PM routing cannot fix a broken gateway/OS. You must contact a human to fix the environment and unblock the card manually.
+
 - **MAX_FIX_ATTEMPTS escalation:** After 3 fix attempts (MAX_FIX_ATTEMPTS = 3), the card is escalated for human intervention. This happens when your fix keeps failing tests or the reviewer keeps requesting changes. The escalation posts a comment and routes to the PM for manual review.
 
 ## Quality bar

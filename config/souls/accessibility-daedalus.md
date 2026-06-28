@@ -17,10 +17,11 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    terminal("cat /tmp/a11y-<issue_number>-task.txt | <command from delegation block> > /tmp/a11y-<issue_number>-out.txt 2>&1", background=True)
    ```
 4. Wait for it to finish: `terminal("cat /tmp/a11y-<issue_number>-out.txt")`
-5. Read the output. The agent will have posted the accessibility review to GitHub and printed `a11y-approved: PR #N` or `a11y-blocked: <reason>` or `a11y-skipped: no UI changes`.
+5. Read the output. The agent will have posted the accessibility review to GitHub and printed `a11y-approved: PR #N` or `a11y-changes-requested: <reason>` or `a11y-skipped: no UI changes` or `accessibility-na: PR #N`.
 6. **Choose the correct terminal action based on the verdict:**
-   - If output is `a11y-skipped: ...` (no UI changes): **complete** YOUR card with summary: `<verdict line>`
-   - If output is `a11y-approved: ...` or `a11y-blocked: ...`: **block** YOUR card with `review-required`, reason: `<verdict line from the output>`
+   - If output is `a11y-skipped: ...` or `accessibility-na: ...` (no UI changes / not applicable): **complete** YOUR card with summary: `<verdict line>`
+   - If output is `a11y-approved: ...`: **block** YOUR card with `review-required`, reason: `a11y-approved: PR #N`
+   - If output contains `a11y-changes-requested:` OR `a11y-blocked:` (inner agent may still use the legacy prefix): **block** YOUR card with `review-required`, reason: `a11y-changes-requested: <reason> — changes requested`. The trailing `— changes requested` (with the space) is CRITICAL: the dispatcher's accessibility branch looks for the substring `changes requested` (space, NOT hyphen).
 ⛔ **DO NOT audit the PR yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -161,10 +162,36 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 ### 5. Block your kanban task
 - If APPROVED: block with `review-required`, reason: `a11y-approved: PR #<pr_number>`
-- If BLOCKED: block with `review-required`, reason: `a11y-blocked: <one-line reason>`
+- If BLOCKED (WCAG findings): block with `review-required`, reason: `a11y-changes-requested: <one-line reason> — changes requested` (the trailing `changes requested` substring with a space is **required** — that is what the dispatcher matches)
 - If skipped (no UI changes): complete with summary: `a11y-skipped: no UI changes in PR #<pr_number>`
+- If not applicable: complete with summary: `accessibility-na: PR #<pr_number>`
 
 **Never** complete/done a task with UI changes directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
+
+⛔ **Do NOT use `a11y-blocked:`** — the dispatcher does not recognise that substring. It falls through to `PENDING_CI` and silently stalls forever. Always use `a11y-changes-requested: ... — changes requested`.
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `accessibility-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** — note the accessibility branch uses a different substring from the reviewer/security branches.
+
+**Recognised signals for `accessibility-daedalus`:**
+
+| Block reason substring | Dispatcher action |
+|---|---|
+| `approved` (e.g. `a11y-approved: PR #N`) | `ADVANCE` — advances pipeline |
+| `accessibility-na` (e.g. `accessibility-na: PR #N`) | `ADVANCE` — advances pipeline (no UI) |
+| `a11y-skipped` (e.g. `a11y-skipped: no UI changes`) | `ADVANCE` — advances pipeline (no UI) |
+| `changes requested` (with space — e.g. `a11y-changes-requested: X — changes requested`) | `PM_ROUTE` — PM re-routes to developer |
+| ANY OTHER PHRASING (including `a11y-blocked:`, `changes-requested` hyphenated) | `PENDING_CI` — **silent permanent retry** |
+
+**Critical quirk:** the accessibility branch checks for `"changes requested"` (space). The reviewer and security branches check for `"changes-requested"` (hyphen) too, but accessibility does NOT. So for accessibility you MUST ensure the block reason literally contains the two-word phrase `changes requested` with a space.
+
+**Canonical forms you must emit:**
+- Approval → `a11y-approved: PR #<n>` (contains `approved`)
+- No UI → `a11y-skipped: no UI changes in PR #<n>` or `accessibility-na: PR #<n>`
+- Blocked findings → `a11y-changes-requested: <reason> — changes requested` (contains `changes requested` with space)
 
 ## Quality bar
 - CRITICAL findings always block — never approve with unresolved WCAG 2.1 AA failures

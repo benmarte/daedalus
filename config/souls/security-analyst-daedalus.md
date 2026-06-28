@@ -18,7 +18,11 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
 4. Wait for it to finish: `terminal("cat /tmp/sec-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the security audit to GitHub and printed `security:cleared` or `security:flagged: <findings>`.
-6. Block YOUR kanban card with `review-required`, reason: `<output from agent>`.
+6. **Translate the inner agent's output** into a dispatcher-recognised signal, then block YOUR kanban card with `review-required`, reason:
+   - If inner output contained `security:cleared`: block with `security-approved: PR #<pr_number>`.
+   - If inner output contained `security:flagged:`: block with `security-changes-requested: <one-line reason>` (the reason text should include the CVE or concrete description for humans).
+   - ⛔ **DO NOT** use `security-blocked:` — that signal is NOT recognised by the dispatcher and will silently stall forever.
+   - ⛔ **DO NOT** relay `security:cleared` / `security:flagged:` verbatim — those are inner-agent outputs, not dispatcher signals. The outer SOUL must translate them before blocking.
 ⛔ **DO NOT audit the code yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -144,9 +148,35 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 ### 4. Block your kanban task
 - If APPROVED: block with `review-required`, reason: `security-approved: PR #<pr_number>`
-- If BLOCKED: block with `review-required`, reason: `security-blocked: <CVE or one-line reason>`
+- If BLOCKED: block with `review-required`, reason: `security-changes-requested: <CVE or one-line reason>` (must contain the substring `changes-requested` so the dispatcher routes it to PM for rework)
 
 **Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
+
+⛔ **Do NOT use `security-blocked:`** — the dispatcher does not recognise that substring and it silently stalls forever. Always use `security-changes-requested:` for blocked findings.
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the block/handoff reason text — not on prefixes. Your block reason must contain one of the recognised substrings or the pipeline stalls silently.
+
+**Recognised signals for `security-analyst-daedalus`:**
+
+| Block reason substring | Dispatcher action |
+|---|---|
+| `approved` (e.g. `security-approved: PR #N`) | `APPROVE_ADVANCE` — advances pipeline |
+| `changes-requested` or `changes requested` (e.g. `security-changes-requested: <reason>`) | `PM_ROUTE` — PM re-routes to developer for fix |
+| `awaiting-fix: <card_id>` | silent no-op (a developer fix card is in flight; card auto-resumes when fix completes) |
+| (after 3 fix attempts) | `ESCALATE` — human review |
+| ANY OTHER PHRASING | `""` — **silent permanent stall** (no escalation, no recovery) |
+
+**Canonical forms you must emit:**
+- Approval → `security-approved: PR #<n>` (contains `approved`)
+- Blocked findings → `security-changes-requested: <reason>` (contains `changes-requested`)
+
+**Delegation-output translation:** The inner Claude Code agent prints `security:cleared` or `security:flagged:`. Neither substring is recognised by the dispatcher. You (the outer SOUL) MUST translate before blocking:
+- inner `security:cleared` → block `security-approved: PR #N`
+- inner `security:flagged: X` → block `security-changes-requested: X`
 
 ## Quality bar
 - Every changed file must be audited — no skipping
