@@ -435,6 +435,95 @@ def test_validator_retry_cap_dry_run_does_not_mark():
               not mock_comment.called)
 
 
+# ── Test 15: PM dry_run does not stamp the dedup marker ─────────────────────────
+
+def test_pm_retry_cap_dry_run_does_not_mark():
+    """In dry_run, PM retry-cap notification is logged but marker is NOT stamped,
+    ensuring no side effects during dry run."""
+    disp = _load_dispatch()
+
+    fake_tasks = [
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done",
+         "summary": "CONFIRMED: valid issue", "id": "t_v42"},
+    ]
+
+    fake_tasks_all = list(fake_tasks)  # list_tasks returns all tasks
+
+    def fake_pm_task_state(slug, issue_nr, pm_profile):
+        return ("stale", 3)  # stale_count >= _MAX_PM_RETRIES
+
+    comments_store = []
+
+    def fake_comment(slug, tid, body):
+        comments_store.append({"body": body})
+
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=fake_tasks_all), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"comments": comments_store}), \
+         mock.patch.object(disp.kanban, "comment", side_effect=fake_comment), \
+         mock.patch.object(disp, "_pm_task_state", side_effect=fake_pm_task_state), \
+         mock.patch.object(disp, "_send_retry_cap_notification") as mock_notify:
+        disp._check_confirmed_validators(
+            "slug", "owner/repo",
+            {42: {"number": 42, "title": "fix bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+            provider=None,
+            resolved=_minimal_resolved(),
+            dry_run=True,
+        )
+        check("PM dry_run calls _send_retry_cap_notification", mock_notify.called)
+        check("PM dry_run does not stamp marker (no board mutation)",
+              not any(disp._RETRY_CAP_MARKER in c["body"] for c in comments_store))
+
+
+# ── Test 16: PM retry-cap notification dedup across ticks ──────────────
+
+def test_pm_retry_cap_notification_sent_once_across_ticks():
+    """Issue #181: PM retry-cap exhaustion re-runs on every dispatcher tick,
+    but notification must be sent only once. Second tick sees marker and skips.
+    Mirrors test_validator_retry_cap_notification_sent_once_across_ticks but
+    for the PM retry-cap path."""
+    disp = _load_dispatch()
+
+    fake_tasks = [
+        {"title": "#42 fix bug", "assignee": "validator-daedalus", "status": "done",
+         "summary": "CONFIRMED: valid issue", "id": "t_v42"},
+    ]
+
+    def fake_pm_task_state(slug, issue_nr, pm_profile):
+        return ("stale", 3)  # stale_count >= _MAX_PM_RETRIES
+
+    # Shared comment store persists across ticks
+    comments_store = []
+
+    def fake_comment(slug, tid, body):
+        comments_store.append({"body": body})
+
+    def run_tick():
+        disp._check_confirmed_validators(
+            "slug", "owner/repo",
+            {42: {"number": 42, "title": "fix bug", "body": ""}},
+            3, "/tmp", "", "main", "github",
+            provider=None,
+            resolved=_minimal_resolved(),
+        )
+
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=fake_tasks), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"comments": comments_store}), \
+         mock.patch.object(disp.kanban, "comment", side_effect=fake_comment), \
+         mock.patch.object(disp, "_pm_task_state", side_effect=fake_pm_task_state), \
+         mock.patch.object(disp, "_send_retry_cap_notification") as mock_notify:
+        # Tick 1: PM retry cap exhausted → notification fires + marker stamped.
+        run_tick()
+        check("PM retry-cap notification sent on first tick",
+              mock_notify.call_count == 1)
+        check("PM retry-cap marker stamped after first tick",
+              any(disp._RETRY_CAP_MARKER in c["body"] for c in comments_store))
+        # Tick 2: marker present → no duplicate notification.
+        run_tick()
+        check("PM retry-cap notification NOT re-sent on second tick (no duplicate)",
+              mock_notify.call_count == 1)
+
+
 # ── Main runner ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -453,6 +542,8 @@ if __name__ == "__main__":
     test_send_retry_cap_notification_delivery_failure()
     test_validator_retry_cap_notification_sent_once_across_ticks()
     test_validator_retry_cap_dry_run_does_not_mark()
+    test_pm_retry_cap_dry_run_does_not_mark()
+    test_pm_retry_cap_notification_sent_once_across_ticks()
     print(f"\n{'='*60}")
     print(f"Passed: {conftest._passed}  Failed: {conftest._failed}")
     print(f"{'='*60}\n")
