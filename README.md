@@ -163,7 +163,11 @@ deterministic — never dependent on an agent remembering to update anything.
 When an issue is flagged as epic-sized (≥4 checklist items, an `epic` label, or body ≥2000
 chars), the dispatcher routes it to the planner agent for scoping instead of splitting it
 across the team directly. The planner confirms readiness by completing its kanban card with
-`PLANNING COMPLETE:`. The dispatcher then decomposes the epic into sub-issues:
+`PLANNING COMPLETE:` — the dispatcher records a decomposed-mark
+(`<!-- daedalus:decomposed -->`, tolerant of an optional suffix like
+`<!-- daedalus:decomposed:1719630000 -->`) on the parent so subsequent ticks never
+re-trigger decomposition even if the planner's summary is replayed. The dispatcher then decomposes the
+epic into sub-issues:
 
 - **Case A** (parent has checklist items): one sub-issue per item, capped at 10.
 - **Case B** (no checklist): three default sub-issues — Research & Scoping,
@@ -175,6 +179,34 @@ enters the validator pipeline independently. An idempotency marker comment
 (`<!-- daedalus:sub-issues:[N1,N2,...] -->`) is posted on the parent to prevent
 re-creation on subsequent dispatcher ticks. The `epic` label is applied to the parent
 issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
+
+### Tier promotion: dependency-aware sub-issue Ready-gating
+
+Phase-3 sub-issues can declare `Depends on: #N` (or the planner emits `depends_on:` in its
+spec). The dispatcher uses that DAG to roll sub-issues out in **tiers** rather than marking
+them all `Ready` at once — only dependency-free issues go to the board immediately;
+downstream tiers wait for their blockers to close and then get promoted automatically.
+
+**Three tiers of gating** combine to scope what dispatches when:
+
+1. **Phase-1 detection** — `VCSProvider.is_epic()` flags the parent epic via the three
+   heuristics above (≥4 checklist items, `epic` label, body ≥2000 chars).
+2. **Conditional Ready labeling** — on decomposition, sub-issues whose DAG tier is **0**
+   (no blockers) get the `Ready` label immediately and feed into the normal dispatch flow
+   on the next tick. Tier > 0 sub-issues skip the label; they stay off the dispatch queue
+   until promoted.
+3. **Tier promotion on merge** — every dispatch tick, after the dispatcher archives merged
+   PRs (completed issues), it calls `tier_promotion.promote_waiting_tiers(provider,
+   just_closed)`. That scans every epic whose sub-issues are still open, re-computes the
+   DAG tiers, and relabels issues whose tier level is now 0 (all their blockers closed)
+   with `Ready`. They enter the validator pipeline on the next tick.
+
+Tiers are computed as longest-path through the declared DAG via DFS with cycle detection —
+cycles are logged and those issues are skipped rather than wedging the whole epic.
+External references (to issues outside the epic) are dropped so they don't perturb tier
+levels. The planner can emit `depends_on: [...]` metadata in sub-issue bodies; the
+dispatcher parses them via the portable `Depends on: #N` convention so the tier graph works
+on any provider, not only GitHub's native dependencies.
 
 ### Dependency-aware ready-gating
 
@@ -723,6 +755,65 @@ automatically unblocks any reviewer or security-analyst cards that were marked
 comment, leaves the card blocked, and stops. The pipeline never runs away — every
 blocked card has a finite ceiling and exactly one deterministic path forward.
 
+**Stale-blocked sweeper.** After diagnostics but before the self-healing loop,
+the dispatcher calls `core/sweeper.py` on every tick. The sweeper scans all
+`blocked` cards on the board via `hermes kanban ls --json --status blocked`,
+enriches each with a `last_heartbeat_at` timestamp via a direct SQLite read (to
+sidestep the CLI's omission of heartbeat columns), and compares against a
+configurable threshold (default **48 hours**). Stale cards are logged with their
+age for operational visibility and — when `archive: true` is set — archived off
+the active board via `hermes kanban archive`. The sweeper degrades gracefully:
+any failure logs a warning and the tick continues.
+
+Configure per-project in `.hermes/daedalus.yaml`:
+
+```yaml
+tracking:
+  stale_blocked:
+    hours: 48          # age threshold (default 48)
+    archive: false     # set true to archive stale cards instead of just warning
+```
+
+**Retry-cap exhaustion notifications.** Per-attempt counters for validator retries
+(`validator-retry-N-r*`) and PM stale-task recovery (`pm-{n}-r*`) each cap at a
+maximum (2 for validator, 3 for PM). When an attempt counter exhausts the cap,
+the dispatcher fires a one-time `retry-cap-exhausted` notification — idempotently
+deduped on the issue via an `<!-- daedalus:retry-cap-notified -->` marker comment
+so the same cap-exhaustion is never messaged twice per issue — and posts a
+comment on the card instructing a human to investigate. Route this event to a
+high-visibility channel in the Notifications editor alongside
+`security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
+is unchanged: it posts a per-card comment and stops escalating, but does not
+fire a chat notification.
+
+**Gateway watchdog (`daedalus-cron.sh`).** The per-project cron wrapper script
+(`~/.hermes/scripts/daedalus-cron.sh`, installed by `postinstall.py`) detects a
+silently-dead Hermes gateway (`hermes gateway status` reporting "not running")
+and attempts a single `hermes gateway restart` before exec-ing the dispatcher.
+Prevents the common failure mode where the gateway crashes overnight and the
+dispatcher's cron continues to fire but its messages never deliver. If the
+restart also fails, the wrapper logs to stderr and the dispatch tick still runs
+— self-heal, never blocking the run.
+
+**Fetch-limit ceiling.** `_fetch_issues()` defaults to a page limit of **100**
+per call rather than 20. Boards with more than 20 open issues were silently
+truncated under the previous limit, causing validator and sweep scans to miss
+work. The increase covers most real boards; very large boards can still paginate
+further.
+
+**`issues_map` miss fallback.** When a worker agent reads a freshly-created
+issue that the dispatcher's sweep cached before its body was fully loaded
+(race between a new issue and the sweep), the dispatcher's `get_issue(number)`
+call retries once with a short backoff on transient HTTP failures before
+raising. Prevents one flaky API response from stalling a tick.
+
+**Stop-handler split.** Previously, a developer agent reporting `stop:` in its
+summary could fall through a dead-code branch and leave the card blocked with no
+closure signal. The blocked/stop handlers are now separate: `stop:` routes to a
+dedicated auto-close path that archives the task and comments on the issue;
+`blocked` routes to the PM consultation loop. Both paths are exercised by
+dedicated tests.
+
 ---
 
 ## Design decisions
@@ -781,6 +872,40 @@ Each piece exists because the obvious approach failed:
 - **merged → Done + close** — a PR merged into `dev` doesn't auto-close its issue
   (GitHub only does that on the default branch), so the dispatcher closes it itself —
   and only after confirming no sibling PR is still open.
+- **Tier promotion** — epic decomposition produces multiple sub-issues, but marking
+  all of them `Ready` at once overwhelms the validator pipeline and bypasses dependency
+  semantics. Instead, sub-issues with no declared blockers get the `Ready` label on
+  decomposition; dependents stay unlabeled until a blocking sub-issue's PR merges and
+  the dispatcher's `tier_promotion.promote_waiting_tiers()` pass re-evaluates the DAG.
+  Cycles are detected and logged rather than wedging the epic. This makes epic
+  execution genuinely incremental and dependency-aware on any provider.
+- **Stale-blocked sweeper** — a blocked card that no agent can classify sits on the
+  board forever, polluting the queue and confusing humans. The sweeper detects this
+  silently (via heartbeat timestamps), logs it for visibility, and optionally
+  archives so humans can inspect without disrupting the live queue. It runs inside
+  the tick so it never drifts from the dispatcher's view of the board.
+- **Gateway watchdog** — the cron tick continues to fire even after the Hermes
+  gateway crashes, giving the appearance of a healthy pipeline until a human notices
+  no agents have run. The wrapper restarts the gateway before dispatching so the
+  pipeline self-heals and the tick still delivers its nudge. One-line defense against
+  a multi-hour silence.
+- **Retry-cap notifications** — validator and PM retry caps exist so a broken issue
+  doesn't loop forever. But a cap with no notification means the operator only
+  learns about it days later by scrolling the board. A one-time `retry-cap-exhausted`
+  notification (deduped per issue via a marker comment) surfaces the wedge the
+  moment it happens, routed to the same channels as `security-escalation`.
+- **Fetch limit raised to 100** — the original page limit of 20 silently truncated
+  boards with more than 20 open issues: validator sweep missed work, merged-PR
+  archival missed completions, and the board looked healthy while issues rotted in
+  `Ready`. The raised limit matches real-board sizes without breaking the API.
+- **Stop-handler split** — a developer agent reporting `stop:` (human-driven abort)
+  and an agent stuck `blocked` (waiting for input) used to share a code path; a
+  dead-code branch let `stop:` fall through and leave the card blocked. Separate
+  paths — `stop:` auto-closes, `blocked` PM-consults — prevent the regression.
+- **`issues_map` miss fallback** — a freshly-created issue can race with the
+  dispatcher's sweep such that the sweep has the issue's number but not its body.
+  A one-shot `get_issue()` retry on transient failure prevents a single API flake
+  from stalling the entire tick.
 
 ---
 
