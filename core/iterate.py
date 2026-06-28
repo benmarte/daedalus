@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from core import kanban
+from core import kanban, thresholds
 from core.providers.base import CIStatus, issue_linked_to_pr, parse_depends_on
 from core.util import extract_issue_number
 
@@ -33,6 +35,9 @@ PM_ROUTE = "pm_route"         # reviewer flagged changes → create PM routing c
 APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
 ESCALATE = "escalate"         # max iterations exceeded → log + notify
 PLANNER_DECOMPOSE = "planner_decompose"  # planner completed → create sub-issues
+
+# Hardcoded constants have been moved to core/thresholds.py
+# Access them via thresholds.MAX_FIX_ATTEMPTS or thresholds.get('max_fix_attempts', 3)
 
 # Maximum fix attempts per PR before escalation
 MAX_FIX_ATTEMPTS = 3
@@ -50,6 +55,73 @@ def reset_source_reading_fallback_count() -> None:
     """Reset the source-reading fallback counter to zero (for tests)."""
     global _source_reading_fallback_count
     _source_reading_fallback_count = 0
+
+
+# ── decompose lock (issue #891) ──────────────────────────────────────────────
+
+_DECOMPOSE_LOCK_STALE_SECONDS = 60
+
+
+def _lock_file_path(workdir: str) -> Path:
+    """Return the decompose lock file path for the given workdir."""
+    return Path(workdir) / ".hermes" / "decompose-lock.json"
+
+
+def _acquire_decompose_lock(parent_n: int, workdir: str, *, dry_run: bool = False) -> bool:
+    """Acquire the decompose lock. Returns True if acquired, False if lock is held.
+    
+    The lock is considered stale after 60 seconds and will be overwritten.
+    """
+    if not workdir:
+        return True  # No lock when workdir is empty
+    
+    lock_path = _lock_file_path(workdir)
+    
+    try:
+        if lock_path.exists():
+            lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+            acquired_at = lock_data.get("acquired_at", 0)
+            age = time.time() - acquired_at
+            
+            if age < _DECOMPOSE_LOCK_STALE_SECONDS:
+                # Lock is held and not stale - skip
+                logger.info(
+                    "iterate: decompose lock held by pid=%s for issue #%s (age=%0.1fs), skipping",
+                    lock_data.get("pid"), lock_data.get("issue_n"), age,
+                )
+                return False
+            else:
+                logger.info("iterate: stale decompose lock (age=%0.1fs), overwriting", age)
+        
+        if dry_run:
+            return True
+        
+        # Write lock file
+        lock_data = {
+            "pid": os.getpid(),
+            "issue_n": parent_n,
+            "acquired_at": int(time.time()),
+        }
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps(lock_data, indent=2), encoding="utf-8")
+        return True
+        
+    except Exception as exc:
+        logger.warning("iterate: failed to acquire decompose lock: %s", exc)
+        return True  # Proceed on lock failure
+
+
+def _release_decompose_lock(workdir: str) -> None:
+    """Release the decompose lock by removing the lock file."""
+    if not workdir:
+        return
+    
+    lock_path = _lock_file_path(workdir)
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except Exception as exc:
+        logger.warning("iterate: failed to release decompose lock: %s", exc)
 
 
 # ── pure helpers ────────────────────────────────────────────────────────────
@@ -911,25 +983,36 @@ def _strip_code_blocks(text: str) -> str:
     return _CODE_BLOCK_RE.sub("", text)
 
 
+# New format marker pattern (with optional timestamp)
+_DECOMPOSED_MARKER_RE = re.compile(r'<!--\s*daedalus:decomposed(?::\d+)?\s*-->', re.IGNORECASE)
+# Legacy format marker pattern (sub-issues list)
+_LEGACY_DECOMPOSED_MARKER_RE = re.compile(r'<!--\s*daedalus:sub-issues:\[.*?\]\s*-->', re.IGNORECASE)
+
+
 def has_decomposed_marker(text: Optional[str]) -> bool:
-    """Return True if *text* contains the ``<!-- daedalus:decomposed:... -->`` marker.
+    """Return True if *text* contains any decomposed marker (old or new format).
+
+    Supports both:
+    - New format: ``<!-- daedalus:decomposed[:timestamp] -->``
+    - Legacy format: ``<!-- daedalus:sub-issues:[...] -->``
 
     The marker is an idempotency signal: once present on a parent epic (body or
     a posted comment), re-running the dispatcher must skip decomposition entirely
     and create zero sub-issues. Detection is tolerant of whitespace variations
-    and optional Unix-timestamp suffix.
+    and optional Unix-timestamp suffix on the new format.
 
     Markers inside fenced code blocks (``` or ~~~) are ignored to prevent false
     positives from documentation examples.
     """
     if not text:
         return False
-    # Fast path: substring presence before regex (cheap check)
-    if "daedalus:decomposed" not in text.lower():
-        return False
     # Strip code blocks to avoid false positives from documentation examples
     stripped_text = _strip_code_blocks(text)
-    return bool(_DECOMPOSED_MARKER_RE.search(stripped_text))
+    # Check for either the new format or legacy format
+    return bool(
+        _DECOMPOSED_MARKER_RE.search(stripped_text)
+        or _LEGACY_DECOMPOSED_MARKER_RE.search(stripped_text)
+    )
 
 
 def _extract_sub_issues_from_body(body: str) -> List[str]:
@@ -1561,6 +1644,38 @@ def _execute_planner_decompose(
             kanban.complete(slug, tid, summary=f"Already decomposed epic #{parent_n}")
             return True
 
+    # Concurrency lock (issue #891): prevent concurrent dispatcher ticks from
+    # racing to decompose the same epic.  Acquire a process-wide coarser lock
+    # AFTER the marker check (so idempotent hits short-circuit before any lock I/O).
+    # If workdir is empty we still proceed — lock is best-effort.
+    if not _acquire_decompose_lock(parent_n, workdir, dry_run=dry_run):
+        logger.warning(
+            "iterate: planner_decompose #%s — lock held by another process, "
+            "yielding (will retry next tick)", parent_n,
+        )
+        return True  # idempotent: complete without sub-issue creation
+
+    try:
+        return _execute_planner_decompose_inner(
+            slug, tid, parent_n, parent_title, parent_body, parent_labels,
+            workdir, dry_run, provider,
+        )
+    finally:
+        _release_decompose_lock(workdir)
+
+
+def _execute_planner_decompose_inner(
+    slug: str,
+    tid: str,
+    parent_n: int,
+    parent_title: str,
+    parent_body: str,
+    parent_labels: list,
+    workdir: str,
+    dry_run: bool,
+    provider: Any,
+) -> bool:
+    """Inner implementation of planner decomposition, called while lock is held."""
     checklist_items = _extract_sub_issues_from_body(parent_body)
     if checklist_items:
         sub_titles = checklist_items

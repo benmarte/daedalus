@@ -72,7 +72,9 @@ def test_partial_marker_without_closing_not_detected():
 
 
 def test_similar_but_different_prefix_not_detected():
-    assert has_decomposed_marker("<!-- daedalus:sub-issues:[10] -->") is False
+    # Issue #891: old format <!-- daedalus:sub-issues:[...] --> is now recognized
+    # for backward compatibility with prior decompositions.
+    assert has_decomposed_marker("<!-- daedalus:sub-issues:[10] -->") is True
     assert has_decomposed_marker("<!-- decomposed -->") is False
     assert has_decomposed_marker("<!-- other:decomposed -->") is False
 
