@@ -29,11 +29,12 @@ def test_list_issues_filters_prs_and_dedupes(provider):
     issue = {"number": 7, "title": "Bug", "body": "b", "state": "open",
              "labels": [{"name": "ready"}], "html_url": "u"}
     pr_item = {"number": 8, "title": "PR", "pull_request": {"url": "x"}, "labels": []}
-    provider._http.get_json.return_value = [issue, pr_item, issue]
+    # list_issues now uses get_paginated (pagination support — issue #228)
+    provider._http.get_paginated.return_value = [issue, pr_item, issue]
     out = provider.list_issues(labels=["ready", "bug"])  # two label calls, same issue
     assert [i.number for i in out] == [7]
     assert out[0].labels == ["ready"]
-    assert provider._http.get_json.call_count == 2  # OR semantics: one call per label
+    assert provider._http.get_paginated.call_count == 2  # OR semantics: one call per label
 
 
 def test_close_issue_patches_state(provider):

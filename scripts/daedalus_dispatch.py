@@ -587,16 +587,39 @@ def _get_target_broadcast(target: str, resolved: Dict[str, Any]) -> bool:
 
 
 def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Open issues matching the configured label filter (ANY label), deduped."""
+    """Open issues matching the configured label filter (ANY label), deduped.
+
+    Paginates until the provider returns all issues; logs a WARNING when more
+    than one page is fetched so operators know the board is growing large.
+    An optional ``filters.max_issues`` ceiling caps the total result count for
+    performance-sensitive deployments.
+    """
     if provider is None:
         return []
     state = filters.get("state", "open")
-    # Default 100 (GitHub's max per_page): a default of 20 silently paginated
-    # out older issues on boards with >20 open issues, stranding them in Ready
-    # forever (issue #203). Override via issues.filters.limit in daedalus.yaml.
-    limit = int(filters.get("limit", 100))
+    # ``limit`` is the page size sent to the provider (max 100 per GitHub API).
+    # list_issues() now paginates automatically, so this is no longer a hard cap.
+    page_size = int(filters.get("limit", 100))
+    max_issues = filters.get("max_issues")  # optional hard ceiling
     labels = [l for l in (filters.get("labels") or []) if l]
-    return [i.as_dict() for i in provider.list_issues(state=state, labels=labels, limit=limit)]
+    issues = [i.as_dict() for i in provider.list_issues(
+        state=state, labels=labels, limit=page_size
+    )]
+    if len(issues) > page_size:
+        logger.warning(
+            "dispatch: _fetch_issues returned %d issues (>%d page_size) — "
+            "board has multiple pages; set filters.max_issues to cap if needed",
+            len(issues), page_size,
+        )
+    if max_issues is not None:
+        ceiling = int(max_issues)
+        if len(issues) > ceiling:
+            logger.warning(
+                "dispatch: _fetch_issues truncated to max_issues=%d (total=%d)",
+                ceiling, len(issues),
+            )
+            issues = issues[:ceiling]
+    return issues
 
 
 # API-based instructions only — no gh/glab/az CLIs are installed for workers.
