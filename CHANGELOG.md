@@ -92,6 +92,19 @@ All notable changes to Daedalus are documented here. The format loosely follows
   `validator-retry-cap-exhausted` notification instead of posting once per
   subsequent tick.
 
+- **PM/validator retry-cap → Slack/Discord dual-channel notification** (#378, epics
+  #181, PRs #813, #818, #820, #823, #842, #849, #850) — when the PM or validator
+  retry cap is exhausted, the dispatcher now fires a `retry-cap-exhausted` alert on
+  two independent channels: (a) structured `NotificationPayload` to Slack/Discord
+  webhooks via `core/notification_sender.py` (severity=critical,
+  non-blocking daemon thread, 10s HTTP timeout), and (b) message-bubble to every
+  `hermes send` target subscribed to the `retry-cap-exhausted` event. An
+  idempotency marker (`<!-- daedalus:retry-cap-notified -->`) on the issue
+  guarantees only one notification per cap-exhaustion. A GitHub comment with role,
+  retry-count, error classification, and recovery instructions is also posted.
+  Configured via `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` environment variables.
+  Notification failures are logged but never block the dispatcher.
+
 - **`_fetch_issues` default limit raised to 100** (#203, PR #224) — the default
   limit for `_fetch_issues()` was 20, which silently truncated boards with >20 open
   issues. Default raised to 100 so larger boards are not silently skipped.
