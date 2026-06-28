@@ -61,7 +61,7 @@ _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-S
 
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready",
-                 "security-escalation", "comment-mirror")
+                 "security-escalation", "comment-mirror", "retry-cap-exhausted")
 
 # Priority label ordering — P0 dispatched before P1 before P2 before unlabeled.
 _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
@@ -1980,6 +1980,59 @@ def _repair_orphan_tasks(
     return repaired
 
 
+
+def _send_retry_cap_notification(
+    *,
+    role: str,
+    issue_number: int,
+    retry_count: int,
+    max_retries: int,
+    resolved: Dict[str, Any],
+    dry_run: bool,
+) -> None:
+    """Send notification when PM/validator retry cap is exhausted.
+
+    Routes through ``hermes send`` to every target subscribed to the
+    ``retry-cap-exhausted`` event (or catch-all targets with no ``events``
+    filter). When no targets are configured, returns silently. Failures are
+    logged but not raised.
+    """
+    targets = _notify_targets(resolved, "retry-cap-exhausted")
+    if not targets:
+        return
+
+    body = (
+        f"⚠️ **Retry Cap Exhausted: {role.upper()}**\n\n"
+        f"Issue #{issue_number} has failed {retry_count} times (max: {max_retries}).\n\n"
+        f"**Role**: {role}\n"
+        f"**Retry count**: {retry_count}/{max_retries}\n"
+        f"**Status**: Manual intervention required\n\n"
+    )
+    if role == "pm":
+        body += (
+            "**Likely cause**: PM agent completed without `SPEC:` summary.\n"
+            "**Recovery**: `hermes kanban edit <task-id>` and add `SPEC:` "
+            "summary, or manually requeue with fresh context."
+        )
+    else:  # validator
+        body += (
+            "**Likely cause**: Validator agent completed without `CONFIRMED` "
+            "(context window overflow, agent crash, or silent failure).\n"
+            "**Recovery**: Check agent logs, verify issue context, then manually "
+            "requeue validator or escalate to human review."
+        )
+
+    for target in targets:
+        if dry_run:
+            logger.info("[dry-run] would send retry-cap notification to %s for #%s", target, issue_number)
+            continue
+        ok, _anchor = _hermes_send(target, body)
+        if ok:
+            logger.info("sent retry-cap notification to %s for #%s (role=%s)", target, issue_number, role)
+        else:
+            logger.warning("failed to send retry-cap notification to %s for #%s", target, issue_number)
+
+
 def _check_confirmed_validators(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -1991,6 +2044,7 @@ def _check_confirmed_validators(
     coding_agent_cmd: str = "",
     role_agents: Optional[Dict[str, str]] = None,
     *, dry_run: bool = False, provider=None,
+    resolved: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
     create a PM task to write the spec + acceptance criteria.
@@ -2042,6 +2096,35 @@ def _check_confirmed_validators(
                         logger.info("dispatch: validator BLOCKED #%s — PM consultation %s", n_nr, cid)
                         triggered.append(n_nr)
                 continue
+            if summary.startswith("stop:"):
+                # Validator marked duplicate/already-fixed/cannot-reproduce.
+                # Idempotency key: only close if we haven't already processed this issue.
+                ikey = f"validator-stop-closed-{n_nr}"
+                already_handled = any(
+                    (t.get("idempotency_key") or "") == ikey
+                    for t in kanban.list_tasks(slug)
+                )
+                if not already_handled:
+                    if provider and provider.close_issue(n_nr):
+                        logger.info(
+                            "dispatch: validator done with STOP:%s for #%s — auto-closed issue",
+                            summary_raw[4:].strip(), n_nr,
+                        )
+                        # Mark as handled so we don't re-close on future dispatches.
+                        kanban.create_task(
+                            slug, f"validator-stop #{n_nr}",
+                            body=f"Issue #{n_nr} auto-closed by validator STOP directive",
+                            assignee=p["validator"],
+                            idempotency_key=ikey,
+                            workspace=f"dir:{workdir}" if workdir else "",
+                        )
+                    elif provider:
+                        logger.warning(
+                            "dispatch: validator done with STOP:%s for #%s but close_issue failed",
+                            summary_raw[4:].strip(), n_nr,
+                        )
+                    triggered.append(n_nr)
+                continue
             # Empty or unrecognized summary — check GitHub comments before retrying.
             # When a validator's context window fills before kanban_complete runs,
             # its GitHub comment is the only record of its decision.
@@ -2089,6 +2172,12 @@ def _check_confirmed_validators(
                     "manual intervention required",
                     n_nr, retry_count, _MAX_VALIDATOR_RETRIES,
                 )
+                if resolved is not None:
+                    _send_retry_cap_notification(
+                        role="validator", issue_number=n_nr,
+                        retry_count=retry_count, max_retries=_MAX_VALIDATOR_RETRIES,
+                        resolved=resolved, dry_run=dry_run,
+                    )
                 continue
             retry_key = f"validator-retry-{n_nr}-r{retry_count}"
             if dry_run:
@@ -2128,6 +2217,12 @@ def _check_confirmed_validators(
                     "manual intervention required (hermes kanban edit + SPEC: summary)",
                     n, stale_count,
                 )
+                if resolved is not None:
+                    _send_retry_cap_notification(
+                        role="pm", issue_number=n,
+                        retry_count=stale_count, max_retries=_MAX_PM_RETRIES,
+                        resolved=resolved, dry_run=dry_run,
+                    )
                 continue
             logger.warning(
                 "dispatch: PM task for #%s prematurely completed without SPEC: "
@@ -2861,7 +2956,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         provider.name, _sec_targets, label_overrides=_label_ovr,
         profiles=profiles, role_skills=role_skills, coding_agent=coding_agent,
         coding_agent_cmd=coding_agent_cmd, role_agents=role_agents,
-        dry_run=dry_run, provider=provider,
+        dry_run=dry_run, provider=provider, resolved=resolved,
     )
     if confirmed_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

@@ -149,7 +149,8 @@ Step 2 opens automatically after Step 1. This is where you set branches, boards,
 
 **Notifications:**
 - Configure one or more delivery targets (Slack, Discord, etc.) for dispatch summaries, documentation reports, and pipeline failure alerts.
-- Click **+ Add notification target** to add a channel. Each target can be filtered to specific event types (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`, `security-escalation`).
+- Click **+ Add notification target** to add a channel. Each target can be filtered to specific event types (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`, `security-escalation`, `retry-cap-exhausted`).
+- **`retry-cap-exhausted`** fires when a PM or validator agent exhausts its retry cap without reaching CONFIRMED status, indicating manual intervention is required.
 - **`security-escalation`** fires immediately when the validator flags an issue as a potential threat. It is recommended to route this event to a high-visibility channel (e.g. `#security-alerts`) so a human can review and re-classify the issue quickly.
 
 ![Step 2 notifications section — add notification targets and configure event filters](screenshots/guide/08-add-project-step2-notify.png)
