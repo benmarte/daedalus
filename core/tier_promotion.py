@@ -36,7 +36,7 @@ logger = logging.getLogger("daedalus.tier_promotion")
 # (``Part of epic #N`` / ``Part of: #N``) and the hand-written variant
 # (``Epic: #N`` / ``Epic #N``). Captures the epic number.
 EPIC_REF_RE = re.compile(
-    r"(?im)^(?:part[ -]of(?:\s+epic)?|epic)\s*:?\s*#(\d+)"
+    r"(?im)^(?:part[\s-]+of(?:[\s-]+epic)?|epic)\s*:?\s*#(\d+)"
 )
 
 

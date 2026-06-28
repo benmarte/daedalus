@@ -324,6 +324,21 @@ class GitHubProvider(VCSProvider):
             self._log.warning("add_label #%s %r failed: %s", issue_number, label_name, e)
             return False
 
+    def has_label(self, issue_number: int, label_name: str) -> bool:
+        """Return True if ``issue_number`` has ``label_name`` applied.
+
+        Uses the ``labels`` field returned by ``get_issue`` so it piggybacks on
+        the existing ``GET /repos/{owner}/{repo}/issues/{n}`` call used
+        elsewhere. Never raises — returns False on any provider error (base
+        class contract at ``VCSProvider.has_label``).
+        """
+        issue = self.get_issue(issue_number)
+        if issue is None:
+            return False
+        target = label_name.strip().lower()
+        labels = getattr(issue, "labels", None) or []
+        return any((n or "").strip().lower() == target for n in labels)
+
     def ensure_labels(self) -> List[str]:
         """Create required Daedalus labels in this repo if they don't exist yet."""
         from .base import REQUIRED_LABELS

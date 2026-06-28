@@ -321,18 +321,25 @@ class VCSProvider(abc.ABC):
     def sub_issues_of(self, epic_number: int) -> List[int]:
         """Return issue numbers that are sub-issues of the given epic.
 
-        Base implementation scans all open issues for ``Epic: #<N>`` /
-        ``Part of: #<N>`` in the body (portable fallback). Providers with
-        native sub-issue links override to use the VCS API first.
+        Base implementation scans all open issues for epic-reference conventions
+        in the body (portable fallback). Recognised formats (case-insensitive):
+        ``Epic: #N``, ``Epic #N``, ``Part of: #N``, ``Part of #N``,
+        ``Part of epic: #N``, ``Part of epic #N``, ``Part-of #N``,
+        ``Part-of-epic #N``. Providers with native sub-issue links override to
+        use the VCS API first.
         Never raises — returns ``[]`` on any provider error.
         """
         import re as _re
+        # Aligned with EPIC_REF_RE in core/tier_promotion.py so both code paths
+        # agree on what counts as a parent-epic reference.
+        pattern = _re.compile(
+            rf"(?im)^(?:part[\s-]+of(?:[\s-]+epic)?|epic)\s*:?\s*#{epic_number}\b"
+        )
         results: List[int] = []
         try:
             all_issues = self.list_issues(state="open")
         except Exception:
             return []
-        pattern = _re.compile(rf"(?im)(?:epic|part\s+of)\s*:\s*#{epic_number}\b")
         for issue in all_issues:
             body = ""
             if isinstance(issue, dict):
