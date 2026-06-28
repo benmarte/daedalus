@@ -318,6 +318,21 @@ def promote_waiting_tiers(
                 result.errors.append({"issue": n, "error": "add_label returned False"})
                 continue
 
+            # Also move the issue's board card to Ready so the normal dispatch
+            # loop (which filters by board status, not label) picks it up on the
+            # next tick. The label alone is not enough for board-mode dispatch.
+            try:
+                if provider.board_configured():
+                    board_ok = bool(
+                        provider.board_set_status(n, provider.status_name("ready"))
+                    )
+                    if not board_ok:
+                        logger.warning(
+                            "board_set_status(%d, Ready) returned False", n
+                        )
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning("board_set_status(%d) failed: %s", n, e)
+
             result.promoted.append(n)
             logger.info("tier promotion: promoted #%d → Ready (epic #%d)", n, epic_number)
 
