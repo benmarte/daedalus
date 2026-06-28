@@ -200,7 +200,19 @@ If you complete the task yourself instead of blocking it, the downstream review 
 
 - **PENDING_PR timeout:** When you block with `review-required: PR #N`, the dispatcher waits up to ~8h for you to actually open the PR. If no PR appears after ~8 hours, a warning comment is posted on your card. You must create the PR before blocking.
   
-- **awaiting-fix: auto-unblock:** When the dispatcher creates a fix card for you (because QA/tests failed or reviewer requested changes blocking your PR), your card is blocked with `awaiting-fix: <fix_card_id>`. When the fix card completes, your card is automatically unblocked and re-queued. You don't need to do anything — just wait for the notification.
+- **awaiting-fix: auto-unblock (self-healing pipeline):** When QA/tests fail or a reviewer requests changes on your PR, a fix card is dispatched (either through a PM routing card or directly in the legacy path). Your card — the one that originally requested review — is then blocked with `awaiting-fix: <fix_card_id>` so its state is visible on the board. When the fix card completes successfully, the dispatcher (`_execute_advance` in `core/iterate.py`) scans every blocked card and automatically unblocks any whose block reason contains both `awaiting-fix` AND the completed fix card's task ID; your card is then re-queued for re-review.
+
+  **Trigger conditions:**
+  - The fix card must `kanban_complete` successfully. A blocked/escalated fix card does NOT unblock the waiting reviewer.
+  - The blocked card's `runs[-1].reason` must contain the literal `awaiting-fix:` marker AND the TID of the completing fix card (exact string match).
+
+  **Lifecycle:** reviewer blocks `awaiting-fix: <pm_tid>` → PM dispatches fix card → developer completes fix → dispatcher unblocks reviewer → reviewer re-engages the updated PR automatically.
+
+  **Configuration & constants:** `MAX_FIX_ATTEMPTS = 3` (in `core/iterate.py`). After 3 fix attempts the card escalates to a human and the auto-unblock loop terminates. The PM's own `awaiting-fix: <child_id>` blocks are silently ignored by `_classify_action` (not treated as escalations) because the PM is waiting on the developer fix — not something the PM can self-fix.
+
+  **Concurrency guard:** if a reviewer card is already blocked with `awaiting-fix:` (any fix in flight), `_classify_action` returns no-op for that reviewer card. This prevents concurrent cron ticks from spawning duplicate PM routes before any of them has annotated the card.
+
+  **No manual action required.** You do not need to `kanban_unblock` the reviewer yourself — the dispatcher handles it the moment the fix card completes. Just ensure your fix card completes with a real `kanban_complete` call and a non-empty summary.
 
 - **Crash retry:** If you crash without completing any work, Hermes retries you automatically. PM consultations are NOT created for empty summaries — if your session crashes, you get another attempt before any escalation.
 
