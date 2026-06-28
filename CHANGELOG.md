@@ -1,3 +1,5 @@
+## [feat(e2e): multi-tick pipeline harness — run N dispatcher ticks and assert stage progression](https://github.com/benmarte/daedalus/issues/901) — [PR #913](https://github.com/benmarte/daedalus/pull/913)
+
 ## [bug: planner_decompose injects source-file context into sub-issue bodies, causing 422 body-too-long from GitHub](https://github.com/benmarte/daedalus/issues/899) — [PR #912](https://github.com/benmarte/daedalus/pull/912)
 
 ## [feat(e2e): make e2e target + CI nightly schedule](https://github.com/benmarte/daedalus/issues/903) — [PR #910](https://github.com/benmarte/daedalus/pull/910)
