@@ -1,3 +1,5 @@
+## [feat: add advance hook (daedalus-advance.sh + daedalus_resolve_project.py) to postinstall so it ships with the plugin](https://github.com/benmarte/daedalus/issues/936) — [PR #950](https://github.com/benmarte/daedalus/pull/950)
+
 ## [No regression in manual issue → Ready flow](https://github.com/benmarte/daedalus/issues/930) — [PR #948](https://github.com/benmarte/daedalus/pull/948)
 
 ## [After planner decomposition, all sub-issues appear on the project board](https://github.com/benmarte/daedalus/issues/919) — [PR #947](https://github.com/benmarte/daedalus/pull/947)
