@@ -167,7 +167,7 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 
 | Name | Value | Source |
 |------|-------|--------|
-| `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:37` |
+| `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:38` |
 | `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
 | `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
 | `_CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:154` |
