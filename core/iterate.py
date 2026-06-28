@@ -37,6 +37,35 @@ PLANNER_DECOMPOSE = "planner_decompose"  # planner completed → create sub-issu
 # Maximum fix attempts per PR before escalation
 MAX_FIX_ATTEMPTS = 3
 
+# Source-reading fallback counter for observability
+_source_reading_fallback_count: int = 0
+
+
+def get_source_reading_fallback_count() -> int:
+    """Return the count of Phase 4 fallback events (for testing/monitoring)."""
+    return _source_reading_fallback_count
+
+
+def reset_source_reading_fallback_count() -> None:
+    """Reset the source-reading fallback counter to zero (for tests)."""
+    global _source_reading_fallback_count
+    _source_reading_fallback_count = 0
+
+# Source-reading fallback counter for observability
+_source_reading_fallback_count: int = 0
+
+
+def get_source_reading_fallback_count() -> int:
+    """Return the count of Phase 4 fallback events (for testing/monitoring)."""
+    return _source_reading_fallback_count
+
+
+def reset_source_reading_fallback_count() -> None:
+    """Reset the source-reading fallback counter to zero (for tests)."""
+    global _source_reading_fallback_count
+    _source_reading_fallback_count = 0
+
+
 # ── pure helpers ────────────────────────────────────────────────────────────
 
 
@@ -871,6 +900,21 @@ _DECOMPOSED_MARKER_RE = re.compile(
     r"<!--\s*daedalus:decomposed(?::\d+)?\s*-->", re.IGNORECASE
 )
 
+# Regex to match fenced code blocks (``` or ~~~) with optional language tag.
+_CODE_BLOCK_RE = re.compile(
+    r"(?:^```[^\n]*\n.*?^```)|(?:^~~~[^\n]*\n.*?^~~~)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _strip_code_blocks(text: str) -> str:
+    """Remove fenced code blocks from markdown text.
+
+    Code blocks (```...``` or ~~~...~~~) are documentation examples and should
+    not trigger idempotency detection.
+    """
+    return _CODE_BLOCK_RE.sub("", text)
+
 
 def has_decomposed_marker(text: Optional[str]) -> bool:
     """Return True if *text* contains the ``<!-- daedalus:decomposed:... -->`` marker.
@@ -879,13 +923,18 @@ def has_decomposed_marker(text: Optional[str]) -> bool:
     a posted comment), re-running the dispatcher must skip decomposition entirely
     and create zero sub-issues. Detection is tolerant of whitespace variations
     and optional Unix-timestamp suffix.
+
+    Markers inside fenced code blocks (``` or ~~~) are ignored to prevent false
+    positives from documentation examples.
     """
     if not text:
         return False
     # Fast path: substring presence before regex (cheap check)
     if "daedalus:decomposed" not in text.lower():
         return False
-    return bool(_DECOMPOSED_MARKER_RE.search(text))
+    # Strip code blocks to avoid false positives from documentation examples
+    stripped_text = _strip_code_blocks(text)
+    return bool(_DECOMPOSED_MARKER_RE.search(stripped_text))
 
 
 def _extract_sub_issues_from_body(body: str) -> List[str]:
@@ -1485,6 +1534,12 @@ def _execute_planner_decompose(
         sub_scopes = [t.split(" — ", 1)[0] for t in sub_titles]
 
     # Phase 4: source-file reading & context injection
+    # If reading fails or workdir is unavailable, fall back to Phase 3
+    # behavior (template-only generation without analysis).
+    global _source_reading_fallback_count
+    # If reading fails or workdir is unavailable, fall back to Phase 3
+    # behavior (template-only generation without analysis).
+    global _source_reading_fallback_count
     full_issue_text = f"{parent_title}\n\n{parent_body}"
     source_context = ""
     file_contents: dict[str, str] = {}
@@ -1511,6 +1566,13 @@ def _execute_planner_decompose(
                 "iterate: planner_decompose #%s — source-reading failed (degrading gracefully): %s",
                 parent_n, exc,
             )
+            _source_reading_fallback_count += 1
+    else:
+        logger.info(
+            "iterate: planner_decompose #%s — workdir unavailable (%s), skipping codebase reading (Phase 3 fallback)",
+            parent_n, workdir or "<empty>",
+        )
+        _source_reading_fallback_count += 1
 
     if dry_run:
         logger.info("[dry-run] planner_decompose #%s: would create %d sub-issues: %s",
@@ -1826,3 +1888,4 @@ def run_iterate(
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
 
     return counts, advance_prs, pending_ci_cards
+
