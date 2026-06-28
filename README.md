@@ -873,37 +873,38 @@ dedicated tests.
 
 Five concrete behaviors make the pipeline recover from agent failures without
 manual intervention. Each one is implemented in `core/iterate.py` — verified
-on `origin/dev` at commit `4f99b26`.
+on `origin/dev` at commit `d6ea3e5`.
 
 1. **`awaiting-fix:` auto-unblock.** When developer QA/tests fail or a reviewer
    flags changes, a dedicated fix card is created and assigned to
    `developer-daedalus`. The reviewer/security card is blocked with
-   `awaiting-fix: <fix_card_id>`. When the fix card calls `kanban_complete()`,
-   `_execute_advance()` in `core/iterate.py` (lines 392–411) scans all blocked
-   cards and automatically unblocks any whose block reason contains both
-   `awaiting-fix:` and the fix card's task ID. No human action needed.
+   `awaiting-fix: <fix_card_id>`. When the fix card completes,
+   `_execute_advance()` in `core/iterate.py` (lines 411–426, within
+   `def _execute_advance` starting at line 383) scans all blocked cards and
+   automatically unblocks any whose block reason contains both `awaiting-fix:`
+   and the completing fix card's task ID. No human action needed.
 
 2. **Crash-marker silent no-op.** If a developer agent crashes with
    infrastructure-failure markers (`coding-agent-failed:`, `permission-error:`,
    `coding_agent_died`, `coding_agent_timeout`, `exited with code`,
-   `agent crash`) in the block reason, `classify_blocked()` (lines 160–165)
+   `agent crash`) in the block reason, `classify_blocked()` (lines 179–184)
    returns empty string instead of routing to PM. This prevents the infinite
    PM consultation loop where every cron tick would spawn `PM_ROUTE` → PM
    completes as "no-op" → next tick spawns another `PM_ROUTE` → repeat. A
    human must fix the environment and manually unblock.
 
 3. **`awaiting-fix:` concurrency guard.** Reviewer and security-analyst are
-   handled in one combined branch of `classify_blocked()` (lines 170–183:
+   handled in one combined branch of `classify_blocked()` (lines 189–200:
    `if assignee in (reviewer, security)`). When the card is already blocked
-   with `awaiting-fix:` in the block reason, the guard at lines 175–178
-   returns empty string. This prevents concurrent dispatcher ticks
-   from spawning duplicate fix cards for the same reviewer card. The first
-   tick that annotates the card with `awaiting-fix:` wins; subsequent ticks
-   see the marker and skip.
+   with `awaiting-fix:` in the block reason, the guard at lines 195–197
+   returns empty string. This prevents concurrent dispatcher ticks from
+   spawning duplicate fix cards for the same reviewer card. The first tick
+   that annotates the card with `awaiting-fix:` wins; subsequent ticks see the
+   marker and skip.
 
 4. **`PENDING_PR` VCS search.** When a developer card blocks with
    `review-required: awaiting-pr`, the dispatcher has not yet seen a GitHub
-   PR. Every cron tick calls `_execute_pending_pr()` (lines 571–618), which
+   PR. Every cron tick calls `_execute_pending_pr()` (lines 590–645), which
    searches open PRs via `provider.list_prs()` and matches them against the
    issue number in the PR title/body/branch. Once a PR appears, the block
    reason is updated to `review-required: PR #N — awaiting CI` so CI checks
@@ -911,12 +912,31 @@ on `origin/dev` at commit `4f99b26`.
    PR but the dispatcher keeps classifying the card as "no PR found."
 
 5. **PM `awaiting-fix:` silent no-op.** The project-manager profile's
-   classifier branch (lines 133–136) returns empty string when the PM's own
+   classifier branch (lines 152–154) returns empty string when the PM's own
    block reason contains `awaiting-fix:`. This happens when a PM routing card
    dispatches a developer fix — the PM is then blocked waiting for the fix
    card to complete, which is a legitimate wait, not a real escalation.
    Without this guard the dispatcher would escalate the PM to a human every
    time a developer fix was in flight.
+
+> **Deferred epic #180 behaviors.** The original epic spec listed three
+> additional behaviors that are *not yet implemented* as of this commit —
+> the README intentionally does not document them as shipped:
+>
+> - **`MAX_PENDING_PR_TICKS` timeout (8 cron ticks / ~8h) with a human
+>   warning comment.** `PENDING_PR` currently keeps searching silently until
+>   a PR appears; there is no timeout constant or escalation path yet.
+>   Tracked in epic #180.
+> - **QA/accessibility `PENDING_CI` escalation after `MAX_FIX_ATTEMPTS` (3)
+>   silent ticks.** `classify_blocked()` returns `PENDING_CI` for
+>   non-canonical QA/a11y signals (anything that isn't `qa-passed:` /
+>   `qa-failed:` / `approved:` / `a11y-na:` / `a11y-skipped:` /
+>   `changes requested`), but there is no fix-attempt counter or escalation
+>   path for the `PENDING_CI` case itself.
+> - **Empty-summary developer skip.** Developers that block with no
+>   recognizable signal still route to `PM_ROUTE` for downstream review —
+>   the "skip PM consult when the developer has no signal" branch was not
+>   added.
 
 ### What breaks self-healing
 
@@ -934,12 +954,15 @@ resolve them:
 
 - **Non-canonical QA/a11y signals.** QA must block with `qa-passed:` or
   `qa-failed:` (lowercase, with the colon). Accessibility must use
-  `approved:`, `a11y-approved:`, `a11y-na:`, or `a11y-changes-requested:`. Any
-  other phrasing (e.g., `qa-blocked:`, `a11y-failed:`) results in `PENDING_CI`,
-  which stays in the pending queue indefinitely until CI actually resolves.
-  The stale-blocked sweeper eventually fires at 48h and archives the card if
-  configured, but the dispatcher itself never escalates a non-canonical QA/a11y
-  signal without first getting a terminal signal from the agent.
+  `approved:`, `a11y-approved:`, `a11y-na:`, `a11y-skipped:`, or
+  `a11y-changes-requested:`. Any other phrasing (e.g., `qa-blocked:`,
+  `a11y-failed:`) returns `PENDING_CI` from `classify_blocked()`, which stays
+  in the pending queue indefinitely. The `PENDING_CI` retry cron eventually
+  resolves when a proper signal arrives, but the `MAX_FIX_ATTEMPTS` escalation
+  does not apply to `PENDING_CI` cards — so a QA/a11y agent that keeps posting
+  ambiguous signals will sit in the queue with no automatic human alert.
+  Operators should watch the board and re-queue or cancel cards that never
+  reach a canonical signal.
 
 ---
 
