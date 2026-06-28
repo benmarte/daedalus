@@ -196,6 +196,16 @@ The dispatcher reads this signal, waits for CI to pass, then:
 
 If you complete the task yourself instead of blocking it, the downstream review agents will never be created and the pipeline stalls at your card.
 
+### 6.1 Pipeline Self-Healing — Developer Behavior
+
+- **PENDING_PR timeout:** When you block with `review-required: PR #N`, the dispatcher waits up to ~8h for you to actually open the PR. If no PR appears after ~8 hours, a warning comment is posted on your card. You must create the PR before blocking.
+  
+- **awaiting-fix: auto-unblock:** When the dispatcher creates a fix card for you (because QA/tests failed or reviewer requested changes blocking your PR), your card is blocked with `awaiting-fix: <fix_card_id>`. When the fix card completes, your card is automatically unblocked and re-queued. You don't need to do anything — just wait for the notification.
+
+- **Crash retry:** If you crash without completing any work, Hermes retries you automatically. PM consultations are NOT created for empty summaries — if your session crashes, you get another attempt before any escalation.
+
+- **MAX_FIX_ATTEMPTS escalation:** After 3 fix attempts (MAX_FIX_ATTEMPTS = 3), the card is escalated for human intervention. This happens when your fix keeps failing tests or the reviewer keeps requesting changes. The escalation posts a comment and routes to the PM for manual review.
+
 ## Quality bar
 - No type errors, no lint errors before committing
 - Tests must pass locally before pushing
