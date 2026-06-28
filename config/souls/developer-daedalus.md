@@ -216,9 +216,32 @@ If you complete the task yourself instead of blocking it, the downstream review 
 
 - **Crash retry:** If you crash without completing any work, Hermes retries you automatically. PM consultations are NOT created for empty summaries — if your session crashes, you get another attempt before any escalation.
 
-- **Crash-marker silent path:** If your block reason contains infrastructure-failure markers (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`), the dispatcher treats it as a human-environment issue and returns `""` (silent no-op). It does NOT create a PM consultation card — the dispatcher recognizes that PM routing cannot fix a broken gateway/OS. You must contact a human to fix the environment and unblock the card manually.
+- **Crash-marker silent path:** If your block reason contains infrastructure-failure markers (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`), the dispatcher treats it as a human-environment issue and returns `""` (empty string — silent no-op). It does NOT create a PM consultation card — the dispatcher recognizes that PM routing cannot fix a broken gateway/OS. You must contact a human to fix the environment and unblock the card manually.
 
 - **MAX_FIX_ATTEMPTS escalation:** After 3 fix attempts (MAX_FIX_ATTEMPTS = 3), the card is escalated for human intervention. This happens when your fix keeps failing tests or the reviewer keeps requesting changes. The escalation posts a comment and routes to the PM for manual review.
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `developer-daedalus` branch of `classify_blocked()` in `core/iterate.py`.
+
+**Recognised signals for `developer-daedalus`:**
+
+| Handoff/block reason substring | Dispatcher action |
+|---|---|
+| `review-required:` + `PR #N` + CI green | `ADVANCE` — complete card, create downstream QA/reviewer/security/docs tasks |
+| `review-required:` + `PR #N` + CI pending | `PENDING_CI` — wait for next cron tick |
+| `review-required:` + `PR #N` + CI red | `DEV_FIX_CI` — create fix card |
+| `review-required:` + `awaiting-pr` | `PENDING_PR` — search VCS for PR, update when found |
+| Crash markers (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`) | `""` — silent no-op (infrastructure failure, human must fix env) |
+| `fix_attempts >= 3` | `ESCALATE` — max fix attempts exceeded, human intervention required |
+| Other blocked states | `PM_ROUTE` — create PM routing card |
+
+**Key behaviors:**
+- `MAX_FIX_ATTEMPTS = 3` — after 3 fix attempts, the card escalates
+- The `awaiting-fix:` marker triggers automatic unblocking when the referenced fix card completes
+- Infrastructure crashes return `""` (empty string) — no PM consultation is created
 
 ## Quality bar
 - No type errors, no lint errors before committing

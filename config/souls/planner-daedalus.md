@@ -148,15 +148,20 @@ Complete with summary: `PLAN: <one-line description of the implementation approa
 
 ## Dispatcher Signal Reference (authoritative)
 
-This SOUL is consumed by the `planner-daedalus` branch of `classify_blocked()` in `core/iterate.py`.
+This section covers what the dispatcher does in response to planner behavior. Two distinct paths exist — one for normal completions (the common case) and one for blocks (the unusual case).
 
-**Recognised signals for `planner-daedalus`:**
+### Path A — Normal: Planner completes
 
-| Handoff/completion substring | Dispatcher action |
+The planner should always **complete** (not block) with `PLAN:` summary. When the planner's kanban card transitions to `done`, the dispatcher's completion-handler (not `classify_blocked`) detects the completion and automatically creates downstream tasks: developer, QA, reviewer, security, accessibility, docs.
+
+### Path B — Edge case: Planner blocks
+
+If the planner blocks (which should not happen under normal operation), `classify_blocked()` is invoked:
+
+| Handoff substring | Dispatcher action |
 |---|---|
-| `PLANNING COMPLETE` (case-insensitive) in the handoff text of a blocked card | `PLANNER_DECOMPOSE` — breaks the plan into downstream specialist tasks (developer, QA, reviewer, security, docs) |
-| ANY OTHER block reason | `PM_ROUTE` — falls back to PM (almost certainly wrong for blocker output) |
-| Completion summary starting with `PLAN: <text>` | Normal completion; downstream task spawning is handled by the dispatcher's completion-handler path (not `classify_blocked`). |
+| `PLANNING COMPLETE` (case-insensitive) | `PLANNER_DECOMPOSE` — breaks the plan into downstream specialist tasks (developer, QA, reviewer, security, docs) |
+| ANY OTHER block reason | `PM_ROUTE` — treated as unexpected planner output, escalated to PM |
 
 **Canonical form you must emit:**
 - `PLAN: <one-line description>` — always as a completion, never as a block

@@ -211,14 +211,19 @@ The consultation path handles the third category: blocks that require human judg
 
 ## Dispatcher Signal Reference (authoritative)
 
-This SOUL is consumed by the `project-manager-daedalus` branch of `classify_blocked()` in `core/iterate.py`.
+This SOUL has two distinct paths — completion (the normal case) and blocked (the rare case).
 
-**Recognised signals for `project-manager-daedalus`:**
+### Path A — Normal: PM completes
 
-| Block/completion reason substring | Dispatcher action |
+When the PM completes with `spec: <text>`, the dispatcher's completion-handler (not `classify_blocked`) automatically creates downstream tasks for specialist agents (planner, developer, QA, reviewer, security-analyst, accessibility, documentation) based on the spec. **This is not PM_ROUTE** — PM_ROUTE only triggers when a card is blocked, not when it completes.
+
+### Path B — Edge case: PM blocks
+
+If the PM blocks (which should not happen under normal operation), `classify_blocked()` is invoked:
+
+| Block reason substring | Dispatcher action |
 |---|---|
-| Completion summary starting with `spec: <text>` | Triggers downstream task creation (PM_ROUTE to the spec summary). Cards are spawned for planner, developer, QA, reviewer, security, docs per the plan. |
-| Block reason containing `awaiting-fix: <child_id>` | `""` — silent no-op (the PM is waiting on the developer fix card; not a real escalation). The PM's own `awaiting-fix:` blocks are silently ignored by the classifier. |
+| `awaiting-fix: <child_id>` | `""` — silent no-op (the PM is waiting on the developer fix card; not a real escalation). The PM's own `awaiting-fix:` blocks are silently ignored by the classifier. |
 | ANY OTHER block reason | `ESCALATE` — human review (PM cannot consult itself). |
 
 **Critical PM-specific behaviours:**
