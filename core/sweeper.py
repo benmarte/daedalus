@@ -76,8 +76,13 @@ def _find_stale(
     for card in cards:
         if (card.get("status") or "").lower() != status:
             continue
+        # Skip cards that are already archived or have a non-matching status
+        if (card.get("archived") or False):
+            continue
         since = blocked_since(card)
-        if since is None or since > cutoff:
+        # Strict > threshold (i.e., > NOT >=): a card sitting for exactly
+        # threshold_hours is NOT stale — it must have been stuck MORE than that.
+        if since is None or since >= cutoff:
             continue
         stale.append((card, (now - since) / 3600.0))
     stale.sort(key=lambda pair: pair[1], reverse=True)

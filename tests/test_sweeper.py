@@ -1,4 +1,4 @@
-"""Tests for the stale-card sweeper (issues #186, #232).
+"""Tests for the stale-card sweeper (issues #186, #232; epic #181).
 
 Covers core.sweeper: blocked_since timestamp fallback, the pure find_stale_blocked
 detector, and sweep_stale_blocked (warn / archive / dry-run / DB-enrich), plus the
@@ -10,6 +10,7 @@ via the shared check() helper, mirroring the other suites.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from unittest import mock
@@ -105,6 +106,49 @@ def test_find_stale_respects_custom_threshold():
           len(sweeper.find_stale_blocked(cards, now=NOW, threshold_hours=6)) == 1)
 
 
+# ── find_stale_blocked: edge cases at the exact 48h boundary ─────────────────
+
+
+def test_find_stale_exactly_at_48h_is_not_stale():
+    """A card whose last progress is EXACTLY threshold_hours ago is NOT stale.
+
+    The requirement is 'more than 48 hours' (strictly greater), not 'at least'.
+    """
+    cards = [_card("t1", last_heartbeat_at=NOW - 48 * HOUR)]
+    result = sweeper.find_stale_blocked(cards, now=NOW, threshold_hours=48)
+    check("card exactly at 48h is NOT stale (must be more than)", result == [])
+
+
+def test_find_stale_just_under_48h_is_not_stale():
+    """A card at ~47.99h is clearly not stale."""
+    cards = [_card("t1", last_heartbeat_at=NOW - 47 * HOUR - 59 * 60)]
+    check("card ~47.98h old is not stale",
+          sweeper.find_stale_blocked(cards, now=NOW, threshold_hours=48) == [])
+
+
+def test_find_stale_just_over_48h_is_stale():
+    """A card at ~48.01h IS stale (just over the 'more than 48h' threshold)."""
+    cards = [_card("t1", last_heartbeat_at=NOW - 48 * HOUR - 60)]  # 1 second past threshold
+    result = sweeper.find_stale_blocked(cards, now=NOW, threshold_hours=48)
+    check("card 1 second past 48h IS stale",
+          len(result) == 1 and result[0][0]["id"] == "t1")
+
+
+def test_find_stale_skips_already_archived():
+    """Cards that are already archived are ignored regardless of age."""
+    cards = [_card("t1", last_heartbeat_at=NOW - 200 * HOUR, archived=True)]
+    check("archived card with old timestamp skipped",
+          sweeper.find_stale_blocked(cards, now=NOW, threshold_hours=48) == [])
+
+
+def test_find_stale_running_skips_already_archived():
+    """Running cards already marked archived are also ignored by the running detector."""
+    cards = [_card("t1", status="running",
+                   last_heartbeat_at=NOW - 200 * HOUR, archived=True)]
+    check("archived running card skipped",
+          sweeper.find_stale_running(cards, now=NOW, threshold_hours=24) == [])
+
+
 # ── sweep_stale_blocked: warn / archive / dry-run ─────────────────────────────
 
 
@@ -149,6 +193,48 @@ def test_sweep_enriches_heartbeat_from_db():
          mock.patch.object(kanban, "archive_task"):
         ids = sweeper.sweep_stale_blocked("daedalus", now=NOW)
     check("DB heartbeat (60h) makes card stale despite recent created_at", ids == ["t1"])
+
+
+# ── sweep_stale_blocked: logging output verification ─────────────────────────
+
+
+def test_sweep_logs_warning_for_stale_blocked():
+    """sweep_stale_blocked must emit a WARNING-level log with card id, hours, and threshold."""
+    cards = [_card("t1", last_heartbeat_at=NOW - 50 * HOUR)]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards), \
+         mock.patch.object(sweeper, "_heartbeats", return_value={}), \
+         mock.patch.object(kanban, "archive_task"):
+        with mock.patch.object(sweeper.logger, "warning") as log_warn:
+            sweeper.sweep_stale_blocked("daedalus", now=NOW, threshold_hours=48)
+    check("logger.warning called once", log_warn.call_count == 1)
+    args_pos = log_warn.call_args[0]
+    # Message template + args: template should contain "blocked" and card id
+    msg = args_pos[0]
+    check("warning message contains 'blocked' keyword", "blocked" in msg)
+    check("warning message contains threshold placeholder", "%g" in msg or "48" in str(args_pos))
+    # Card id should appear in a later positional arg (tid is arg[1])
+    check("warning includes card id", "t1" in str(args_pos))
+
+
+def test_sweep_logs_warning_for_stale_running():
+    """sweep_stale_running must emit a WARNING-level log with card id, hours, and threshold."""
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 30 * HOUR)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(sweeper, "_heartbeats", return_value={}):
+        with mock.patch.object(sweeper.logger, "warning") as log_warn:
+            sweeper.sweep_stale_running("daedalus", now=NOW, threshold_hours=24)
+    check("logger.warning called once", log_warn.call_count == 1)
+    args_pos = log_warn.call_args[0]
+    msg = args_pos[0]
+    check("running-card warning contains 'running' keyword", "running" in msg)
+
+
+def test_sweep_no_log_when_no_stale():
+    """When no cards are stale, logger.warning is never called."""
+    with mock.patch.object(kanban, "list_blocked", return_value=[]):
+        with mock.patch.object(sweeper.logger, "warning") as log_warn:
+            sweeper.sweep_stale_blocked("daedalus", now=NOW)
+    check("no warning logged for empty board", log_warn.call_count == 0)
 
 
 # ── find_stale_running: pure detection (issue #232) ───────────────────────────
@@ -196,6 +282,13 @@ def test_find_stale_running_sorts_oldest_first():
           [c["id"] for c, _ in stale] == ["oldest", "recent"])
 
 
+def test_find_stale_running_exactly_at_24h_is_not_stale():
+    """A running card exactly at threshold_hours is NOT stale (matches blocked behavior)."""
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 24 * HOUR)]
+    check("running card exactly at 24h is not stale",
+          sweeper.find_stale_running(cards, now=NOW, threshold_hours=24) == [])
+
+
 # ── sweep_stale_running: warn-only, no archive ────────────────────────────────
 
 
@@ -240,6 +333,47 @@ def test_heartbeats_empty_ids_returns_empty():
     check("no ids → {}", sweeper._heartbeats("daedalus", []) == {})
 
 
+# ── CLI manual invocation entry point ─────────────────────────────────────────
+
+
+def test_cli_sweep_runs_with_defaults():
+    """sweep_stale_blocked can be triggered via the CLI entry point (manual invocation)."""
+    # The entry point must exist and be importable from core.
+    from core import sweeper_cli
+    with mock.patch.object(kanban, "list_blocked", return_value=[]):
+        rc = sweeper_cli.run(["daedalus"])
+    check("CLI run returns 0 on empty board", rc == 0)
+
+
+def test_cli_sweep_respects_threshold_flag():
+    from core import sweeper_cli
+    cards = [_card("t1", last_heartbeat_at=NOW - 10 * HOUR)]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards), \
+         mock.patch.object(kanban, "archive_task"):
+        rc = sweeper_cli.run(["daedalus", "--threshold-hours", "6"])
+    check("CLI --threshold-hours accepted", rc == 0)
+
+
+def test_cli_sweep_archive_flag_triggers_archive():
+    from core import sweeper_cli
+    cards = [_card("t1", last_heartbeat_at=NOW - 50 * HOUR)]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards), \
+         mock.patch.object(kanban, "archive_task", return_value=True) as arch:
+        rc = sweeper_cli.run(["daedalus", "--archive"])
+    check("CLI --archive triggers archive",
+          rc == 0 and arch.call_count == 1)
+
+
+def test_cli_sweep_dry_run_flag():
+    from core import sweeper_cli
+    cards = [_card("t1", last_heartbeat_at=NOW - 50 * HOUR)]
+    with mock.patch.object(kanban, "list_blocked", return_value=cards), \
+         mock.patch.object(kanban, "archive_task") as arch:
+        rc = sweeper_cli.run(["daedalus", "--archive", "--dry-run"])
+    check("CLI --dry-run prevents mutation",
+          rc == 0 and arch.call_count == 0)
+
+
 ALL_TESTS = [
     test_blocked_since_prefers_heartbeat,
     test_blocked_since_falls_back_to_started,
@@ -252,28 +386,41 @@ ALL_TESTS = [
     test_find_stale_skips_unaged_card,
     test_find_stale_sorts_oldest_first,
     test_find_stale_respects_custom_threshold,
+    test_find_stale_exactly_at_48h_is_not_stale,
+    test_find_stale_just_under_48h_is_not_stale,
+    test_find_stale_just_over_48h_is_stale,
+    test_find_stale_skips_already_archived,
+    test_find_stale_running_skips_already_archived,
     test_sweep_returns_stale_ids_and_does_not_archive_by_default,
     test_sweep_archives_when_enabled,
     test_sweep_dry_run_does_not_archive,
     test_sweep_empty_board,
     test_sweep_enriches_heartbeat_from_db,
+    test_sweep_logs_warning_for_stale_blocked,
+    test_sweep_logs_warning_for_stale_running,
+    test_sweep_no_log_when_no_stale,
     test_find_stale_running_detects_old_running,
     test_find_stale_running_ignores_fresh_running,
     test_find_stale_running_ignores_blocked,
     test_find_stale_running_default_threshold_is_24h,
     test_find_stale_running_skips_unaged_card,
     test_find_stale_running_sorts_oldest_first,
+    test_find_stale_running_exactly_at_24h_is_not_stale,
     test_sweep_running_returns_stale_ids,
     test_sweep_running_queries_running_status,
     test_sweep_running_empty_board,
     test_sweep_running_enriches_heartbeat_from_db,
     test_heartbeats_missing_db_returns_empty,
     test_heartbeats_empty_ids_returns_empty,
+    test_cli_sweep_runs_with_defaults,
+    test_cli_sweep_respects_threshold_flag,
+    test_cli_sweep_archive_flag_triggers_archive,
+    test_cli_sweep_dry_run_flag,
 ]
 
 
 if __name__ == "__main__":
-    print("stale blocked-card sweeper tests (issue #186)")
+    print("stale blocked-card sweeper tests (issue #186, #232)")
     print("-" * 60)
     for fn in ALL_TESTS:
         fn()
