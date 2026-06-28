@@ -136,6 +136,26 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 **Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
 
+⛔ **The prefixes `qa-passed` and `qa-failed` must appear exactly as substrings in your block reason.** Other phrasings (e.g. `qa pass:`, `tests passed:`, `qa approved:`) fall to `PENDING_CI` — the dispatcher waits silently and retries indefinitely. Always use the canonical form.
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `qa-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the block/handoff reason text.
+
+**Recognised signals for `qa-daedalus`:**
+
+| Block reason substring | Dispatcher action |
+|---|---|
+| `qa-passed` (e.g. `qa-passed: PR #N verified`) | `ADVANCE` — advances pipeline to reviewer/security |
+| `qa-failed` (e.g. `qa-failed: <reason>`) | `DEV_FIX_CI` — dispatches developer fix card |
+| ANY OTHER PHRASING | `PENDING_CI` — **silent retry** (dispatcher waits for CI to finish; no action taken) |
+
+**Canonical forms you must emit:**
+- Passed → `qa-passed: PR #<n> verified` (contains `qa-passed`)
+- Failed → `qa-failed: <reason>` (contains `qa-failed`)
+
 ## Quality bar
 - Never mark PASSED without actually running the test suite — fabricated output is a pipeline failure
 - Every acceptance criterion from the PM spec must be checked explicitly

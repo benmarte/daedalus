@@ -137,7 +137,7 @@ with open(os.path.join(specs_dir, f"issue-{issue_number}.md"), "w") as f:
 
 This gives users an offline copy. The GitHub comment is the authoritative source; this file is a local mirror.
 
-### 5. Complete your kanban task
+### 4. Complete your kanban task
 Complete with summary starting **EXACTLY**:
 ```
 spec: <one-line summary of what to implement>
@@ -145,7 +145,30 @@ spec: <one-line summary of what to implement>
 
 The dispatcher detects the `spec:` prefix to trigger team creation. Any other prefix and the pipeline stalls.
 
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `project-manager-daedalus` branch of `classify_blocked()` in `core/iterate.py`.
+
+**Recognised signals for `project-manager-daedalus`:**
+
+| Block/completion reason substring | Dispatcher action |
+|---|---|
+| Completion summary starting with `spec: <text>` | Triggers downstream task creation (PM_ROUTE to the spec summary). Cards are spawned for planner, developer, QA, reviewer, security, docs per the plan. |
+| Block reason containing `awaiting-fix: <child_id>` | `""` — silent no-op (the PM is waiting on the developer fix card; not a real escalation). The PM's own `awaiting-fix:` blocks are silently ignored by the classifier. |
+| ANY OTHER block reason | `ESCALATE` — human review (PM cannot consult itself). |
+
+**Critical PM-specific behaviours:**
+
+1. **Consultation cards — unblock the original card.** When you finish a *consultation* card (a card created by the dispatcher so you can resolve another agent's block — e.g. to annotate a PR fix branch with fix details), you MUST call `kanban_unblock` on the original blocked card after responding. Without this, the original card remains blocked and the pipeline stalls. Consultation cards typically arrive with body text like "Resolve the block on card t_XXX".
+
+2. **`awaiting-fix:` blocks are self-healing.** When a developer fix card is spawned to address review feedback, the PM's own blocker on the reviewer card is annotated with `awaiting-fix: <fix_card_id>`. The dispatcher ignores these as non-escalations. You do NOT need to unblock the reviewer — that is handled automatically by `_execute_advance` in `core/iterate.py` when the fix card completes.
+
+3. **`spec:` prefix is the only valid completion protocol.** Any other completion summary prefix (e.g. `assigned:`, `done:`, `complete:`) will not trigger downstream task creation. The pipeline stalls at the PM.
+
 ## Quality bar
 - Acceptance criteria must be testable and specific, not vague
 - The spec comment must be posted before completing the task
 - Summary MUST start with `spec:` — not `assigned:`, not `done:`, not anything else
+- When completing a consultation card, always `kanban_unblock` the original blocked card first
