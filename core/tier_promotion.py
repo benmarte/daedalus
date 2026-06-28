@@ -305,6 +305,25 @@ def promote_waiting_tiers(
 
         promotable = snapshot.promotable(already_ready=already_ready)
 
+        # Sequential-ordering guard: promote at most one tier per parent epic
+        # per tick. If two sub-issue PRs merge between dispatcher ticks, a
+        # still-open tier-1 sibling and a tier-2 issue (whose tier-1 dep just
+        # closed) can both become unblocked at once. Promoting both would
+        # violate the invariant that a tier only starts once every earlier
+        # tier is closed. Keep only the lowest promotable tier; defer the rest
+        # to the next tick (they re-surface once this tier's PRs merge).
+        if promotable:
+            tiers = snapshot.compute_tiers()
+            min_tier = min(tiers.get(n, 0) for n in promotable)
+            deferred = [n for n in promotable if tiers.get(n, 0) != min_tier]
+            promotable = [n for n in promotable if tiers.get(n, 0) == min_tier]
+            if deferred:
+                logger.info(
+                    "tier promotion: deferring %s in epic #%d to a later tick "
+                    "(promoting tier %d first)",
+                    deferred, epic_number, min_tier,
+                )
+
         for n in promotable:
             try:
                 ok = bool(provider.add_label(n, "Ready"))

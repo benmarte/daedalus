@@ -296,6 +296,46 @@ def test_tier_chain_promotion():
     assert 20 not in result.promoted
 
 
+def test_one_tier_per_tick_when_two_prs_merge():
+    """Issue #231: two sub-issue PRs merging between ticks must not promote two
+    tiers at once.
+
+    Setup (epic #10):
+      #40 tier 0 (PR merged → closed)
+      #30 tier 1, depends on #40 — still open, now unblocked
+      #31 tier 1, depends on #40 — PR also merged between ticks → closed
+      #20 tier 2, depends on #31 — now unblocked because #31 closed
+
+    Both tier-1 #30 and tier-2 #20 are simultaneously promotable. The
+    sequential-ordering invariant requires promoting only the lowest tier
+    (tier 1, #30); #20 must wait until every tier-1 sibling is closed.
+    """
+    provider = _StubProvider()
+    provider.set_issue(10, "Epic")
+    provider.set_issue(40, "Epic: #10")  # tier 0
+    provider.set_issue(30, "Epic: #10\nDepends on: #40")  # tier 1, still open
+    provider.set_issue(31, "Epic: #10\nDepends on: #40")  # tier 1, merged
+    provider.set_issue(20, "Epic: #10\nDepends on: #31")  # tier 2
+    provider._states[40] = "closed"
+    provider._states[31] = "closed"  # second PR merged in the same gap
+    provider.set_blockers(40, [])
+    provider.set_blockers(30, [])  # #40 closed → unblocked
+    provider.set_blockers(31, [])
+    provider.set_blockers(20, [])  # #31 closed → unblocked, but tier 2
+
+    result = tier_promotion.promote_waiting_tiers(provider, just_closed=[40, 31])
+    # Only the lowest promotable tier (tier 1) is promoted this tick.
+    assert 30 in result.promoted
+    assert 20 not in result.promoted, "tier-2 #20 must defer until tier 1 closes"
+    assert (20, "Ready") not in provider.label_calls
+
+    # Next tick: #30 has merged → tier-2 #20 finally promotes.
+    provider._states[30] = "closed"
+    provider.set_blockers(20, [])
+    result2 = tier_promotion.promote_waiting_tiers(provider, just_closed=[30])
+    assert 20 in result2.promoted
+
+
 def test_circular_dependency_detected():
     """Cycle in deps → warning, no promotion for cyclic nodes."""
     provider = _StubProvider()
