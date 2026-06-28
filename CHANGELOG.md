@@ -1,3 +1,5 @@
+## [`daedalus-cron.sh` detects silent gateway death and attempts restart](https://github.com/benmarte/daedalus/issues/799) — [PR #851](https://github.com/benmarte/daedalus/pull/851)
+
 ## [PM SOUL.md explains the importance of unblocking the original card after consultation](https://github.com/benmarte/daedalus/issues/785) — [PR #812](https://github.com/benmarte/daedalus/pull/812)
 
 ## [feat: end-to-end integration test driving a full 7-stage pipeline scenario](https://github.com/benmarte/daedalus/issues/230) — [PR #445](https://github.com/benmarte/daedalus/pull/445)
