@@ -50,7 +50,7 @@ class TestWebhookHermesConsistency(unittest.TestCase):
     def _wait(self) -> None:
         deadline = time.monotonic() + 2.0
         while not self.captured and time.monotonic() < deadline:
-            time.sleep(0.02)
+            time.sleep(0.005)
 
     # -- tests ---------------------------------------------------------------
 
@@ -141,7 +141,7 @@ class TestWebhookHermesConsistency(unittest.TestCase):
             role="validator", issue_number=55,
             retry_count=3, max_retries=2, dry_run=True,
         )
-        time.sleep(0.2)
+        time.sleep(0.03)
         self.assertEqual(len(self.captured), 0)
 
 

@@ -63,7 +63,7 @@ class TestRetryCapNotificationEdgeCases(unittest.TestCase):
                 dry_run=False,
             )
             # Wait for async webhook thread
-            time.sleep(0.2)
+            time.sleep(0.03)
             check(
                 "webhook fires even when no hermes-send targets configured",
                 len(captured_payloads) > 0
@@ -149,7 +149,7 @@ class TestRetryCapNotificationEdgeCases(unittest.TestCase):
                 max_retries=3,
                 dry_run=False,
             )
-            time.sleep(0.2)
+            time.sleep(0.03)
             self.assertGreater(len(captured), 0, "webhook should have been called")
             payload = captured[0]
 
@@ -282,7 +282,7 @@ class TestRetryCapNotificationEdgeCases(unittest.TestCase):
                 max_retries=2,
                 dry_run=False,
             )
-            time.sleep(0.2)
+            time.sleep(0.03)
             self.assertGreater(len(captured), 0, "webhook should have been called")
             payload = captured[0]
 
@@ -313,7 +313,7 @@ class TestRetryCapNotificationEdgeCases(unittest.TestCase):
                 max_retries=3,
                 dry_run=False,
             )
-            time.sleep(0.2)
+            time.sleep(0.03)
             self.assertGreater(len(captured), 0, "webhook should have been called")
             payload = captured[0]
 
