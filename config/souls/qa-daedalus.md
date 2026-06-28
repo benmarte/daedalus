@@ -173,24 +173,54 @@ infrastructure failure — the card parks and the sweeper notices at 48 h.
 
 ### Self-healing escalation sequence
 
-1. **`qa-failed`** → dispatcher spawns a `developer-daedalus` fix card with the PR
-   link. The card title reads `Fix attempt N/3`.
-2. **Developer fix completes** → the card re-enters the dispatcher. CI status is
-   re-checked. If still red or QA still fails, another fix card is spawned
-   (fix-attempt counter increments).
-3. **`MAX_FIX_ATTEMPTS` (3) exceeded** → dispatcher calls `_execute_escalate`:
-   posts `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. The
-   card parks — no further automation touches it. A human must intervene.
-4. **Infrastructure failure** (your agent crashes, gateway dies, permission error,
-   or the worker hits the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writes
-   `coding_agent_timeout`) → handoff matches a crash marker
-   (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
-   `coding_agent_timeout`, `exited with code`, `agent crash`). For QA cards the
-   same markers are *not* special-cased — a QA crash (including a timeout)
-   leaves the card stuck in `PENDING_CI` until the sweeper notices.
-5. **Unrecognized signal** (typo in verdict, missing `qa-passed:` / `qa-failed:`
-   keyword) → dispatcher cannot classify, falls through to `PENDING_CI`. The card
-   idles until the sweeper alerts or a human unblocks.
+The escalation path progresses through 6 stages (matching the research in the
+parent task). You (QA) are the primary actor in stages 0, 1, 3, 4, and 5. Stage 2
+and 6 involve other pipeline participants.
+
+**Stage 1 — Automatic fix-retry loop**
+When you emit `qa-failed`, the dispatcher spawns a `developer-daedalus` fix card
+with the PR link. The card title reads `Fix attempt N/3`. After the developer fix
+completes, CI is re-checked. If tests still fail or QA still fails, another fix
+card is spawned and the fix-attempt counter increments. The fix-attempt counter
+is **per-PR across all fix cards** — the third attempt on any fix card for the
+same PR triggers escalation.
+
+**Stage 3 — Formal escalation (MAX_FIX_ATTEMPTS exceeded)**
+When the retry loop is exhausted (3 fix attempts failed), the dispatcher calls
+`_execute_escalate`: posts `⚠️ ESCALATE` on the PR and stamps the card
+`escalated: issue #N`. The card parks — no further automation touches it.
+**Your role at this stage:** QA is complete (you already failed 3 times). The
+issue is now in human-review queue.
+
+**Stage 4 — Infrastructure-failure silent path (crash markers)**
+Infrastructure failure (your agent crashes, gateway dies, permission error, or
+the worker hits the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writes
+`coding_agent_timeout`) → handoff matches a crash marker
+(`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
+`coding_agent_timeout`, `exited with code`, `agent crash`). For QA cards these
+markers are *not* special-cased — a QA crash (including a timeout) leaves the
+card stuck in `PENDING_CI` until the sweeper notices. **Your role:** you crashed
+before emitting a verdict, so the pipeline halts.
+
+**Stage 5 — Stale-card sweeper (notification, not recovery)**
+The sweeper (`core/sweeper.py`) runs on every dispatcher tick and warns about
+cards that have made no forward progress. It detects your absence via heartbeat
+staleness. **Your role:** if you crash or wedge without emitting a heartbeat,
+the sweeper notices and logs a warning. Recovery must come from a human.
+
+**Stage 6 — Human intervention (terminal fallback)**
+After escalation + sweeper notification, the issue is parked awaiting manual
+intervention. No further auto-recovery exists. A human must resolve the
+environmental or product-level blocker, unblock or reassign the card, and
+optionally archive it if no longer actionable. **Your role:** you cannot
+self-recover at this stage. A human must assess whether QA should be re-run,
+skipped, or the PR restructured.
+
+**Unrecognized signal (fallback to PENDING_CI)**
+Typo in verdict, missing `qa-passed:` / `qa-failed:` keyword → dispatcher
+cannot classify, falls through to `PENDING_CI`. The card idles until the sweeper
+alerts (at 24h/48h) or a human unblocks. **Your role:** ensure your verdict
+uses the canonical forms exactly.
 
 ### Sweeper thresholds (stale-card detection)
 
