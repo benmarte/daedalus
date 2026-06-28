@@ -1,5 +1,7 @@
 ## [Integration test: issue routed to planner → planner returns NOT SUITABLE → validator created automatically](https://github.com/benmarte/daedalus/issues/935) — [PR #946](https://github.com/benmarte/daedalus/pull/946)
 
+## [Integration test: issue routed to planner → planner returns NOT SUITABLE → validator created automatically](https://github.com/benmarte/daedalus/issues/935) — [PR #946](https://github.com/benmarte/daedalus/pull/946)
+
 ## [When a planner task completes with `NOT SUITABLE FOR DECOMPOSITION` in summary, a validator task is created for the parent issue](https://github.com/benmarte/daedalus/issues/931) — [PR #941](https://github.com/benmarte/daedalus/pull/941)
 
 ## [fix: Add dispatcher handler for planner NOT SUITABLE FOR DECOMPOSITION signal](https://github.com/benmarte/daedalus/issues/931) — [PR #941](https://github.com/benmarte/daedalus/pull/941)
