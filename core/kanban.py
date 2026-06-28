@@ -319,6 +319,20 @@ def block_task(slug: str, task_id: str, reason: str = "") -> bool:
     return True
 
 
+def archive_task(slug: str, task_id: str) -> bool:
+    """Archive a task off the active board (``hermes kanban archive``).
+
+    Used by the stale-blocked sweeper to move long-stuck cards out of the active
+    columns. Returns True on success; degrades gracefully (logs + returns False).
+    """
+    rc, out, err = _hk(["--board", slug, "archive", task_id])
+    if rc != 0:
+        logger.warning("kanban: archive %s failed: %s", task_id, (err or out or "").strip())
+        return False
+    logger.info("kanban: archived %s", task_id)
+    return True
+
+
 def reassign_task(slug: str, task_id: str, profile: str, *, reclaim: bool = False) -> bool:
     """Reassign a task to a different profile. Returns True on success."""
     args = ["--board", slug, "reassign", task_id, profile]

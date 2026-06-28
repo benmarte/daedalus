@@ -81,6 +81,7 @@ class FakeKanban:
         self.unblocked_calls: List[tuple] = []
         self.created: List[Dict[str, Any]] = []
         self.comments: List[tuple] = []
+        self.archived: List[str] = []
 
     # ---- seeding (not counted as pipeline mutations) ----
 
@@ -215,6 +216,14 @@ class FakeKanban:
         if t is not None:
             t.setdefault("comments", []).append({"body": body})
         self.comments.append((task_id, body))
+        return True
+
+    def archive_task(self, slug: str, task_id: str) -> bool:
+        t = self.tasks.get(task_id)
+        if not t:
+            return False
+        t["status"] = "archived"
+        self.archived.append(task_id)
         return True
 
     # ---- assertion helpers ----
