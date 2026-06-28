@@ -86,6 +86,13 @@ if [ -f "$CRON_WRAPPER" ]; then
   else
     fail "daedalus-cron.sh does not reference daedalus_dispatch.py"
   fi
+  # Gateway watchdog (#187): wrapper detects a dead gateway and restarts it.
+  if grep -q "hermes gateway status" "$CRON_WRAPPER" && \
+     grep -q "hermes gateway restart" "$CRON_WRAPPER"; then
+    pass "daedalus-cron.sh includes the gateway watchdog (#187)"
+  else
+    fail "daedalus-cron.sh missing gateway watchdog (status + restart)"
+  fi
 else
   fail "daedalus-cron.sh not found at $CRON_WRAPPER"
 fi

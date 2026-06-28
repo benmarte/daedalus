@@ -353,3 +353,144 @@ class TestInstallWebhookHandler:
 
         assert ok is False
         assert "MISSING" in msg
+
+
+# ── cron wrapper / gateway watchdog tests (#187) ─────────────────────────────
+
+
+class TestInstallCronWrapper:
+    """_install_cron_wrapper writes daedalus-cron.sh with the gateway watchdog."""
+
+    def test_wrapper_content(self, postinstall, tmp_path):
+        """Generated wrapper preserves existing behavior AND adds the watchdog block."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = postinstall._install_cron_wrapper()
+
+        assert ok is True
+        assert "OK:" in msg
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+        assert wrapper.is_file()
+        assert wrapper.stat().st_mode & 0o111  # executable
+        text = wrapper.read_text()
+
+        # Existing behavior preserved.
+        assert ".hermes/.env" in text
+        assert "daedalus_dispatch.py" in text
+        assert "exec python3" in text
+
+        # Watchdog: liveness via stdout marker, single restart, best-effort guard.
+        assert "command -v hermes" in text
+        assert "hermes gateway status" in text
+        assert "not running" in text
+        assert "hermes gateway restart" in text
+        # Restart appears exactly once → single attempt, no retry loop.
+        assert text.count("hermes gateway restart") == 1
+        # The watchdog must sit BEFORE the dispatcher exec.
+        assert text.index("hermes gateway status") < text.index("exec python3")
+
+
+def _build_fake_bin(tmp_path, *, with_hermes: bool):
+    """Create a bin dir with stub `sleep`/`python3` (+ optional `hermes`).
+
+    The `hermes` stub logs each invocation and reports liveness from a flag
+    file so the post-restart status check can flip to 'running'. `sleep` is a
+    no-op so the wrapper's `sleep 5` doesn't slow the test.
+    """
+    import sys
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    # No-op sleep so the wrapper's `sleep 5` returns instantly.
+    sleep_stub = fake_bin / "sleep"
+    sleep_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+    sleep_stub.chmod(0o755)
+
+    # `python3` must resolve to the running interpreter.
+    py = fake_bin / "python3"
+    py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
+    py.chmod(0o755)
+
+    log = tmp_path / "hermes.log"
+    restart_flag = tmp_path / "restarted"
+
+    if with_hermes:
+        hermes = fake_bin / "hermes"
+        hermes.write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "$1 $2" >> "{log}"\n'
+            'if [ "$1" = "gateway" ] && [ "$2" = "status" ]; then\n'
+            f'  if [ "$GW_MODE" = "down" ] && [ ! -f "{restart_flag}" ]; then\n'
+            '    echo "✗ Gateway is not running"\n'
+            "  else\n"
+            '    echo "✓ Gateway is running — PID 4242"\n'
+            "  fi\n"
+            'elif [ "$1" = "gateway" ] && [ "$2" = "restart" ]; then\n'
+            f'  touch "{restart_flag}"\n'
+            "fi\n"
+            "exit 0\n"  # status always exits 0, just like the real CLI
+        )
+        hermes.chmod(0o755)
+
+    return fake_bin, log, restart_flag
+
+
+def _install_stub_dispatcher(fake_home, marker):
+    """Place a stub daedalus_dispatch.py under fake_home that touches `marker`."""
+    disp = fake_home / ".hermes" / "plugins" / "daedalus" / "scripts" / "daedalus_dispatch.py"
+    disp.parent.mkdir(parents=True, exist_ok=True)
+    disp.write_text(
+        "import os\n"
+        f'open(r"{marker}", "w").close()\n'
+    )
+    return disp
+
+
+class TestCronWrapperIntegration:
+    """Run the generated wrapper end-to-end with a stubbed `hermes` on PATH."""
+
+    def _run(self, postinstall, tmp_path, *, gw_mode, with_hermes=True):
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, _ = postinstall._install_cron_wrapper()
+        assert ok is True
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+
+        marker = tmp_path / "dispatched"
+        _install_stub_dispatcher(fake_home, marker)
+        fake_bin, log, restart_flag = _build_fake_bin(tmp_path, with_hermes=with_hermes)
+
+        env = {
+            "HOME": str(fake_home),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "GW_MODE": gw_mode,
+        }
+        subprocess.run(["bash", str(wrapper)], env=env,
+                       capture_output=True, text=True, timeout=30)
+        log_text = log.read_text() if log.exists() else ""
+        return marker, log_text
+
+    def test_dead_gateway_triggers_restart(self, postinstall, tmp_path):
+        """A 'not running' status triggers exactly one restart; dispatcher still runs."""
+        marker, log_text = self._run(postinstall, tmp_path, gw_mode="down")
+        assert "gateway restart" in log_text
+        assert log_text.count("gateway restart") == 1
+        assert marker.exists(), "dispatcher must still be reached after the watchdog"
+
+    def test_live_gateway_skips_restart(self, postinstall, tmp_path):
+        """A running gateway is left alone — no restart invoked, dispatcher runs."""
+        marker, log_text = self._run(postinstall, tmp_path, gw_mode="up")
+        assert "gateway restart" not in log_text
+        assert "gateway status" in log_text
+        assert marker.exists()
+
+    def test_missing_hermes_cli_is_best_effort(self, postinstall, tmp_path):
+        """No `hermes` on PATH: watchdog is skipped, dispatcher still reached."""
+        marker, log_text = self._run(
+            postinstall, tmp_path, gw_mode="down", with_hermes=False)
+        assert log_text == ""  # hermes never ran
+        assert marker.exists(), "dispatcher must run even without the hermes CLI"
