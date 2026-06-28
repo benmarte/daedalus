@@ -474,6 +474,72 @@ accessibility → approved ────────┤  (skipped for non-UI issu
 documentation → done → report posted to PR + channels
 ```
 
+### The Self-Healing Pipeline (epic #180)
+
+Daedalus's pipeline recovers from most agent failures automatically. The **self-healing loop** runs inside every dispatcher tick against every blocked card, classifying its state and executing a recovery action. As an operator, you need to understand what the pipeline handles on its own, what surfaces to you, and which knobs you can tune.
+
+**What the self-healing pipeline does.** Every cron tick, the dispatcher scans all `blocked` cards and classifies each one (`core/iterate.py:classify_blocked`). Based on the card's assignee and the text of its block reason, the dispatcher picks one of several actions — advance the card, spawn a fix card, search for a PR, route through the PM, approve and complete, or escalate to a human. This is how the pipeline self-corrects without intervention.
+
+**The five core behaviours** (detailed technical reference in the README under *"Self-healing behaviors (epic #180)"*):
+
+1. **Automatic awaiting-fix unblock.** When CI fails or a reviewer flags changes, a fix card is dispatched. The reviewer (or security / accessibility) card is blocked with `awaiting-fix: <fix_task_id>` so you can see the dependency on the board. When the fix card completes, the dispatcher automatically unblocks the waiting reviewer and re-queues it — no manual action needed.
+2. **Crash-marker silent no-op.** If an agent crashes with an infrastructure-level marker (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`), the dispatcher does *not* spawn a PM consultation card (which would just loop). The card parks and waits for a human to fix the environment.
+3. **Awaiting-fix concurrency guard.** Concurrent cron ticks cannot spawn duplicate fix cards for the same reviewer card — once the first tick annotates the card with `awaiting-fix:`, subsequent ticks see the marker and skip.
+4. **`PENDING_PR` VCS search.** When a developer agent has been spawned but has not yet opened a PR, the dispatcher polls GitHub once per cron tick looking for a PR linked to the issue. Once found, it updates the block reason so the next tick can drive CI and downstream stages.
+5. **PM `awaiting-fix:` silent no-op.** The project-manager's own waits-on-developer-fix blocks are treated as legitimate waits, not escalations — otherwise every developer fix would wake an unnecessary PM escalation.
+
+**When it triggers.** The self-healing loop runs on **every dispatcher tick** — both the primary session-end trigger and the cron safety net. There is no separate switch or flag. If a card is `blocked`, it gets classified.
+
+**What you can expect during recovery.**
+
+- **CI-red PRs** → a developer fix card appears automatically within seconds. Each fix attempt increments a counter; the third failure on any fix card for the same PR escalates (see below).
+- **Reviewer / security changes-requested** → a PM routing card is dispatched to decide whether the fix goes to developer, security, or re-spec. The reviewer/security card parks with `awaiting-fix: <fix_id>` and is auto-resumed when the fix lands.
+- **Non-canonical signals** (a QA agent that says `qa-blocked:` instead of `qa-failed:`, for example) → the card stays in `PENDING_CI` silently. No automatic recovery exists for ambiguous signals. A human must re-queue or cancel the card.
+- **Infrastructure failures / crashes** → card parks silently. The sweeper (see below) logs a warning when the stale-card threshold is reached; after that it is on you.
+
+**Escalation after repeated failures.** Fix cards (CI red, review findings) share a single per-PR counter. After **3 attempts**, the dispatcher calls the escalation handler, which posts a `⚠️ ESCALATE` comment on the PR, stamps the card with `escalated: issue #N`, and stops retrying. The card parks for human intervention — the pipeline will not auto-loop you to death.
+
+**Sweeper (stale-card watchdog).** A separate pass scans for cards that have not made forward progress:
+
+- **Blocked cards** with no heartbeat for longer than the threshold (default **48 hours**) get a warning. With `archive: true` set (see below), the card is auto-archived off the active board.
+- **Running cards** with no heartbeat for longer than **24 hours** get a warning (never archived — the detector is notification-only).
+
+The sweeper is a signal, not a recovery mechanism. It tells you that something is wedged; it does not fix it.
+
+#### Configuration knobs
+
+These are the levers you can tune from `.hermes/daedalus.yaml` or the project config modal:
+
+| Name | Default | Override |
+|------|---------|----------|
+| `MAX_FIX_ATTEMPTS` | 3 | Hard-coded in `core/iterate.py` — raises require a code change (and a corresponding SOUL.md update) |
+| `tracking.stale_blocked.hours` | 48 | Project YAML: `tracking.stale_blocked.hours` |
+| `tracking.stale_blocked.archive` | false | Project YAML: `tracking.stale_blocked.archive` (set `true` to auto-archive stale blocked cards) |
+| `tracking.stale_running.hours` | 24 | Project YAML: `tracking.stale_running.hours` |
+| `execution.coding_agent_max_wait` | 3600 (1 h) | Project YAML: `execution.coding_agent_max_wait` — wall-clock ceiling on each spawned coding-agent invocation |
+
+```yaml
+# Example: tighter stale-card thresholds for a fast-moving project
+tracking:
+  stale_blocked:
+    hours: 12
+    archive: true
+  stale_running:
+    hours: 6
+execution:
+  coding_agent_max_wait: 1800   # 30 min for small changes
+```
+
+#### What breaks self-healing
+
+Three scenarios require human intervention because the self-healing loop cannot resolve them:
+
+- **Infrastructure crashes** (coding-agent-failed, permission-error, gateway down). The dispatcher parks the card. You must fix the gateway / OS / agent binary and unblock the card manually.
+- **`awaiting-fix:` blocks that never complete.** If the fix card is itself stuck (agent keeps crashing, or the fix task blocks on a non-terminal signal), the reviewer card stays blocked forever. Investigate the fix card, then either complete it or escalate manually.
+- **Non-canonical QA / accessibility signals.** QA must emit exactly `qa-passed:` or `qa-failed:`; accessibility must use `approved`, `a11y-na`, `a11y-skipped`, or `changes requested`. Any other phrasing leaves the card in a waiting state with no automatic escalation — the `MAX_FIX_ATTEMPTS` counter does not apply to `PENDING_CI` status.
+
+For the per-role signal reference (exactly which substrings classify into which action), each agent SOUL has an authoritative *"Dispatcher Signal Reference"* section, and the README has the full five-behavior walkthrough with line-level citations to `core/iterate.py`.
+
 ---
 
 ## 11. Add Your VCS Token
