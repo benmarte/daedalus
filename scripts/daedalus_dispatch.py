@@ -49,6 +49,7 @@ from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
 from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
+from core import sweeper  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core import thread_delivery  # noqa: E402
 from core.providers.base import ensure_closing_keyword, is_epic  # noqa: E402
@@ -2864,6 +2865,21 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             logger.info("dispatch:   [%s] %s — %s",
                         d.get("severity", "?"), d.get("task_id", "?"),
                         d.get("message", ""))
+
+    # Stale-blocked sweeper (#186): warn for cards stuck in blocked > N hours and
+    # optionally archive them off the active board. Configurable via
+    # tracking.stale_blocked.{hours,archive}; degrades gracefully.
+    stale_cfg = (resolved.get("tracking") or {}).get("stale_blocked") or {}
+    try:
+        sweeper.sweep_stale_blocked(
+            slug,
+            threshold_hours=float(stale_cfg.get("hours", sweeper.DEFAULT_STALE_HOURS)),
+            archive=bool(stale_cfg.get("archive", False)),
+            dry_run=dry_run,
+        )
+    except Exception as exc:  # never let the sweeper break a dispatch tick
+        logger.warning("dispatch: stale-blocked sweep failed: %s", exc)
+
     iterate_counts, advance_prs, pending_ci_cards = iterate.run_iterate(
         slug, repo, resolved=resolved, provider=provider, dry_run=dry_run,
     )

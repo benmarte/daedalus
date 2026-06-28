@@ -1,0 +1,155 @@
+"""Stale blocked-card sweeper (issue #186, epic #181).
+
+Kanban cards can get stuck in ``blocked`` status indefinitely with no
+visibility. This module detects cards that have sat in ``blocked`` with no
+activity for longer than a threshold (default 48h), logs a warning for each,
+and — when enabled — archives them off the active board via the native
+``hermes kanban archive`` command.
+
+It runs each dispatch tick alongside ``kanban.diagnostics`` and degrades
+gracefully: any failure logs and returns, never breaking a run.
+
+**Blocked-since signal.** The board has no ``blocked_at`` column, and its
+``task_runs`` table is not reliably populated across deployments. The most
+dependable "last made progress" timestamp is therefore ``last_heartbeat_at``
+(which freezes once a blocked worker stops reporting), falling back to
+``started_at`` then ``created_at``. ``hermes kanban list --json`` omits
+``last_heartbeat_at``, so :func:`sweep_stale_blocked` enriches blocked cards
+with a single direct SQLite read (mirroring ``kanban.rename_task``).
+"""
+from __future__ import annotations
+
+import logging
+import os
+import sqlite3
+import time
+from typing import Dict, List, Optional, Tuple
+
+from core import kanban
+
+logger = logging.getLogger("daedalus.sweeper")
+
+DEFAULT_STALE_HOURS = 48
+
+# Timestamp columns to consult, in order of preference, for "last progress".
+_SINCE_KEYS = ("last_heartbeat_at", "started_at", "created_at")
+
+
+def blocked_since(card: Dict) -> Optional[int]:
+    """Best epoch-seconds estimate of when ``card`` last made progress.
+
+    Returns the first present, truthy value among ``last_heartbeat_at``,
+    ``started_at``, ``created_at`` (coerced to ``int``), or ``None`` if none are
+    available — in which case the card cannot be aged and is skipped.
+    """
+    for key in _SINCE_KEYS:
+        val = card.get(key)
+        if val:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def find_stale_blocked(
+    cards: List[Dict],
+    *,
+    now: int,
+    threshold_hours: float = DEFAULT_STALE_HOURS,
+) -> List[Tuple[Dict, float]]:
+    """Pure detection: blocked cards with no activity for > ``threshold_hours``.
+
+    Returns ``[(card, age_hours)]`` sorted oldest-first. Cards that are not
+    blocked, or whose age can't be determined, are skipped.
+    """
+    cutoff = now - threshold_hours * 3600
+    stale: List[Tuple[Dict, float]] = []
+    for card in cards:
+        if (card.get("status") or "").lower() != "blocked":
+            continue
+        since = blocked_since(card)
+        if since is None or since > cutoff:
+            continue
+        stale.append((card, (now - since) / 3600.0))
+    stale.sort(key=lambda pair: pair[1], reverse=True)
+    return stale
+
+
+def _db_path(slug: str) -> str:
+    return os.path.expanduser(f"~/.hermes/kanban/boards/{slug}/kanban.db")
+
+
+def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
+    """``{task_id: last_heartbeat_at}`` from the board DB. Degrades to ``{}``.
+
+    Only ids found in the DB with a non-null heartbeat are returned, so callers
+    can safely leave already-present timestamps untouched for the rest.
+    """
+    if not task_ids:
+        return {}
+    path = _db_path(slug)
+    if not os.path.exists(path):
+        return {}
+    try:
+        conn = sqlite3.connect(path)
+        placeholders = ",".join("?" for _ in task_ids)
+        rows = conn.execute(
+            f"SELECT id, last_heartbeat_at FROM tasks WHERE id IN ({placeholders})",
+            task_ids,
+        ).fetchall()
+        conn.close()
+        return {r[0]: int(r[1]) for r in rows if r[1] is not None}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("sweeper: heartbeat lookup failed for %s: %s", slug, exc)
+        return {}
+
+
+def sweep_stale_blocked(
+    slug: str,
+    *,
+    threshold_hours: float = DEFAULT_STALE_HOURS,
+    archive: bool = False,
+    now: Optional[int] = None,
+    dry_run: bool = False,
+) -> List[str]:
+    """Detect, warn, and optionally archive stale blocked cards.
+
+    Returns the list of stale card ids found. ``archive`` (off by default) moves
+    each stale card off the active board via ``kanban.archive_task``;
+    ``dry_run`` logs intended actions without mutating the board.
+    """
+    now = int(time.time()) if now is None else int(now)
+    cards = kanban.list_blocked(slug) or []
+    if not cards:
+        return []
+
+    # Enrich blocked cards that lack a heartbeat (list --json omits it) with a
+    # single DB read, so aging uses the freshest available activity timestamp.
+    needs = [str(c.get("id")) for c in cards
+             if c.get("id") and not c.get("last_heartbeat_at")]
+    hb = _heartbeats(slug, needs)
+    if hb:
+        for c in cards:
+            beat = hb.get(str(c.get("id")))
+            if beat is not None:
+                c["last_heartbeat_at"] = beat
+
+    stale = find_stale_blocked(cards, now=now, threshold_hours=threshold_hours)
+    stale_ids: List[str] = []
+    for card, age in stale:
+        tid = str(card.get("id") or "")
+        label = card.get("title") or card.get("assignee") or "?"
+        action = (
+            "archiving" if (archive and not dry_run)
+            else "[dry-run] would archive" if (archive and dry_run)
+            else "manual intervention may be required"
+        )
+        logger.warning(
+            "sweeper: card %s (%s) stuck in blocked for %.0fh (>%gh) — %s",
+            tid, label, age, threshold_hours, action,
+        )
+        stale_ids.append(tid)
+        if archive and not dry_run and tid:
+            kanban.archive_task(slug, tid)
+    return stale_ids
