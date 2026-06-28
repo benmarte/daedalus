@@ -803,6 +803,12 @@ tracking:
     archive: false     # set true to archive stale cards instead of just warning
 ```
 
+The sweeper also runs as a standalone CLI for manual invocation (e.g., scheduled jobs, ad-hoc cleanup):
+
+```bash
+python -m core.sweeper_cli <board_slug> [--threshold-hours 48] [--archive] [--dry-run]
+```
+
 **Retry-cap exhaustion notifications.** Per-attempt counters for validator retries
 (`validator-retry-N-r*`) and PM stale-task recovery (`pm-{n}-r*`) each cap at a
 maximum (2 for validator, 3 for PM). When an attempt counter exhausts the cap,
@@ -818,11 +824,31 @@ fire a chat notification.
 **Gateway watchdog (`daedalus-cron.sh`).** The per-project cron wrapper script
 (`~/.hermes/scripts/daedalus-cron.sh`, installed by `postinstall.py`) detects a
 silently-dead Hermes gateway (`hermes gateway status` reporting "not running")
-and attempts a single `hermes gateway restart` before exec-ing the dispatcher.
+and attempts a `hermes gateway restart` before exec-ing the dispatcher.
 Prevents the common failure mode where the gateway crashes overnight and the
-dispatcher's cron continues to fire but its messages never deliver. If the
-restart also fails, the wrapper logs to stderr and the dispatch tick still runs
-— self-heal, never blocking the run.
+dispatcher's cron continues to fire but its messages never deliver. Two layers
+of protection:
+
+1. **Shell-level check** — the wrapper parses `hermes gateway status` (which
+   always exits 0) for the `not running` marker and does a basic restart attempt.
+2. **Enhanced watchdog** (`scripts/gateway_watchdog.py`, invoked after the
+   shell check if installed) adds safeguards: a **STOP marker**
+   (`~/.hermes/gateway-stop`) that inhibits all restarts for manual maintenance,
+   **rate limiting** (max 3 restarts per 3600s window to prevent restart storms),
+   **exponential backoff** (10s → 20s → 40s, capped at 300s) between restart
+   attempts, **persistent state** (`~/.hermes/gateway-watchdog-state.json`) so
+   restart history survives across ticks, and **crash log detection** (scans
+   `~/.hermes/logs/` for `gateway*.log` or `hermes.*.log` files within the
+   lookback window). If the watchdog is rate-limited or the restart fails, it
+   logs to stderr and the dispatch tick still runs — self-heal, never blocking
+   the run.
+
+Additionally, `scripts/watchdog.py` provides an HTTP health-probe mode for
+daemon-style deployments: it probes the gateway's health endpoint and checks
+dispatch-staleness (zombie detection — process alive but dispatcher goroutine
+stuck). Configured via `DAEDALUS_GW_*` environment variables (health port,
+timeouts, rate limits). Both watchdogs degrade gracefully: any failure logs
+and never blocks dispatch.
 
 **Fetch-limit ceiling.** `_fetch_issues()` defaults to a page limit of **100**
 per call rather than 20. Boards with more than 20 open issues were silently
@@ -986,10 +1012,15 @@ Each piece exists because the obvious approach failed:
   archives so humans can inspect without disrupting the live queue. It runs inside
   the tick so it never drifts from the dispatcher's view of the board.
 - **Gateway watchdog** — the cron tick continues to fire even after the Hermes
-  gateway crashes, giving the appearance of a healthy pipeline until a human notices
-  no agents have run. The wrapper restarts the gateway before dispatching so the
-  pipeline self-heals and the tick still delivers its nudge. One-line defense against
-  a multi-hour silence.
+  gateway crashes, giving the appearance of a healthy pipeline until a human
+  notices no agents have run. A two-layer defense: the `daedalus-cron.sh`
+  wrapper parses `hermes gateway status` for the `not running` marker, and the
+  enhanced `gateway_watchdog.py` adds rate limiting (max 3 restarts per hour),
+  exponential backoff (10s → 300s), a STOP marker for manual maintenance, and
+  persistent state so restart history survives across ticks. The pipeline
+  self-heals and the tick still delivers its nudge. Rate limiting prevents a
+  flapping gateway from exhausting the cron slot with restart attempts every
+  three minutes.
 - **Retry-cap notifications** — validator and PM retry caps exist so a broken issue
   doesn't loop forever. But a cap with no notification means the operator only
   learns about it days later by scrolling the board. A one-time `retry-cap-exhausted`
