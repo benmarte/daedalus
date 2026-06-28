@@ -1400,6 +1400,7 @@ _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
 # sent, so subsequent dispatcher ticks don't re-send the identical alert (#183).
 _RETRY_CAP_MARKER = "<!-- daedalus:retry-cap-notified -->"
 
+_RETRY_CAP_NOTIFICATION_MARKER = "RETRY_CAP_NOTIFICATION_SENT"
 _MAX_VALIDATOR_RETRIES = 2
 
 
@@ -2285,12 +2286,20 @@ def _check_confirmed_validators(
                     "manual intervention required (hermes kanban edit + SPEC: summary)",
                     n, stale_count,
                 )
-                if resolved is not None:
+                if resolved is not None and not _has_notified_block(
+                    slug, n, validator_profile=p["validator"],
+                    marker=_RETRY_CAP_MARKER,
+                ):
                     _send_retry_cap_notification(
                         role="pm", issue_number=n,
                         retry_count=stale_count, max_retries=_MAX_PM_RETRIES,
                         resolved=resolved, dry_run=dry_run,
                     )
+                    if not dry_run:
+                        _mark_notified_block(
+                            slug, n, validator_profile=p["validator"],
+                            marker=_RETRY_CAP_MARKER,
+                        )
                 continue
             logger.warning(
                 "dispatch: PM task for #%s prematurely completed without SPEC: "
