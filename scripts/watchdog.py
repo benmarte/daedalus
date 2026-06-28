@@ -172,8 +172,8 @@ def _do_restart() -> bool:
         return False
 
 
-def _dispatch_stale() -> bool:
-    """True iff hermes gateway status --deep reports no dispatch in 2+ hours."""
+def _dispatch_stale(threshold_hours: int = 2) -> bool:
+    """True iff hermes gateway status --deep reports no dispatch in threshold_hours+ hours."""
     try:
         out = subprocess.run(
             ["hermes", "gateway", "status", "--deep"],
@@ -187,7 +187,7 @@ def _dispatch_stale() -> bool:
             if line.strip().lower().startswith(prefix.lower()):
                 try:
                     secs = int(line.split(":", 1)[1].split()[0])
-                    return secs >= 2 * 3600
+                    return secs >= threshold_hours * 3600
                 except (ValueError, IndexError):
                     return False
     return False
@@ -315,6 +315,17 @@ def run_watchdog(cfg=None, probe_fn=_health_probe, status_fn=_check_status,
     # can iterate over multiple profiles from `hermes gateway list`.
     profiles = ["DEFAULT"]
 
+    # Wrap stale_fn to inject threshold_hours from config (#396)
+    threshold_hours = getattr(cfg, "stale_threshold_hours", 2)
+
+    def _stale_wrapper():
+        import inspect
+        sig = inspect.signature(stale_fn)
+        if len(sig.parameters) > 0:
+            return stale_fn(threshold_hours)
+        else:
+            return stale_fn()
+
     checked = False
     needed_restart = False
     allowed = False
@@ -325,7 +336,7 @@ def run_watchdog(cfg=None, probe_fn=_health_probe, status_fn=_check_status,
 
     for profile in profiles:
         checked = True
-        gw = check_gateway(probe_fn, status_fn, stale_fn, cfg.health_port, cfg.health_timeout)
+        gw = check_gateway(probe_fn, status_fn, _stale_wrapper, cfg.health_port, cfg.health_timeout)
 
         need_restart = (not gw.alive and gw.has_pid) or gw._dispatch_stale
 
