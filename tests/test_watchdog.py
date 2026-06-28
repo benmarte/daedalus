@@ -418,3 +418,328 @@ def test_load_config_env_overrides(monkeypatch):
     assert cfg.enabled is False
     assert cfg.health_port == 9000
     assert cfg.max_restarts == 5
+
+
+# ---------------------------------------------------------------------------
+# Multi-tick / state-recovery lifecycle
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("tick_times", [
+    [1000, 1010, 1020, 1030],  # 10-second intervals
+    [1000, 1500, 2000, 2500],  # 500-second intervals
+])
+def test_watchdog_rapid_flapping_hits_rate_limit(tick_times):
+    """Simulate rapid failures across 4 ticks: 3 restarts succeed, 4th is rate-limited."""
+    tmp = TempStateDir()
+    cfg = _make_cfg(tmp, max_restarts=3, cooldown_secs=0, restart_window_secs=3600)
+    gw = FakeGateway(probe_alive=False, status_running=True, dispatch_is_stale=False)
+
+    # Ticks 1-3: restarts succeed
+    for t in tick_times[:3]:
+        result = run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                              restart_fn=gw.restart, stale_fn=gw.stale_fn, now=t)
+        assert result.restart_succeeded is True
+
+    # Tick 4: rate limit triggered (3/3)
+    result = run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                          restart_fn=gw.restart, stale_fn=gw.stale_fn, now=tick_times[3])
+    assert result.restart_attempted is False
+    assert result.alert_written is True
+    assert gw.restart_calls == 3
+    tmp.cleanup()
+
+
+def test_watchdog_state_recovery_lifecycle():
+    """Verify watchdog can restart a dead gateway, then detects recovery on next tick."""
+    tmp = TempStateDir()
+    cfg = _make_cfg(tmp, cooldown_secs=0)
+
+    # Tick 1: gateway is dead — restart triggered and succeeds
+    gw_dead = FakeGateway(probe_alive=False, status_running=True, dispatch_is_stale=False)
+    result = run_watchdog(cfg, probe_fn=gw_dead.probe, status_fn=gw_dead.status,
+                          restart_fn=gw_dead.restart, stale_fn=gw_dead.stale_fn, now=1000)
+    assert result.restart_succeeded is True
+    assert gw_dead.restart_calls == 1
+
+    # Tick 2: gateway recovered — no restart needed
+    gw_healthy = FakeGateway(probe_alive=True, status_running=True, dispatch_is_stale=False)
+    result = run_watchdog(cfg, probe_fn=gw_healthy.probe, status_fn=gw_healthy.status,
+                          restart_fn=gw_healthy.restart, stale_fn=gw_healthy.stale_fn, now=1010)
+    assert result.restart_attempted is False
+    assert gw_healthy.restart_calls == 0
+    tmp.cleanup()
+
+
+def test_watchdog_cooldown_throttle_then_allow():
+    """Verify cooldown prevents restart within window, then allows after it expires."""
+    tmp = TempStateDir()
+    cfg = _make_cfg(tmp, cooldown_secs=600, max_restarts=10)
+    gw = FakeGateway(probe_alive=False, status_running=True, dispatch_is_stale=False)
+
+    # Tick 1: restart at t=1000
+    result = run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                          restart_fn=gw.restart, stale_fn=gw.stale_fn, now=1000)
+    assert result.restart_succeeded is True
+
+    # Tick 2: attempt at t=1300 (within cooldown) — blocked silently
+    result = run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                          restart_fn=gw.restart, stale_fn=gw.stale_fn, now=1300)
+    assert result.restart_attempted is False
+    assert result.alert_written is False  # cooldown, not rate limit
+
+    # Tick 3: attempt at t=1700 (> cooldown from t=1000) — allowed
+    result = run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                          restart_fn=gw.restart, stale_fn=gw.stale_fn, now=1700)
+    assert result.restart_attempted is True
+    assert result.restart_succeeded is True
+    assert gw.restart_calls == 2
+    tmp.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Timeout boundaries and precision
+# ---------------------------------------------------------------------------
+def test_prune_restarts_exact_boundary_excluded():
+    """Restart timestamp exactly at cutoff is excluded (cutoff uses strict >)."""
+    restarts = [{"timestamp": 1000, "profile": "DEFAULT"}, {"timestamp": 1001, "profile": "DEFAULT"}]
+    pruned = prune_restarts(restarts, now=2000, window=1000)
+    # cutoff = 2000 - 1000 = 1000; ts=1000 NOT > 1000 (excluded), ts=1001 > 1000 (included)
+    assert len(pruned) == 1
+    assert pruned[0]["timestamp"] == 1001
+
+
+def test_prune_restarts_non_numeric_timestamp_skipped():
+    """Non-numeric / non-JSON-serializable timestamps are filtered out cleanly."""
+    restarts = [
+        {"timestamp": 1000, "profile": "DEFAULT"},
+        {"timestamp": "invalid", "profile": "DEFAULT"},
+        {"timestamp": None, "profile": "DEFAULT"},
+    ]
+    pruned = prune_restarts(restarts, now=2000, window=3600)
+    # Only the numeric entry survives; 'invalid' and None are filtered via int() cast
+    assert len(pruned) == 1
+    assert pruned[0]["timestamp"] == 1000
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit decision precision
+# ---------------------------------------------------------------------------
+def test_decide_restart_exactly_at_max_n():
+    """Exactly at max_n → denied."""
+    state = {
+        "restarts": [{"timestamp": 900 * i, "profile": "DEFAULT"} for i in range(1, 4)],
+        "last_restart": 2700,
+        "last_alert_sent": 0,
+    }
+    allowed, _, reason = decide_restart(state, now=4000, max_n=3, window=5000, cooldown=0)
+    assert allowed is False
+    assert reason == "rate_limit"
+
+
+def test_decide_restart_one_below_max_n():
+    """One below max_n → allowed (if cooldown OK)."""
+    state = {
+        "restarts": [{"timestamp": 900, "profile": "DEFAULT"}, {"timestamp": 1000, "profile": "DEFAULT"}],
+        "last_restart": 1000,
+        "last_alert_sent": 0,
+    }
+    allowed, _, reason = decide_restart(state, now=5000, max_n=3, window=3600, cooldown=0)
+    assert allowed is True
+    assert reason == ""
+
+
+def test_decide_restart_cooldown_boundary():
+    """Exactly at cooldown boundary — one second past cooldown is allowed."""
+    state = {"restarts": [{"timestamp": 1000, "profile": "DEFAULT"}],
+             "last_restart": 1000, "last_alert_sent": 0}
+
+    # Now=1599 → elapsed=599 → (599 < 600) → still in cooldown
+    allowed, _, reason = decide_restart(state, now=1599, max_n=3, window=3600, cooldown=600)
+    assert allowed is False
+    assert reason == "cooldown"
+
+    # Now=1600 → elapsed=600 → (600 < 600) is False → allowed
+    allowed, _, reason = decide_restart(state, now=1600, max_n=3, window=3600, cooldown=600)
+    assert allowed is True
+    assert reason == ""
+
+
+def test_decide_restart_handles_malformed_state():
+    """decide_restart tolerates missing keys gracefully."""
+    # No 'restarts' key
+    state_no_restarts = {"last_restart": 1000}
+    allowed, _, _ = decide_restart(state_no_restarts, now=2000, max_n=3, window=3600, cooldown=0)
+    assert allowed is True  # no restarts = not rate-limited
+
+    # No 'last_restart' key (defaults to 0, so cooldown never active)
+    state_no_last = {"restarts": [], "last_alert_sent": 0}
+    allowed, _, _ = decide_restart(state_no_last, now=2000, max_n=3, window=3600, cooldown=600)
+    assert allowed is True
+
+    # Completely empty state
+    allowed, _, _ = decide_restart({}, now=2000, max_n=3, window=3600, cooldown=600)
+    assert allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Logging output
+# ---------------------------------------------------------------------------
+def test_watchdog_logs_healthy_message(capsys):
+    """Verify 'gateway healthy' log entry on healthy path."""
+    import sys
+    tmp = TempStateDir()
+    cfg = _make_cfg(tmp)
+    gw = FakeGateway(probe_alive=True, status_running=True, dispatch_is_stale=False)
+    run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                 stale_fn=gw.stale_fn, now=1000, out=sys.stderr)
+    captured = capsys.readouterr()
+    assert "gateway healthy" in captured.err
+    assert "alive=True" in captured.err
+    tmp.cleanup()
+
+
+def test_watchdog_logs_down_and_restart_attempt(capsys):
+    """Verify 'gateway DOWN' + 'attempting restart' logged on failure."""
+    import sys
+    tmp = TempStateDir()
+    cfg = _make_cfg(tmp)
+    gw = FakeGateway(probe_alive=False, status_running=True, dispatch_is_stale=False)
+    run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                 restart_fn=gw.restart, stale_fn=gw.stale_fn, now=1000, out=sys.stderr)
+    captured = capsys.readouterr()
+    assert "gateway DOWN" in captured.err
+    assert "attempting restart" in captured.err
+    assert "restart succeeded" in captured.err
+    tmp.cleanup()
+
+
+def test_watchdog_logs_rate_limit_message(capsys):
+    """Verify 'limit exhausted' message when rate limit triggers."""
+    import sys
+    tmp = TempStateDir()
+    # Set timestamps WITHIN the 3600s window relative to now=5000 (cutoff=1400)
+    initial_state = {
+        "restarts": [
+            {"timestamp": 2000, "profile": "DEFAULT"},
+            {"timestamp": 3000, "profile": "DEFAULT"},
+            {"timestamp": 4000, "profile": "DEFAULT"},
+        ],
+        "last_restart": 4000,
+        "last_alert_sent": 0,
+    }
+    save_state(tmp.state_file, initial_state)
+    cfg = _make_cfg(tmp, max_restarts=3)
+    gw = FakeGateway(probe_alive=False, status_running=True, dispatch_is_stale=False)
+    run_watchdog(cfg, probe_fn=gw.probe, status_fn=gw.status,
+                 restart_fn=gw.restart, stale_fn=gw.stale_fn, now=5000, out=sys.stderr)
+    captured = capsys.readouterr()
+    assert "limit exhausted" in captured.err
+    assert "Manual intervention required" in captured.err
+    tmp.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Alert content validation
+# ---------------------------------------------------------------------------
+def test_alert_message_format_and_structure():
+    """Verify alert file has CRITICAL: prefix and valid ISO timestamp."""
+    tmp = TempStateDir()
+    msg = "Gateway watchdog — restart limit exhausted (3/3600s), profile=DEFAULT. Manual intervention required."
+    write_alert(tmp.alert_file, msg)
+    content = tmp.alert_file.read_text()
+
+    assert content.startswith("CRITICAL:")
+    assert msg in content
+    lines = content.strip().split("\n")
+    assert len(lines) == 2
+    # Second line is "Timestamp: <iso>"
+    assert lines[1].startswith("Timestamp:")
+    # ISO format contains 'T' delimiter
+    assert "T" in lines[1]
+    tmp.cleanup()
+
+
+def test_alert_overwrites_not_appends():
+    """Writing a second alert replaces the first (no stacking)."""
+    tmp = TempStateDir()
+    write_alert(tmp.alert_file, "first alert message")
+    first = tmp.alert_file.read_text()
+
+    write_alert(tmp.alert_file, "second alert message")
+    second = tmp.alert_file.read_text()
+
+    assert "first alert message" not in second
+    assert "second alert message" in second
+    assert first != second
+    tmp.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# check_gateway edge cases — stale_fn invocation logic
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("probe,status,expected_stale_call", [
+    # probe OK + status OK: stale_fn is called (silent goroutine death detection)
+    (True, True, True),
+    # probe dead + status OK (zombie): stale_fn is called
+    (False, True, True),
+    # probe dead + status False (no PID): stale_fn is NOT called
+    (False, False, False),
+    # probe dead + status None (CLI missing): stale_fn is NOT called
+    (False, None, False),
+    # probe OK + status False (inconsistent): stale_fn is NOT called (probe=True + status=False has no PID)
+    (True, False, False),
+    # probe OK + status None: stale_fn is NOT called
+    (True, None, False),
+])
+def test_check_gateway_stale_fn_invocation(probe, status, expected_stale_call):
+    """Verify stale_fn called only when meaningful (has PID or probe OK)."""
+    call_count = {"count": 0}
+
+    def probe_fn(port, timeout):
+        return probe
+
+    def status_fn():
+        return status
+
+    def stale_fn():
+        call_count["count"] += 1
+        return False
+
+    check_gateway(probe_fn, status_fn, stale_fn, port=8900, timeout=5)
+    called = call_count["count"] > 0
+    # The stale_fn call depends on whether the gateway has a PID or probe succeeded
+    # and whether probe is failing (suggesting zombie) or succeeding (but dispatch stale)
+    if expected_stale_call:
+        assert called, f"stale_fn should have been called (probe={probe}, status={status})"
+    else:
+        assert not called, f"stale_fn should NOT have been called (probe={probe}, status={status})"
+
+
+# ---------------------------------------------------------------------------
+# State persistence edge cases
+# ---------------------------------------------------------------------------
+def test_state_atomic_write_no_partial_data_or_tmp_files():
+    """Atomic save_state leaves no .tmp residuals and produces valid JSON."""
+    tmp = TempStateDir()
+    state = {"restarts": [{"timestamp": 1000, "profile": "DEFAULT"}],
+             "last_restart": 1000, "last_alert_sent": 0}
+    save_state(tmp.state_file, state)
+
+    # No .tmp residuals
+    residuals = list(tmp.state_file.parent.glob(".watchdog-*.tmp"))
+    assert residuals == []
+
+    # Final file is valid JSON and round-trips correctly
+    loaded = load_state(tmp.state_file)
+    assert loaded == state
+    tmp.cleanup()
+
+
+def test_record_restart_updates_both_fields():
+    """record_restart must update both restarts list AND last_restart atomically."""
+    state = {"restarts": [], "last_restart": 0, "last_alert_sent": 0}
+    updated = record_restart(state, now=5000, profile="test-profile")
+
+    assert len(updated["restarts"]) == 1
+    assert updated["restarts"][0] == {"timestamp": 5000, "profile": "test-profile"}
+    assert updated["last_restart"] == 5000
+    assert updated["last_alert_sent"] == 0  # unchanged by this function

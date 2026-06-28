@@ -106,9 +106,20 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def prune_restarts(restarts: list, now: int, window: int) -> list:
-    """Return a new restarts list containing only entries within `window`."""
+    """Return a new restarts list containing only entries within `window`.
+
+    Non-numeric timestamps are silently dropped (defensive filtering).
+    """
     cutoff = now - window
-    return [r for r in restarts if int(r.get("timestamp", 0)) > cutoff]
+    result = []
+    for r in restarts:
+        try:
+            ts = int(r.get("timestamp", 0))
+        except (TypeError, ValueError):
+            continue
+        if ts > cutoff:
+            result.append(r)
+    return result
 
 
 # ---------------------------------------------------------------------------
