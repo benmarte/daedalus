@@ -210,7 +210,7 @@ auto-fix you — it is a notification mechanism, not a recovery mechanism.
 | `MAX_FIX_ATTEMPTS` | 3 | `core/iterate.py:37` |
 | `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
 | `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
-| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:156` |
+| `CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:154` |
 
 ### What breaks self-healing
 
