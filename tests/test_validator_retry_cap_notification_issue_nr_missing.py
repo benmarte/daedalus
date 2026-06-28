@@ -9,9 +9,14 @@ entirely, so retry-cap exhaustion notifications would never fire.
 Fix: Move the retry-cap check BEFORE the `if not issue_nr: continue` guard.
 """
 import sys
+from pathlib import Path
 from unittest import mock
-sys.path.insert(0, '/Users/benmarte/Documents/github/ai/daedalus/scripts')
-import daedalus_dispatch as disp
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from conftest import _load_dispatch  # noqa: E402
+
+disp = _load_dispatch()
 
 
 def _minimal_resolved(*, notifications=None):
