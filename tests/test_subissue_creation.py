@@ -381,7 +381,112 @@ def test_kanban_triage_created_per_subissue():
     assert mk_triage.call_count == 3
 
 
+def test_sub_issue_gets_ready_label_when_no_dependencies():
+    """Sub-issues without dependency references must be labeled Ready immediately."""
+    body = "- [ ] Implement login\n- [ ] Add validation\n"
+    issue = _make_issue_obj(1, "Epic", body)
+    prov = _make_provider(issue_obj=issue, created_numbers=[10, 11])
+
+    with mock.patch.object(iterate.kanban, "complete", return_value=True), \
+         mock.patch.object(iterate.kanban, "create_triage", return_value="t_x"), \
+         mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
+        _execute_planner_decompose(
+            "slug", _make_card(body=body), "o/r", "PLANNING COMPLETE",
+            provider=prov,
+        )
+
+    assert prov.create_issue.call_count == 2
+    # All sub-issues (no dependency references) must get Ready label
+    ready_calls = [c for c in prov.add_label.call_args_list if c.args[1] == "Ready"]
+    assert len(ready_calls) == 2
+    ready_issue_numbers = {c.args[0] for c in ready_calls}
+    assert ready_issue_numbers == {10, 11}
+
+
+def test_sub_issue_no_ready_label_when_has_dependencies():
+    """Sub-issues with dependency references must NOT be labeled Ready."""
+    body = "- [ ] Implement login\n\nDepends on: #999\n"
+    issue = _make_issue_obj(1, "Epic", body)
+    prov = _make_provider(issue_obj=issue, created_numbers=[10])
+
+    with mock.patch.object(iterate.kanban, "complete", return_value=True), \
+         mock.patch.object(iterate.kanban, "create_triage", return_value="t_x"), \
+         mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
+        _execute_planner_decompose(
+            "slug", _make_card(body=body), "o/r", "PLANNING COMPLETE",
+            provider=prov,
+        )
+
+    assert prov.create_issue.call_count == 1
+    # Should NOT have Ready label calls for the created sub-issue
+    ready_calls = [c for c in prov.add_label.call_args_list if c.args[1] == "Ready"]
+    assert len(ready_calls) == 0
+
+
+def test_mixed_sub_issues_partial_ready_labeling():
+    """Test mixed scenario: sub-issues with deps get no Ready, without deps get Ready."""
+    # Create two separate tests within one function to avoid duplication
+    # Test 1: All sub-issues without deps -> all get Ready
+    body1 = "- [ ] Task A\n- [ ] Task B\n- [ ] Task C\n"
+    issue1 = _make_issue_obj(1, "Epic1", body1)
+    prov1 = _make_provider(issue_obj=issue1, created_numbers=[10, 11, 12])
+
+    with mock.patch.object(iterate.kanban, "complete", return_value=True), \
+         mock.patch.object(iterate.kanban, "create_triage", return_value="t_x"), \
+         mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
+        result1 = _execute_planner_decompose(
+            "slug", _make_card(body=body1), "o/r", "PLANNING COMPLETE",
+            provider=prov1,
+        )
+
+    assert result1 is True
+    assert prov1.create_issue.call_count == 3
+    ready_calls1 = [c for c in prov1.add_label.call_args_list if c.args[1] == "Ready"]
+    assert len(ready_calls1) == 3
+    ready_numbers1 = {c.args[0] for c in ready_calls1}
+    assert ready_numbers1 == {10, 11, 12}
+
+    # Test 2: Sub-issues with deps -> none get Ready
+    body2 = "- [ ] Task A\n- [ ] Task B\n\nDepends on: #42\n"
+    issue2 = _make_issue_obj(2, "Epic2", body2)
+    prov2 = _make_provider(issue_obj=issue2, created_numbers=[20, 21])
+
+    with mock.patch.object(iterate.kanban, "complete", return_value=True), \
+         mock.patch.object(iterate.kanban, "create_triage", return_value="t_x"), \
+         mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
+        result2 = _execute_planner_decompose(
+            "slug", _make_card(body=body2), "o/r", "PLANNING COMPLETE",
+            provider=prov2,
+        )
+
+    assert result2 is True
+    ready_calls2 = [c for c in prov2.add_label.call_args_list if c.args[1] == "Ready"]
+    assert len(ready_calls2) == 0
+
+
+def test_completion_message_includes_ready_count():
+    """Kanban completion message must report Ready sub-issue count."""
+    body = "- [ ] Task A\n"
+    issue = _make_issue_obj(1, "Epic", body)
+    prov = _make_provider(issue_obj=issue, created_numbers=[10])
+
+    with mock.patch.object(iterate.kanban, "complete", return_value=True) as mk_complete, \
+         mock.patch.object(iterate.kanban, "create_triage", return_value="t_x"), \
+         mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
+        _execute_planner_decompose(
+            "slug", _make_card(body=body), "o/r", "PLANNING COMPLETE",
+            provider=prov,
+        )
+
+    mk_complete.assert_called_once()
+    call_kwargs = mk_complete.call_args[1]
+    summary = call_kwargs.get("summary")
+    assert "1 Ready)" in summary
+    assert "Decomposed epic #1" in summary
+
+
 def test_planner_card_completed():
+    """Legacy test: verify planner card completion still works."""
     issue = _make_issue_obj(1, "Epic", "- [ ] t\n" * 3)
     prov = _make_provider(issue_obj=issue, created_numbers=[10, 11, 12])
 

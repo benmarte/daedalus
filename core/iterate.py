@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core import kanban
-from core.providers.base import CIStatus, issue_linked_to_pr
+from core.providers.base import CIStatus, issue_linked_to_pr, parse_depends_on
 from core.util import extract_issue_number
 
 logger = logging.getLogger("daedalus.iterate")
@@ -902,9 +902,12 @@ def _default_sub_issue_titles(parent_n: int, parent_title: str) -> List[str]:
     ]
 
 
-def _sub_issue_body(parent_n: int, parent_title: str, scope: str) -> str:
+def _sub_issue_body(parent_n: int, parent_title: str, scope: str, depends_on: list[int]) -> str:
+    deps_str = ", ".join(f"#{n}" for n in depends_on)
+    depends_line = f"depends_on: {deps_str}" if deps_str else "depends_on:"
     return (
         f"Part of epic #{parent_n}: {parent_title}\n\n"
+        f"{depends_line}\n\n"
         f"## Scope\n{scope}\n\n"
         f"## Acceptance Criteria\n"
         f"- [ ] Implementation complete per scope\n"
@@ -978,16 +981,30 @@ def _execute_planner_decompose(
         logger.info("[dry-run] planner_decompose #%s: would create %d sub-issues: %s",
                     parent_n, len(sub_titles), sub_titles)
         return True
-
     inherit_labels = [l for l in parent_labels if l and l.lower() != "epic"]
     created_numbers: List[int] = []
+    ready_numbers: List[int] = []
     for title, scope in zip(sub_titles, sub_scopes):
-        sub_body = _sub_issue_body(parent_n, parent_title, scope)
+        # Each sub-issue depends on all previously created sub-issues in this epic
+        # (sequential tier ordering). The first sub-issue has empty depends_on and
+        # is immediately actionable — labeled Ready below.
+        sub_body = _sub_issue_body(parent_n, parent_title, scope, list(created_numbers))
         sub_labels = inherit_labels + ["subtask"]
         sub_n = provider.create_issue(title, sub_body, labels=sub_labels)
         if sub_n is not None:
             created_numbers.append(sub_n)
             logger.info("iterate: planner_decompose — created sub-issue #%s: %s", sub_n, title)
+            
+            # Check if this sub-issue has any dependencies
+            dependencies = parse_depends_on(sub_body)
+            
+            if not dependencies:
+                # No dependencies = immediately actionable, apply Ready label
+                provider.add_label(sub_n, "Ready")
+                ready_numbers.append(sub_n)
+                logger.info("iterate: planner_decompose — applied Ready label to sub-issue #%s (no dependencies)", sub_n)
+            else:
+                logger.info("iterate: planner_decompose — sub-issue #%s has %d dependencies, skipping Ready label", sub_n, len(dependencies))
         else:
             logger.warning("iterate: planner_decompose — create_issue failed for %r", title)
 
@@ -1028,7 +1045,7 @@ def _execute_planner_decompose(
                 )
 
     kanban.complete(slug, tid,
-                    summary=f"Decomposed epic #{parent_n} into {len(created_numbers)} sub-issues")
+                    summary=f"Decomposed epic #{parent_n} into {len(created_numbers)} sub-issues ({len(ready_numbers)} Ready)")
     logger.info("iterate: planner_decompose — completed #%s with %d sub-issues",
                 parent_n, len(created_numbers))
     return True
