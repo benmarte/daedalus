@@ -873,30 +873,30 @@ dedicated tests.
 
 Five concrete behaviors make the pipeline recover from agent failures without
 manual intervention. Each one is implemented in `core/iterate.py` — verified
-on `origin/dev` at commit `d6ea3e5`.
+on `origin/dev` at commit `70c1340`.
 
 1. **`awaiting-fix:` auto-unblock.** When developer QA/tests fail or a reviewer
    flags changes, a dedicated fix card is created and assigned to
    `developer-daedalus`. The reviewer/security card is blocked with
    `awaiting-fix: <fix_card_id>`. When the fix card completes,
-   `_execute_advance()` in `core/iterate.py` (lines 411–426, within
-   `def _execute_advance` starting at line 383) scans all blocked cards and
+   `_execute_advance()` in `core/iterate.py` (lines 424–433, within
+   `def _execute_advance` starting at line 394) scans all blocked cards and
    automatically unblocks any whose block reason contains both `awaiting-fix:`
    and the completing fix card's task ID. No human action needed.
 
 2. **Crash-marker silent no-op.** If a developer agent crashes with
    infrastructure-failure markers (`coding-agent-failed:`, `permission-error:`,
    `coding_agent_died`, `coding_agent_timeout`, `exited with code`,
-   `agent crash`) in the block reason, `classify_blocked()` (lines 179–184)
+   `agent crash`) in the block reason, `classify_blocked()` (lines 180–188)
    returns empty string instead of routing to PM. This prevents the infinite
    PM consultation loop where every cron tick would spawn `PM_ROUTE` → PM
    completes as "no-op" → next tick spawns another `PM_ROUTE` → repeat. A
    human must fix the environment and manually unblock.
 
 3. **`awaiting-fix:` concurrency guard.** Reviewer and security-analyst are
-   handled in one combined branch of `classify_blocked()` (lines 189–200:
+   handled in one combined branch of `classify_blocked()` (lines 192–205:
    `if assignee in (reviewer, security)`). When the card is already blocked
-   with `awaiting-fix:` in the block reason, the guard at lines 195–197
+   with `awaiting-fix:` in the block reason, the guard at lines 199–200
    returns empty string. This prevents concurrent dispatcher ticks from
    spawning duplicate fix cards for the same reviewer card. The first tick
    that annotates the card with `awaiting-fix:` wins; subsequent ticks see the
@@ -904,7 +904,7 @@ on `origin/dev` at commit `d6ea3e5`.
 
 4. **`PENDING_PR` VCS search.** When a developer card blocks with
    `review-required: awaiting-pr`, the dispatcher has not yet seen a GitHub
-   PR. Every cron tick calls `_execute_pending_pr()` (lines 590–645), which
+   PR. Every cron tick calls `_execute_pending_pr()` (lines 601–657), which
    searches open PRs via `provider.list_prs()` and matches them against the
    issue number in the PR title/body/branch. Once a PR appears, the block
    reason is updated to `review-required: PR #N — awaiting CI` so CI checks
@@ -912,7 +912,7 @@ on `origin/dev` at commit `d6ea3e5`.
    PR but the dispatcher keeps classifying the card as "no PR found."
 
 5. **PM `awaiting-fix:` silent no-op.** The project-manager profile's
-   classifier branch (lines 152–154) returns empty string when the PM's own
+   classifier branch (lines 162–165) returns empty string when the PM's own
    block reason contains `awaiting-fix:`. This happens when a PM routing card
    dispatches a developer fix — the PM is then blocked waiting for the fix
    card to complete, which is a legitimate wait, not a real escalation.
