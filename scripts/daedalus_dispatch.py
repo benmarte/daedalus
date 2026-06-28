@@ -2353,13 +2353,6 @@ def _repair_orphan_tasks(
         if extract_issue_number(title) is not None:
             continue  # already has issue number, nothing to do
 
-        # Skip show_card (expensive, ~230ms) when the assignee is already a valid
-        # Daedalus profile — Bug 2 title prefix is cosmetic and non-blocking for
-        # properly assigned tasks. Only fetch the body when Bug 1 also triggered,
-        # which means the card may be genuinely malformed and needs full repair.
-        if assignee in profile_values:
-            continue
-
         # Body not included in list_tasks output — fetch via show_card.
         issue_n: Optional[str] = None
         card = kanban.show_card(slug, task_id) or {}
