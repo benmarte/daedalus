@@ -148,6 +148,45 @@ def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
         return {}
 
 
+def _archive_with_retry(
+    slug: str,
+    tid: str,
+    *,
+    max_attempts: int = 3,
+) -> bool:
+    """Archive a task with retry-safe error handling and idempotent logging.
+
+    Retries up to ``max_attempts`` times on failure. Each attempt is logged at
+    WARNING level with attempt number so retries are audit-safe. Failures are
+    contained: exception or False both result in a WARNING and continue. After
+    all attempts exhausted, logs ERROR and returns False. Never raises.
+
+    Returns True on first successful archive, False if all attempts fail.
+    Idempotent: re-archiving an already-archived card is treated as success by
+    the underlying ``archive_task`` CLI — the retry logic mirrors that.
+    """
+    if not tid:
+        return False
+    for attempt in range(1, max_attempts + 1):
+        try:
+            ok = kanban.archive_task(slug, tid)
+            if ok:
+                logger.info("sweeper: archived card %s (attempt %d/%d)", tid, attempt, max_attempts)
+                return True
+            # archive_task already logged the failure internally
+            logger.warning(
+                "sweeper: archive returned False for card %s (attempt %d/%d)", tid, attempt, max_attempts
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "sweeper: archive raised for card %s (attempt %d/%d): %s", tid, attempt, max_attempts, exc
+            )
+        if attempt < max_attempts:
+            time.sleep(0.1)
+    logger.error("sweeper: failed to archive card %s after %d attempts", tid, max_attempts)
+    return False
+
+
 def sweep_stale_blocked(
     slug: str,
     *,
@@ -159,7 +198,8 @@ def sweep_stale_blocked(
     """Detect, warn, and optionally archive stale blocked cards.
 
     Returns the list of stale card ids found. ``archive`` (off by default) moves
-    each stale card off the active board via ``kanban.archive_task``;
+    each stale card off the active board via ``_archive_with_retry`` with retry
+    and error handling; failures do not break the sweep.
     ``dry_run`` logs intended actions without mutating the board.
     """
     now = int(time.time()) if now is None else int(now)
@@ -194,7 +234,7 @@ def sweep_stale_blocked(
         )
         stale_ids.append(tid)
         if archive and not dry_run and tid:
-            kanban.archive_task(slug, tid)
+            _archive_with_retry(slug, tid)
     return stale_ids
 
 

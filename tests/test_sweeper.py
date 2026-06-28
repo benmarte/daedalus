@@ -374,6 +374,67 @@ def test_cli_sweep_dry_run_flag():
           rc == 0 and arch.call_count == 0)
 
 
+
+# ── _archive_with_retry: retry-safe error handling (issue #430) ─────────────
+
+
+def test_archive_with_retry_succeeds_first_attempt():
+    """First archive attempt succeeds — no retries needed."""
+    with mock.patch.object(kanban, "archive_task", return_value=True) as arch:
+        check(
+            "archive succeeds first attempt",
+            sweeper._archive_with_retry("daedalus", "t1", max_attempts=3) is True
+        )
+    check("archive_task called exactly once", arch.call_count == 1)
+
+
+def test_archive_with_retry_succeeds_on_second_attempt():
+    """First attempt fails, second succeeds."""
+    responses = [False, True]
+    def side_effect(slug, tid):
+        return responses.pop(0) if responses else True
+    with mock.patch.object(kanban, "archive_task", side_effect=side_effect) as arch:
+        check(
+            "archive succeeds on retry",
+            sweeper._archive_with_retry("daedalus", "t1", max_attempts=3) is True
+        )
+    check("archive_task called twice (1 fail + 1 success)", arch.call_count == 2)
+
+
+def test_archive_with_retry_all_attempts_exhausted():
+    """All retry attempts fail — returns False after max_attempts."""
+    with mock.patch.object(kanban, "archive_task", return_value=False) as arch:
+        check(
+            "archive exhausted returns False",
+            sweeper._archive_with_retry("daedalus", "t1", max_attempts=3) is False
+        )
+    check("archive_task called 3 times (all attempts)", arch.call_count == 3)
+
+
+def test_archive_with_retry_handles_exception():
+    """archive_task raises exception — contained, returns False after retries."""
+    call_count_local = [0]
+    def raising_archive(slug, tid):
+        call_count_local[0] += 1
+        raise RuntimeError("catastrophic network failure")
+    with mock.patch.object(kanban, "archive_task", side_effect=raising_archive) as arch:
+        check(
+            "archive exception contained, returns False",
+            sweeper._archive_with_retry("daedalus", "t1", max_attempts=2) is False
+        )
+    check("archive_task called 2 times despite exception", arch.call_count == 2)
+
+
+def test_archive_with_retry_idempotent_success():
+    """Re-archiving an already-archived card succeeds (idempotent)."""
+    def idempotent_archive(slug, tid):
+        return True
+    with mock.patch.object(kanban, "archive_task", side_effect=idempotent_archive):
+        check(
+            "idempotent re-archive returns True",
+            sweeper._archive_with_retry("daedalus", "t1", max_attempts=3) is True
+        )
+
 ALL_TESTS = [
     test_blocked_since_prefers_heartbeat,
     test_blocked_since_falls_back_to_started,
@@ -416,6 +477,12 @@ ALL_TESTS = [
     test_cli_sweep_respects_threshold_flag,
     test_cli_sweep_archive_flag_triggers_archive,
     test_cli_sweep_dry_run_flag,
+    # Issue #430: retry-safe archive error handling
+    test_archive_with_retry_succeeds_first_attempt,
+    test_archive_with_retry_succeeds_on_second_attempt,
+    test_archive_with_retry_all_attempts_exhausted,
+    test_archive_with_retry_handles_exception,
+    test_archive_with_retry_idempotent_success,
 ]
 
 
