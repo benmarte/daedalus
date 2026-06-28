@@ -204,7 +204,7 @@ If you complete the task yourself instead of blocking it, the downstream review 
 
   **Trigger conditions:**
   - The fix card must `kanban_complete` successfully. A blocked/escalated fix card does NOT unblock the waiting reviewer.
-  - The blocked card's `runs[-1].reason` must contain the literal `awaiting-fix:` marker AND the TID of the completing fix card (exact string match).
+  - The blocked card's block reason (from `runs[-1].reason` via `_handoff_from_card()`) must contain both the substring `awaiting-fix` (case-insensitive) AND the substring of the completing fix card's TID. The match is `f"{tid}" in block_reason and "awaiting-fix" in block_reason.lower()` — substring containment, not exact equality.
 
   **Lifecycle:** reviewer blocks `awaiting-fix: <pm_tid>` → PM dispatches fix card → developer completes fix → dispatcher unblocks reviewer → reviewer re-engages the updated PR automatically.
 
