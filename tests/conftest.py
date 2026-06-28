@@ -260,6 +260,8 @@ class FakeProvider:
         supports_ci_status: bool = True,
         blockers: Optional[Dict[int, List[int]]] = None,
         get_issue_failures: int = 0,
+        closed_issues: Optional[set[int]] = None,
+        close_issue_fail_for: Optional[set[int]] = None,
     ) -> None:
         self.name = name
         self._ci = ci_status
@@ -274,6 +276,9 @@ class FakeProvider:
         self.posted_issue_comments: List[tuple] = []
         self.posted_pr_comments: List[tuple] = []
         self.merged: List[tuple] = []
+        self.close_calls: List[int] = []
+        self._closed_issues: set[int] = set(closed_issues or [])
+        self._close_issue_fail_for: set[int] = set(close_issue_fail_for or [])
 
     def get_pr_ci_status(self, pr_number: int) -> str:
         if isinstance(self._ci, dict):
@@ -305,6 +310,21 @@ class FakeProvider:
 
     def post_pr_comment(self, pr_number: int, body: str) -> bool:
         self.posted_pr_comments.append((pr_number, body))
+        return True
+
+    def get_issue_state(self, issue_number: int) -> str:
+        """Mock get_issue_state — return 'closed' if in _closed_issues, else 'open'."""
+        return "closed" if issue_number in self._closed_issues else "open"
+
+    def close_issue(self, issue_number: int) -> bool:
+        """Mock close_issue — record call, simulate failure if requested."""
+        # Already-closed → short-circuit (no API call, no recording)
+        if issue_number in self._closed_issues:
+            return True
+        self.close_calls.append(issue_number)
+        if issue_number in self._close_issue_fail_for:
+            return False
+        self._closed_issues.add(issue_number)
         return True
 
     def merge_pr(self, pr_number: int, merge_method: str = "squash") -> bool:
