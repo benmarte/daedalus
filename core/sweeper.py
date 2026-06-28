@@ -1,21 +1,25 @@
-"""Stale blocked-card sweeper (issue #186, epic #181).
+"""Stale-card sweeper (issues #186, #232; epic #181).
 
-Kanban cards can get stuck in ``blocked`` status indefinitely with no
-visibility. This module detects cards that have sat in ``blocked`` with no
-activity for longer than a threshold (default 48h), logs a warning for each,
-and — when enabled — archives them off the active board via the native
-``hermes kanban archive`` command.
+Kanban cards can get stuck with no visibility. This module detects two cases
+and logs a warning for each:
+
+* **blocked** cards that have sat with no activity for longer than a threshold
+  (default 48h) — optionally archived off the active board via the native
+  ``hermes kanban archive`` command (issue #186).
+* **running** cards whose summary hasn't advanced for longer than a threshold
+  (default 24h) — a worker that has died or wedged, otherwise invisible since
+  the board still shows it as in-progress (issue #232).
 
 It runs each dispatch tick alongside ``kanban.diagnostics`` and degrades
 gracefully: any failure logs and returns, never breaking a run.
 
-**Blocked-since signal.** The board has no ``blocked_at`` column, and its
-``task_runs`` table is not reliably populated across deployments. The most
-dependable "last made progress" timestamp is therefore ``last_heartbeat_at``
-(which freezes once a blocked worker stops reporting), falling back to
-``started_at`` then ``created_at``. ``hermes kanban list --json`` omits
-``last_heartbeat_at``, so :func:`sweep_stale_blocked` enriches blocked cards
-with a single direct SQLite read (mirroring ``kanban.rename_task``).
+**Last-progress signal.** The board has no ``blocked_at``/``updated_at``
+column, and its ``task_runs`` table is not reliably populated across
+deployments. The most dependable "last made progress" timestamp is therefore
+``last_heartbeat_at`` (which freezes once a worker stops reporting its summary),
+falling back to ``started_at`` then ``created_at``. ``hermes kanban list
+--json`` omits ``last_heartbeat_at``, so the sweeps enrich cards with a single
+direct SQLite read (mirroring ``kanban.rename_task``).
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ from core import kanban
 logger = logging.getLogger("daedalus.sweeper")
 
 DEFAULT_STALE_HOURS = 48
+DEFAULT_RUNNING_STALE_HOURS = 24
 
 # Timestamp columns to consult, in order of preference, for "last progress".
 _SINCE_KEYS = ("last_heartbeat_at", "started_at", "created_at")
@@ -41,6 +46,8 @@ def blocked_since(card: Dict) -> Optional[int]:
     Returns the first present, truthy value among ``last_heartbeat_at``,
     ``started_at``, ``created_at`` (coerced to ``int``), or ``None`` if none are
     available — in which case the card cannot be aged and is skipped.
+
+    Status-agnostic: reused for both blocked and running cards.
     """
     for key in _SINCE_KEYS:
         val = card.get(key)
@@ -50,6 +57,31 @@ def blocked_since(card: Dict) -> Optional[int]:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _find_stale(
+    cards: List[Dict],
+    *,
+    status: str,
+    now: int,
+    threshold_hours: float,
+) -> List[Tuple[Dict, float]]:
+    """Pure detection: cards in ``status`` with no progress for > ``threshold_hours``.
+
+    Returns ``[(card, age_hours)]`` sorted oldest-first. Cards not in ``status``,
+    or whose age can't be determined, are skipped.
+    """
+    cutoff = now - threshold_hours * 3600
+    stale: List[Tuple[Dict, float]] = []
+    for card in cards:
+        if (card.get("status") or "").lower() != status:
+            continue
+        since = blocked_since(card)
+        if since is None or since > cutoff:
+            continue
+        stale.append((card, (now - since) / 3600.0))
+    stale.sort(key=lambda pair: pair[1], reverse=True)
+    return stale
 
 
 def find_stale_blocked(
@@ -63,17 +95,23 @@ def find_stale_blocked(
     Returns ``[(card, age_hours)]`` sorted oldest-first. Cards that are not
     blocked, or whose age can't be determined, are skipped.
     """
-    cutoff = now - threshold_hours * 3600
-    stale: List[Tuple[Dict, float]] = []
-    for card in cards:
-        if (card.get("status") or "").lower() != "blocked":
-            continue
-        since = blocked_since(card)
-        if since is None or since > cutoff:
-            continue
-        stale.append((card, (now - since) / 3600.0))
-    stale.sort(key=lambda pair: pair[1], reverse=True)
-    return stale
+    return _find_stale(cards, status="blocked", now=now, threshold_hours=threshold_hours)
+
+
+def find_stale_running(
+    cards: List[Dict],
+    *,
+    now: int,
+    threshold_hours: float = DEFAULT_RUNNING_STALE_HOURS,
+) -> List[Tuple[Dict, float]]:
+    """Pure detection: running cards with no progress for > ``threshold_hours``.
+
+    A running card whose ``last_heartbeat_at`` (the freshest summary-update
+    signal) has frozen for longer than the threshold is almost certainly a dead
+    or wedged worker. Returns ``[(card, age_hours)]`` sorted oldest-first; cards
+    not running, or whose age can't be determined, are skipped.
+    """
+    return _find_stale(cards, status="running", now=now, threshold_hours=threshold_hours)
 
 
 def _db_path(slug: str) -> str:
@@ -152,4 +190,47 @@ def sweep_stale_blocked(
         stale_ids.append(tid)
         if archive and not dry_run and tid:
             kanban.archive_task(slug, tid)
+    return stale_ids
+
+
+def sweep_stale_running(
+    slug: str,
+    *,
+    threshold_hours: float = DEFAULT_RUNNING_STALE_HOURS,
+    now: Optional[int] = None,
+) -> List[str]:
+    """Detect and warn about running cards stuck with no update for > N hours.
+
+    A card whose worker has died or wedged stays in ``running`` indefinitely and
+    is otherwise invisible. This warns (card id, assignee, hours elapsed) so a
+    human can intervene; unlike blocked cards, running cards are never archived
+    automatically. Returns the list of stale running card ids found.
+    """
+    now = int(time.time()) if now is None else int(now)
+    cards = kanban.list_tasks(slug, status="running") or []
+    if not cards:
+        return []
+
+    # ``list --json`` omits last_heartbeat_at; enrich from the DB so aging uses
+    # the freshest summary-update signal (mirrors sweep_stale_blocked).
+    needs = [str(c.get("id")) for c in cards
+             if c.get("id") and not c.get("last_heartbeat_at")]
+    hb = _heartbeats(slug, needs)
+    if hb:
+        for c in cards:
+            beat = hb.get(str(c.get("id")))
+            if beat is not None:
+                c["last_heartbeat_at"] = beat
+
+    stale = find_stale_running(cards, now=now, threshold_hours=threshold_hours)
+    stale_ids: List[str] = []
+    for card, age in stale:
+        tid = str(card.get("id") or "")
+        assignee = card.get("assignee") or card.get("title") or "?"
+        logger.warning(
+            "sweeper: card %s (%s) stuck in running for %.0fh (>%gh) with no "
+            "summary update — worker may have died; manual intervention may be required",
+            tid, assignee, age, threshold_hours,
+        )
+        stale_ids.append(tid)
     return stale_ids

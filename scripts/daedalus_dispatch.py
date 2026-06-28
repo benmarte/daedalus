@@ -2957,6 +2957,20 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-blocked sweep failed: %s", exc)
 
+    # Stale-running sweeper (#232): warn for running cards whose summary hasn't
+    # advanced in > N hours (default 24) — a dead/wedged worker that the board
+    # still shows as in-progress. Configurable via tracking.stale_running.hours.
+    stale_running_cfg = (resolved.get("tracking") or {}).get("stale_running") or {}
+    stale_running = 0
+    try:
+        stale_running = len(sweeper.sweep_stale_running(
+            slug,
+            threshold_hours=float(
+                stale_running_cfg.get("hours", sweeper.DEFAULT_RUNNING_STALE_HOURS)),
+        ))
+    except Exception as exc:  # never let the sweeper break a dispatch tick
+        logger.warning("dispatch: stale-running sweep failed: %s", exc)
+
     iterate_counts, advance_prs, pending_ci_cards = iterate.run_iterate(
         slug, repo, resolved=resolved, provider=provider, dry_run=dry_run,
     )
@@ -2995,7 +3009,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                    "reconciled": reconciled, "completed": completed,
                    "advance_prs": advance_prs, "routed_actions": routed_actions,
                    "issues_seen": 0, "spec_created": spec_created,
-                   "slack_delivered": slack_delivered, "vcs_autoconfig": vcs_autoconfig}
+                   "slack_delivered": slack_delivered, "vcs_autoconfig": vcs_autoconfig,
+                   "stale_running": stale_running}
         logger.info("dispatch summary: %s", summary)
         return summary
 
@@ -3416,7 +3431,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                "blocked": blocked_issues, "blocked_deps": blocked_deps,
                "threads_mirrored": threads_mirrored,
                "pm_triggered": pm_triggered, "blocker_triggered": blocker_triggered,
-               "vcs_autoconfig": vcs_autoconfig,
+               "vcs_autoconfig": vcs_autoconfig, "stale_running": stale_running,
                "enrollment_failures": sorted(set(getattr(provider, "enrollment_failures", [])))}
     logger.info("dispatch summary: %s", summary)
     return summary
