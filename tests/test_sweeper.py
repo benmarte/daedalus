@@ -1,7 +1,8 @@
-"""Tests for the stale blocked-card sweeper (issue #186).
+"""Tests for the stale-card sweeper (issues #186, #232).
 
 Covers core.sweeper: blocked_since timestamp fallback, the pure find_stale_blocked
-detector, and sweep_stale_blocked (warn / archive / dry-run / DB-enrich).
+detector, and sweep_stale_blocked (warn / archive / dry-run / DB-enrich), plus the
+running-card detection added in #232 (find_stale_running / sweep_stale_running).
 
 Dual-mode: runs under pytest AND standalone (``python tests/test_sweeper.py``)
 via the shared check() helper, mirroring the other suites.
@@ -150,6 +151,83 @@ def test_sweep_enriches_heartbeat_from_db():
     check("DB heartbeat (60h) makes card stale despite recent created_at", ids == ["t1"])
 
 
+# ── find_stale_running: pure detection (issue #232) ───────────────────────────
+
+
+def test_find_stale_running_detects_old_running():
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 30 * HOUR)]
+    stale = sweeper.find_stale_running(cards, now=NOW, threshold_hours=24)
+    check("30h-old running card is stale", len(stale) == 1 and stale[0][0]["id"] == "t1")
+    check("age ~30h reported", abs(stale[0][1] - 30.0) < 0.01)
+
+
+def test_find_stale_running_ignores_fresh_running():
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 5 * HOUR)]
+    check("5h-old running card not stale",
+          sweeper.find_stale_running(cards, now=NOW, threshold_hours=24) == [])
+
+
+def test_find_stale_running_ignores_blocked():
+    cards = [_card("t1", status="blocked", last_heartbeat_at=NOW - 100 * HOUR)]
+    check("old blocked card skipped by running detector",
+          sweeper.find_stale_running(cards, now=NOW, threshold_hours=24) == [])
+
+
+def test_find_stale_running_default_threshold_is_24h():
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 25 * HOUR)]
+    check("25h running card stale at default threshold",
+          len(sweeper.find_stale_running(cards, now=NOW)) == 1)
+    check("DEFAULT_RUNNING_STALE_HOURS is 24", sweeper.DEFAULT_RUNNING_STALE_HOURS == 24)
+
+
+def test_find_stale_running_skips_unaged_card():
+    cards = [_card("t1", status="running")]  # running but no timestamps
+    check("running card with no timestamps skipped",
+          sweeper.find_stale_running(cards, now=NOW, threshold_hours=24) == [])
+
+
+def test_find_stale_running_sorts_oldest_first():
+    cards = [
+        _card("recent", status="running", last_heartbeat_at=NOW - 25 * HOUR),
+        _card("oldest", status="running", last_heartbeat_at=NOW - 90 * HOUR),
+    ]
+    stale = sweeper.find_stale_running(cards, now=NOW, threshold_hours=24)
+    check("running cards sorted oldest-first",
+          [c["id"] for c, _ in stale] == ["oldest", "recent"])
+
+
+# ── sweep_stale_running: warn-only, no archive ────────────────────────────────
+
+
+def test_sweep_running_returns_stale_ids():
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 30 * HOUR),
+             _card("t2", status="running", last_heartbeat_at=NOW - 1 * HOUR)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards):
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW)
+    check("only the 30h running card is returned", ids == ["t1"])
+
+
+def test_sweep_running_queries_running_status():
+    with mock.patch.object(kanban, "list_tasks", return_value=[]) as lt:
+        sweeper.sweep_stale_running("daedalus", now=NOW)
+    check("list_tasks called with status='running'",
+          lt.call_args == mock.call("daedalus", status="running"))
+
+
+def test_sweep_running_empty_board():
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+        check("empty board → []", sweeper.sweep_stale_running("daedalus", now=NOW) == [])
+
+
+def test_sweep_running_enriches_heartbeat_from_db():
+    cards = [_card("t1", status="running", created_at=NOW - 1 * HOUR)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(sweeper, "_heartbeats", return_value={"t1": NOW - 40 * HOUR}):
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW)
+    check("DB heartbeat (40h) makes running card stale despite recent created_at",
+          ids == ["t1"])
+
+
 # ── _heartbeats: graceful DB degradation ──────────────────────────────────────
 
 
@@ -179,6 +257,16 @@ ALL_TESTS = [
     test_sweep_dry_run_does_not_archive,
     test_sweep_empty_board,
     test_sweep_enriches_heartbeat_from_db,
+    test_find_stale_running_detects_old_running,
+    test_find_stale_running_ignores_fresh_running,
+    test_find_stale_running_ignores_blocked,
+    test_find_stale_running_default_threshold_is_24h,
+    test_find_stale_running_skips_unaged_card,
+    test_find_stale_running_sorts_oldest_first,
+    test_sweep_running_returns_stale_ids,
+    test_sweep_running_queries_running_status,
+    test_sweep_running_empty_board,
+    test_sweep_running_enriches_heartbeat_from_db,
     test_heartbeats_missing_db_returns_empty,
     test_heartbeats_empty_ids_returns_empty,
 ]
