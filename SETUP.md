@@ -127,6 +127,13 @@ See the [README](README.md#delegating-to-claude-code-or-codex) for the full refe
   worktree-pinned triage card → dispatcher decomposes → roster works it → PR.
 - **Automated (cron):** each project gets its own cron job (created by setup.sh /
   the dashboard); edits update the job in place.
+- **Event-driven (advance hook):** `postinstall.py` installs
+  `~/.hermes/agent-hooks/daedalus-advance.sh` (+ `daedalus_resolve_project.py`)
+  automatically on `hermes plugins install/update daedalus`. Hermes runs it when
+  any daedalus pipeline worker's session ends; it resolves the worker's project
+  and fires the dispatcher scoped to that project, so the pipeline advances
+  within seconds (validator done → PM spawned) instead of waiting up to an hour
+  for the next cron tick. No manual registration needed.
 
 > **If the cron silently does nothing:** the job invokes
 > `~/.hermes/scripts/daedalus-cron.sh`. The plugin now (re)installs that wrapper

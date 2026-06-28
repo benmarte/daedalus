@@ -213,6 +213,40 @@ def _install_webhook_handler() -> tuple[bool, str]:
         return False, f"FAIL: could not install webhook handler at {target}: {exc}"
 
 
+def _install_advance_hook() -> tuple[bool, str]:
+    """Install the session-end advance hook to ~/.hermes/agent-hooks/ (idempotent).
+
+    Copies BOTH scripts/daedalus-advance.sh and scripts/daedalus_resolve_project.py
+    from the repo to the user's agent-hooks dir; the shell script is made
+    executable. Hermes runs scripts in ~/.hermes/agent-hooks/ on session end, so
+    copying daedalus-advance.sh there is all the registration it needs — when a
+    daedalus pipeline worker finishes, the hook resolves the worker's project via
+    daedalus_resolve_project.py and fires the dispatcher scoped to that project so
+    the pipeline advances immediately instead of waiting for the next cron tick.
+    """
+    real_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+    hooks_dir = real_home / ".hermes" / "agent-hooks"
+    source_dir = Path(__file__).resolve().parent
+    sh_source = source_dir / "daedalus-advance.sh"
+    py_source = source_dir / "daedalus_resolve_project.py"
+
+    for source in (sh_source, py_source):
+        if not source.is_file():
+            return False, f"MISSING: source script not found at {source}"
+
+    try:
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        sh_target = hooks_dir / "daedalus-advance.sh"
+        sh_target.write_text(sh_source.read_text())
+        sh_target.chmod(0o755)
+        py_target = hooks_dir / "daedalus_resolve_project.py"
+        py_target.write_text(py_source.read_text())
+        py_target.chmod(0o644)
+        return True, f"OK: advance hook installed at {sh_target} (+ {py_target.name})"
+    except OSError as exc:
+        return False, f"FAIL: could not install advance hook in {hooks_dir}: {exc}"
+
+
 def _install_watchdog_script() -> tuple[bool, str]:
     """Install the gateway watchdog script to ~/.hermes/plugins/daedalus/scripts/ (idempotent).
 
@@ -340,6 +374,11 @@ def main(check_only: bool = False) -> int:
     
     # Install the webhook handler script (idempotent, non-fatal)
     ok, msg = _install_webhook_handler()
+    print(msg)
+    print()
+
+    # Install the session-end advance hook (idempotent, non-fatal)
+    ok, msg = _install_advance_hook()
     print(msg)
     print()
 
