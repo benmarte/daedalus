@@ -1,3 +1,5 @@
+## [Promotion applies the label that triggers the normal dispatch flow (validator → PM → dev team)](https://github.com/benmarte/daedalus/issues/208) — [PR #220](https://github.com/benmarte/daedalus/pull/220)
+
 ## [Stale blocked card sweeper logs warning after 48h (optional archive)](https://github.com/benmarte/daedalus/issues/186) — [PR #217](https://github.com/benmarte/daedalus/pull/217)
 
 ## [Stale blocked card sweeper logs warning after 48h (optional archive)](https://github.com/benmarte/daedalus/issues/186) — [PR #217](https://github.com/benmarte/daedalus/pull/217)
