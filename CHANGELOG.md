@@ -1,3 +1,5 @@
+## [feat(e2e): dry-run mode flag for dispatcher — seed test issues/tasks without touching real GitHub](https://github.com/benmarte/daedalus/issues/900) — [PR #914](https://github.com/benmarte/daedalus/pull/914)
+
 ## [feat(e2e): multi-tick pipeline harness — run N dispatcher ticks and assert stage progression](https://github.com/benmarte/daedalus/issues/901) — [PR #913](https://github.com/benmarte/daedalus/pull/913)
 
 ## [bug: planner_decompose injects source-file context into sub-issue bodies, causing 422 body-too-long from GitHub](https://github.com/benmarte/daedalus/issues/899) — [PR #912](https://github.com/benmarte/daedalus/pull/912)
