@@ -60,15 +60,29 @@ class GitHubProvider(VCSProvider):
     # ── issues ───────────────────────────────────────────────────────────────
     def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
                     limit: int = 50) -> List[IssueSummary]:
-        """ANY-label semantics: one call per label, deduped (gh-CLI parity)."""
+        """ANY-label semantics: one call per label, deduped (gh-CLI parity).
+
+        ``limit`` is the page size for each request; all pages are fetched until
+        GitHub returns fewer items than the page size (end-of-results signal).
+        This ensures boards with >100 open issues are never silently truncated
+        (#228). Use ``_fetch_issues(provider, filters)`` with ``filters.max_issues``
+        to apply a hard ceiling on the total result count.
+        """
+        per_page = min(limit, 100)
         label_sets = [[l] for l in (labels or []) if l] or [[]]
         seen: Dict[int, IssueSummary] = {}
         for ls in label_sets:
-            params: Dict[str, Any] = {"state": state, "per_page": min(limit, 100)}
+            params: Dict[str, Any] = {"state": state, "per_page": per_page}
             if ls:
                 params["labels"] = ",".join(ls)
             try:
-                data = self._http.get_json(f"/repos/{self.repo}/issues", params=params)
+                data = self._http.get_paginated(
+                    f"/repos/{self.repo}/issues",
+                    params=params,
+                    style="link_header",
+                    per_page=per_page,
+                    max_pages=50,
+                )
             except ProviderError as e:
                 self._log.warning("list_issues failed: %s", e)
                 continue
@@ -83,7 +97,7 @@ class GitHubProvider(VCSProvider):
                         labels=[l.get("name", "") for l in it.get("labels") or []],
                         state=(it.get("state") or "open").lower(),
                         url=it.get("html_url") or "")
-        return list(seen.values())[:limit]
+        return list(seen.values())
 
     def close_issue(self, issue_number: int) -> bool:
         try:
