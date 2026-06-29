@@ -1,3 +1,5 @@
+## [Planner detects when two sub-tasks are likely to touch the same file(s) based on task description keywords or explicit file references in the task body](https://github.com/benmarte/daedalus/issues/1058) — [PR #1065](https://github.com/benmarte/daedalus/pull/1065)
+
 # Changelog
 
 All notable changes to Daedalus are documented here. The format loosely follows
