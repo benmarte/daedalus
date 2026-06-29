@@ -1,3 +1,5 @@
+## [bug: QA races developer mid-edit on shared working tree, sees uncommitted changes](https://github.com/benmarte/daedalus/issues/953) — [PR #954](https://github.com/benmarte/daedalus/pull/954)
+
 ## [bug: validator completes with summary=None when Claude Code delegation fails, silently burning retry cap](https://github.com/benmarte/daedalus/issues/916) — [PR #952](https://github.com/benmarte/daedalus/pull/952)
 
 ## [feat: add advance hook (daedalus-advance.sh + daedalus_resolve_project.py) to postinstall so it ships with the plugin](https://github.com/benmarte/daedalus/issues/936) — [PR #950](https://github.com/benmarte/daedalus/pull/950)
