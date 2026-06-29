@@ -60,7 +60,7 @@ from core.providers.base import ensure_closing_keyword, is_epic  # noqa: E402
 from core import tier_promotion  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
 from core.util import extract_issue_number  # noqa: E402
-
+from core.util import extract_pr_number_from_summary  # noqa: E402
 logger = logging.getLogger("daedalus.dispatch")
 
 _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify → Ship")
@@ -4692,8 +4692,7 @@ def _parse_pr_from_card(card: dict) -> Optional[int]:
     body = (card.get("body") or "").strip()
     summary = (card.get("latest_summary") or "").strip()
     text = f"{body}\n{summary}"
-    m = re.search(r"PR #(\d+)", text)
-    return int(m.group(1)) if m else None
+    return extract_pr_number_from_summary(text)
 
 
 def _summary_events(summary: Dict[str, Any]) -> set:

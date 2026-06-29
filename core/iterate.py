@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Set
 from core import kanban
 from core.providers.base import CIStatus, issue_linked_to_pr, parse_depends_on
 from core.util import extract_issue_number
+from core.util import extract_pr_number_from_summary
 
 logger = logging.getLogger("daedalus.iterate")
 
@@ -134,16 +135,11 @@ def _parse_handoff(handoff_text: str) -> Dict[str, Any]:
     text = handoff_text or ""
     result: Dict[str, Any] = {
         "is_review_required": "review-required" in text.lower(),
-        "pr_number": None,
+        "pr_number": extract_pr_number_from_summary(text),
         "is_changes_requested": False,
         "is_approved": False,
         "findings_text": text,
     }
-
-    # Extract PR number
-    m = re.search(r"PR #(\d+)", text)
-    if m:
-        result["pr_number"] = int(m.group(1))
 
     # Detect review outcomes
     lower = text.lower()
@@ -409,8 +405,7 @@ def _count_fix_attempts(card: dict, slug: str = "", workdir: str = "") -> int:
 
 def _parse_pr_number(handoff_text: str) -> Optional[int]:
     """Extract a PR number from handoff text."""
-    m = re.search(r"PR #(\d+)", handoff_text)
-    return int(m.group(1)) if m else None
+    return extract_pr_number_from_summary(handoff_text)
 
 
 def _extract_issue_number_from_card(card: dict) -> Optional[int]:
