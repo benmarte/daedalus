@@ -454,12 +454,89 @@ def _resolve_agent_for_role(execution: Dict[str, Any], role: str) -> str:
     return _resolve_coding_agent(execution)
 
 
+def _resolve_active_model_provider() -> Dict[str, Optional[str]]:
+    """Read the active model and provider from the Hermes global config.
+
+    Reads ``~/.hermes/config.yaml`` (or ``$HERMES_HOME/config.yaml``).
+    Always returns a dict with ``"model"`` and ``"provider"`` keys.
+    Values are ``None`` when the config is missing, unreadable, or the
+    fields are absent/empty.
+    """
+    import yaml as _yaml  # lazy — yaml may not be installed in all envs
+    hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    config_path = Path(hermes_home) / "config.yaml"
+    try:
+        with open(config_path, "r") as fh:
+            cfg = _yaml.safe_load(fh) or {}
+        model_block = cfg.get("model") or {}
+        model = (model_block.get("default") or "").strip() or None
+        provider = (model_block.get("provider") or "").strip() or None
+        return {"model": model, "provider": provider}
+    except Exception:
+        return {"model": None, "provider": None}
+
+
+_CLAUDE_MODEL_PREFIXES = ("claude", "anthropic/")
+
+
+def _is_model_compatible_with_coding_agent(model: Optional[str], agent: str) -> bool:
+    """Return True if *model* can be used with the given coding *agent*.
+
+    ``claude-code`` only accepts Claude / Anthropic models.  ``codex`` and
+    ``opencode`` accept any model string.  Empty / None model is always
+    compatible (caller will skip injection).
+    """
+    if not model:
+        return True
+    if agent != "claude-code":
+        return True
+    model_lower = (model or "").lower()
+    compatible = any(model_lower.startswith(p) for p in _CLAUDE_MODEL_PREFIXES)
+    if not compatible:
+        logger.warning(
+            "dispatch: model %r is incompatible with coding_agent=claude-code "
+            "(only Claude/Anthropic models are supported); skipping --model injection",
+            model,
+        )
+    return compatible
+
+
+def _inject_model_into_coding_agent_cmd(cmd: str, agent: str, model: str) -> str:
+    """Append ``--model <model>`` to *cmd* when not already present.
+
+    No-op when *cmd* or *model* is empty, when ``--model`` is already in the
+    command, or when the model is not compatible with *agent*.
+    """
+    if not cmd or not model:
+        return cmd
+    if "--model" in cmd:
+        return cmd
+    if not _is_model_compatible_with_coding_agent(model, agent):
+        return cmd
+    return f"{cmd} --model {model}"
+
+
 def _resolve_coding_agent_cmd(execution: Dict[str, Any]) -> str:
-    """Return the configured CLI command for the coding agent, or empty string."""
-    cmd = (execution or {}).get("coding_agent_cmd")
-    if not cmd or not isinstance(cmd, str):
+    """Return the configured CLI command for the coding agent.
+
+    Falls back to ``_CODING_AGENT_DEFAULTS`` when no explicit command is set.
+    When no ``--model`` flag is present and the active Hermes global model is
+    compatible with the configured coding agent, injects ``--model <model>``
+    so the external CLI respects the same model selection.
+    """
+    raw_cmd = (execution or {}).get("coding_agent_cmd")
+    agent = _resolve_coding_agent(execution)
+    if raw_cmd is not None and not isinstance(raw_cmd, str):
         return ""
-    return cmd.strip()
+    cmd = (raw_cmd.strip() if isinstance(raw_cmd, str) else "") or _CODING_AGENT_DEFAULTS.get(agent, "")
+    if not cmd:
+        return ""
+    if agent in ("hermes", "none"):
+        return cmd
+    active = _resolve_active_model_provider()
+    if active.get("model"):
+        cmd = _inject_model_into_coding_agent_cmd(cmd, agent, active["model"])
+    return cmd
 
 
 _DEFAULT_CODING_AGENT_MAX_TURNS = 100
