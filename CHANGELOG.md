@@ -1,5 +1,7 @@
 ## [bug: planner NOT SUITABLE FOR DECOMPOSITION leaves issue stuck In progress forever (no validator created)](https://github.com/benmarte/daedalus/issues/969) — [PR #976](https://github.com/benmarte/daedalus/pull/976)
 
+## [bug: planner NOT SUITABLE FOR DECOMPOSITION leaves issue stuck In progress forever (no validator created)](https://github.com/benmarte/daedalus/issues/969) — [PR #976](https://github.com/benmarte/daedalus/pull/976)
+
 ### Bug
 
 The `_check_planner_not_suitable()` handler introduced in PRs #941 / #943 for issue #931 only scanned planner cards with `status="done"`. Combined with two other failure modes — (1) the planner soul never instructed the planner *when* to emit the `NOT SUITABLE FOR DECOMPOSITION` signal, and (2) the planner could block its card with the signal rather than complete it (making the card invisible to the handler) — issues that the planner deemed unsuitable for decomposition were left `In Progress` on the board indefinitely with no downstream validator task, no comment, and no diagnostic log message explaining why.
