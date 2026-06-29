@@ -1,3 +1,5 @@
+## [bug: advance hook does not fire after planner-daedalus session ends, causing 60-minute pipeline stall](https://github.com/benmarte/daedalus/issues/962) — [PR #981](https://github.com/benmarte/daedalus/pull/981)
+
 ## [perf: dispatcher processes validator retry logic per-task instead of per-issue, burning O(N) API calls](https://github.com/benmarte/daedalus/issues/961) — [PR #980](https://github.com/benmarte/daedalus/pull/980)
 
 ## [bug: planner NOT SUITABLE FOR DECOMPOSITION leaves issue stuck In progress forever (no validator created)](https://github.com/benmarte/daedalus/issues/969) — [PR #976](https://github.com/benmarte/daedalus/pull/976)
