@@ -153,9 +153,15 @@ def _parse_handoff(handoff_text: str) -> Dict[str, Any]:
         result["is_changes_requested"] = True
 
     # Approval signals
+    # Removed: "pass" (ambiguous — caused false positives on "tests pass", "password").
+    # Added explicit prefixed signals for role-specific approvals (qa, a11y, security).
     approve_signals = [
         "approved", "sign-off", "signoff", "approved.", "lgtm",
-        "looks good", "no findings", "pass", ":+1:",
+        "looks good", "no findings", ":+1:",
+        "qa-passed", "qa passed",
+        "a11y-passed", "a11y passed",
+        "security-approved", "security approved",
+        "security-passed", "security passed",
     ]
     if any(s in lower for s in approve_signals):
         result["is_approved"] = True

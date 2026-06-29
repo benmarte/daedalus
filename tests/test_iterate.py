@@ -255,6 +255,78 @@ def test_parse_handoff_signals():
     check("not changes", h2["is_changes_requested"] is False)
 
 
+def test_parse_handoff_pass_substring_no_false_positive():
+    """#956: 'pass' substring in arbitrary text must NOT trigger is_approved.
+
+    Previously, 'pass' was in approve_signals as a raw substring match, so text like
+    'changes-requested: tests pass but login flow needs fix' incorrectly set
+    is_approved=True, causing the dispatcher to fire APPROVE_ADVANCE when the
+    reviewer actually requested changes.
+    """
+    # Exact reproduction from bug report
+    h = iterate._parse_handoff("changes-requested: tests pass but login flow needs fix")
+    check("changes-requested still detected", h["is_changes_requested"] is True)
+    check("'tests pass' does NOT fire is_approved", h["is_approved"] is False)
+
+    # Another false-positive case: 'password' contains 'pass'
+    h2 = iterate._parse_handoff("the password field is missing validation")
+    check("'password' does NOT fire is_approved", h2["is_approved"] is False)
+
+    # 'passing' also should not trigger
+    h3 = iterate._parse_handoff("tests passing but logic needs review")
+    check("'passing' does NOT fire is_approved", h3["is_approved"] is False)
+
+    # Changes-requested + 'tests pass' — must NOT approve when reviewer requested changes
+    h4 = iterate._parse_handoff("review-changes-requested: tests pass but logic broken")
+    check("request changes not confused with approve", h4["is_changes_requested"] is True)
+    check("approved NOT set when changes requested", h4["is_approved"] is False)
+
+
+def test_parse_handoff_prefixed_approval_signals():
+    """#956: Role-prefixed approval signals are detected (backward compat)."""
+    prefixes = [
+        "qa-passed: regression suite green",
+        "a11y-passed: wcag 2.1 AA compliant",
+        "security-approved: no vulnerabilities found",
+        "security-passed: review complete",
+    ]
+    for text in prefixes:
+        h = iterate._parse_handoff(text)
+        check(f"prefixed approval detected: {text[:30]}", h["is_approved"] is True)
+        check("not changes-requested", h["is_changes_requested"] is False)
+
+
+def test_parse_handoff_existing_approvals_still_detected():
+    """Existing unambiguous approval signals MUST still work (backward compat)."""
+    approvals = [
+        "APPROVED — LGTM",
+        "approved: all tests green",
+        "changes: sign-off complete",
+        "signoff received",
+        "looks good to me",
+        "no findings from security review",
+        ":+1: ready to merge",
+    ]
+    for text in approvals:
+        h = iterate._parse_handoff(text)
+        check(f"existing approval detected: {text[:30]}", h["is_approved"] is True)
+
+
+def test_parse_handoff_pass_not_in_signals_list():
+    """#956: 'pass' is not a standalone signal in approve_signals list."""
+    import inspect
+    import re
+    src = inspect.getsource(iterate._parse_handoff)
+    m = re.search(r"approve_signals\s*=\s*\[(.*?)\]", src, re.DOTALL)
+    assert m is not None, "Could not locate approve_signals in _parse_handoff source"
+    signals_block = m.group(1)
+    # 'pass' must NOT appear as a standalone quoted entry
+    check(
+        "'pass' removed from approve_signals",
+        '"pass"' not in signals_block and "'pass'" not in signals_block,
+    )
+
+
 # ── _count_fix_attempts ─────────────────────────────────────────────────────
 
 
