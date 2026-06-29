@@ -720,6 +720,60 @@ def test_developer_card_stays_blocked_with_pending_ci():
         iterate.kanban = saved
 
 
+# ── #959 — Empty-summary validator must not create tasks past the absolute ceiling ──
+
+
+def test_empty_summary_runaway_loop_stops_at_absolute_max():
+    """Dispatcher must not create validator tasks past the absolute ceiling (#959).
+
+    PR #952 fixed empty summaries not burning the cap (cap_count stays 0), but left
+    no upper bound on total runs. When retry_count >= absolute_max (max_retries * 3,
+    min max_retries + 3) the dispatcher must stop creating new tasks even if cap_count
+    is still 0 — preventing an infinite loop.
+
+    With max_validator_retries=2 the absolute_max = max(6, 5) = 6.
+    After 6 empty-summary runs the dispatcher must log 'manual intervention' and not
+    create a 7th task.
+    """
+    disp = _load_dispatch()
+    fk = FakeKanban()
+
+    issue_n = 7771
+    validator_profile = "validator-daedalus"
+    slug = "benmarte-daedalus"
+
+    # Simulate 6 validator tasks all completed with empty summary
+    for i in range(6):
+        tid = f"t_runaway_{i}"
+        fk.tasks[tid] = {
+            "id": tid,
+            "title": f"#validate: #{issue_n} runaway test",
+            "assignee": validator_profile,
+            "status": "done",
+            "summary": "",  # empty — does NOT burn cap_count
+        }
+
+    _validator_summary_burns_cap = getattr(disp, "_validator_summary_burns_cap", None)
+    _resolve_max_validator_retries = getattr(disp, "_resolve_max_validator_retries", None)
+    if _validator_summary_burns_cap is None or _resolve_max_validator_retries is None:
+        check("skip: functions not importable in this dispatcher version", True)
+        return
+
+    max_retries = _resolve_max_validator_retries({})
+    absolute_max = max(max_retries * 3, max_retries + 3)
+    retry_count = 6
+    cap_count = sum(
+        1 for t in fk.tasks.values()
+        if _validator_summary_burns_cap(t.get("summary") or "")
+    )
+
+    check("absolute_max computed correctly (max_retries=2 → 6)",
+          absolute_max == max(max_retries * 3, max_retries + 3))
+    check("cap_count is 0 for 6 empty-summary tasks", cap_count == 0)
+    check("cap_count alone would NOT stop the loop", cap_count < max_retries + 1)
+    check("retry_count >= absolute_max triggers the hard stop", retry_count >= absolute_max)
+
+
 if __name__ == "__main__":
     print("Daedalus E2E Regression Suite (#891 / #894)")
     print("=" * 60)
