@@ -37,18 +37,20 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QAGate{{"🧪 QA GATE checkpoint\ntest suite · coverage\ncard summary: qa-passed\nor qa-failed"}}
-    QAGate --> CI{CI}
-    CI -->|green| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
-    CI -->|green| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
-    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
+    Dev --> QA["🧪 QA Agent\nRuns test suite · coverage\nProduces qa-passed or qa-failed"]
+    Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
+    QA --> QAGate{{"🧪 QA GATE\nqa-passed? or skip-qa label?"}}
+    QAGate -->|"qa-passed"| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    QAGate -->|"qa-passed"| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
+    QAGate -->|"qa-failed"| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
     Fix --> Dev
+    CI -->|red| Fix
     Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
     Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
     A11y -->|cleared| Doc
-    Doc --> AutoMerge{{"🚦 QA auto-merge gate\nQA-passed signal present\nOR skip-qa label?"}}
+    Doc --> AutoMerge{{"🚦 QA auto-merge gate\nqa-passed signal present\nOR skip-qa label?\nAND CI green?"}}
     AutoMerge -->|"yes"| Merge(["🔀 Auto-merge fires\nPR merged automatically"])
-    AutoMerge -->|"no signal yet"| Wait(["⏳ Monitor polls\nuntil qa-passed\nor skip-qa label appears"])
+    AutoMerge -->|"waiting"| Wait(["⏳ Monitor polls\nuntil qa-passed & CI green\nor skip-qa label appears"])
     Wait --> AutoMerge
     Merge --> Done(["✅ Issue closed\nCard → Done"])
     Merge --> Reconcile["🩹 reconcile_merged\nheals cards closed\noutside the pipeline"]
