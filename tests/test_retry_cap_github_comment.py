@@ -368,6 +368,106 @@ class TestEmptySummaryDoesNotBurnCap(unittest.TestCase):
             "Empty-summary run should be retried, not capped",
         )
 
+    def test_mixed_summaries_only_real_verdicts_count_toward_cap(self):
+        """Mixed empty + real-verdict runs: cap fires only when *real* verdicts reach it.
+
+        Five done runs — three empty (failed delegations) and two real STOP
+        verdicts. cap_count == 2 < max+1 (3), so the cap must NOT fire and the
+        failed delegation is retried instead. Real verdicts carry an inline
+        ``summary`` (so they bypass the show_card fallback, which returns None
+        for the empty runs).
+        """
+        fake_tasks = [
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t0"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t1", "summary": "ran but produced no clear verdict"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t2"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t3", "summary": "ran but produced no clear verdict"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t4"},
+        ]
+        provider = FakeProvider()
+        created: list = []
+
+        def fake_create_task(*args, **kwargs):
+            created.append(kwargs.get("idempotency_key", ""))
+            return "new_task_id"
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": None}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp.kanban, "create_task", side_effect=fake_create_task), \
+             mock.patch.object(self.disp, "_validator_body", return_value="body"), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification") as send_cap, \
+             mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+             mock.patch.object(self.disp, "_mark_notified_block"):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {902: {"number": 902, "title": "fix bug", "body": ""}},
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        # Only 2 real verdicts < cap (3) → no exhaustion, delegation retried.
+        send_cap.assert_not_called()
+        self.assertEqual(
+            [c for c in provider.comments if c[0] == 902], [],
+            "Two real verdicts (< cap) must not post a retry-cap-exhausted comment",
+        )
+        self.assertTrue(
+            any(k.startswith("validator-retry-902") for k in created),
+            "Below-cap mixed scenario should still retry the failed delegation",
+        )
+
+    def test_mixed_summaries_cap_fires_once_real_verdicts_reach_limit(self):
+        """Mixed runs where real verdicts DO reach the cap → exhaustion fires.
+
+        Three real STOP verdicts (== max+1) plus two empty runs. The empty runs
+        are ignored; the three real verdicts trip the cap.
+        """
+        fake_tasks = [
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t0"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t1", "summary": "ran but produced no clear verdict"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t2", "summary": "ran but produced no clear verdict"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t3"},
+            {"title": "#902 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t4", "summary": "ran but produced no clear verdict"},
+        ]
+        provider = FakeProvider()
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": None}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp.kanban, "create_task", return_value="new_task_id"), \
+             mock.patch.object(self.disp, "_validator_body", return_value="body"), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification") as send_cap, \
+             mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+             mock.patch.object(self.disp, "_mark_notified_block"):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {902: {"number": 902, "title": "fix bug", "body": ""}},
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        # Three real verdicts == max+1 → cap exhaustion notification fires.
+        send_cap.assert_called()
+
     def test_helper_classifies_summaries(self):
         """_validator_summary_burns_cap: empty/CONFIRMED don't count, verdicts do."""
         burns = self.disp._validator_summary_burns_cap
