@@ -1158,6 +1158,76 @@ def test_create_downstream_partial_idempotency():
     check("docs key created", keys[2] == "docs-19")
 
 
+def test_create_downstream_dedup_respects_status():
+    """#936 Dedup must detect tasks regardless of their status.
+
+    Idempotency scan must match on idempotency_key alone — a task in
+    ``running``/``ready``/``done``/``blocked`` with the same key must still
+    prevent creation. Regression guard for #936.
+    """
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+
+    # security exists in "running" status — must be detected and skipped
+    existing = [{"idempotency_key": "security-19", "status": "running"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_rev", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("security (running) skipped", "security-19" not in created_keys)
+    check("4 tasks created (qa, reviewer, accessibility, docs)", len(created_keys) == 4)
+    check("qa key created", "qa-19" in created_keys)
+    check("reviewer key created", "reviewer-19" in created_keys)
+    check("accessibility key created", "accessibility-19" in created_keys)
+    check("docs key created", "docs-19" in created_keys)
+
+
+def test_create_downstream_dedup_multiple_statuses():
+    """#936 Dedup must work across several status values at once.
+
+    qa / reviewer / security each exist in a different status — all must be
+    deduplicated; only accessibility and docs should be created.
+    """
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+
+    existing = [
+        {"idempotency_key": "qa-19", "status": "ready"},
+        {"idempotency_key": "reviewer-19", "status": "running"},
+        {"idempotency_key": "security-19", "status": "blocked"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("qa (ready) skipped", "qa-19" not in created_keys)
+    check("reviewer (running) skipped", "reviewer-19" not in created_keys)
+    check("security (blocked) skipped", "security-19" not in created_keys)
+    check("2 tasks created (accessibility, docs)", len(created_keys) == 2)
+    check("accessibility key created", "accessibility-19" in created_keys)
+    check("docs key created", "docs-19" in created_keys)
+
+
+def test_create_downstream_dedup_done_status():
+    """#936 A task in ``done`` status must still be deduplicated.
+
+    Regression: a terminal reviewer card from a previous run must prevent a
+    fresh reviewer creation on re-dispatch.
+    """
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    existing = [{"idempotency_key": "reviewer-19", "status": "done"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("reviewer (done) skipped", "reviewer-19" not in created_keys)
+    check("4 other tasks still created", len(created_keys) == 4)
+
+
 def test_create_downstream_dry_run():
     """dry_run=True logs but does not create or comment."""
     card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
@@ -1995,13 +2065,16 @@ if __name__ == "__main__":
         test_run_iterate_falls_back_to_show_card_for_handoff,
         test_run_iterate_show_card_fallback_skip_on_failure,
         test_run_iterate_show_card_no_latest_summary,
-        test_run_iterate_respects_router_profile_config,
-        test_run_iterate_default_router_profile,
-        test_classify_blocked_pr_number_fallback,
-        test_run_iterate_branch_pr_fallback,
-        test_run_iterate_branch_pr_fallback_no_match,
-        test_run_iterate_handoff_pr_still_works,
-        test_run_iterate_branch_pr_fallback_ci_red,
+        test_create_downstream_happy_path,
+        test_create_downstream_idempotency_guard,
+        test_create_downstream_partial_idempotency,
+        test_create_downstream_dedup_respects_status,
+        test_create_downstream_dedup_multiple_statuses,
+        test_create_downstream_dedup_done_status,
+        test_create_downstream_dry_run,
+        test_execute_advance_triggers_downstream,
+        test_execute_advance_skip_downstream_no_issue_number,
+        test_downstream_task_body_references_pr,
         test_classify_blocked_planner_returns_pm_route,
         test_classify_blocked_documentation_docs_posted_returns_approve_advance,
         test_classify_blocked_documentation_unknown_returns_pm_route,
@@ -2010,13 +2083,6 @@ if __name__ == "__main__":
         test_extract_issue_number_bare_hash,
         test_extract_issue_number_none,
         test_extract_issue_number_prefers_repo_qualified,
-        test_create_downstream_happy_path,
-        test_create_downstream_idempotency_guard,
-        test_create_downstream_partial_idempotency,
-        test_create_downstream_dry_run,
-        test_execute_advance_triggers_downstream,
-        test_execute_advance_skip_downstream_no_issue_number,
-        test_downstream_task_body_references_pr,
         test_run_iterate_no_ci_provider_advances_immediately,
         test_run_iterate_pending_ci_returns_pending_cards,
         test_run_iterate_green_ci_no_pending_cards,
