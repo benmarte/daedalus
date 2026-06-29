@@ -1,3 +1,5 @@
+## [bug: planner NOT SUITABLE FOR DECOMPOSITION leaves issue stuck In progress forever (no validator created)](https://github.com/benmarte/daedalus/issues/969) — [PR #976](https://github.com/benmarte/daedalus/pull/976)
+
 ## [bug: QA races developer mid-edit on shared working tree, sees uncommitted changes](https://github.com/benmarte/daedalus/issues/953) — [PR #954](https://github.com/benmarte/daedalus/pull/954)
 
 ## [bug: validator completes with summary=None when Claude Code delegation fails, silently burning retry cap](https://github.com/benmarte/daedalus/issues/916) — [PR #952](https://github.com/benmarte/daedalus/pull/952)
