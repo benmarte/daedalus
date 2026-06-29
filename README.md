@@ -163,6 +163,10 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    security-analyst, and documentation tasks (idempotency keys `reviewer-{n}`,
    `security-{n}`, `docs-{n}`) if they don't already exist on the board. This handles
    the edge case where the initial Phase 2 decompose didn't propagate to all four roles.
+   This fallback **also enforces the QA gate**: it creates a `qa-{n}` task and parents
+   the reviewer/security/docs roles to it, so they only run once QA has passed. A prior
+   version of this path bypassed the gate by parenting every downstream role directly to
+   the developer card (fixed in #955).
 5. When you **merge** the PR, the next tick sets the card **Done** and **closes the
    issue** (GitHub doesn't auto-close on a non-default-branch merge, so the dispatcher
    does it).
@@ -644,6 +648,15 @@ the next cron tick.
 For example, as soon as the developer blocks with `review-required`, the session ends,
 the dispatcher fires, detects CI green, and promotes the reviewer task.
 
+This end-of-session trigger is the `daedalus-advance.sh` hook, wired into each profile's
+`hooks.on_session_end` in its `config.yaml`. Registration is **per profile** — a profile
+that never gets it wired silently stalls until the next hourly cron tick. `provision_roster.sh`
+now registers the hook for **every** role, including `planner-daedalus`, which previously
+lacked it: a planner that finished scoping an epic and signalled `PLANNING COMPLETE:` would
+sit idle for up to 60 minutes waiting on cron before the dispatcher decomposed it into
+sub-issues. With the hook registered, the planner's session end triggers immediate
+advancement just like every other role (fixed in #962).
+
 The cron job is still present as a last-resort safety net (in case an agent crashes
 before reaching its terminal state), but it is no longer the primary advancement mechanism.
 
@@ -776,8 +789,10 @@ blocked card detected
         │       └──► advance
         │             complete the developer card
         │             _create_downstream_review_tasks() fires:
-        │               creates reviewer, security-analyst, docs tasks
-        │               idempotency keys: reviewer-{n}, security-{n}, docs-{n}
+        │               creates a qa-{n} task and parents reviewer,
+        │                 security-analyst, docs to it — QA gate enforced
+        │                 (downstream roles run only after qa-passed)
+        │               idempotency keys: qa-{n}, reviewer-{n}, security-{n}, docs-{n}
         │               skips any whose key already exists on the board
         │
         ├─ developer card + CI red?
@@ -813,6 +828,23 @@ mid-tick) never double-create fix cards. Attempt counts survive across ticks in
 **Awaiting-fix unblock.** When a developer fix card completes, the loop
 automatically unblocks any reviewer or security-analyst cards that were marked
 "awaiting-fix" for that issue. They re-enter the queue without human intervention.
+
+**Approve-signal precision.** `approve_signals` (the set the loop matches a card's
+handoff text against to detect `approve_advance`) deliberately omits the bare token
+`pass` — it false-triggered on phrases like "all tests pass" and "password", silently
+advancing a reviewer/security card that hadn't actually been approved. The set now
+carries only explicit, role-prefixed signals (`approved`, `lgtm`, `qa-passed`,
+`a11y-passed`, `security-approved`, …), so a QA pass note can describe its run without
+being misread as an approval (fixed in #956).
+
+**Merged-PR guard on Done sync.** When an issue reaches **Done** on the VCS board, the
+dispatcher bulk-closes the issue's remaining kanban cards. For a developer card it first
+asks the provider `is_pr_open(pr)`; only when the PR is **not** open does it call
+`is_pr_merged(pr)`. A PR that is *closed but not merged* (`is_pr_merged=False`) no longer
+triggers the sync — previously such a state orphaned every remaining pipeline card by
+closing them as if the work had landed. Unverifiable states (provider lacks the
+capability or errors) fall back to prior behaviour; only an affirmative "not merged"
+holds the cards (fixed in #957).
 
 **Escalation cap.** `MAX_FIX_ATTEMPTS = 3`. After three attempts the loop posts a
 comment, leaves the card blocked, and stops. The pipeline never runs away — every
@@ -1063,7 +1095,7 @@ Each piece exists because the obvious approach failed:
   and docs tasks had to be manually created by the human operator (issue #21).
 - **Self-healing loop** (`core/iterate.py`) — every blocked card is classified into one
   of 5 actions and routed to the agent that can clear it:
-    - `advance` — dev PR green + review-required → complete dev card, then `_create_downstream_review_tasks()` creates reviewer/security/docs tasks (idempotent keys `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
+    - `advance` — dev PR green + review-required → complete dev card, then `_create_downstream_review_tasks()` creates a `qa-{n}` task and parents reviewer/security/docs to it so they run only after QA passes (idempotent keys `qa-{n}`, `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
     - `dev_fix_ci` — CI red → creates idempotent developer fix card
     - `pm_route` — reviewer/security requests changes → creates PM routing card with findings; PM decides owner (developer, security-analyst, re-spec), then fix lands. Reviewer cards are marked "awaiting-fix" and auto-unblocked when the fix completes.
     - `approve_advance` — reviewer/security approved → complete the card
