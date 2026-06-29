@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core import kanban
+from core.file_overlap import detect_file_overlap as _pairwise_file_overlap
 from core.providers.base import CIStatus, issue_linked_to_pr, parse_depends_on
 from core.util import extract_issue_number
 from core.util import extract_pr_number_from_summary
@@ -1329,6 +1330,188 @@ class AggregateEpicContext:
     all_dir_tags: set[str] = field(default_factory=set)
 
 
+# ── Same-file task merging ────────────────────────────────────────────────────
+
+@dataclass
+class _MergedTask:
+    """Result of merging one or more sub-issue tasks that share the same files."""
+    title: str
+    scope: str
+    context: "EpicContext"
+
+
+def _merge_same_file_tasks(
+    titles: List[str],
+    scopes: List[str],
+    contexts: List["EpicContext"],
+) -> tuple:
+    """Consolidate tasks that touch exactly the same set of files into one task.
+
+    Groups tasks by the frozenset of their ``file_paths``.  Tasks with no
+    file_paths, or whose file_path sets are unique, pass through unchanged.
+    Tasks with overlapping but non-identical file_path sets are NOT merged —
+    only exact set equality triggers consolidation.
+
+    Returns ``(merged_titles, merged_scopes, merged_contexts)`` with the same
+    relative ordering as the input (first occurrence of each group determines
+    its position).
+    """
+    if not titles:
+        return [], [], []
+    if len(contexts) != len(titles):
+        return titles, scopes, contexts
+    groups: Dict[Any, List[int]] = {}
+    for idx, ctx in enumerate(contexts):
+        key = frozenset(ctx.file_paths) if ctx.file_paths else ("__nofiles__", idx)
+        groups.setdefault(key, []).append(idx)
+    merged_titles: List[str] = []
+    merged_scopes: List[str] = []
+    merged_contexts: List["EpicContext"] = []
+    seen: set = set()
+    for idx in range(len(titles)):
+        ctx = contexts[idx]
+        key = frozenset(ctx.file_paths) if ctx.file_paths else ("__nofiles__", idx)
+        if key in seen:
+            continue
+        seen.add(key)
+        group_indices = groups.get(key, [idx])
+        if len(group_indices) == 1:
+            merged_titles.append(titles[idx])
+            merged_scopes.append(scopes[idx])
+            merged_contexts.append(ctx)
+        else:
+            g_titles = [titles[i] for i in group_indices]
+            g_scopes = [scopes[i] for i in group_indices]
+            g_ctxs = [contexts[i] for i in group_indices]
+            combined_title = " + ".join(g_titles)
+            combined_scope = "\n".join(g_scopes)
+            seen_fps: List[str] = []
+            seen_fps_set: set = set()
+            seen_ids: List[str] = []
+            seen_ids_set: set = set()
+            for c in g_ctxs:
+                for fp in (c.file_paths or []):
+                    if fp not in seen_fps_set:
+                        seen_fps.append(fp)
+                        seen_fps_set.add(fp)
+                for ident in (c.identifiers or []):
+                    if ident not in seen_ids_set:
+                        seen_ids.append(ident)
+                        seen_ids_set.add(ident)
+            combined_ctx = EpicContext(
+                scope=combined_scope,
+                file_paths=seen_fps,
+                identifiers=seen_ids,
+            )
+            merged_titles.append(combined_title)
+            merged_scopes.append(combined_scope)
+            merged_contexts.append(combined_ctx)
+    return merged_titles, merged_scopes, merged_contexts
+
+
+# ── Overlap-based blocking chain helpers ─────────────────────────────────────
+
+def detect_file_overlap(contexts: List["EpicContext"]) -> Dict[str, Set[int]]:
+    """Group sub-issue contexts by shared file paths.
+
+    Returns a mapping of ``{file_path: {context_indices}}`` for every file
+    that appears in two or more contexts.  Files that appear in only one
+    context are omitted (they produce no blocking chain).
+    """
+    file_to_indices: Dict[str, Set[int]] = {}
+    for idx, ctx in enumerate(contexts):
+        for fp in (ctx.file_paths or []):
+            file_to_indices.setdefault(fp, set()).add(idx)
+    return {fp: idxs for fp, idxs in file_to_indices.items() if len(idxs) > 1}
+
+
+def build_blocking_edges(
+    overlap: Dict[str, Set[int]],
+    total_tasks: int,
+    existing: Optional[Dict[int, List[int]]] = None,
+) -> Dict[int, List[int]]:
+    """Build a blocking-edge map from an overlap group dict.
+
+    For each file that two or more tasks share, the tasks that touch it are
+    sorted and chained sequentially (task N+1 blocked by task N).  No cycles
+    are produced since edges always point from lower to higher index.
+
+    *existing* may contain pre-existing edges that are merged rather than
+    replaced.  Duplicate edges are deduplicated.
+
+    Returns ``{task_index: [blocking_task_indices]}``.
+    """
+    edges: Dict[int, List[int]] = {k: list(v) for k, v in (existing or {}).items()}
+    for fp, idxs in overlap.items():
+        sorted_idxs = sorted(idxs)
+        for i in range(1, len(sorted_idxs)):
+            blocked = sorted_idxs[i]
+            blocker = sorted_idxs[i - 1]
+            lst = edges.setdefault(blocked, [])
+            if blocker not in lst:
+                lst.append(blocker)
+    return edges
+
+
+def _file_paths_overlap(paths_a: List[str], paths_b: List[str]) -> bool:
+    """Return True if paths_a and paths_b share at least one file path."""
+    if not paths_a or not paths_b:
+        return False
+    set_a = set(paths_a)
+    return any(p in set_a for p in paths_b)
+
+
+def _compute_sub_issue_dependencies(
+    contexts: List["EpicContext"],
+    index: int,
+    created_numbers: List[int],
+    existing_deps: Optional[List[int]] = None,
+) -> List[int]:
+    """Return the depends_on list for the sub-issue at *index*.
+
+    Compares the sub-issue at *index* against all prior contexts using direct
+    file_paths comparison.  To avoid redundant transitive deps, only the most
+    recently created overlapping predecessor is chained — earlier predecessors
+    are already reachable through the chain.
+
+    Contexts without file_paths never create dependencies (keyword similarity
+    alone is not used here — only explicit file-path overlap).
+
+    *created_numbers* maps prior context indices to their GitHub issue numbers.
+    *existing_deps* may contain pre-existing dependencies (deduplicated).
+    """
+    if index == 0:
+        return list(existing_deps or [])
+    # When no per-sub-issue context is available, fall back to fully sequential
+    # ordering (each task depends on all prior) to avoid accidental parallelism.
+    if not contexts or index >= len(contexts):
+        deps = list(existing_deps or [])
+        for n in created_numbers:
+            if n not in deps:
+                deps.append(n)
+        return deps
+    current_ctx = contexts[index]
+    # When the current sub-issue has no file_paths, we cannot determine which
+    # prior tasks it might conflict with.  Default to sequential (all prior
+    # tasks as dependencies) so we don't accidentally parallelize unknown work.
+    if not current_ctx.file_paths:
+        deps = list(existing_deps or [])
+        for n in created_numbers:
+            if n not in deps:
+                deps.append(n)
+        return deps
+    latest_overlapping_n: Optional[int] = None
+    for prior_idx, prior_n in enumerate(created_numbers):
+        if prior_idx >= len(contexts):
+            break
+        if _file_paths_overlap(current_ctx.file_paths, contexts[prior_idx].file_paths):
+            latest_overlapping_n = prior_n  # keep updating: want the most recent
+    deps: List[int] = list(existing_deps or [])
+    if latest_overlapping_n is not None and latest_overlapping_n not in deps:
+        deps.append(latest_overlapping_n)
+    return deps
+
+
 # Well-known directories for dir-tag extraction
 _KNOWN_DIRS = frozenset({"src", "lib", "app", "core", "tests", "scripts", "providers"})
 
@@ -1912,6 +2095,11 @@ def _execute_planner_decompose_inner(
         )
         _source_reading_fallback_count += 1
 
+    # Merge tasks that touch exactly the same set of files into one task
+    # (issue #1060: consolidate all-same-file tasks into single task).
+    sub_titles, sub_scopes, per_sub_contexts = _merge_same_file_tasks(
+        sub_titles, sub_scopes, per_sub_contexts,
+    )
     if dry_run:
         logger.info("[dry-run] planner_decompose #%s: would create %d sub-issues: %s",
                     parent_n, len(sub_titles), sub_titles)
@@ -1921,16 +2109,19 @@ def _execute_planner_decompose_inner(
     ready_numbers: List[int] = []
     for idx, (title, scope) in enumerate(zip(sub_titles, sub_scopes)):
         sub_ctx = per_sub_contexts[idx] if idx < len(per_sub_contexts) else EpicContext()
-        # Each sub-issue depends on all previously created sub-issues in this epic
-        # (sequential tier ordering). The first sub-issue has empty depends_on and
-        # is immediately actionable — labeled Ready below.
+        # Determine depends_on via file/keyword overlap: only chain against prior
+        # sub-issues that touch the same files or share enough vocabulary.
+        # Tasks with no overlapping predecessors run in parallel (depends_on=[]).
         # The body carries only the concise checklist-derived scope plus the
         # affected files/symbols metadata — NOT raw source contents (issue #899).
+        overlapping_prior_numbers = _compute_sub_issue_dependencies(
+            per_sub_contexts, idx, created_numbers
+        )
         sub_body = _sub_issue_body(
             parent_n,
             parent_title,
             scope,
-            list(created_numbers),
+            overlapping_prior_numbers,
             file_paths=sub_ctx.file_paths,
             identifiers=sub_ctx.identifiers,
         )
