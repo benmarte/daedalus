@@ -1,3 +1,5 @@
+## [When the fingerprint changes, dispatcher triggers a profile resync for the project](https://github.com/benmarte/daedalus/issues/1053) — [PR #1066](https://github.com/benmarte/daedalus/pull/1066)
+
 ## [When overlap is detected, planner creates blocking relationships: task N+1 is blocked by task N](https://github.com/benmarte/daedalus/issues/1059) — [PR #1067](https://github.com/benmarte/daedalus/pull/1067)
 
 ## [Planner detects when two sub-tasks are likely to touch the same file(s) based on task description keywords or explicit file references in the task body](https://github.com/benmarte/daedalus/issues/1058) — [PR #1065](https://github.com/benmarte/daedalus/pull/1065)
