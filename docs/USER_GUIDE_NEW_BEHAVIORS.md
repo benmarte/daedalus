@@ -198,18 +198,20 @@ No user-facing configuration. Idempotency is enforced automatically.
 **What it does:**  
 When the planner agent completes its kanban card but concludes the parent issue is not suitable for decomposition (e.g., the issue is already small, blocked on a dependency, or already simple enough for direct implementation), it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The dispatcher detects this via a case-insensitive regex match, skips the planner's normal decomposition path, looks up the parent issue, and creates a validator task for it — routing the issue through the standard validator → PM → developer flow rather than leaving it stuck in In Progress with no active child task.
 
+**Defense-in-depth extension (fix for issue #969).** The previous implementation (`_check_planner_not_suitable()`) only scanned cards with `status="done"`. If the planner blocked its card — emitting the signal as a block reason instead of a completion summary — the handler was blind to it, and the issue stayed stuck In Progress forever. The handler now iterates **both `done` and `blocked` planner cards**, matching the signal on either status. Duplicate routing is prevented by the `planner-fallback-validator-{n}` idempotency key (only one validator per issue across both scans). The handler also emits diagnostic `info`/`debug` logs at every skip point (empty summary, non-matching pattern, missing issue, out-of-scope issue number) so silent failure modes from issue #969 no longer recur.
+
 **How you interact with it:**  
-No manual intervention required. If the planner determines an issue doesn't need decomposition, the system automatically reassigns it to the validator for normal pipeline processing. The parent issue will not get stuck — it will continue through the standard flow.
+No manual intervention required. If the planner determines an issue doesn't need decomposition, the system automatically reassigns it to the validator for normal pipeline processing. The parent issue will not get stuck — it will continue through the standard flow, even if the planner incorrectly blocks its card instead of completing it.
 
 **Prerequisites:**  
 - The parent issue must have been routed to the planner (via epic detection or manual assignment).
-- The planner must complete its kanban card with `NOT SUITABLE FOR DECOMPOSITION` in the summary.
+- The planner must **complete** (preferred) or **block** its kanban card with `NOT SUITABLE FOR DECOMPOSITION` in the summary or block reason.
 
 **Configuration:**  
-No user-facing configuration. Detection is automatic via case-insensitive regex matching of the planner's summary signal.
+No user-facing configuration. Detection is automatic via case-insensitive regex matching of the planner's summary signal on both done and blocked planner cards.
 
 **Source implementation:**  
-`scripts/daedalus_dispatch.py:_check_planner_not_suitable()` (line ~3030)
+`scripts/daedalus_dispatch.py:_check_planner_not_suitable()` (line ~3088)
 
 ---
 
