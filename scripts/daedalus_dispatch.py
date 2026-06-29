@@ -3311,10 +3311,12 @@ def _check_completed_planner(
         if n is None:
             continue
         logger.info("dispatch: planner PLANNING COMPLETE #%s — triggering decompose", n)
-        # Ensure issue number is present in body for _extract_issue_number_from_card.
+        # Use a minimal body with ONLY the bare issue number so that
+        # _extract_issue_number_from_card (prefer_qualified=True) cannot be
+        # fooled by qualified benmarte/daedalus#<other> references that may
+        # appear inside test-code examples in the task body.
         card = dict(task)
-        if f"#{n}" not in (card.get("body") or ""):
-            card["body"] = f"Issue #{n}\n" + (card.get("body") or "")
+        card["body"] = f"Issue #{n}"
         ok = _execute_planner_decompose(
             slug, card, "", summary_raw,
             workdir=workdir, dry_run=dry_run, provider=provider,
