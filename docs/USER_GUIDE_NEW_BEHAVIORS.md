@@ -341,6 +341,8 @@ For every blocked card, `classify_blocked()` categorizes its state into one of:
 
 Each action has a dedicated executor function that performs the appropriate VCS operations (label changes, comments, card completions, etc.).
 
+**A note on approval signals:** `approve_advance` fires when a card's handoff text contains an explicit approval signal — `approved`, `lgtm`, `qa-passed`, `a11y-passed`, `security-approved`, and similar role-prefixed tokens. The bare word `pass` is **not** a signal: it used to be, but it false-triggered on ordinary QA notes like "all tests pass" (and even "password"), advancing cards that were never approved. If you author agent souls or write QA pass notes, you can describe a passing run freely — only the explicit signals above are read as approval.
+
 **How you interact with it:**  
 Blocked cards are automatically diagnosed and routed — most resolve without human intervention. You don't need to manually unblock cards or figure out why a card is stuck — the self-healing loop identifies the blocker and takes corrective action.
 
