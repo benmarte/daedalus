@@ -1106,6 +1106,18 @@ Each piece exists because the obvious approach failed:
 - **merged → Done + close** — a PR merged into `dev` doesn't auto-close its issue
   (GitHub only does that on the default branch), so the dispatcher closes it itself —
   and only after confirming no sibling PR is still open.
+- **QA auto-merge gate** (`core/iterate.py`) — the dispatcher's auto-merge path checks for
+  an explicit `qa-passed` signal from the QA agent before merging. The helper
+  `_qa_passed_for_issue()` examines the QA card's `latest_summary` (matched by idempotency
+  key `qa-{issue_number}`) via case-insensitive substring match. If the gate finds QA still
+  running (no `qa-passed` signal yet), it skips the merge with a warning log: _"Skipping merge:
+  QA has not passed for PR #N (issue #M). Wait for QA card to report 'qa-passed'."_ The check
+  is fail-closed: any kanban DB error or missing card also blocks the merge. PRs with green CI
+  but no QA pass signal wait indefinitely — the dispatcher re-checks every tick, so QA
+  completion automatically triggers the merge on the next cycle. A `skip-qa` label on a PR
+  bypasses the gate entirely for low-risk changes (docs-only, config, dependency bumps). See
+  [`qa-gate-design.md`](qa-gate-design.md) for the full design spec, edge cases, and signal
+  format reference.
 - **Tier promotion** — epic decomposition produces multiple sub-issues, but marking
   all of them `Ready` at once overwhelms the validator pipeline and bypasses dependency
   semantics. Instead, sub-issues with no declared blockers get the `Ready` label on
