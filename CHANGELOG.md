@@ -1,9 +1,3 @@
-## [When the fingerprint changes, dispatcher triggers a profile resync for the project](https://github.com/benmarte/daedalus/issues/1053) — [PR #1066](https://github.com/benmarte/daedalus/pull/1066)
-
-## [When overlap is detected, planner creates blocking relationships: task N+1 is blocked by task N](https://github.com/benmarte/daedalus/issues/1059) — [PR #1067](https://github.com/benmarte/daedalus/pull/1067)
-
-## [Planner detects when two sub-tasks are likely to touch the same file(s) based on task description keywords or explicit file references in the task body](https://github.com/benmarte/daedalus/issues/1058) — [PR #1065](https://github.com/benmarte/daedalus/pull/1065)
-
 # Changelog
 
 All notable changes to Daedalus are documented here. The format loosely follows
@@ -12,12 +6,73 @@ All notable changes to Daedalus are documented here. The format loosely follows
 
 ## [Unreleased]
 
+---
+
+## [1.0.0-beta.32] — 2026-06-29
+
+### Model & Profile Sync
+
+- Profile resync: when `coding_agent` or global Hermes model changes, all `*-daedalus` profiles are updated automatically ([#1066], closes [#1053] [#1054] [#1055] [#1057])
+- Config fingerprint stored per-workdir; first tick seeds baseline without resyncing; subsequent ticks with changed fingerprint trigger resync ([#1063], closes [#1052])
+- Model injection: `--model ${resolved-model}` injected into `coding_agent_cmd` when absent ([#1049])
+
+### Planner Intelligence
+
+- Planner detects sub-tasks touching the same file(s) and merges them into one issue ([#1065], closes [#1058])
+- Overlap-based blocking chains: sub-tasks sharing files are serialized with `depends_on` edges ([#1067], closes [#1059] [#1060] [#1061] [#1062])
+
 ### Pipeline Reliability
 
+- `merge_pr` verifies actual GitHub state before reporting MERGE FAILED; worktree branch-cleanup errors no longer masked as merge failures ([#1068], closes [#1034])
+- Validator-blocked idempotency key increments per block cycle — no more silent re-notifications ([#1033], closes [#994])
+- Monotonic idempotency key for planner-fallback validator path ([#1031])
+- Status-blind guard applied to task-existence queries ([#1027], closes [#1008])
+- Gate auto-merge on QA pass signal ([#1006])
+- Gate downstream review roles behind QA in fallback path ([#985], closes [#955])
+- Safety nets for orphaned kanban cards ([#1005], closes [#957])
+- Reconcile dev cards when PR merged outside pipeline ([#984], closes [#957])
 - QA no longer races developer mid-edit on shared working tree ([#954], closes [#953])
+- Dispatcher handler for planner `NOT SUITABLE` signal ([#941], closes [#931])
+
+[#1068]: https://github.com/benmarte/daedalus/pull/1068
+[#1067]: https://github.com/benmarte/daedalus/pull/1067
+[#1066]: https://github.com/benmarte/daedalus/pull/1066
+[#1065]: https://github.com/benmarte/daedalus/pull/1065
+[#1063]: https://github.com/benmarte/daedalus/pull/1063
+[#1049]: https://github.com/benmarte/daedalus/pull/1049
+[#1033]: https://github.com/benmarte/daedalus/pull/1033
+[#1031]: https://github.com/benmarte/daedalus/pull/1031
+[#1027]: https://github.com/benmarte/daedalus/pull/1027
+[#1006]: https://github.com/benmarte/daedalus/pull/1006
+[#985]: https://github.com/benmarte/daedalus/pull/985
+[#1005]: https://github.com/benmarte/daedalus/pull/1005
+[#984]: https://github.com/benmarte/daedalus/pull/984
+[#954]: https://github.com/benmarte/daedalus/pull/954
+[#941]: https://github.com/benmarte/daedalus/pull/941
+[#1034]: https://github.com/benmarte/daedalus/issues/1034
+[#1053]: https://github.com/benmarte/daedalus/issues/1053
+[#1054]: https://github.com/benmarte/daedalus/issues/1054
+[#1055]: https://github.com/benmarte/daedalus/issues/1055
+[#1057]: https://github.com/benmarte/daedalus/issues/1057
+[#1052]: https://github.com/benmarte/daedalus/issues/1052
+[#1058]: https://github.com/benmarte/daedalus/issues/1058
+[#1059]: https://github.com/benmarte/daedalus/issues/1059
+[#1060]: https://github.com/benmarte/daedalus/issues/1060
+[#1061]: https://github.com/benmarte/daedalus/issues/1061
+[#1062]: https://github.com/benmarte/daedalus/issues/1062
+[#994]: https://github.com/benmarte/daedalus/issues/994
+[#1008]: https://github.com/benmarte/daedalus/issues/1008
+[#955]: https://github.com/benmarte/daedalus/issues/955
+[#957]: https://github.com/benmarte/daedalus/issues/957
+[#953]: https://github.com/benmarte/daedalus/issues/953
+[#931]: https://github.com/benmarte/daedalus/issues/931
+
+---
+
+### Pipeline Reliability (legacy, rolled into prior releases)
+
 - Validator no longer completes silently with `summary=None` when Claude Code delegation fails ([#952], closes [#916])
 - `advance hook` registered to postinstall so it ships with the plugin ([#950], closes [#936])
-- Dispatcher handler for planner `NOT SUITABLE` signal ([#941], closes [#931])
 - Auto-advance sub-issues to Ready after planner decomposition ([#937], closes [#915])
 - E2E regression assertions for #891 and #894 ([#917], closes [#902])
 - Dry-run mode flag for dispatcher ([#914], closes [#900])
