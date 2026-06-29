@@ -1,3 +1,5 @@
+## [docs: update README and USER_GUIDE for pipeline reliability fixes (#955, #956, #957, #962)](https://github.com/benmarte/daedalus/issues/986) — [PR #989](https://github.com/benmarte/daedalus/pull/989)
+
 ## [bug: _create_downstream_review_tasks fallback bypasses QA gate by parenting all review roles to dev card](https://github.com/benmarte/daedalus/issues/955) — [PR #985](https://github.com/benmarte/daedalus/pull/985)
 
 ## [bug: _create_downstream_review_tasks fallback bypasses QA gate by parenting all review roles to dev card](https://github.com/benmarte/daedalus/issues/955) — [PR #985](https://github.com/benmarte/daedalus/pull/985)
