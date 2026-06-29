@@ -65,7 +65,6 @@ flowchart TD
     style ST fill:#C62828,color:#fff,stroke:#B71C1C
     style Merge fill:#388E3C,color:#fff,stroke:#1B5E20
     style AutoMerge fill:#FF8F00,color:#fff,stroke:#E65100
-    style QAGate fill:#FF6F00,color:#fff,stroke:#E65100
     style Wait fill:#5D4037,color:#fff,stroke:#3E2723
     style Done fill:#2E7D32,color:#fff,stroke:#1B5E20
     style Reco fill:#AD1457,color:#fff,stroke:#880E4F
