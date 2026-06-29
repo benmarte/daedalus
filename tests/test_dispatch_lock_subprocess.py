@@ -20,8 +20,6 @@ def test_two_dispatcher_processes_serialize(tmp_path: Path):
     # Point the lock at an isolated temp path so this test doesn't collide with
     # an actually-running dispatcher or another test.
     lock_path = tmp_path / "daemon.lock"
-    env = os.environ.copy()
-    env["DAEDALUS_TEST_LOCK_PATH"] = str(lock_path)
 
     # Process 1: dispatch with --dry-run (no-op). We'll hold the lock from the
     # test harness so proc1 sees contention.
@@ -48,7 +46,6 @@ sys.exit(rc)
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
             cwd=str(Path(__file__).resolve().parent.parent),
         )
 

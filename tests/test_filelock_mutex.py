@@ -68,24 +68,26 @@ def test_filelock_timeout_zero_succeeds_when_free(tmp_path):
 # ── main() mutex behavior ────────────────────────────────────────────────────
 
 
-def test_main_returns_zero_on_contention(caplog):
+def test_main_returns_zero_on_contention(tmp_path, caplog):
     """When lock is held by another process, main() logs + returns 0 (clean exit)."""
-    # Hold the lock so main()'s acquire fails
-    holder = FileLock(disp._MUTEX_LOCK_PATH)
-    holder.acquire()
+    # Use a tmp_path lock so we never collide with a running dispatcher.
+    holder_path = tmp_path / "contended.lock"
+    with mock.patch.object(disp, "_MUTEX_LOCK_PATH", str(holder_path)):
+        holder = FileLock(str(holder_path))
+        holder.acquire()
 
-    try:
-        with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
-            rc = disp.main()
+        try:
+            with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
+                rc = disp.main()
 
-        assert rc == 0, "main() must return 0 (clean exit) on lock contention"
+            assert rc == 0, "main() must return 0 (clean exit) on lock contention"
 
-        # Verify the warning was logged
-        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("FileLock already held" in m for m in warning_messages), \
-            f"Expected 'FileLock already held' warning. Got: {warning_messages}"
-    finally:
-        holder.release()
+            # Verify the warning was logged
+            warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+            assert any("FileLock already held" in m for m in warning_messages), \
+                f"Expected 'FileLock already held' warning. Got: {warning_messages}"
+        finally:
+            holder.release()
 
 
 def test_main_calls_inner_when_lock_free(tmp_path):
@@ -138,7 +140,13 @@ def test_main_suppresses_release_errors(tmp_path):
 
 
 def test_two_concurrent_mains_serialize(tmp_path):
-    """Second main() call sees contention and returns 0; first succeeds."""
+    """Two sequential main() calls both succeed when run one after the other.
+
+    Each invocation acquires the lock, calls _main_inner, and releases.
+    Because they run sequentially in one thread (not truly concurrent),
+    there's never contention — both succeed. True concurrency is tested
+    in test_dispatch_lock_subprocess.py which spawns real processes.
+    """
     lock_path = tmp_path / "serialize.lock"
 
     inner_calls = []
