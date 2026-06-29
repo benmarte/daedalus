@@ -1900,6 +1900,9 @@ def _validator_github_comment_outcome(
     return ""
 
 
+_TERMINAL_TASK_STATUSES = frozenset({"done", "complete", "completed", "cancelled", "canceled", "archived", "failed"})
+
+
 def _has_notified_block(slug: str, issue_number: int,
                         validator_profile: str = "validator-daedalus",
                         marker: str = _ESCALATION_MARKER) -> bool:
@@ -1909,12 +1912,19 @@ def _has_notified_block(slug: str, issue_number: int,
     idempotency store — no local JSON files needed. ``marker`` selects which
     one-shot notification to check (block-escalation by default, or
     ``_RETRY_CAP_MARKER`` for retry-cap exhaustion — #183).
+
+    Guards against terminal-state shadowing: done/cancelled validator tasks
+    cannot receive new stamps — only active tasks are inspected (epic #1008).
     """
     pattern = f"#{issue_number}"
     for task in kanban.list_tasks(slug):
         if pattern not in (task.get("title") or ""):
             continue
         if (task.get("assignee") or "") != validator_profile:
+            continue
+        # Status-blind guard: terminal tasks cannot be the stamp target.
+        status = (task.get("status") or "").strip().lower()
+        if status in _TERMINAL_TASK_STATUSES:
             continue
         tid = str(task.get("id") or task.get("task_id") or "")
         if not tid:
@@ -1931,12 +1941,22 @@ def _has_notified_block(slug: str, issue_number: int,
 def _mark_notified_block(slug: str, issue_number: int,
                          validator_profile: str = "validator-daedalus",
                          marker: str = _ESCALATION_MARKER) -> None:
-    """Stamp the validator task with ``marker`` so future ticks skip re-sending."""
+    """Stamp the validator task with ``marker`` so future ticks skip re-sending.
+
+    Terminal-state tasks are skipped (epic #1008) — only active validator
+    tasks can receive the stamp. If no active task is found, the stamp is
+    silently dropped (the notification already fired via the code path that
+    calls this helper; the next retry will create a fresh task).
+    """
     pattern = f"#{issue_number}"
     for task in kanban.list_tasks(slug):
         if pattern not in (task.get("title") or ""):
             continue
         if (task.get("assignee") or "") != validator_profile:
+            continue
+        # Status-blind guard: never stamp a terminal task.
+        status = (task.get("status") or "").strip().lower()
+        if status in _TERMINAL_TASK_STATUSES:
             continue
         tid = str(task.get("id") or task.get("task_id") or "")
         if tid:
@@ -1952,15 +1972,23 @@ def _has_downstream_tasks(slug: str, issue_number: int, *,
 
     Used by _check_completed_pm to avoid creating duplicate team triage cards.
     Planner tasks are upstream dispatch artifacts, not downstream team tasks.
+
+    Status-blind (epic #1008): terminal states are excluded — a done/cancelled
+    developer/reviewer task no longer shadows re-triage of its parent issue.
     """
     pattern = f"#{issue_number}"
     pipeline_profiles = {validator_profile, pm_profile, planner_profile}
+    terminal_states = {
+        "done", "complete", "completed", "cancelled", "canceled", "archived", "failed",
+    }
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
         assignee = (t.get("assignee") or "").strip()
         if assignee not in pipeline_profiles:
-            return True  # triage card or downstream role task (developer/reviewer/etc.)
+            status = (t.get("status") or "").strip().lower()
+            if status not in terminal_states:
+                return True  # active triage/downstream role task
     return False
 
 
@@ -3245,7 +3273,18 @@ def _check_planner_not_suitable(
                 processed_ids.add(task_id)
                 continue
 
-            ikey = f"planner-fallback-validator-{n}"
+            # Monotonic idempotency key (epic #1008): count existing planner-fallback
+            # validators for this issue so a new one gets a unique key after the
+            # previous one retires. Without this, a done planner-fallback validator
+            # shadows the idempotency check and a new NOT SUITABLE signal is silently
+            # swallowed forever.
+            existing_fb = [
+                t for t in kanban.list_tasks(slug)
+                if (t.get("assignee") or "") == p["validator"]
+                and f"#{n}" in (t.get("title") or "")
+                and (t.get("idempotency_key") or "").startswith("planner-fallback-validator-")
+            ]
+            ikey = f"planner-fallback-validator-{n}-r{len(existing_fb)}"
             vid = kanban.create_task(
                 slug, f"#{n} {issue.get('title', '')}",
                 body=_planner_not_suitable_validator_body(
@@ -4285,14 +4324,18 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             # when the key matches, but the Python code below would still record
             # dispatch state and add to 'created' list. An explicit check here
             # prevents duplicates on re-tick when the key already exists.
+            # Status-blind guard (epic #1008): only non-terminal planner tasks
+            # shadow the creation — a done/cancelled planner card should not
+            # block re-dispatch for a still-open epic issue.
             existing_planner = next(
                 (t for t in kanban.list_tasks(slug)
-                 if (t.get("idempotency_key") or "") == planner_key),
+                 if (t.get("idempotency_key") or "") == planner_key
+                 and (t.get("status") or "").strip().lower() not in _TERMINAL_TASK_STATUSES),
                 None
             )
             if existing_planner is not None:
-                logger.info("dispatch: #%s planner card already exists (%s) — skipping duplicate",
-                            n, planner_key)
+                logger.info("dispatch: #%s planner card already exists (%s, status=%s) — skipping duplicate",
+                            n, planner_key, existing_planner.get("status"))
                 # Do NOT 'continue' — fall through to the `if vid:` check with
                 # vid=None so dispatch state is not re-recorded.
                 vid = None
