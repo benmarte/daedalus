@@ -4095,6 +4095,16 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     fallback_behavior = (execution.get("profile_fallback_behavior") or "fallback").strip()
     profiles = _validate_profiles(profiles, fallback_behavior=fallback_behavior)
     workdir = resolved.get("workdir", "")
+    # Compute and persist a config fingerprint (SHA-256 of coding_agent +
+    # model.default) so downstream logic can detect when either value changes
+    # across ticks (issue #1052).
+    if workdir and not dry_run:
+        active_model = _resolve_active_model_provider()
+        _config_fp = dispatch_state.compute_config_fingerprint(
+            coding_agent, active_model.get("model"),
+        )
+        dispatch_state.set_config_fingerprint(workdir, _config_fp)
+        logger.debug("dispatch: config fingerprint = %s", _config_fp)
     # Messaging target the documentation agent's completion report is sent to.
     notify_target = (resolved.get("cron") or {}).get("deliver", "")
     slug = _board_slug(repo, resolved.get("name", ""))
