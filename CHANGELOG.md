@@ -1,130 +1,3 @@
-## [`FileLock` acquired at `main()` entry with `timeout=0`; second invocation logs and exits cleanly](https://github.com/benmarte/daedalus/issues/1015) — [PR #1028](https://github.com/benmarte/daedalus/pull/1028)
-
-## [fix: add process-level mutex + universal status-blind guard to eliminate all dispatcher race conditions (closes #988, #993, #994, #995, #996, #997)](https://github.com/benmarte/daedalus/issues/1008) — [PR #1027](https://github.com/benmarte/daedalus/pull/1027)
-
-## [feat: gate auto-merge monitor on qa-passed signal to prevent pre-QA merges](https://github.com/benmarte/daedalus/issues/998) — [PR #1006](https://github.com/benmarte/daedalus/pull/1006)
-
-## [docs: update README and USER_GUIDE for pipeline reliability fixes (#955, #956, #957, #962)](https://github.com/benmarte/daedalus/issues/986) — [PR #989](https://github.com/benmarte/daedalus/pull/989)
-
-## [bug: _create_downstream_review_tasks fallback bypasses QA gate by parenting all review roles to dev card](https://github.com/benmarte/daedalus/issues/955) — [PR #985](https://github.com/benmarte/daedalus/pull/985)
-
-## [bug: _create_downstream_review_tasks fallback bypasses QA gate by parenting all review roles to dev card](https://github.com/benmarte/daedalus/issues/955) — [PR #985](https://github.com/benmarte/daedalus/pull/985)
-
-## [bug: kanban pipeline cards orphaned when issue reaches Done on board before pipeline completes](https://github.com/benmarte/daedalus/issues/957) — [PR #984](https://github.com/benmarte/daedalus/pull/984)
-
-## [bug: kanban pipeline cards orphaned when issue reaches Done on board before pipeline completes](https://github.com/benmarte/daedalus/issues/957) — [PR #984](https://github.com/benmarte/daedalus/pull/984)
-
-## [bug: 'pass' substring in approve_signals false-triggers APPROVE_ADVANCE on reviewer/security cards](https://github.com/benmarte/daedalus/issues/956) — [PR #983](https://github.com/benmarte/daedalus/pull/983)
-
-## [bug: 'pass' substring in approve_signals false-triggers APPROVE_ADVANCE on reviewer/security cards](https://github.com/benmarte/daedalus/issues/956) — [PR #983](https://github.com/benmarte/daedalus/pull/983)
-
-## [bug: advance hook does not fire after planner-daedalus session ends, causing 60-minute pipeline stall](https://github.com/benmarte/daedalus/issues/962) — [PR #981](https://github.com/benmarte/daedalus/pull/981)
-
-## [bug: advance hook does not fire after planner-daedalus session ends, causing 60-minute pipeline stall](https://github.com/benmarte/daedalus/issues/962) — [PR #981](https://github.com/benmarte/daedalus/pull/981)
-
-## [perf: dispatcher processes validator retry logic per-task instead of per-issue, burning O(N) API calls](https://github.com/benmarte/daedalus/issues/961) — [PR #980](https://github.com/benmarte/daedalus/pull/980)
-
-## [bug: planner NOT SUITABLE FOR DECOMPOSITION leaves issue stuck In progress forever (no validator created)](https://github.com/benmarte/daedalus/issues/969) — [PR #976](https://github.com/benmarte/daedalus/pull/976)
-
-## [bug: planner NOT SUITABLE FOR DECOMPOSITION leaves issue stuck In progress forever (no validator created)](https://github.com/benmarte/daedalus/issues/969) — [PR #976](https://github.com/benmarte/daedalus/pull/976)
-
-### Bug
-
-The `_check_planner_not_suitable()` handler introduced in PRs #941 / #943 for issue #931 only scanned planner cards with `status="done"`. Combined with two other failure modes — (1) the planner soul never instructed the planner *when* to emit the `NOT SUITABLE FOR DECOMPOSITION` signal, and (2) the planner could block its card with the signal rather than complete it (making the card invisible to the handler) — issues that the planner deemed unsuitable for decomposition were left `In Progress` on the board indefinitely with no downstream validator task, no comment, and no diagnostic log message explaining why.
-
-### Fix
-
-The planner soul (`config/souls/planner-daedalus.md`) now documents the `NOT SUITABLE FOR DECOMPOSITION` signal as a valid **completion** summary (Path C in the dispatcher signal reference) and explicitly warns that emitting it as a block reason will route to `PM_ROUTE`. The handler is extended to scan **both `done` and `blocked` planner cards** (defense in depth) so a blocked card with the signal no longer falls through silently. Diagnostic logging is added at every skip point — empty summary, non-matching pattern, missing issue, missing issue number — so future silent failures surface in the dispatch log. The `planner-fallback-validator-{n}` idempotency key prevents duplicate validator creation when the same issue appears in both done and blocked cards.
-
-### Tests
-
-- 14 existing tests in `tests/test_planner_not_suitable.py` + new tests covering blocked-card detection, idempotency between done/blocked, and soul contract verification.
-- Integration test added in `tests/test_planner_signal_integration.py` (`test_blocked_planner_with_not_suitable_triggers_handler`) verifying a blocked planner card with the signal still creates a validator task.
-
-### Affected files
-
-- `config/souls/planner-daedalus.md` — added Path C documentation + canonical-form guidance + what-breaks-self-healing note
-- `scripts/daedalus_dispatch.py` — `_check_planner_not_suitable()` now iterates done+blocked, adds `processed_ids` guard, emits diagnostic logs
-- `tests/test_planner_not_suitable.py` — AC-3 / AC-4 tests
-- `tests/test_planner_signal_integration.py` — blocked-card integration test
-
----
-
-## [bug: QA races developer mid-edit on shared working tree, sees uncommitted changes](https://github.com/benmarte/daedalus/issues/953) — [PR #954](https://github.com/benmarte/daedalus/pull/954)
-
-## [bug: validator completes with summary=None when Claude Code delegation fails, silently burning retry cap](https://github.com/benmarte/daedalus/issues/916) — [PR #952](https://github.com/benmarte/daedalus/pull/952)
-
-## [feat: add advance hook (daedalus-advance.sh + daedalus_resolve_project.py) to postinstall so it ships with the plugin](https://github.com/benmarte/daedalus/issues/936) — [PR #950](https://github.com/benmarte/daedalus/pull/950)
-
-## [No regression in manual issue → Ready flow](https://github.com/benmarte/daedalus/issues/930) — [PR #948](https://github.com/benmarte/daedalus/pull/948)
-
-## [After planner decomposition, all sub-issues appear on the project board](https://github.com/benmarte/daedalus/issues/919) — [PR #947](https://github.com/benmarte/daedalus/pull/947)
-
-## [After planner decomposition, all sub-issues appear on the project board](https://github.com/benmarte/daedalus/issues/919) — [PR #947](https://github.com/benmarte/daedalus/pull/947)
-
-## [Integration test: issue routed to planner → planner returns NOT SUITABLE → validator created automatically](https://github.com/benmarte/daedalus/issues/935) — [PR #946](https://github.com/benmarte/daedalus/pull/946)
-
-## [Integration test: issue routed to planner → planner returns NOT SUITABLE → validator created automatically](https://github.com/benmarte/daedalus/issues/935) — [PR #946](https://github.com/benmarte/daedalus/pull/946)
-
-## [When a planner task completes with `NOT SUITABLE FOR DECOMPOSITION` in summary, a validator task is created for the parent issue](https://github.com/benmarte/daedalus/issues/931) — [PR #941](https://github.com/benmarte/daedalus/pull/941)
-
-## [fix: Add dispatcher handler for planner NOT SUITABLE FOR DECOMPOSITION signal](https://github.com/benmarte/daedalus/issues/931) — [PR #941](https://github.com/benmarte/daedalus/pull/941)
-
-## [feat: auto-advance sub-issues to Ready after planner decomposition, respecting dependency order](https://github.com/benmarte/daedalus/issues/915) — [PR #937](https://github.com/benmarte/daedalus/pull/937)
-
-## [feat(e2e): regression assertions for #891 (no duplicate sub-issues) and #894 (agent comments posted)](https://github.com/benmarte/daedalus/issues/902) — [PR #917](https://github.com/benmarte/daedalus/pull/917)
-
-## [feat(e2e): dry-run mode flag for dispatcher — seed test issues/tasks without touching real GitHub](https://github.com/benmarte/daedalus/issues/900) — [PR #914](https://github.com/benmarte/daedalus/pull/914)
-
-## [feat(e2e): multi-tick pipeline harness — run N dispatcher ticks and assert stage progression](https://github.com/benmarte/daedalus/issues/901) — [PR #913](https://github.com/benmarte/daedalus/pull/913)
-
-## [bug: planner_decompose injects source-file context into sub-issue bodies, causing 422 body-too-long from GitHub](https://github.com/benmarte/daedalus/issues/899) — [PR #912](https://github.com/benmarte/daedalus/pull/912)
-
-## [feat(e2e): make e2e target + CI nightly schedule](https://github.com/benmarte/daedalus/issues/903) — [PR #910](https://github.com/benmarte/daedalus/pull/910)
-
-## [bug: agents silently fail to post issue comments when GITHUB_TOKEN not set in cron env](https://github.com/benmarte/daedalus/issues/894) — [PR #895](https://github.com/benmarte/daedalus/pull/895)
-
-## [bug: concurrent dispatcher ticks re-decompose epics when idempotency marker format changed](https://github.com/benmarte/daedalus/issues/891) — [PR #893](https://github.com/benmarte/daedalus/pull/893)
-
-## [docs: update SOUL.md profiles and user guide with self-healing pipeline behavior](https://github.com/benmarte/daedalus/issues/180) — [PR #866](https://github.com/benmarte/daedalus/pull/866)
-
-## [docs: update SOUL.md profiles and user guide with self-healing pipeline behavior](https://github.com/benmarte/daedalus/issues/180) — [PR #866](https://github.com/benmarte/daedalus/pull/866)
-
-## [feat: auto-paginate _fetch_issues to prevent silent truncation on large boards](https://github.com/benmarte/daedalus/issues/228) — [PR #846](https://github.com/benmarte/daedalus/pull/846)
-
-## [feat: auto-paginate _fetch_issues to prevent silent truncation on large boards](https://github.com/benmarte/daedalus/issues/228) — [PR #846](https://github.com/benmarte/daedalus/pull/846)
-
-## [Unit tests / integration tests: planner creates sub-issues with file-specific acceptance criteria when source is available; graceful fallback when source is not](https://github.com/benmarte/daedalus/issues/806) — [PR #871](https://github.com/benmarte/daedalus/pull/871)
-
-## [Unit tests / integration tests: planner creates sub-issues with file-specific acceptance criteria when source is available; graceful fallback when source is not](https://github.com/benmarte/daedalus/issues/806) — [PR #871](https://github.com/benmarte/daedalus/pull/871)
-
-## [docs: clarify epic #180 line references and document deferred behaviors](https://github.com/benmarte/daedalus/issues/180) — PR #866
-
-### Documentation
-
-- README "Self-healing behaviors (epic #180)" line references corrected to
-  current `core/iterate.py` (drifted 13–27 lines since PR #816 landed).
-- Added explicit note that three epic #180 behaviors are deferred
-  (`MAX_PENDING_PR_TICKS` timeout, `PENDING_CI` fix-attempt escalation for
-  QA/a11y, and empty-summary developer skip) and what the dispatcher actually
-  does today in each case.
-- Added `a11y-skipped:` to the canonical accessibility signals list.
-- "What breaks self-healing" paragraph for QA/a11y corrected to say these
-  signals stay pending indefinitely (no sweep escalation for non-canonical
-  signals yet).
-
-## [PM SOUL.md explains the importance of unblocking the original card after consultation](https://github.com/benmarte/daedalus/issues/785) — [PR #812](https://github.com/benmarte/daedalus/pull/812)
-
-## [feat: end-to-end integration test driving a full 7-stage pipeline scenario](https://github.com/benmarte/daedalus/issues/230) — [PR #445](https://github.com/benmarte/daedalus/pull/445)
-
-## [fix: tier promotion guard — max one promotion per parent epic per dispatcher tick](https://github.com/benmarte/daedalus/issues/231) — [PR #349](https://github.com/benmarte/daedalus/pull/349)
-
-## [feat: extend sweeper to detect stale 'running' cards stuck without updates >24h](https://github.com/benmarte/daedalus/issues/232) — [PR #259](https://github.com/benmarte/daedalus/pull/259)
-
-## [feat: --plugin-dir flag for daedalus-cron.sh to load local dev plugin without reinstalling](https://github.com/benmarte/daedalus/issues/233) — [PR #249](https://github.com/benmarte/daedalus/pull/249)
-
-## [docs: update README, user guide, and all feature documentation for current release](https://github.com/benmarte/daedalus/issues/234) — [PR #258](https://github.com/benmarte/daedalus/pull/258)
-
 # Changelog
 
 All notable changes to Daedalus are documented here. The format loosely follows
@@ -132,6 +5,144 @@ All notable changes to Daedalus are documented here. The format loosely follows
 `1.0.0-beta.N` pre-release versioning.
 
 ## [Unreleased]
+
+_No unreleased changes at this time._
+
+---
+
+## [1.0.0-beta.31] — 2026-06-29
+
+### ⚠️ Notable behavior changes
+
+- **QA gate on auto-merge**: The auto-merge monitor now requires an explicit
+  QA-passed signal before merging. PRs must have either the `qa-passed` label
+  OR a successful `daedalus/qa` status check. PRs with the `skip-qa` label
+  bypass the gate (for docs-only changes and emergency hotfixes).
+- **Concurrent dispatcher protection**: A process-level `FileLock` mutex at
+  dispatcher entry prevents concurrent cron + advance-hook invocations from
+  racing. The second invocation exits cleanly instead of corrupting state.
+- **New dependency**: `filelock>=3.0` added to requirements.txt and pyproject.toml.
+
+### Added
+
+- **Concurrent dispatch stress tests** (#1029) — regression tests verifying
+  concurrent dispatcher invocations produce exactly one task.
+- **Monotonic idempotency keys** (#1031) — planner-fallback validator path now
+  uses monotonic idempotency keys to prevent duplicate validator creation.
+- **QA auto-merge gate** (#1006, closes #998, #999, #1001) — auto-merge monitor
+  requires explicit QA-passed signal before merging. Signal: `qa-passed` label
+  OR `daedalus/qa` status check = success.
+- **Skip-QA label bypass** (#1026, closes #1000, #1003) — PRs with `skip-qa`
+  label bypass the QA gate (for docs-only changes and emergency hotfixes).
+- **Orphaned card safety nets** (#1005, closes #957) — cards cleaned up if
+  GitHub issue moves to Done before pipeline completes.
+
+### Changed
+
+- **Process-level FileLock mutex** (#1025, #1028, closes #1015) — `FileLock`
+  acquired at `main()` entry with `timeout=0`; second invocation logs and exits
+  cleanly instead of racing.
+- **Status-blind guards** (#1027, closes #1008, #988, #993, #994, #995, #996, #997) —
+  guards on `_has_downstream_tasks`, `_has_active_pm_consultation`,
+  `_count_active_issue_tasks` now ignore task status when checking existence,
+  preventing race conditions where tasks exist but are in terminal states.
+
+### Fixed
+
+- **Test quality issues** (#1030) — fixes from PR #1028 review addressing test
+  isolation and assertion clarity.
+- **Downstream review roles gated behind QA** (#985, closes #955) — fallback path
+  no longer bypasses QA gate by parenting all review roles to dev card.
+- **Ambiguous 'pass' in approve_signals** (#983, closes #956) — removed ambiguous
+  'pass' substring from approve_signals to prevent false approvals on
+  reviewer/security cards.
+- **Advance hook registration** (#981, closes #962) — advance hook now registered
+  per-profile so planner sessions properly advance the pipeline.
+- **Validator retry deduplication** (#980, closes #961) — dispatcher processes
+  validator retry logic per-issue instead of per-task, eliminating O(N) redundant
+  API calls.
+
+### Tests
+
+- **FileLock mutex tests** (#1028) — comprehensive tests for concurrent dispatcher
+  protection.
+- **Skip-QA bypass tests** (#1026) — tests verifying `skip-qa` label correctly
+  bypasses the QA gate.
+- **Concurrent dispatch tests** (#1029) — stress tests verifying exactly one task
+  produced under concurrent dispatcher invocations.
+
+---
+
+## [1.0.0-beta.30] — 2026-06-26
+
+### ⚠️ Notable behavior change — automatic comment-mirror threading
+
+Daedalus now mirrors every agent comment into a **persistent per-issue thread**
+on each notification target (see Added → Notification threading). This is
+delivered as a new `comment-mirror` event, and **any catch-all
+`cron.notifications` entry** — one with no `events` filter or `events: []` —
+**receives it automatically, with no opt-in.**
+
+If you have existing Slack/Discord targets without an `events` filter, they will
+start receiving threaded comment mirrors after upgrading. On an active board this
+can be a significant increase in message volume. **To exclude it,** list the
+events you *do* want on that entry and leave `comment-mirror` out:
+
+```yaml
+cron:
+  notifications:
+    - platform: "Slack"
+      target: "slack:C0CHANNEL1"
+      events: ["dispatch-summary", "pipeline-failure"]  # no comment-mirror
+```
+
+### Added
+
+- **Notification threading** (#126, closes #121) — every daedalus-managed issue
+  gets one persistent thread per configured `cron.notifications` target. Agent
+  comments on the issue and its linked PR (spec posts, progress, review feedback)
+  are mirrored into that thread as replies; PR-open and merge events post replies
+  too. Threading is **platform-agnostic**: Slack anchors on `thread_ts`, Discord
+  on `message_id`, both captured via `hermes send --json`. No new config keys are
+  required — it works automatically with existing notification targets.
+  - `daedalus_dispatch_state.json` gains a `threads` key per issue:
+    `{\"<issue_number>\": {\"threads\": {\"<target>\": \"<anchor_id>\"},
+    \"thread_events\": {\"<target>\": [\"<event_key>\"]}}}`.
+  - Cross-tick duplicate suppression — the same event is never posted twice to a
+    target.
+  - Self-healing anchor — if a thread's root message is deleted, the next event
+    posts a fresh root and updates the stored anchor.
+  - See [docs/notification-threading.md](docs/notification-threading.md).
+
+### Changed
+
+- **Agent comment header enforcement** (#122, closes #120) — all soul files now
+  route comments through `scripts/agent_comment.py`, which enforces the mandatory
+  `**Agent: <name>**` header as the first line of every comment. Previously souls
+  could omit it; it is now structural. Tooling that parses or filters daedalus
+  comments by author can rely on this header always being present.
+
+### Fixed
+
+PR #244 — implement `provider.has_label()` so tier promotion no longer re-labels and re-comments already-Ready issues on every dispatch tick. `sub_issues_of` regex in `core/providers/base.py` widened to accept the same format variants as `EPIC_REF_RE` (with/without colon, hyphens, `part of epic #N`). 16 regression tests added.
+
+- **Standalone test runner** (#124, closes #123) — internal fix to the standalone
+  `__main__` test runner. No user-facing impact.
+
+### Caveats / follow-ups (from PR #126 review)
+
+- **Silent opt-in** — catch-all notification entries receive `comment-mirror`
+  with no explicit opt-in (documented above). A future opt-out config key is
+  under consideration.
+- **Per-tick API cost** — `_mirror_issue_threads` fetches each open issue's issue
+  and PR comments every tick before dedup. Fine for small boards; may be
+  noticeable on large boards with many open issues.
+- **Root-failure edge** — if the initial root post fails but a later reply
+  succeeds, that reply becomes the thread anchor. Self-heals; rare; not a blocker.
+
+---
+
+## [1.0.0-beta.29] — 2026-06-25
 
 ### Added
 
@@ -228,70 +239,3 @@ All notable changes to Daedalus are documented here. The format loosely follows
   the dispatcher's `issues_map` cache misses an issue number, it now falls back to
   a direct `get_issue()` call with retry on transient failure, instead of failing
   outright.
-
-## [1.0.0-beta.30] — 2026-06-26
-
-### ⚠️ Notable behavior change — automatic comment-mirror threading
-
-Daedalus now mirrors every agent comment into a **persistent per-issue thread**
-on each notification target (see Added → Notification threading). This is
-delivered as a new `comment-mirror` event, and **any catch-all
-`cron.notifications` entry** — one with no `events` filter or `events: []` —
-**receives it automatically, with no opt-in.**
-
-If you have existing Slack/Discord targets without an `events` filter, they will
-start receiving threaded comment mirrors after upgrading. On an active board this
-can be a significant increase in message volume. **To exclude it,** list the
-events you *do* want on that entry and leave `comment-mirror` out:
-
-```yaml
-cron:
-  notifications:
-    - platform: "Slack"
-      target: "slack:C0CHANNEL1"
-      events: ["dispatch-summary", "pipeline-failure"]  # no comment-mirror
-```
-
-### Added
-
-- **Notification threading** (#126, closes #121) — every daedalus-managed issue
-  gets one persistent thread per configured `cron.notifications` target. Agent
-  comments on the issue and its linked PR (spec posts, progress, review feedback)
-  are mirrored into that thread as replies; PR-open and merge events post replies
-  too. Threading is **platform-agnostic**: Slack anchors on `thread_ts`, Discord
-  on `message_id`, both captured via `hermes send --json`. No new config keys are
-  required — it works automatically with existing notification targets.
-  - `daedalus_dispatch_state.json` gains a `threads` key per issue:
-    `{"<issue_number>": {"threads": {"<target>": "<anchor_id>"},
-    "thread_events": {"<target>": ["<event_key>"]}}}`.
-  - Cross-tick duplicate suppression — the same event is never posted twice to a
-    target.
-  - Self-healing anchor — if a thread's root message is deleted, the next event
-    posts a fresh root and updates the stored anchor.
-  - See [docs/notification-threading.md](docs/notification-threading.md).
-
-### Changed
-
-- **Agent comment header enforcement** (#122, closes #120) — all soul files now
-  route comments through `scripts/agent_comment.py`, which enforces the mandatory
-  `**Agent: <name>**` header as the first line of every comment. Previously souls
-  could omit it; it is now structural. Tooling that parses or filters daedalus
-  comments by author can rely on this header always being present.
-
-### Fixed
-
-PR #244 — implement `provider.has_label()` so tier promotion no longer re-labels and re-comments already-Ready issues on every dispatch tick. `sub_issues_of` regex in `core/providers/base.py` widened to accept the same format variants as `EPIC_REF_RE` (with/without colon, hyphens, `part of epic #N`). 16 regression tests added.
-
-- **Standalone test runner** (#124, closes #123) — internal fix to the standalone
-  `__main__` test runner. No user-facing impact.
-
-### Caveats / follow-ups (from PR #126 review)
-
-- **Silent opt-in** — catch-all notification entries receive `comment-mirror`
-  with no explicit opt-in (documented above). A future opt-out config key is
-  under consideration.
-- **Per-tick API cost** — `_mirror_issue_threads` fetches each open issue's issue
-  and PR comments every tick before dedup. Fine for small boards; may be
-  noticeable on large boards with many open issues.
-- **Root-failure edge** — if the initial root post fails but a later reply
-  succeeds, that reply becomes the thread anchor. Self-heals; rare; not a blocker.
