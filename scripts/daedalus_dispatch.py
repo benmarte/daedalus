@@ -3165,6 +3165,51 @@ def _check_completed_planner(
 
 _NOT_SUITABLE_RE = re.compile(r"not\s+suitable(?:\s+for\s+decomposition)?", re.IGNORECASE)
 
+# Pattern for monotonic planner-fallback idempotency keys: planner-fallback-validator-{N}-g{gen}
+_PLANNER_FALLBACK_KEY_RE = re.compile(r"^planner-fallback-validator-(\d+)-g(\d+)$")
+# Terminal statuses that close a generation (task is done/cancelled/archived)
+_PLANNER_FALLBACK_TERMINAL_STATUSES = frozenset({
+    "done", "complete", "completed", "cancelled", "canceled", "archived"
+})
+
+
+def _compute_planner_fallback_idempotency_key(slug: str, issue_number: int) -> str:
+    """Compute a monotonic idempotency key for the planner-fallback validator path.
+
+    Returns ``planner-fallback-validator-{N}-g{gen}`` where ``gen`` is the
+    lowest non-negative integer such that no task with that generation has a
+    terminal status (done/cancelled/archived). This allows a recurring issue
+    to spawn a fresh validator after the previous one closes, while still
+    preventing duplicates within the same generation.
+
+    Legacy static keys (``planner-fallback-validator-{N}`` without a -g{gen}
+    suffix) are ignored so existing production boards can migrate cleanly.
+
+    Epic #1008 (dispatcher race condition fixes).
+    """
+    # Gather all tasks on the board. We need to scan regardless of status
+    # because archived/cancelled tasks still carry their generation number.
+    all_tasks = kanban.list_tasks(slug)
+    # Collect {gen: status} pairs for this issue's planner-fallback keys
+    generations: dict[int, str] = {}
+    prefix = f"planner-fallback-validator-{issue_number}-g"
+    for task in all_tasks:
+        ikey = (task.get("idempotency_key") or "").strip()
+        if not ikey.startswith(prefix):
+            continue
+        m = _PLANNER_FALLBACK_KEY_RE.match(ikey)
+        if not m:
+            continue
+        gen = int(m.group(2))
+        status = (task.get("status") or "").strip().lower()
+        generations[gen] = status
+
+    # Find the lowest generation that is NOT terminal
+    gen = 0
+    while gen in generations and generations[gen] in _PLANNER_FALLBACK_TERMINAL_STATUSES:
+        gen += 1
+    return f"planner-fallback-validator-{issue_number}-g{gen}"
+
 
 def _check_planner_not_suitable(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]], workdir: str,
@@ -3189,9 +3234,11 @@ def _check_planner_not_suitable(
     fallback validator path (defense in depth — the planner soul instructs
     completion, but if the planner blocks instead we still route correctly).
 
-    Idempotency is enforced via the ``planner-fallback-validator-{n}``
-    idempotency key — re-running on the next tick returns the existing task id
-    rather than creating a duplicate.
+    Idempotency is enforced via a monotonic idempotency key
+    ``planner-fallback-validator-{N}-g{gen}`` where ``gen`` increments each time
+    a prior generation closes (done/cancelled/archived). This allows recurring
+    issues to spawn fresh validators without creating duplicates within the
+    same generation (epic #1008).
 
     Returns the issue numbers that were (or would be, in dry_run) routed to
     the validator path.
@@ -3268,7 +3315,7 @@ def _check_planner_not_suitable(
                 processed_ids.add(task_id)
                 continue
 
-            ikey = f"planner-fallback-validator-{n}"
+            ikey = _compute_planner_fallback_idempotency_key(slug, n)
             vid = kanban.create_task(
                 slug, f"#{n} {issue.get('title', '')}",
                 body=_planner_not_suitable_validator_body(

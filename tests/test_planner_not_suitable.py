@@ -167,7 +167,8 @@ def test_creates_validator_task_with_correct_assignee():
 def test_validator_task_idempotency_key_contains_issue_number():
     task = _make_planner_task(42, "NOT SUITABLE FOR DECOMPOSITION: reason")
     _triggered, created = _check(done_tasks=[task], issues_map=_issue_map_entry(42))
-    assert created[0]["idempotency_key"] == "planner-fallback-validator-42"
+    # Monotonic key format: includes -g{gen} suffix (epic #1008)
+    assert created[0]["idempotency_key"] == "planner-fallback-validator-42-g0"
 
 
 def test_validator_task_body_mentions_parent_issue():
@@ -216,7 +217,7 @@ def test_falls_back_to_provider_when_issue_not_in_map():
 
 def test_duplicate_signal_idempotent_only_one_validator_created():
     """Calling the handler twice must not create two validator tasks — the
-    idempotency_key on the created task is the guard."""
+    monotonic idempotency_key on the created task is the guard (epic #1008)."""
     task = _make_planner_task(42, "NOT SUITABLE FOR DECOMPOSITION: reason")
     issues_map = _issue_map_entry(42)
     # First call: creates the task.
@@ -224,7 +225,9 @@ def test_duplicate_signal_idempotent_only_one_validator_created():
     assert len(c1) == 1
     # Second call: include the previously-created task in all_tasks to simulate
     # persistent kanban state. The create side_effect must return the existing id.
-    existing = {"id": "t_prev", "idempotency_key": "planner-fallback-validator-42"}
+    # The key is now monotonic (-g0), so the fake_create_task matches on that key.
+    existing = {"id": "t_prev", "idempotency_key": "planner-fallback-validator-42-g0",
+                "status": "running", "title": "#42", "assignee": "validator-daedalus"}
     _t2, c2 = _check(done_tasks=[task], issues_map=issues_map, all_tasks=[task, existing])
     assert len(c2) == 0, "no duplicate task should be created with same idempotency key"
 
@@ -270,11 +273,12 @@ def test_detects_not_suitable_on_blocked_card():
 
 
 def test_blocked_card_validator_has_correct_idempotency_key():
-    """The validator task created from a blocked card must have the same idempotency key."""
+    """The validator task created from a blocked card must have the monocyclic key."""
     task = _make_planner_task(50, "NOT SUITABLE FOR DECOMPOSITION: already fixed", task_id="t_blocked")
     task["status"] = "blocked"
     _triggered, created = _check(blocked_tasks=[task], issues_map=_issue_map_entry(50))
-    assert created[0]["idempotency_key"] == "planner-fallback-validator-50"
+    # Monotonic key format: includes -g{gen} suffix (epic #1008)
+    assert created[0]["idempotency_key"] == "planner-fallback-validator-50-g0"
 
 
 def test_blocked_and_done_cards_do_not_duplicate_validator():
