@@ -59,6 +59,23 @@ When PR has green CI but no QA pass signal:
 - Log info message and skip merge if it returns `False`
 - Do NOT log as warning (expected state, not an error)
 
+### Decision Flow
+
+```mermaid
+flowchart TD
+    Start([Auto-merge tick]) --> HasSkipQA{PR has\nskip-qa label?}
+    HasSkipQA -->|yes| Merge([MERGE])
+    HasSkipQA -->|no| HasQACard{QA card exists\nfor issue?}
+    HasQACard -->|no| Wait([WAIT\nre-check next tick])
+    HasQACard -->|yes| CheckSummary{latest_summary\ncontains\nqa-passed?}
+    CheckSummary -->|yes| Merge
+    CheckSummary -->|qa-failed / empty / None| Wait
+    CheckSummary -->|DB error| WaitClosed([WAIT fail-closed\nre-check next tick])
+
+    Wait -->|next tick| Start
+    WaitClosed -->|next tick| Start
+```
+
 ## QA Failed Handling
 
 When QA card summary contains `qa-failed`:

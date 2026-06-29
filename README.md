@@ -961,6 +961,16 @@ fire a chat notification. See
 [`design-retry-cap-notification.md`](design-retry-cap-notification.md) for the
 design rationale.
 
+**Validator-blocked notifications.** When a validator blocks with `BLOCKED:`,
+the dispatcher creates a PM consultation task with an incrementing idempotency
+key (`validator-blocked-{n}`, `validator-blocked-{n}-r1`, `validator-blocked-{n}-r2`, …)
+so each block cycle produces a fresh consultation instead of matching the
+already-done first one. A `validator-blocked` notification is fired to
+Slack/Discord on every block (including repeat blocks), ensuring stalled issues
+surface to humans immediately rather than sitting silently on the board. An
+in-flight guard (`_has_active_pm_consultation()`) prevents duplicate
+consultations while one is already active for the same issue.
+
 **Intermediate retry-attempt notifications.** When a validator or PM retry is
 actually about to happen (retry_count < max_retries), the dispatcher first fires
 a distinct `retry-attempt` notification — separate from the cap-exhaustion event —
