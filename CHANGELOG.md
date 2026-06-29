@@ -1,5 +1,7 @@
 ## [bug: 'pass' substring in approve_signals false-triggers APPROVE_ADVANCE on reviewer/security cards](https://github.com/benmarte/daedalus/issues/956) — [PR #983](https://github.com/benmarte/daedalus/pull/983)
 
+## [bug: 'pass' substring in approve_signals false-triggers APPROVE_ADVANCE on reviewer/security cards](https://github.com/benmarte/daedalus/issues/956) — [PR #983](https://github.com/benmarte/daedalus/pull/983)
+
 ## [bug: advance hook does not fire after planner-daedalus session ends, causing 60-minute pipeline stall](https://github.com/benmarte/daedalus/issues/962) — [PR #981](https://github.com/benmarte/daedalus/pull/981)
 
 ## [bug: advance hook does not fire after planner-daedalus session ends, causing 60-minute pipeline stall](https://github.com/benmarte/daedalus/issues/962) — [PR #981](https://github.com/benmarte/daedalus/pull/981)
