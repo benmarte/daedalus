@@ -1,8 +1,6 @@
-# USER_GUIDE_NEW_BEHAVIORS.md
+# User Guide: New Behaviors (Current Release)
 
-> **Note:** Line numbers in this document are approximate and may shift as the codebase evolves. Always search for the function/symbol name if a referenced line number doesn't match.
-
-This document describes new user-facing behaviors introduced in v1.0.0-beta.30. Each section explains **what** changed, **why** it matters, and **how** to use or interact with it.
+> **Note on line-number drift:** Source line numbers cited throughout this document (e.g., “line 126”) are approximate and may drift as the codebase evolves. If a referenced line has shifted, search for the function or symbol name in the source instead.
 
 ---
 
