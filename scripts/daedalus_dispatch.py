@@ -71,7 +71,7 @@ _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-S
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready",
                  "security-escalation", "comment-mirror", "retry-cap-exhausted",
-                 "retry-attempt")
+                 "retry-attempt", "validator-blocked")
 
 # Priority label ordering — P0 dispatched before P1 before P2 before unlabeled.
 _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
@@ -2699,6 +2699,62 @@ def _send_retry_attempt_notification(
             logger.warning("failed to send retry-attempt notification to %s for #%s", target, issue_number)
 
 
+def _notify_validator_blocked(
+    issue_number: int,
+    issue_title: str,
+    blocker_text: str,
+    block_number: int,
+    resolved: Dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Notify human channels that a validator blocked an issue (#994).
+
+    Fires on every validator block — including repeat blocks after a PM
+    resolution — so a stalled issue surfaces on Slack/Discord instead of
+    sitting silently on the kanban board. Routes through ``hermes send`` to
+    every ``validator-blocked`` subscriber (mirrors ``_notify_retry_cap_exhausted``).
+    When no targets are configured, returns silently. Failures are logged,
+    never raised.
+    """
+    targets = _notify_targets(resolved, "validator-blocked")
+    if not targets:
+        return
+
+    ordinal = (
+        "first" if block_number == 1
+        else "second" if block_number == 2
+        else f"#{block_number}"
+    )
+    body = (
+        f"🚧 **Validator Blocked: #{issue_number}**\n\n"
+        f"Issue #{issue_number} ({issue_title}) was blocked by the validator "
+        f"for the {ordinal} time.\n\n"
+        f"**Blocker**: {blocker_text}\n\n"
+        f"A PM consultation has been created to unblock it. If this keeps "
+        f"recurring, the issue likely needs human intervention."
+    )
+
+    for target in targets:
+        if dry_run:
+            logger.info(
+                "[dry-run] would send validator-blocked notification to %s for #%s",
+                target, issue_number,
+            )
+            continue
+        ok, _anchor = _hermes_send(target, body)
+        if ok:
+            logger.info(
+                "sent validator-blocked notification to %s for #%s (block #%s)",
+                target, issue_number, block_number,
+            )
+        else:
+            logger.warning(
+                "failed to send validator-blocked notification to %s for #%s",
+                target, issue_number,
+            )
+
+
 def _check_confirmed_validators(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -2773,11 +2829,31 @@ def _check_confirmed_validators(
                             "fetched directly from provider", n_nr,
                         )
                 if issue_nt:
+                    # An in-flight consultation already covers this block — don't
+                    # spawn a duplicate while the PM is still working it. Without
+                    # this guard the incrementing key below would mint a fresh
+                    # -rN consultation on every tick until the PM finishes (#994).
+                    if _has_active_pm_consultation(slug, n_nr, p["pm"]):
+                        continue
                     if dry_run:
                         logger.info("[dry-run] validator BLOCKED #%s — would create PM consultation", n_nr)
                         triggered.append(n_nr)
                         continue
                     blocker_text = summary_raw
+                    # Incrementing idempotency key per block cycle (#994). A static
+                    # key silenced repeat blocks: once the first consultation was
+                    # done, create_task matched it and returned None, so a second
+                    # validator block created no consultation and the issue stalled
+                    # with no human notification. Count prior consultations for this
+                    # issue (done or in any state) and suffix -rN so each block cycle
+                    # gets a distinct key: validator-blocked-42, validator-blocked-42-r1, …
+                    base_key = f"validator-blocked-{n_nr}"
+                    block_count = sum(
+                        1 for t in kanban.list_tasks(slug)
+                        if (t.get("idempotency_key") or "") == base_key
+                        or (t.get("idempotency_key") or "").startswith(f"{base_key}-r")
+                    )
+                    ikey = base_key if block_count == 0 else f"{base_key}-r{block_count}"
                     cid = kanban.create_task(
                         slug, f"consult: #{n_nr} {issue_nt.get('title', '')}",
                         body=_pm_consultation_body(
@@ -2786,13 +2862,21 @@ def _check_confirmed_validators(
                             workdir, provider_name,
                         ),
                         assignee=p["pm"],
-                        idempotency_key=f"validator-blocked-{n_nr}",
+                        idempotency_key=ikey,
                         workspace=f"dir:{workdir}" if workdir else "",
                         skills=rs.get("pm") or None,
                     )
                     if cid:
-                        logger.info("dispatch: validator BLOCKED #%s — PM consultation %s", n_nr, cid)
+                        logger.info(
+                            "dispatch: validator BLOCKED #%s — PM consultation %s (key=%s)",
+                            n_nr, cid, ikey,
+                        )
                         triggered.append(n_nr)
+                        _notify_validator_blocked(
+                            n_nr, issue_nt.get("title", ""), blocker_text,
+                            block_count + 1, resolved or {},
+                            dry_run=dry_run,
+                        )
                 continue
             if summary.startswith("stop:"):
                 # Validator marked duplicate/already-fixed/cannot-reproduce.
