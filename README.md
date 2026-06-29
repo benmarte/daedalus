@@ -38,11 +38,15 @@ flowchart TD
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
     Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
-    QA --> CI{CI}
-    CI -->|green & qa-passed| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
-    CI -->|green & qa-passed| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
-    CI -->|green & qa-passed| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
-    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
+    Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
+    
+    QA --> QAGate{{"🚦 QA Gate\nqa-passed?"}}
+    QAGate -->|yes| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    QAGate -->|yes| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
+    QAGate -->|yes| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
+    QAGate -->|no| Fix["🔧 Fix card created\nidempotent · capped at 3"]
+    
+    CI -->|red| Fix
     Fix --> Dev
     Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
     Sec -->|cleared| Doc
