@@ -1,3 +1,5 @@
+## [`FileLock` acquired at `main()` entry with `timeout=0`; second invocation logs and exits cleanly](https://github.com/benmarte/daedalus/issues/1015) — [PR #1028](https://github.com/benmarte/daedalus/pull/1028)
+
 ## [fix: add process-level mutex + universal status-blind guard to eliminate all dispatcher race conditions (closes #988, #993, #994, #995, #996, #997)](https://github.com/benmarte/daedalus/issues/1008) — [PR #1027](https://github.com/benmarte/daedalus/pull/1027)
 
 ## [feat: gate auto-merge monitor on qa-passed signal to prevent pre-QA merges](https://github.com/benmarte/daedalus/issues/998) — [PR #1006](https://github.com/benmarte/daedalus/pull/1006)
