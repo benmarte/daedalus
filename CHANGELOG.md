@@ -1,5 +1,7 @@
 ## [bug: kanban pipeline cards orphaned when issue reaches Done on board before pipeline completes](https://github.com/benmarte/daedalus/issues/957) — [PR #984](https://github.com/benmarte/daedalus/pull/984)
 
+## [bug: kanban pipeline cards orphaned when issue reaches Done on board before pipeline completes](https://github.com/benmarte/daedalus/issues/957) — [PR #984](https://github.com/benmarte/daedalus/pull/984)
+
 ## [bug: 'pass' substring in approve_signals false-triggers APPROVE_ADVANCE on reviewer/security cards](https://github.com/benmarte/daedalus/issues/956) — [PR #983](https://github.com/benmarte/daedalus/pull/983)
 
 ## [bug: 'pass' substring in approve_signals false-triggers APPROVE_ADVANCE on reviewer/security cards](https://github.com/benmarte/daedalus/issues/956) — [PR #983](https://github.com/benmarte/daedalus/pull/983)
