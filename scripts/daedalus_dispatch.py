@@ -498,6 +498,41 @@ def _apply_coding_agent_max_turns(agent: str, cmd: str, execution: Dict[str, Any
     return f"{base} --max-turns {_resolve_coding_agent_max_turns(execution)}"
 
 
+def _resolve_coding_agent_model(execution: Dict[str, Any]) -> str:
+    """Return the configured model for the coding agent (``execution.coding_agent_model``).
+
+    Empty string when unset, non-string, or blank — callers treat '' as "no override".
+    """
+    val = (execution or {}).get("coding_agent_model")
+    if not val or not isinstance(val, str):
+        return ""
+    return val.strip()
+
+
+def _apply_coding_agent_model(agent: str, cmd: str, execution: Dict[str, Any]) -> str:
+    """Append ``--model <resolved-model>`` to the coding agent CLI command when missing.
+
+    Applies to external CLI agents (claude-code, codex, opencode) that accept
+    ``--model``. Skips local agents (``hermes`` / ``none``), skips when the
+    command already contains a ``--model`` flag (explicit user override wins),
+    and skips when ``coding_agent_model`` is not configured (the agent falls
+    back to its own default).
+
+    The effective command for ``cmd == ""`` is read fresh each call so concurrent
+    tests cannot mutate the module-level defaults dict in another thread. The
+    defaults dict is never written to.
+    """
+    if agent not in ("claude-code", "codex", "opencode"):
+        return cmd
+    model = _resolve_coding_agent_model(execution)
+    if not model:
+        return cmd
+    base = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
+    if not base or "--model" in base:
+        return base
+    return f"{base} --model {model}"
+
+
 def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
     """Return the configured coding agent from execution.coding_agent.
 
