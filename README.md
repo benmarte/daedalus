@@ -41,12 +41,13 @@ flowchart TD
     Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
     QA --> QAGate{{"🧪 QA GATE\nqa-passed? or skip-qa label?"}}
     QAGate -->|"qa-passed"| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    QAGate -->|"qa-passed"| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
     QAGate -->|"qa-passed"| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
     QAGate -->|"qa-failed"| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
     Fix --> Dev
     CI -->|red| Fix
-    Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
-    Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Sec -->|cleared| Doc
     A11y -->|cleared| Doc
     Doc --> AutoMerge{{"🚦 QA auto-merge gate\nqa-passed signal present\nOR skip-qa label?\nAND CI green?"}}
     AutoMerge -->|"yes"| Merge(["🔀 Auto-merge fires\nPR merged automatically"])
