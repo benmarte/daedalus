@@ -218,11 +218,16 @@ def _install_advance_hook() -> tuple[bool, str]:
 
     Copies BOTH scripts/daedalus-advance.sh and scripts/daedalus_resolve_project.py
     from the repo to the user's agent-hooks dir; the shell script is made
-    executable. Hermes runs scripts in ~/.hermes/agent-hooks/ on session end, so
-    copying daedalus-advance.sh there is all the registration it needs — when a
-    daedalus pipeline worker finishes, the hook resolves the worker's project via
-    daedalus_resolve_project.py and fires the dispatcher scoped to that project so
-    the pipeline advances immediately instead of waiting for the next cron tick.
+    executable. When a daedalus pipeline worker finishes, the hook resolves the
+    worker's project via daedalus_resolve_project.py and fires the dispatcher scoped
+    to that project so the pipeline advances immediately instead of waiting for the
+    next cron tick.
+
+    NOTE: copying the script here is necessary but NOT sufficient. Hermes only runs
+    a profile-agent's session-end hooks when they are registered in that profile's
+    config.yaml under hooks.on_session_end. That per-profile registration is owned by
+    scripts/provision_roster.sh (via register_advance_hook.py) — a profile missing
+    the block stalls the pipeline for up to 60 minutes (issue #962).
     """
     real_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
     hooks_dir = real_home / ".hermes" / "agent-hooks"
