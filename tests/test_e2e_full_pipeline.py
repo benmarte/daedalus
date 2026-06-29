@@ -159,4 +159,44 @@ def test_full_seven_stage_pipeline(pipeline, fake_issue, fake_provider):
     for tid in terminal_tids:
         assert kanban.tasks[tid]["status"] == "done", tid
     # The PM and validator cards are terminal too (completed in stages 1–2).
+    # The PM and validator cards are terminal too (completed in stages 1–2).
     assert kanban.tasks[pm_card["id"]]["status"] == "done"
+
+
+def test_post_developer_dedup_with_preexisting_tasks(pipeline):
+    """#936 Integration: when downstream review tasks already exist on the board
+    (in various statuses), `_create_downstream_review_tasks` must deduplicate
+    and NOT create new ones. Only missing roles get created.
+
+    This exercises the full post-developer hook end-to-end with FakeKanban,
+    verifying the idempotency guard works across mixed statuses.
+    """
+    iterate = pipeline.iterate
+    kanban = pipeline.kanban
+    slug = "proj"
+    issue_number = 936
+    pr_number = 1234
+    card = {"id": "t_dev", "body": f"benmarte/daedalus#{issue_number}", "workspace": "dir:/w"}
+
+    # Pre-seed downstream tasks in different statuses using kanban.seed()
+    # which directly inserts onto the board.
+    kanban.seed(assignee="qa-daedalus", title=f"#{issue_number} QA review", status="running", idempotency_key="qa-936")
+    kanban.seed(assignee="reviewer-daedalus", title=f"#{issue_number} Reviewer review", status="done", idempotency_key="reviewer-936")
+    kanban.seed(assignee="security-analyst-daedalus", title=f"#{issue_number} Security audit", status="blocked", idempotency_key="security-936")
+
+    # Call the downstream creation function — should skip qa/reviewer/security
+    # and only create accessibility and docs
+    created = iterate._create_downstream_review_tasks(
+        slug, issue_number, card, pr_number=pr_number,
+    )
+
+    # Verify only 2 new tasks were created (accessibility + docs)
+    assert len(created) == 2, f"expected 2 created, got {len(created)}: {created}"
+
+    # Verify no duplicates for any key across the whole board
+    all_tasks = list(kanban.tasks.values())
+    for key in ["qa-936", "reviewer-936", "security-936", "accessibility-936", "docs-936"]:
+        count = sum(1 for t in all_tasks if t.get("idempotency_key") == key)
+        assert count == 1, f"{key} should have exactly 1 task, got {count}"
+
+

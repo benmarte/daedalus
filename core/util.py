@@ -13,7 +13,7 @@ from typing import Dict, Optional
 def extract_issue_number(text: str, *, prefer_qualified: bool = False) -> Optional[int]:
     """Parse an issue number from free text.
 
-    Default mode mirrors the bare ``re.search(r"#(\\d+)", text)`` used throughout
+    Default mode mirrors the bare ``re.search(r"#(\d+)", text)`` used throughout
     the dispatcher: the first ``#<n>`` anywhere in the string.
 
     With ``prefer_qualified=True`` (used by ``core.iterate`` for card bodies), a
@@ -29,6 +29,17 @@ def extract_issue_number(text: str, *, prefer_qualified: bool = False) -> Option
             return int(m.group(1))
         return None
     m = re.search(r"#(\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def extract_pr_number_from_summary(text: str) -> Optional[int]:
+    """Parse a PR number from text, looking for ``PR #<n>`` patterns.
+
+    Used by the dispatcher to extract PR numbers from card bodies and summaries.
+    Returns ``None`` if no PR reference is found.
+    """
+    text = text or ""
+    m = re.search(r"PR #(\d+)", text)
     return int(m.group(1)) if m else None
 
 
