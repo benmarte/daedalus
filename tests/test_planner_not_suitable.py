@@ -63,12 +63,21 @@ def _check(slug="slug", *, repo="o/r", issues_map=None, workdir="/tmp/work",
            base_branch="dev", provider_name="github", profiles=None,
            role_skills=None, coding_agent="none", coding_agent_cmd="",
            notify_targets=None, dry_run=False, provider=None,
-           done_tasks=(), all_tasks=()):
+           done_tasks=(), blocked_tasks=(), all_tasks=()):
     """Call the handler with sensible defaults and in-memory kanban doubles."""
     profiles = profiles or disp._DEFAULT_PROFILES
     issues_map = issues_map if issues_map is not None else {}
-    show_map = {t["id"]: {**t, "latest_summary": t.get("summary", "")} for t in done_tasks}
-    list_map = {None: list(all_tasks), "done": list(done_tasks)}
+    # Build show_map over both done and blocked tasks so summary lookup works
+    # for blocked cards too (the fix extends the handler to scan blocked).
+    show_map = {
+        t["id"]: {**t, "latest_summary": t.get("summary", "")}
+        for t in tuple(done_tasks) + tuple(blocked_tasks)
+    }
+    list_map = {
+        None: list(all_tasks),
+        "done": list(done_tasks),
+        "blocked": list(blocked_tasks),
+    }
     created = []
 
     def _fake_create_task(slug_, title, *, body="", assignee="", idempotency_key="",
@@ -247,3 +256,71 @@ def test_custom_validator_profile_from_config():
     )
     assert triggered == [42]
     assert created[0]["assignee"] == "custom-validator"
+
+
+# ── AC-3: Blocked cards ─────────────────────────────────────────────────────
+
+def test_detects_not_suitable_on_blocked_card():
+    """A blocked planner card with NOT SUITABLE summary triggers validator creation."""
+    task = _make_planner_task(42, "NOT SUITABLE FOR DECOMPOSITION: too small")
+    task["status"] = "blocked"
+    triggered, created = _check(blocked_tasks=[task], issues_map=_issue_map_entry(42))
+    assert triggered == [42]
+    assert created, "a validator task must be created for blocked cards too"
+
+
+def test_blocked_card_validator_has_correct_idempotency_key():
+    """The validator task created from a blocked card must have the same idempotency key."""
+    task = _make_planner_task(50, "NOT SUITABLE FOR DECOMPOSITION: already fixed", task_id="t_blocked")
+    task["status"] = "blocked"
+    _triggered, created = _check(blocked_tasks=[task], issues_map=_issue_map_entry(50))
+    assert created[0]["idempotency_key"] == "planner-fallback-validator-50"
+
+
+def test_blocked_and_done_cards_do_not_duplicate_validator():
+    """If the same NOT SUITABLE signal appears in both done and blocked cards,
+    only one validator is created (idempotency key prevents duplication)."""
+    done_task = _make_planner_task(42, "NOT SUITABLE FOR DECOMPOSITION: reason", task_id="t_done")
+    blocked_task = _make_planner_task(42, "NOT SUITABLE FOR DECOMPOSITION: reason", task_id="t_blocked")
+    blocked_task["status"] = "blocked"
+    triggered, created = _check(
+        done_tasks=[done_task],
+        blocked_tasks=[blocked_task],
+        issues_map=_issue_map_entry(42),
+    )
+    # The done card should be processed first, creating the validator
+    assert 42 in triggered
+    assert len(created) == 1, "only one validator should be created despite both done and blocked cards"
+
+
+# ── AC-4: Diagnostic logging ────────────────────────────────────────────────
+
+import logging
+
+
+def test_handler_logs_skip_reason_on_empty_summary(caplog):
+    """When the summary is empty, the handler must log a skip reason."""
+    task = _make_planner_task(42, "")
+    with caplog.at_level(logging.INFO):
+        triggered, created = _check(done_tasks=[task], issues_map=_issue_map_entry(42))
+    assert triggered == []
+    assert any("empty summary" in record.message.lower() for record in caplog.records)
+
+
+def test_handler_logs_skip_reason_on_non_matching_summary(caplog):
+    """When the summary doesn't match NOT SUITABLE, the handler must log a skip reason."""
+    task = _make_planner_task(42, "just rambling")
+    with caplog.at_level(logging.DEBUG):
+        triggered, created = _check(done_tasks=[task], issues_map=_issue_map_entry(42))
+    assert triggered == []
+    assert any("does not match" in record.message.lower() for record in caplog.records)
+
+
+# ── AC-1: Soul documentation ────────────────────────────────────────────────
+
+def test_soul_mentions_not_suitable_signal():
+    """The planner soul must document the NOT SUITABLE FOR DECOMPOSITION signal."""
+    soul_path = Path(__file__).resolve().parent.parent / "config" / "souls" / "planner-daedalus.md"
+    soul_text = soul_path.read_text()
+    assert "NOT SUITABLE FOR DECOMPOSITION" in soul_text, \
+        "Planner soul must document the NOT SUITABLE signal"

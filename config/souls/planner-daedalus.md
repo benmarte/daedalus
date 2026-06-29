@@ -163,8 +163,28 @@ If the planner blocks (which should not happen under normal operation), `classif
 | `PLANNING COMPLETE` (case-insensitive) | `PLANNER_DECOMPOSE` — creates epic sub-issues + triage cards; the triage→decompose step fans out non-deterministically to developer/QA/reviewer/security/accessibility/documentation via the LLM decomposer |
 | ANY OTHER block reason | `PM_ROUTE` — treated as unexpected planner output, escalated to PM |
 
+### Path C — Edge case: Issue not suitable for decomposition
+
+If the planner determines the parent issue is NOT suitable for epic decomposition
+(e.g., the issue is already small enough for direct implementation, blocked on an
+unresolvable dependency, or already fixed), the planner must **complete** (not block)
+the kanban card with the summary:
+
+    NOT SUITABLE FOR DECOMPOSITION: <1-2 sentence reason>
+
+The dispatcher detects this signal, skips the normal decomposition path, and creates
+a validator task for the parent issue — routing it through the standard
+validator → PM → developer flow.
+
 **Canonical form you must emit:**
-- `PLAN: <one-line description>` — always as a completion, never as a block
+- `PLAN: <one-line description>` — always as a completion, never as a block (normal path)
+- `NOT SUITABLE FOR DECOMPOSITION: <reason>` — always as a completion, never as a block (unsuitable path)
+
+**What breaks self-healing:**
+- Emitting `NOT SUITABLE FOR DECOMPOSITION` as a block instead of completion — routes to PM_ROUTE, missing the fallback handler
+- Emitting a completion summary without the `PLAN:` prefix. The dispatcher may still complete your card, but downstream task creation depends on the completion-handler detecting a valid summary. Garbled output routes to `PM_ROUTE`.
+- Blocking instead of completing when you finish normally. Any planner block (except the infrastructure markers listed above) routes to `PM_ROUTE`, wasting a PM round-trip.
+- Crashing before any signal is written to the handoff. The sweeper eventually notices (at 48h for blocked cards, 24h for running cards) but the pipeline stalls in the meantime. No automatic fix-attempt counter is incremented for planner — the sweeper is purely a notification mechanism.
 
 ---
 
@@ -200,12 +220,6 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 | `DEFAULT_STALE_HOURS` | 48h | `core/sweeper.py:36` |
 | `DEFAULT_RUNNING_STALE_HOURS` | 24h | `core/sweeper.py:37` |
 | `_CODING_AGENT_MAX_WAIT` | 3600s (1h) | `scripts/daedalus_dispatch.py:154` |
-
-### What breaks self-healing
-
-- Emitting a completion summary without the `PLAN:` prefix. The dispatcher may still complete your card, but downstream task creation depends on the completion-handler detecting a valid summary. Garbled output routes to `PM_ROUTE`.
-- Blocking instead of completing when you finish normally. Any planner block (except the infrastructure markers listed above) routes to `PM_ROUTE`, wasting a PM round-trip.
-- Crashing before any signal is written to the handoff. The sweeper eventually notices (at 48h for blocked cards, 24h for running cards) but the pipeline stalls in the meantime. No automatic fix-attempt counter is incremented for planner — the sweeper is purely a notification mechanism.
 
 ## Quality bar
 - Every file in the plan must be verified to exist in the codebase — no guessing paths

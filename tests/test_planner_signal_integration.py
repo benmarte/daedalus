@@ -336,6 +336,46 @@ class TestPlannerSignalCoexistence:
         validator_tasks = [c for c in fake_kb.created if "validator" in c.get("assignee", "")]
         assert len(validator_tasks) == 1, "One validator task must be created"
 
+    def test_blocked_planner_with_not_suitable_triggers_handler(self):
+        """A blocked (not done) planner card with NOT SUITABLE signal must still trigger validation.
+        
+        The soul instructs the planner to complete (not block), but if the planner blocks anyway,
+        the handler must detect the signal and route to validator. This is defense in depth.
+        """
+        fake_kb, fake_provider, patches = _setup_fake_board()
+        
+        # Seed a blocked planner card with NOT SUITABLE signal
+        _make_planner_card(
+            fake_kb,
+            50,
+            "NOT SUITABLE FOR DECOMPOSITION: already small",
+            status="blocked",
+            tid="t_blocked_planner",
+        )
+        
+        issues_map = {50: {"number": 50, "title": "Small fix", "body": "...", "labels": []}}
+        
+        with patches[0], patches[1], patches[2]:
+            # Call NOT SUITABLE handler (should detect blocked card)
+            triggered_not_suitable = disp._check_planner_not_suitable(
+                "test-slug",
+                repo="test/repo",
+                issues_map=issues_map,
+                workdir="/tmp/test",
+                base_branch="dev",
+                provider_name="github",
+                dry_run=False,
+                provider=fake_provider,
+            )
+        
+        # Handler should have triggered for the blocked card
+        assert triggered_not_suitable == [50], f"Expected [50], got {triggered_not_suitable}"
+        
+        # Verify a validator task was created
+        validator_tasks = [c for c in fake_kb.created if "validator" in c.get("assignee", "")]
+        assert len(validator_tasks) == 1, f"Expected 1 validator task for blocked card, got {len(validator_tasks)}"
+        assert "#50" in validator_tasks[0].get("title", ""), "Validator task should reference issue 50"
+
 
 if __name__ == "__main__":
     import pytest

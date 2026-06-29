@@ -3103,6 +3103,11 @@ def _check_planner_not_suitable(
     creates a validator task for the parent issue so the pipeline keeps moving
     (refs issue #931 / epic #918).
 
+    The handler scans both ``done`` and ``blocked`` planner cards. A blocked
+    card with the NOT SUITABLE signal is treated as a valid route to the
+    fallback validator path (defense in depth — the planner soul instructs
+    completion, but if the planner blocks instead we still route correctly).
+
     Idempotency is enforced via the ``planner-fallback-validator-{n}``
     idempotency key — re-running on the next tick returns the existing task id
     rather than creating a duplicate.
@@ -3113,71 +3118,97 @@ def _check_planner_not_suitable(
     p = profiles or _DEFAULT_PROFILES
     rs = role_skills or {}
     triggered: List[int] = []
+    processed_ids: set = set()
 
-    for task in kanban.list_tasks(slug, status="done"):
-        if (task.get("assignee") or "").strip() != p["planner"]:
-            continue
-        summary_raw = _get_task_summary(task, slug)
-        summary_upper = summary_raw.upper()
-        # Happy path is handled by _check_completed_planner — skip to avoid overlap.
-        if "PLANNING COMPLETE" in summary_upper:
-            continue
-        if not _NOT_SUITABLE_RE.search(summary_raw or ""):
-            continue
-
-        n = extract_issue_number(task.get("title") or "")
-        if n is None:
-            logger.debug(
-                "dispatch: planner NOT SUITABLE #%s — no issue number in title, skipping",
-                task.get("title", "<untitled>"),
-            )
-            continue
-
-        logger.info(
-            "dispatch: planner NOT SUITABLE #%s — routing to validator (fallback)",
-            n,
-        )
-
-        issue = issues_map.get(n)
-        if not issue and provider is not None:
-            fetched = _fetch_issue_with_retry(provider, n)
-            if fetched:
-                issue = fetched.as_dict()
-                logger.info(
-                    "dispatch: planner-fallback #%s not in issues_map window, "
-                    "fetched directly from provider", n,
+    # Scan both done and blocked cards. The done cards are the normal path;
+    # blocked cards are defense in depth (soul says "always complete", but the
+    # planner may block instead — handler must still route correctly).
+    for status in ("done", "blocked"):
+        for task in kanban.list_tasks(slug, status=status):
+            task_id = task.get("id")
+            if task_id in processed_ids:
+                continue
+            if (task.get("assignee") or "").strip() != p["planner"]:
+                continue
+            summary_raw = _get_task_summary(task, slug)
+            summary_upper = summary_raw.upper()
+            # Happy path is handled by _check_completed_planner — skip to avoid overlap.
+            if "PLANNING COMPLETE" in summary_upper:
+                logger.debug(
+                    "dispatch: planner #%s has PLANNING COMPLETE signal — skipping not_suitable handler",
+                    task_id,
                 )
-        if not issue:
-            logger.warning(
-                "dispatch: planner NOT SUITABLE #%s but issue not in current scope — skipping",
+                continue
+            if not _NOT_SUITABLE_RE.search(summary_raw or ""):
+                if summary_raw:
+                    logger.debug(
+                        "dispatch: planner #%s summary does not match NOT SUITABLE pattern — skipping",
+                        task_id,
+                    )
+                else:
+                    logger.info(
+                        "dispatch: planner #%s has empty summary — skipping",
+                        task_id,
+                    )
+                continue
+
+            n = extract_issue_number(task.get("title") or "")
+            if n is None:
+                logger.debug(
+                    "dispatch: planner NOT SUITABLE #%s — no issue number in title, skipping",
+                    task.get("title", "<untitled>"),
+                )
+                continue
+
+            logger.info(
+                "dispatch: planner NOT SUITABLE #%s — routing to validator (fallback)",
                 n,
             )
-            continue
 
-        if dry_run:
-            logger.info("[dry-run] planner NOT SUITABLE #%s — would create validator task", n)
-            triggered.append(n)
-            continue
+            issue = issues_map.get(n)
+            if not issue and provider is not None:
+                fetched = _fetch_issue_with_retry(provider, n)
+                if fetched:
+                    issue = fetched.as_dict()
+                    logger.info(
+                        "dispatch: planner-fallback #%s not in issues_map window, "
+                        "fetched directly from provider", n,
+                    )
+            if not issue:
+                logger.warning(
+                    "dispatch: planner NOT SUITABLE #%s but issue not in current scope — skipping",
+                    n,
+                )
+                continue
 
-        ikey = f"planner-fallback-validator-{n}"
-        vid = kanban.create_task(
-            slug, f"#{n} {issue.get('title', '')}",
-            body=_planner_not_suitable_validator_body(
-                repo, issue, summary_raw, workdir, base_branch, provider_name,
-                coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd,
-                security_targets=notify_targets,
-            ),
-            assignee=p["validator"],
-            idempotency_key=ikey,
-            workspace=f"dir:{workdir}" if workdir else "",
-            skills=rs.get("validator") or None,
-        )
-        if vid:
-            logger.info(
-                "dispatch: planner NOT SUITABLE #%s — validator task %s created",
-                n, vid,
+            if dry_run:
+                logger.info("[dry-run] planner NOT SUITABLE #%s — would create validator task", n)
+                triggered.append(n)
+                processed_ids.add(task_id)
+                continue
+
+            ikey = f"planner-fallback-validator-{n}"
+            vid = kanban.create_task(
+                slug, f"#{n} {issue.get('title', '')}",
+                body=_planner_not_suitable_validator_body(
+                    repo, issue, summary_raw, workdir, base_branch, provider_name,
+                    coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd,
+                    security_targets=notify_targets,
+                ),
+                assignee=p["validator"],
+                idempotency_key=ikey,
+                workspace=f"dir:{workdir}" if workdir else "",
+                skills=rs.get("validator") or None,
             )
-            triggered.append(n)
+            if vid:
+                logger.info(
+                    "dispatch: planner NOT SUITABLE #%s — validator task %s created",
+                    n, vid,
+                )
+                triggered.append(n)
+            # Mark this issue as processed so we don't create duplicate validators
+            # if the same issue appears in both done and blocked states.
+            processed_ids.add(task_id)
     return triggered
 
 
