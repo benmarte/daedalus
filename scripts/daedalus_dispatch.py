@@ -526,7 +526,9 @@ def _resolve_coding_agent_cmd(execution: Dict[str, Any]) -> str:
     """
     raw_cmd = (execution or {}).get("coding_agent_cmd")
     agent = _resolve_coding_agent(execution)
-    cmd = (raw_cmd or "").strip() or _CODING_AGENT_DEFAULTS.get(agent, "")
+    if raw_cmd is not None and not isinstance(raw_cmd, str):
+        return ""
+    cmd = (raw_cmd.strip() if isinstance(raw_cmd, str) else "") or _CODING_AGENT_DEFAULTS.get(agent, "")
     if not cmd:
         return ""
     if agent in ("hermes", "none"):
