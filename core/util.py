@@ -66,6 +66,35 @@ def schedule_to_crontab(schedule: str) -> str:
     return schedule.strip()
 
 
+def extract_pr_number_from_summary(text: Optional[str]) -> Optional[int]:
+    """Parse a PR number from a developer card's ``latest_summary`` field.
+
+    The canonical format developers produce is::
+
+        review-required: PR #N — <branch>
+
+    but the parser is tolerant of variations:
+
+    * The ``review-required:`` prefix is optional — any string containing
+      ``PR #<digits>`` is parsed.
+    * Extra whitespace (leading / trailing / around ``#``) is stripped.
+    * When multiple ``PR #N`` references exist, the first match wins.
+
+    Returns ``None`` — never raises — for missing numbers, malformed input,
+    or ``None`` / empty strings.
+    """
+    if not text:
+        return None
+    text = str(text).strip()
+    if not text:
+        return None
+    # Match ``PR`` (case-insensitive), at least one whitespace, ``#``, optional
+    # whitespace, then digits.  This catches ``PR #42``, ``PR  #  42``,
+    # ``pr #42`` but NOT ``PR#42`` (no space after PR).
+    m = re.search(r"PR\s+#\s*(\d+)", text, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
 def parse_env_file(path: Path) -> Dict[str, str]:
     """Parse a ``.env`` file into ``{key: value}``. Returns ``{}`` on any error.
 

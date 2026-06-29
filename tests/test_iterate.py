@@ -1218,6 +1218,94 @@ def test_downstream_task_body_references_pr():
     check("body references developer card", "t_dev" in body)
 
 
+def test_create_downstream_idempotency_open_status():
+    """Dedup works when task exists in open (todo/ready) status, not just done."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # All 5 downstream task keys exist, each in a different non-terminal status.
+    # dedup must skip creation regardless of status.
+    existing = [
+        {"idempotency_key": "qa-19", "status": "todo"},
+        {"idempotency_key": "reviewer-19", "status": "ready"},
+        {"idempotency_key": "security-19", "status": "running"},
+        {"idempotency_key": "accessibility-19", "status": "blocked"},
+        {"idempotency_key": "docs-19", "status": "todo"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", return_value="t_unexpected") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("open/ready/running/blocked tasks → all skipped", created == [])
+    mk_create.assert_not_called()
+
+
+def test_create_downstream_idempotency_in_progress_status():
+    """Dedup works when task exists in in-progress (running) status."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # Task exists with idempotency key and is actively running
+    existing = [
+        {"idempotency_key": "docs-19", "status": "running", "id": "t_doc"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", return_value="t_other") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("running task → docs key skipped", len(created) == 4)
+    check("4 tasks created (qa, reviewer, security, accessibility)", mk_create.call_count == 4)
+    # Verify docs was NOT in the created keys
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("docs key not created", "docs-19" not in created_keys)
+    check("qa key created", "qa-19" in created_keys)
+
+
+def test_create_downstream_idempotency_mixed_statuses():
+    """Dedup works across all statuses: todo, ready, running, blocked, done."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # Each existing task has a different status
+    existing = [
+        {"idempotency_key": "qa-19", "status": "done", "id": "t_qa"},
+        {"idempotency_key": "reviewer-19", "status": "todo", "id": "t_rev"},
+        {"idempotency_key": "security-19", "status": "running", "id": "t_sec"},
+        {"idempotency_key": "accessibility-19", "status": "blocked", "id": "t_acc"},
+        # docs has no matching key, so it should be created
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", return_value="t_doc") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("only docs created (4 others exist across all statuses)", len(created) == 1)
+    check("docs key created", mk_create.call_args[1]["idempotency_key"] == "docs-19")
+
+
+def test_create_downstream_independent_task_types():
+    """Each task type is checked independently — existence of one doesn't affect others."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # Only reviewer-19 exists; qa, security, accessibility, docs should be created
+    existing = [{"idempotency_key": "reviewer-19", "status": "done", "id": "t_rev"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("4 tasks created (reviewer skipped)", len(created) == 4)
+    check("reviewer key not in created keys",
+          all(call.kwargs["idempotency_key"] != "reviewer-19" for call in mk_create.call_args_list))
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("qa key created", "qa-19" in created_keys)
+    check("security key created", "security-19" in created_keys)
+    check("accessibility key created", "accessibility-19" in created_keys)
+    check("docs key created", "docs-19" in created_keys)
+
+
+def test_create_downstream_no_preexisting_creates_all():
+    """When no tasks exist, all 5 downstream tasks are created."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#21", "workspace": "dir:/w"}
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 21, card, pr_number=25)
+    check("no preexisting → all 5 created", len(created) == 5)
+    check("create_task called 5 times", mk_create.call_count == 5)
+
+
 # ── Issue #24: robust CI polling ──────────────────────────────────────────────
 
 
