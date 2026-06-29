@@ -242,3 +242,63 @@ def get_config_fingerprint(workdir: str) -> Optional[str]:
     state = _load(workdir)
     fp = state.get("config_fingerprint")
     return str(fp) if fp else None
+
+
+# ── Resync fingerprint (profile-sync tracking) ────────────────────────────────
+#
+# The config fingerprint captures coding_agent + model.default. The *resync*
+# fingerprint captures the same tuple but is used specifically for detecting
+# when to re-sync global model config into *-daedalus profile config files.
+# Keeping these separate allows the config fingerprint to be used for other
+# fingerprint-based logic (e.g. caching) without triggering profile resyncs.
+
+def set_resync_fingerprint(workdir: str, fingerprint: str) -> None:
+    """Persist *fingerprint* as the current resync fingerprint for *workdir*."""
+    state = _load(workdir)
+    state["resync_fingerprint"] = fingerprint
+    _save(workdir, state)
+
+
+def get_resync_fingerprint(workdir: str) -> Optional[str]:
+    """Return the stored resync fingerprint for *workdir*, or *None* if unset."""
+    state = _load(workdir)
+    fp = state.get("resync_fingerprint")
+    return str(fp) if fp else None
+
+
+# ── Config values (coding_agent + model.default for resync) ──────────────────
+#
+# Persist the resolved coding_agent and model.default values so that a subsequent
+# tick can compare the current resolved values against what was last used to
+# trigger a profile resync. This lets _resync_profiles_to_model() detect changes
+# between ticks even if the fingerprint hasn't changed (e.g. if the fingerprint
+# is the same but the individual values did).
+
+def set_config_values(workdir: str, coding_agent: Optional[str], model_default: Optional[str]) -> None:
+    """Persist the resolved coding_agent and model.default for *workdir*.
+
+    Used by the resync logic to compare last-resynced values against current
+    resolved values. None values are stored as empty strings for stability.
+    """
+    state = _load(workdir)
+    state["config_values"] = {
+        "coding_agent": coding_agent or "",
+        "model_default": model_default or "",
+    }
+    _save(workdir, state)
+
+
+def get_config_values(workdir: str) -> Optional[Dict[str, str]]:
+    """Return the stored config values for *workdir*, or *None* if unset.
+
+    Returns a dict with keys "coding_agent" and "model_default". Both values
+    are strings (empty string if originally None).
+    """
+    state = _load(workdir)
+    vals = state.get("config_values")
+    if not isinstance(vals, dict):
+        return None
+    return {
+        "coding_agent": str(vals.get("coding_agent", "")),
+        "model_default": str(vals.get("model_default", "")),
+    }
