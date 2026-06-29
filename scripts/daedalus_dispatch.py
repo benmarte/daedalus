@@ -24,11 +24,12 @@ import subprocess
 import sys
 import threading
 import time
-import threading
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from filelock import FileLock, Timeout
 
 # Make the plugin's modules importable. This script may run in place (plugin/
 # scripts/) OR be COPIED into ~/.hermes/scripts/ (Hermes --script rejects symlinks
@@ -62,6 +63,8 @@ from core.util import board_slug as _board_slug  # noqa: E402
 from core.util import extract_issue_number  # noqa: E402
 from core.util import extract_pr_number_from_summary  # noqa: E402
 logger = logging.getLogger("daedalus.dispatch")
+
+_MUTEX_LOCK_PATH = str(Path(__file__).resolve().parent / ".daedalus_dispatch.lock")
 
 _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-Simplify → Ship")
 
@@ -1955,12 +1958,21 @@ def _has_downstream_tasks(slug: str, issue_number: int, *,
     """
     pattern = f"#{issue_number}"
     pipeline_profiles = {validator_profile, pm_profile, planner_profile}
+    # Status-blind guard (epic #1008): ignore terminal states so stale
+    # completed/cancelled downstream cards never block a fresh triage dispatch.
+    terminal_statuses = {"done", "complete", "completed", "cancelled", "canceled", "archived"}
     for t in kanban.list_tasks(slug):
         if pattern not in (t.get("title") or ""):
             continue
         assignee = (t.get("assignee") or "").strip()
-        if assignee not in pipeline_profiles:
-            return True  # triage card or downstream role task (developer/reviewer/etc.)
+        if assignee in pipeline_profiles:
+            # Validator/PM/planner cards are upstream dispatch artifacts, not
+            # downstream work. Even a stale planner card must not count.
+            continue
+        status = ((t.get("status") or "").strip().lower())
+        if status in terminal_statuses:
+            continue  # epic #1008: terminal downstream tasks are invisible
+        return True  # active downstream / triage card exists
     return False
 
 
@@ -2015,15 +2027,18 @@ def _has_pm_tasks(slug: str, issue_number: int,
 
 
 def _has_active_pm_consultation(slug: str, issue_number: int,
-                                pm_profile: str = "project-manager-daedalus") -> bool:
-    """Return True if there is already a PM consultation task for issue_number.
+                                 pm_profile: str = "project-manager-daedalus") -> bool:
+    """Return True if there is already an ACTIVE PM consultation for issue_number.
 
-    Counts any non-archived consultation (including done) to prevent the
-    runaway loop where a completed consultation triggers a new one every tick.
-    The idempotency key on create_task is the primary guard; this check is a
-    fast in-memory pre-flight that avoids the subprocess call entirely.
+    Status-blind guard (epic #1008): only consultations in non-terminal states
+    count. The idempotency key on create_task is the primary runaway-prevention
+    guard; this function only needs to detect in-flight consultations so that we
+    don't spawn a duplicate subprocess call on the same tick. Archived
+    consultations are not returned by list_tasks, so they are excluded
+    automatically.
     """
     pattern = f"#{issue_number}"
+    terminal_statuses = {"done", "complete", "completed", "cancelled", "canceled", "archived"}
     for t in kanban.list_tasks(slug):
         title = (t.get("title") or "")
         if pattern not in title:
@@ -2032,9 +2047,9 @@ def _has_active_pm_consultation(slug: str, issue_number: int,
             continue
         if not title.lower().startswith("consult:"):
             continue
-        # Any status (including done) blocks a new consultation.
-        # Archived consultations are not returned by list_tasks, so they are
-        # excluded automatically — archiving a consultation re-opens the door.
+        status = ((t.get("status") or "").strip().lower())
+        if status in terminal_statuses:
+            continue  # epic #1008: terminal consultations do not block new ones
         return True
     return False
 
@@ -2376,19 +2391,27 @@ def _find_issue_n_from_parents(slug: str, task_id: str) -> Optional[str]:
 
 
 def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
-    """Count active (non-done, non-cancelled) kanban tasks for issue #N.
+    """Count ACTIVE tasks for issue #N.
 
     A task "belongs" to an issue when its title references ``#<issue_number>``.
     Used to guard orphaned-issue cleanup: an issue closed on VCS while active
     kanban tasks remain is likely an accidental close (bot mis-fire, manual
     mis-click mid-pipeline), so the dispatcher must NOT bulk-complete its tasks.
+
+    The tasks are filtered to exclude terminal states (done, complete, completed,
+    cancelled, canceled, archived), consistent with the status-blind principle from
+    epic #1008.
     """
-    active = 0
+    terminal_statuses = {"done", "complete", "completed", "cancelled", "canceled", "archived"}
+    count = 0
     for t in kanban.list_tasks(slug):
         num = extract_issue_number(t.get("title") or "")
-        if num == issue_number and t.get("status") not in ("done", "cancelled"):
-            active += 1
-    return active
+        if num != issue_number:
+            continue
+        status = ((t.get("status") or "").strip().lower())
+        if status not in terminal_statuses:
+            count += 1
+    return count
 
 
 def _global_reconcile_orphan_cards(slug: str, provider, *, dry_run: bool = False) -> None:
@@ -5080,10 +5103,37 @@ def _format_history(records: List[Dict[str, Any]]) -> str:
 
 
 def main() -> int:
+    """Process-level mutex wrapper.
+
+    Acquires a FileLock with timeout=0 (non-blocking). If another instance holds
+    the lock, logs a warning and exits cleanly (rc=0) to prevent concurrent
+    dispatchers on the same host. Otherwise calls _main_inner() for the actual
+    dispatch logic.
+    """
+    lock = FileLock(_MUTEX_LOCK_PATH)
+    try:
+        lock.acquire(timeout=0)
+    except Timeout:
+        logger.warning(
+            'FileLock already held by another dispatcher process at %s — exiting cleanly. '
+            '(This is expected when two cron ticks land on top of each other.)',
+            _MUTEX_LOCK_PATH,
+        )
+        return 0
+    try:
+        return _main_inner()
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass  # best-effort cleanup on shutdown
+
+
+def _main_inner() -> int:
     """Cron / single-repo entrypoint.
 
     With --repo <path-or-slug>: resolves that single repo (a filesystem path or a
-    registered ``owner/repo`` VCS identifier) and calls run() for it.
+    registered ``owner/repo`` VCS identifier and calls run() for it.
 
     Without --repo: auto-scopes to the registered project containing cwd (set by a
     cron's ``--workdir`` or a kanban worker's working dir) so a cron/hook/webhook
