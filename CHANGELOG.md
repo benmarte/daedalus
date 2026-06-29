@@ -6,7 +6,29 @@ All notable changes to Daedalus are documented here. The format loosely follows
 
 ## [Unreleased]
 
-_No unreleased changes at this time._
+### Pipeline Reliability
+
+- QA no longer races developer mid-edit on shared working tree ([#954], closes [#953])
+- Validator no longer completes silently with `summary=None` when Claude Code delegation fails ([#952], closes [#916])
+- `advance hook` registered to postinstall so it ships with the plugin ([#950], closes [#936])
+- Dispatcher handler for planner `NOT SUITABLE` signal ([#941], closes [#931])
+- Auto-advance sub-issues to Ready after planner decomposition ([#937], closes [#915])
+- E2E regression assertions for #891 and #894 ([#917], closes [#902])
+- Dry-run mode flag for dispatcher ([#914], closes [#900])
+- Multi-tick pipeline harness ([#913], closes [#901])
+- Agents no longer silently fail when `GITHUB_TOKEN` not set in cron env ([#895], closes [#894])
+- Concurrent dispatcher ticks no longer re-decompose epics ([#893], closes [#891])
+
+[#954]: https://github.com/benmarte/daedalus/pull/954
+[#952]: https://github.com/benmarte/daedalus/pull/952
+[#950]: https://github.com/benmarte/daedalus/pull/950
+[#941]: https://github.com/benmarte/daedalus/pull/941
+[#937]: https://github.com/benmarte/daedalus/pull/937
+[#917]: https://github.com/benmarte/daedalus/pull/917
+[#914]: https://github.com/benmarte/daedalus/pull/914
+[#913]: https://github.com/benmarte/daedalus/pull/913
+[#895]: https://github.com/benmarte/daedalus/pull/895
+[#893]: https://github.com/benmarte/daedalus/pull/893
 
 ---
 

@@ -2,10 +2,8 @@
 
 This guide documents all new user-facing behaviors introduced since v1.0.0-beta.30. Each section explains what the behavior does, how you interact with it, and any relevant configuration or prerequisites.
 
-> **Note on line-number references:** Source line numbers cited throughout this document (e.g., "line 126") are approximate and may drift as the codebase evolves. If a referenced line has shifted, search for the function or symbol name in the source — the logic is the same even if the line number has moved.
-
-**Last updated:** 2026-06-29  
-**Coverage:** 38 behaviors across 6 feature areas
+**Last updated:** 2026-06-28  
+**Coverage:** 39 behaviors across 6 feature areas
 
 ---
 
@@ -41,6 +39,7 @@ This guide documents all new user-facing behaviors introduced since v1.0.0-beta.
    - 4.5 [Suppress Retry-Attempt Notification at Cap Boundary](#45-suppress-retry-attempt-notification-at-cap-boundary)
    - 4.6 [Webhook Notification on Validator Retry Cap Exhausted](#46-webhook-notification-on-validator-retry-cap-exhausted)
    - 4.7 [Broadcast Thread Reply Support for Slack](#47-broadcast-thread-reply-support-for-slack)
+   - 4.8 [Validator-Blocked Notification with Incrementing Idempotency Keys](#48-validator-blocked-notification-with-incrementing-idempotency-keys)
 5. [Reliability & Infrastructure](#5-reliability--infrastructure)
    - 5.1 [Auto-Pagination of _fetch_issues](#51-auto-pagination-of-_fetch_issues)
    - 5.2 [Default Fetch Limit Raised to 100](#52-default-fetch-limit-raised-to-100)
@@ -52,10 +51,6 @@ This guide documents all new user-facing behaviors introduced since v1.0.0-beta.
    - 6.2 [Skip show_card in Orphan Repair for Valid Assignees](#62-skip-show_card-in-orphan-repair-for-valid-assignees)
    - 6.3 [Agent Comment Header Enforcement](#63-agent-comment-header-enforcement)
    - 6.4 [--plugin-dir Flag for daedalus-cron.sh](#64-plugin-dir-flag-for-daedalus-cronsh)
-   - 6.5 [QA Gate for Auto-Merge](#65-qa-gate-for-auto-merge)
-   - 6.6 [Dispatcher Concurrency (FileLock Mutex)](#66-dispatcher-concurrency-filelock-mutex)
-   - 6.7 [Status-Blind Re-Triage](#67-status-blind-re-triage)
-   - 6.8 [Dispatcher CLI Flags (--dry-run, --self-test, --history)](#68-dispatcher-cli-flags-dry-run-self-testhistory)
 
 ---
 
@@ -217,7 +212,7 @@ No manual intervention required. If the planner determines an issue doesn't need
 No user-facing configuration. Detection is automatic via case-insensitive regex matching of the planner's summary signal on both done and blocked planner cards.
 
 **Source implementation:**  
-`scripts/daedalus_dispatch.py:_check_planner_not_suitable()` (line ~3214)
+`scripts/daedalus_dispatch.py:_check_planner_not_suitable()` (line ~3088)
 
 ---
 
@@ -689,6 +684,31 @@ No user-facing configuration. Threading is automatic for Slack.
 
 ---
 
+### 4.8 Validator-Blocked Notification with Incrementing Idempotency Keys
+
+**What it does:**  
+When a validator blocks with `BLOCKED:`, the dispatcher creates a PM consultation task. Previously, the idempotency key was static (`validator-blocked-{n}`), so after the first consultation completed and the validator blocked again on a subsequent tick, no new consultation was created — the issue stalled indefinitely with no human notification. Now the key increments per block cycle: `validator-blocked-{n}`, `validator-blocked-{n}-r1`, `validator-blocked-{n}-r2`, etc., ensuring each block creates a fresh consultation. Additionally, the dispatcher fires a new `validator-blocked` notification to Slack/Discord on every block (including repeat blocks) so stalled issues surface to humans immediately. An in-flight guard prevents duplicate consultations while one is already active for the same issue.
+
+**How you interact with it:**  
+If a validator blocks multiple times on the same issue (e.g., the PM resolves one blocker but the validator encounters another), you now get:
+1. A new PM consultation task on each block (not just the first)
+2. A Slack/Discord notification on every block, so you're alerted immediately
+3. No duplicate consultations while a PM is actively working on the current block
+
+This prevents silent stalls where an issue sits blocked with no human awareness.
+
+**Prerequisites:**  
+- Slack or Discord must be configured as notification targets to receive alerts.
+- The issue must have a validator that can block with `BLOCKED:`.
+
+**Configuration:**  
+No user-facing configuration. The incrementing key and notification are applied automatically.
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py:_check_confirmed_validators()`, `scripts/daedalus_dispatch.py:_notify_validator_blocked()`
+
+---
+
 ## 5. Reliability & Infrastructure
 
 ### 5.1 Auto-Pagination of _fetch_issues
@@ -884,136 +904,15 @@ This loads the plugin from the specified directory instead of the installed loca
 
 ---
 
-### 6.5 QA Gate for Auto-Merge
-
-**What it does:**  
-The pipeline now blocks auto-merge of a PR until the QA agent explicitly passes. The dispatcher checks for a QA card (idempotency key `qa-{issue_number}`) and inspects its `latest_summary` for the `qa-passed` signal (case-insensitive). If no QA card exists, or the QA card has not produced a `qa-passed` signal, the PR will not be auto-merged even if CI is green.
-
-A `skip-qa` label on the PR bypasses this gate entirely — the label is a stronger signal than any QA state and allows immediate auto-merge. This is intended for documentation-only PRs, emergency hotfixes, or other cases where QA is not applicable.
-
-**How you interact with it:**  
-PRs wait for explicit QA approval before merging — no more merging PRs that passed CI but haven't been tested. For example:
-- Developer opens PR #42 → QA agent runs tests → QA card summary becomes `qa-passed: PR #42` → auto-merge proceeds.
-- Developer opens PR #43 → CI passes but QA card shows `qa-failed: tests broken` → PR waits until QA passes or developer fixes the issue.
-- For docs-only changes → add the `skip-qa` label to the PR → auto-merge proceeds immediately without QA signal.
-
-To check whether an issue has a QA pass signal:
-```bash
-# List QA cards for an issue
-hermes kanban list | grep "qa-{issue_number}"
-# Check the latest_summary field for 'qa-passed'
-hermes kanban show <task-id> | grep latest_summary
-```
-
-**Prerequisites:**  
-- The issue must have a QA card (created automatically by the dispatcher for validated issues).
-- The QA agent must complete its work and signal `qa-passed` in the card summary.
-
-**Configuration:**  
-- `skip-qa` label: Add this label to any PR to bypass the QA gate. No other configuration needed.
-
-**Source implementation:**  
-`core/iterate.py:_qa_passed_for_issue()` (line 490), `core/iterate.py:run_iterate()` (line ~2260, auto-merge gate), `core/iterate.py:classify_blocked()` (skip_qa bypass in QA card classification)
-
----
-
-### 6.6 Dispatcher Concurrency (FileLock Mutex)
-
-**What it does:**
-The dispatcher uses a process-level `FileLock` mutex to prevent concurrent dispatcher instances from running simultaneously on the same host. The lock file is located at `<scripts-dir>/.daedalus_dispatch.lock` (resolved to `scripts/.daedalus_dispatch.lock` relative to the daedalus plugin directory). When `main()` is called, it attempts to acquire the lock with `timeout=0` (non-blocking). If another dispatcher instance already holds the lock, the current instance logs a warning and exits cleanly (return code 0) — no duplicate task creation, no race conditions.
-
-This is critical when the dispatcher is invoked from multiple sources: cron jobs, manual triggers, or overlapping scheduler ticks. The lock ensures exactly one dispatcher instance runs at a time, even if multiple invocations are triggered simultaneously.
-
-**How you interact with it:**  
-Multiple dispatcher invocations are safe — no risk of duplicate task creation or race conditions. For example:
-- Cron tick fires at 10:00:00 → dispatcher starts, acquires lock, begins processing issues.
-- Manual trigger at 10:00:05 → dispatcher attempts to acquire lock, finds it already held, logs warning and exits cleanly.
-- No duplicate tasks are created, no issues are processed twice.
-
-You can safely run `python scripts/daedalus_dispatch.py` manually even if the cron job is running — the FileLock prevents conflicts.
-
-**Prerequisites:**  
-None. The FileLock is enforced automatically on every dispatcher invocation.
-
-**Configuration:**  
-No user-facing configuration. The lock path is hardcoded to `.daedalus_dispatch.lock` in the scripts directory. The lock uses non-blocking acquisition (timeout=0) and is released automatically when the dispatcher exits (via `finally` block).
-
-**Source implementation:**  
-`scripts/daedalus_dispatch.py:_MUTEX_LOCK_PATH` (line 67), `scripts/daedalus_dispatch.py:main()` (line ~5155, lock acquisition and release)
-
----
-
-### 6.7 Status-Blind Re-Triage
-
-**What it does:**  
-Issues whose validator task completed with a non-CONFIRMED status (e.g., `blocked:`, `stop:`, or failed validation) can now be correctly re-queued for triage after retry. The status-blind principle from epic #1008 ensures that closed, cancelled, or archived downstream tasks no longer shadow active ones in downstream task checks.
-
-Specifically, `_has_downstream_tasks()` filters out tasks in terminal states (`done`, `complete`, `completed`, `cancelled`, `canceled`, `archived`) before checking whether a team triage card exists. This means a stale completed validator card won't prevent a fresh triage dispatch after the issue is re-opened or re-queued.
-
-Similarly, `_check_confirmed_validators()` now handles non-CONFIRMED validator done cards by creating PM consultation cards (for `blocked:` outcomes) or closing the issue (for `stop:` outcomes) instead of silently dropping them. This ensures the pipeline correctly routes failed validation attempts through the appropriate next step.
-
-**How you interact with it:**  
-Issues that failed validation can be re-dispatched without manual intervention — no shadowing from stale terminal tasks. For example:
-- Issue #45 validator runs → validation fails → validator card completes with `stop: cannot reproduce`.
-- Issue is re-opened → dispatcher re-runs validation → stale `stop:` card no longer blocks fresh triage → new validator task is created and runs.
-- No manual cleanup of old cards needed — the status-blind guard handles it automatically.
-
-**Prerequisites:**  
-- The issue must have been processed by the validator and completed with a non-CONFIRMED status (e.g., `blocked:`, `stop:`, or failed validation).
-- The issue must be re-opened or re-queued for dispatch.
-
-**Configuration:**  
-No user-facing configuration. Status-blind filtering is enforced automatically in all downstream task checks.
-
-**Source implementation:**  
-`scripts/daedalus_dispatch.py:_has_downstream_tasks()` (line ~1950, status-blind filtering), `scripts/daedalus_dispatch.py:_check_confirmed_validators()` (line ~2702, non-CONFIRMED validator handling)
-
----
-
-### 6.8 Dispatcher CLI Flags (--dry-run, --self-test, --history)
-
-**What it does:**  
-The dispatcher script (`scripts/daedalus_dispatch.py`) exposes three read-only or no-op CLI flags for operators:
-
-- **`--dry-run`** — Executes the full dispatch pipeline logic but logs every intended mutation (`create follow-up issue`, `send notification`, `merge PR`, etc.) without writing to GitHub or Slack. Uses `[dry-run]` prefixes in log output.
-- **`--self-test`** — Seeding a real but GitHub-free pipeline smoke test using `core.dispatch_selftest`. Creates fake issues and tasks, runs a real dispatch tick, asserts expected state transitions, then prints PASS/FAIL. Does nothing against real GitHub. Intended for CI gating.
-- **`--history [N]`** — Print the last *N* dispatch-history entries (default 10) to stdout, then exit. Read-only; does not mutate anything.
-
-**How you interact with it:**  
-```bash
-# See what the dispatcher would do this tick, without touching GitHub
-python scripts/daedalus_dispatch.py --dry-run
-
-# Run the offline smoke-test (no GitHub access required)
-python scripts/daedalus_dispatch.py --self-test
-
-# View the last 25 dispatch decisions
-python scripts/daedalus_dispatch.py --history 25
-```
-
-`--dry-run` is most useful when diagnosing unexpected dispatch behavior or previewing changes before a real run. `--self-test` is intended for CI pipelines — it runs fast, needs no credentials, and exits non-zero on any failed assertion. `--history` lets you audit recent dispatches without starting a full tick.
-
-**Prerequisites:**  
-- `--dry-run` and `--history` require valid cron/environment setup (they use the same code path as a real tick, just with mutations gated out).  
-- `--self-test` requires no external credentials or GitHub access.
-
-**Configuration:**  
-No configuration keys — these are pure CLI flags, passed on the command line.
-
-**Source implementation:**  
-`scripts/daedalus_dispatch.py:main()` (line ~5200, argparse definitions), `core/dispatch_selftest.py` (self-test logic)
-
----
-
 ## Summary
 
-This guide documents **38 new user-facing behaviors** across **6 feature areas**:
-- **Epic & Sub-issue Management (7 behaviors):** Automatic epic detection, decomposition, and context injection
+This guide documents **31 new user-facing behaviors** across **6 feature areas**:
+- **Epic & Sub-issue Management (6 behaviors):** Automatic epic detection, decomposition, and context injection
 - **Dependency-Aware Dispatch (5 behaviors):** Ready-gating, tier promotion, and idempotency
 - **Self-Healing & Auto-Advance (7 behaviors):** Automatic diagnosis and routing of blocked cards
 - **Notification & Alerting (7 behaviors):** Threading, retry-cap alerts, and webhook integration
 - **Reliability & Infrastructure (5 behaviors):** Auto-pagination, retry logic, and rate-limit handling
-- **Dispatch & Pipeline (8 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, status-blind re-triage, and dispatcher CLI flags
+- **Dispatch & Pipeline (4 behaviors):** History persistence, performance optimizations, and comment enforcement
 
 All behaviors are verified against the source code implementation and are active in the current release (since v1.0.0-beta.30). No user-facing configuration is required for most behaviors — they are automatic and transparent.
 
