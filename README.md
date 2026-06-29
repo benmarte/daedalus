@@ -37,16 +37,15 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA Agent\nRuns test suite · coverage\nProduces qa-passed or qa-failed"]
-    Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
-    QA --> QAGate{{"🧪 QA GATE\nqa-passed? or skip-qa label?"}}
-    QAGate -->|"qa-passed"| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
-    QAGate -->|"qa-passed"| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
-    QAGate -->|"qa-failed"| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
+    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
+    QA --> CI{CI}
+    CI -->|green & qa-passed| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    CI -->|green & qa-passed| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
+    CI -->|green & qa-passed| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
+    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
     Fix --> Dev
-    CI -->|red| Fix
-    Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
-    Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Sec -->|cleared| Doc
     A11y -->|cleared| Doc
     Doc --> AutoMerge{{"🚦 QA auto-merge gate\nqa-passed signal present\nOR skip-qa label?\nAND CI green?"}}
     AutoMerge -->|"yes"| Merge(["🔀 Auto-merge fires\nPR merged automatically"])
@@ -66,7 +65,6 @@ flowchart TD
     style ST fill:#C62828,color:#fff,stroke:#B71C1C
     style Merge fill:#388E3C,color:#fff,stroke:#1B5E20
     style AutoMerge fill:#FF8F00,color:#fff,stroke:#E65100
-    style QAGate fill:#FF6F00,color:#fff,stroke:#E65100
     style Wait fill:#5D4037,color:#fff,stroke:#3E2723
     style Done fill:#2E7D32,color:#fff,stroke:#1B5E20
     style Reco fill:#AD1457,color:#fff,stroke:#880E4F
