@@ -149,7 +149,7 @@ class TestIsModelCompatibleWithCodingAgent:
     def test_claude_code_rejection_logs_warning(self, caplog):
         """Rejection emits a warning."""
         import logging
-        with caplog.at_level(logging.WARNING, logger="scripts.daedalus_dispatch"):
+        with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
             result = disp._is_model_compatible_with_coding_agent("openrouter/qwen3", "claude-code")
         assert result is False
         assert any("incompatible" in msg or "not be compatible" in msg
