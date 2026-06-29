@@ -12,7 +12,7 @@ flowchart TD
     subgraph Reliability["🛡 Pipeline reliability layer"]
         direction LR
         WD["🐕 Gateway watchdog\ndetects stalled dispatcher\n· 3 restarts/hr cap\n· exponential backoff"]
-        MX["🔒 FileLock mutex\n· non-blocking timeout=0\n· exits cleanly if held"]
+        MX["🔒 FileLock mutex\n· concurrency-safe\n· 300s stale timeout"]
         ID["🔑 Idempotency keys\n· per-role per-stage\n· prevents duplicate cards"]
     end
 
@@ -37,15 +37,16 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
-    QA --> CI{CI}
-    CI -->|green & qa-passed| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
-    CI -->|green & qa-passed| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
-    CI -->|green & qa-passed| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
-    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
+    Dev --> QA["🧪 QA Agent\nRuns test suite · coverage\nProduces qa-passed or qa-failed"]
+    Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
+    QA --> QAGate{{"🧪 QA GATE\nqa-passed? or skip-qa label?"}}
+    QAGate -->|"qa-passed"| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    QAGate -->|"qa-passed"| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
+    QAGate -->|"qa-failed"| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
     Fix --> Dev
-    Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
-    Sec -->|cleared| Doc
+    CI -->|red| Fix
+    Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
+    Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
     A11y -->|cleared| Doc
     Doc --> AutoMerge{{"🚦 QA auto-merge gate\nqa-passed signal present\nOR skip-qa label?\nAND CI green?"}}
     AutoMerge -->|"yes"| Merge(["🔀 Auto-merge fires\nPR merged automatically"])
@@ -65,6 +66,7 @@ flowchart TD
     style ST fill:#C62828,color:#fff,stroke:#B71C1C
     style Merge fill:#388E3C,color:#fff,stroke:#1B5E20
     style AutoMerge fill:#FF8F00,color:#fff,stroke:#E65100
+    style QAGate fill:#FF6F00,color:#fff,stroke:#E65100
     style Wait fill:#5D4037,color:#fff,stroke:#3E2723
     style Done fill:#2E7D32,color:#fff,stroke:#1B5E20
     style Reco fill:#AD1457,color:#fff,stroke:#880E4F
@@ -801,15 +803,14 @@ blocked card and routes it to the agent that can clear it — the pipeline never
 stalls waiting for a human unless it has already retried 3 times.
 
 **Dispatcher mutex: FileLock.** The dispatcher acquires a process-level file lock
-(`<scripts-dir>/.daedalus_dispatch.lock`) when `main()` is invoked, using `timeout=0`
-(non-blocking). This prevents concurrent dispatcher instances from racing on the same
-board — a common failure mode when cron ticks overlap or when the dispatcher is invoked
-both by webhook and cron simultaneously. If another dispatcher instance already holds the
-lock, the new invocation logs `"FileLock already held by another dispatcher process"` and
-exits cleanly (rc=0), preventing duplicate task creation, double-decomposing epics, and
-race conditions in the self-healing loop. The lock is released explicitly in a `finally`
-block on normal exit; stale locks from crashes are handled by the filelock library's
-stale-lock detection mechanism.
+(`<scripts-dir>/.daedalus_dispatch.lock`) on every tick. This prevents concurrent dispatcher
+instances from racing on the same board — a common failure mode when cron ticks overlap
+or when the dispatcher is invoked both by webhook and cron simultaneously. The mutex
+guarantees that only one dispatcher runs at a time, so no duplicate task creation, no
+double-decomposing epics, and no race conditions in the self-healing loop. If another
+dispatcher is already running, the new tick exits immediately (no-op) rather than queuing.
+The lock auto-releases after 300 seconds (5 minutes) even on crash, preventing stale locks
+from wedging future ticks.
 
 **Validator None-summary recovery.** When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
 

@@ -71,18 +71,6 @@ _No unreleased changes at this time._
 - **Concurrent dispatch tests** (#1029) — stress tests verifying exactly one task
   produced under concurrent dispatcher invocations.
 
-### Documentation
-
-- **QA auto-merge gate documentation** (#1007) — README and USER_GUIDE updated
-  with QA gate behavior: `qa-passed` signal required, `skip-qa` label bypass,
-  re-check-on-next-tick behavior.
-- **Pipeline reliability fixes documentation** (#989) — README and USER_GUIDE
-  updated for fixes #955, #956, #957, #962: downstream review roles gated behind
-  QA, ambiguous 'pass' removed from approve_signals, orphaned card safety nets,
-  advance hook registration per-profile.
-- **Pipeline Mermaid diagram update** (#987) — Phase 3 planner/epic decomposition
-  path added to the main pipeline flowchart in README.
-
 ---
 
 ## [1.0.0-beta.30] — 2026-06-26
