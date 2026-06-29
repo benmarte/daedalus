@@ -1470,6 +1470,20 @@ def test_security_task_body_has_role_instructions():
     assert "security: cleared" in body or "security:" in body
 
 
+def test_qa_task_body_isolates_pr_in_worktree():
+    """QA tests the PR in an isolated worktree, never the shared tree (#953)."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/work/shared", "github")
+    # Instructs an isolated worktree pinned to the PR head.
+    assert "worktree add" in body
+    assert "pull/<P>/head" in body
+    assert "worktree remove" in body  # always cleans up
+    # Explicitly forbids mutating / testing the shared tree.
+    assert "MUST NOT run tests in it directly" in body
+    assert "stash" in body.lower()  # warns against stash/checkout in shared tree
+    # No PR ⇒ block qa-failed, do not validate the shared tree.
+    assert "qa-failed: no PR" in body
+
+
 def test_qa_task_body_comment_targets_pr_not_issue():
     """_qa_task_body comment instruction targets the PR, not the issue (#115)."""
     body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github")

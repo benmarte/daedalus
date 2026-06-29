@@ -77,6 +77,44 @@ def test_classify_blocked_dev_no_pr():
     check("dev no PR → pm_route", result == iterate.PM_ROUTE)
 
 
+def test_classify_blocked_dev_pr_not_open_holds():
+    """#953: review-required + green CI but provider says PR is NOT open → pending_pr.
+
+    The handoff's 'PR #N' is just a string the agent typed; if the provider
+    affirmatively reports no open PR, the dev card must NOT advance (which would
+    release the QA child against a phantom PR / mid-edit shared tree).
+    """
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped, all tests pass",
+        ci_green=True,
+        pr_is_open=False,
+    )
+    check("dev green CI but PR not open → pending_pr", result == iterate.PENDING_PR)
+
+
+def test_classify_blocked_dev_pr_open_advances():
+    """#953: verified-open PR still advances on green CI (no regression)."""
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped",
+        ci_green=True,
+        pr_is_open=True,
+    )
+    check("dev green CI + PR open → advance", result == iterate.ADVANCE)
+
+
+def test_classify_blocked_dev_pr_unverified_advances():
+    """#953: pr_is_open=None (unverified) preserves prior advance behaviour."""
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped",
+        ci_green=True,
+        pr_is_open=None,
+    )
+    check("dev green CI + PR unverified → advance", result == iterate.ADVANCE)
+
+
 def test_classify_blocked_reviewer_changes():
     """Reviewer + changes requested → pm_route."""
     result = iterate.classify_blocked(
@@ -450,6 +488,24 @@ def test_run_iterate_dev_advance():
     check("dev green CI → advance count 1", counts[iterate.ADVANCE] == 1)
     check("no other actions", sum(v for v in counts.values() if v > 0) == 1)
     check("advance PR is 42", prs == [42])
+
+
+def test_run_iterate_dev_no_open_pr_holds_qa():
+    """#953: dev card with green CI but no real open PR → held (PENDING_PR), QA not released."""
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 shipped"}],
+    }]
+    # Provider reports PR #42 is NOT among the open PRs.
+    prov = FakeProvider(ci_status="green", open_prs=set())
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(iterate, "_execute_pending_pr", return_value=True) as mpend:
+            counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=prov)
+    check("no advance when PR not open", counts[iterate.ADVANCE] == 0)
+    check("held as pending_pr", counts[iterate.PENDING_PR] == 1)
+    check("pending-pr executor invoked", mpend.call_count == 1)
+    check("no PR advanced", prs == [])
 
 
 def test_run_iterate_dev_fix_ci():
