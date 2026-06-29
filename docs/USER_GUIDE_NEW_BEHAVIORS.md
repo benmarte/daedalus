@@ -2,7 +2,9 @@
 
 This guide documents all new user-facing behaviors introduced since v1.0.0-beta.30. Each section explains what the behavior does, how you interact with it, and any relevant configuration or prerequisites.
 
-**Last updated:** 2026-06-28  
+> **Note on line-number references:** Source line numbers cited throughout this document (e.g., "line 126") are approximate and may drift as the codebase evolves. If a referenced line has shifted, search for the function or symbol name in the source — the logic is the same even if the line number has moved.
+
+**Last updated:** 2026-06-29  
 **Coverage:** 39 behaviors across 6 feature areas
 
 ---
