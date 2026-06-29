@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install deps
-        run: pip install --quiet pyyaml fastapi pytest httpx pytest-xdist pytest-timeout
+        run: pip install --quiet pyyaml fastapi pytest httpx pytest-xdist pytest-timeout filelock
       # Plain-script smoke test (uses custom check() runner).
       - name: Plain-script suite (real assertions via custom runner)
         run: python3 tests/test_daedalus.py
