@@ -599,6 +599,36 @@ _DOWNSTREAM_REVIEW_ROLES = [
 ]
 
 
+def _downstream_parents(
+    role_suffix: str,
+    dev_id: str,
+    role_ids: Dict[str, str],
+) -> Optional[List[str]]:
+    """Resolve the parent card(s) for a downstream review role.
+
+    Enforces the QA gate by mirroring the primary dispatch path
+    (``daedalus_dispatch.py``): only QA is parented to the developer card; every
+    other role is gated behind QA so it cannot unblock until QA completes (#955).
+
+        dev → qa → [reviewer, security, accessibility] → docs
+
+    Falls back to ``None`` (no parent) only when no suitable gate id is
+    resolvable, rather than silently parenting a review role to the dev card.
+    """
+    qa_id = role_ids.get("qa")
+    if role_suffix == "qa":
+        return [dev_id] if dev_id else None
+    if role_suffix == "docs":
+        docs_parents = [
+            role_ids[r] for r in ("reviewer", "security", "accessibility") if role_ids.get(r)
+        ]
+        if docs_parents:
+            return docs_parents
+        return [qa_id] if qa_id else None
+    # reviewer / security / accessibility are all gated behind QA.
+    return [qa_id] if qa_id else None
+
+
 def _create_downstream_review_tasks(
     slug: str,
     issue_number: int,
@@ -628,12 +658,27 @@ def _create_downstream_review_tasks(
         f"Workspace: {workspace}\n"
     )
 
-    # Idempotency: check which keys already exist on the board.
+    # Idempotency: check which keys already exist on the board, and remember the
+    # id of each existing card so an already-created QA gate can still parent the
+    # downstream roles (#955).
     existing_keys: Set[str] = set()
+    key_to_id: Dict[str, str] = {}
     for task in kanban.list_tasks(slug):
         ikey = task.get("idempotency_key") or ""
         if ikey:
             existing_keys.add(ikey)
+            tid_existing = task.get("id")
+            if tid_existing:
+                key_to_id[ikey] = tid_existing
+
+    # Map role_suffix → created/recovered card id so the parent chain can be
+    # resolved per-role (dev → qa → [reviewer, security, accessibility] → docs),
+    # mirroring the primary dispatch path. Pre-seed from already-existing cards.
+    role_ids: Dict[str, str] = {}
+    for role_suffix, _assignee in _DOWNSTREAM_REVIEW_ROLES:
+        recovered = key_to_id.get(f"{role_suffix}-{issue_number}")
+        if recovered:
+            role_ids[role_suffix] = recovered
 
     for role_suffix, assignee in _DOWNSTREAM_REVIEW_ROLES:
         ikey = f"{role_suffix}-{issue_number}"
@@ -651,6 +696,7 @@ def _create_downstream_review_tasks(
             )
             continue
 
+        parents = _downstream_parents(role_suffix, tid, role_ids)
         new_tid = kanban.create_task(
             slug,
             title,
@@ -658,9 +704,10 @@ def _create_downstream_review_tasks(
             assignee=assignee,
             workspace=workspace,
             idempotency_key=ikey,
-            parents=[tid] if tid else None,
+            parents=parents,
         )
         if new_tid:
+            role_ids[role_suffix] = new_tid
             created.append(new_tid)
             logger.info(
                 "iterate: created downstream %s task %s for issue #%s",
