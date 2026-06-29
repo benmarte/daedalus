@@ -115,6 +115,50 @@ def test_classify_blocked_dev_pr_unverified_advances():
     check("dev green CI + PR unverified → advance", result == iterate.ADVANCE)
 
 
+def test_classify_blocked_dev_pr_merged_reconciles():
+    """#957: review-required dev card whose PR was merged → reconcile_merged.
+
+    A human merged the PR directly (bypassing the pipeline). The work landed,
+    so the card reconciles instead of looping forever in PENDING_PR.
+    """
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #954 shipped",
+        ci_green=False,
+        pr_is_open=False,
+        pr_is_merged=True,
+    )
+    check("dev PR merged → reconcile_merged", result == iterate.RECONCILE_MERGED)
+
+
+def test_classify_blocked_dev_pr_merged_precedes_not_open():
+    """#957: a merged PR is also 'not open', but merged wins → reconcile_merged.
+
+    Guards the ordering: the merged check must run before the #953 not-open gate
+    so a landed PR reconciles rather than being held in PENDING_PR.
+    """
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #954 shipped",
+        ci_green=True,
+        pr_is_open=False,
+        pr_is_merged=True,
+    )
+    check("merged precedes not-open gate", result == iterate.RECONCILE_MERGED)
+
+
+def test_classify_blocked_dev_pr_not_merged_still_holds():
+    """#957: not open and not merged (phantom PR) → still PENDING_PR (no regression)."""
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #954 shipped",
+        ci_green=True,
+        pr_is_open=False,
+        pr_is_merged=False,
+    )
+    check("not-merged phantom PR → pending_pr", result == iterate.PENDING_PR)
+
+
 def test_classify_blocked_reviewer_changes():
     """Reviewer + changes requested → pm_route."""
     result = iterate.classify_blocked(
@@ -426,6 +470,46 @@ def test_execute_advance():
     mk.assert_called_once_with("slug", "t_abc")
 
 
+def test_execute_reconcile_merged():
+    """#957: _execute_reconcile_merged closes all pipeline cards for the issue."""
+    with mock.patch.object(
+        kanban, "close_issue_tasks", return_value=["t_dev", "t_qa", "t_rev"]
+    ) as mk:
+        card = {"id": "t_dev", "body": "Issue benmarte/daedalus#957: fix bug"}
+        ok = iterate._execute_reconcile_merged(
+            "slug", card, "O/R", "review-required: PR #954 merged",
+        )
+    check("reconcile_merged returns True", ok is True)
+    pos, kw = mk.call_args
+    check("close_issue_tasks called for issue 957", pos[0] == "slug" and pos[1] == 957)
+    check("summary mentions merged PR", "954" in kw["summary"] and "merged" in kw["summary"])
+
+
+def test_execute_reconcile_merged_no_issue_number():
+    """#957: with no issue number on the card, fall back to completing the card."""
+    with mock.patch.object(kanban, "complete", return_value=True) as mk:
+        card = {"id": "t_dev"}  # no body → no issue number
+        ok = iterate._execute_reconcile_merged(
+            "slug", card, "O/R", "review-required: PR #954 merged",
+        )
+    check("reconcile fallback returns True", ok is True)
+    mk.assert_called_once()
+    check("fallback completes the card", mk.call_args[0][1] == "t_dev")
+
+
+def test_execute_reconcile_merged_dry_run():
+    """#957: dry_run logs intent without mutating the board."""
+    with mock.patch.object(kanban, "close_issue_tasks") as mk_close:
+        with mock.patch.object(kanban, "complete") as mk_complete:
+            card = {"id": "t_dev", "body": "#957"}
+            ok = iterate._execute_reconcile_merged(
+                "slug", card, "O/R", "review-required: PR #954 merged", dry_run=True,
+            )
+    check("dry_run returns True", ok is True)
+    check("dry_run does not close tasks", mk_close.call_count == 0)
+    check("dry_run does not complete", mk_complete.call_count == 0)
+
+
 def test_execute_dev_fix_ci():
     """_execute_dev_fix_ci creates a fix task with idempotency key."""
     with mock.patch.object(kanban, "create_task", return_value="t_fix") as mk_create:
@@ -578,6 +662,31 @@ def test_run_iterate_dev_no_open_pr_holds_qa():
     check("held as pending_pr", counts[iterate.PENDING_PR] == 1)
     check("pending-pr executor invoked", mpend.call_count == 1)
     check("no PR advanced", prs == [])
+
+
+def test_run_iterate_dev_pr_merged_reconciles():
+    """#957: dev card whose PR was merged outside the pipeline → reconcile_merged.
+
+    The PR is not open (merged), so the #953 gate alone would loop it in
+    PENDING_PR forever. With is_pr_merged=True the dispatcher reconciles:
+    close_issue_tasks completes the dev card and its sibling pipeline cards.
+    """
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "body": "Issue benmarte/daedalus#957: fix orphaned cards",
+        "runs": [{"reason": "review-required: PR #954 shipped"}],
+    }]
+    # PR #954 is merged (not open).
+    prov = FakeProvider(ci_status="green", open_prs=set(), merged_prs={954})
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(
+            kanban, "close_issue_tasks", return_value=["t_dev", "t_qa"]
+        ) as mk_close:
+            counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=prov)
+    check("reconcile_merged count 1", counts[iterate.RECONCILE_MERGED] == 1)
+    check("not held as pending_pr", counts[iterate.PENDING_PR] == 0)
+    check("close_issue_tasks invoked for issue 957", mk_close.call_args[0][1] == 957)
 
 
 def test_run_iterate_dev_fix_ci():
@@ -2090,6 +2199,13 @@ if __name__ == "__main__":
         test_classify_blocked_dev_red,
         test_classify_blocked_dev_escalate,
         test_classify_blocked_dev_no_pr,
+        test_classify_blocked_dev_pr_merged_reconciles,
+        test_classify_blocked_dev_pr_merged_precedes_not_open,
+        test_classify_blocked_dev_pr_not_merged_still_holds,
+        test_execute_reconcile_merged,
+        test_execute_reconcile_merged_no_issue_number,
+        test_execute_reconcile_merged_dry_run,
+        test_run_iterate_dev_pr_merged_reconciles,
         test_classify_blocked_reviewer_changes,
         test_classify_blocked_reviewer_approved,
         test_classify_blocked_reviewer_escalate,

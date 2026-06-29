@@ -314,6 +314,7 @@ class FakeProvider:
         supports_ci_status: bool = True,
         blockers: Optional[Dict[int, List[int]]] = None,
         open_prs: Optional[set[int]] = None,
+        merged_prs: Optional[set[int]] = None,
         get_issue_failures: int = 0,
         closed_issues: Optional[set[int]] = None,
         close_issue_fail_for: Optional[set[int]] = None,
@@ -328,6 +329,9 @@ class FakeProvider:
         # #953: set of open PR numbers for the pre-QA gate. None (default) means
         # "assume any resolved PR is open" — preserves pre-#953 advance tests.
         self._open_prs = open_prs
+        # #957: set of merged PR numbers. None (default) means "no PR is merged"
+        # so is_pr_merged returns False — preserves pre-#957 behaviour.
+        self._merged_prs = merged_prs
         # Number of leading get_issue calls that return None before serving the
         # issue — models a transient outage that recovers (issue #185).
         self._get_issue_failures = get_issue_failures
@@ -363,6 +367,13 @@ class FakeProvider:
         if self._open_prs is None:
             return True
         return pr_number in self._open_prs
+
+    def is_pr_merged(self, pr_number: int) -> bool:
+        # #957: only the explicitly-configured merged set counts. Default None
+        # → no PR is merged, so pre-#957 tests are unaffected.
+        if self._merged_prs is None:
+            return False
+        return pr_number in self._merged_prs
 
     def get_issue(self, issue_number: int) -> Any:
         self.get_issue_calls += 1
