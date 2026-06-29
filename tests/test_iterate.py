@@ -1299,8 +1299,39 @@ def test_create_downstream_happy_path():
     workspaces = [call.kwargs["workspace"] for call in mk_create.call_args_list]
     check("workspace propagated", all(w == "dir:/work" for w in workspaces))
 
+    # Verify the QA gate parent chain (#955): only QA hangs off the dev card;
+    # every other role is gated behind QA so it cannot unblock before QA runs.
+    parents = [call.kwargs["parents"] for call in mk_create.call_args_list]
+    check("qa parented to dev card", parents[0] == ["t_dev"])
+    check("reviewer parented to qa", parents[1] == ["t_qa"])
+    check("security parented to qa", parents[2] == ["t_qa"])
+    check("accessibility parented to qa", parents[3] == ["t_qa"])
+    check("docs parented to reviewer/security/accessibility (not dev)",
+          parents[4] == ["t_rev", "t_sec", "t_acc"])
+    check("no review role parented to dev card except qa",
+          all("t_dev" not in (p or []) for p in parents[1:]))
+
     # Verify comment posted
     mk_comment.assert_called_once()
+
+
+def test_create_downstream_qa_gate_recovered_parent():
+    """#955 When QA already exists, a new reviewer is parented to the recovered
+    QA id — not the developer card — so the QA gate is preserved on re-runs."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # QA already on the board (any status) with a known id; reviewer is new.
+    existing = [{"idempotency_key": "qa-19", "id": "t_qa_existing", "status": "running"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_rev", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+    by_key = {call.kwargs["idempotency_key"]: call.kwargs["parents"] for call in mk_create.call_args_list}
+    check("qa skipped (already exists)", "qa-19" not in by_key)
+    check("reviewer parented to recovered qa id", by_key["reviewer-19"] == ["t_qa_existing"])
+    check("security parented to recovered qa id", by_key["security-19"] == ["t_qa_existing"])
+    check("accessibility parented to recovered qa id", by_key["accessibility-19"] == ["t_qa_existing"])
+    check("no recovered role parented to dev card",
+          all("t_dev" not in (p or []) for p in by_key.values()))
 
 
 def test_create_downstream_idempotency_guard():
@@ -2254,6 +2285,7 @@ if __name__ == "__main__":
         test_run_iterate_show_card_fallback_skip_on_failure,
         test_run_iterate_show_card_no_latest_summary,
         test_create_downstream_happy_path,
+        test_create_downstream_qa_gate_recovered_parent,
         test_create_downstream_idempotency_guard,
         test_create_downstream_partial_idempotency,
         test_create_downstream_dedup_respects_status,
