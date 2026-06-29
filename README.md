@@ -9,8 +9,16 @@ notification channels (Slack, Discord, Telegram, Signal, WhatsApp, …).
 
 ```mermaid
 flowchart TD
-    A([🏁 Issue marked Ready\nGitHub · GitLab · Azure]) -->|cron tick or\ncompletion trigger| B[Dispatcher\ndaedalus_dispatch.py]
+    subgraph Reliability["🛡 Pipeline reliability layer"]
+        direction LR
+        WD["🐕 Gateway watchdog\ndetects stalled dispatcher\n· 3 restarts/hr cap\n· exponential backoff"]
+        MX["🔒 FileLock mutex\n· concurrency-safe\n· 300s stale timeout"]
+        ID["🔑 Idempotency keys\n· per-role per-stage\n· prevents duplicate cards"]
+    end
 
+    A([🏁 Issue marked Ready\nGitHub · GitLab · Azure]) -->|cron tick · webhook\nor completion signal| MX
+
+    MX --> B["Dispatcher\ndaedalus_dispatch.py"]
     B --> Epic{"Epic-sized?\n≥4 checklist items\nepic label · body ≥2000 chars"}
     Epic -->|yes| P["🗺 Phase 3 — Planner\nScopes work · defines interfaces\nDecomposes into sub-issues"]
     Epic -->|no| C
@@ -18,26 +26,35 @@ flowchart TD
     P -->|"PLANNING COMPLETE"| SubI(["📋 Sub-issues created\nEach follows the full pipeline"])
     P -->|"NOT SUITABLE\nfor decomposition"| C
 
-    C["⚡ Phase 1\nValidator task created\n— only agent active —"]
+    C["⚡ Phase 1 · Validator\ntask created\n(idempotency key enforced)"]
     C --> V{Validator\nOutcome}
 
-    V -->|"CONFIRMED: &lt;note&gt;"| E["📋 Phase 2\nPM decomposes work\nacross team roster"]
+    V -->|"CONFIRMED: <note>"| E["📋 Phase 2\nPM decomposes work\nacross team roster"]
     V -->|"ALREADY_FIXED\nor DUPLICATE"| AF(["✅ Issue closed\nPipeline ends"])
     V -->|NEEDS_MORE_INFO| NI(["⏸ Card blocked\nComment posted\nAwaits reporter response"])
     V -->|"SECURITY_THREAT\nor BLOCK_FOR_REVIEW"| ST(["🔒 Card blocked\nIssue comment posted\nsecurity-escalation fired"])
+    V -->|"None summary"| Reco["🔄 Validator retry\nGitHub-comment fallback\nthen retry capped at 2"]
+    Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
-    QA --> CI{CI}
+    Dev --> QAGate{{"🧪 QA GATE checkpoint\ntest suite · coverage\ncard summary: qa-passed\nor qa-failed"}}
+    QAGate --> CI{CI}
     CI -->|green| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
     CI -->|green| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
-    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
+    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
     Fix --> Dev
     Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
     Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
     A11y -->|cleared| Doc
-    Doc --> Merge(["🔀 You merge the PR"])
+    Doc --> AutoMerge{{"🚦 QA auto-merge gate\nQA-passed signal present\nOR skip-qa label?"}}
+    AutoMerge -->|"yes"| Merge(["🔀 Auto-merge fires\nPR merged automatically"])
+    AutoMerge -->|"no signal yet"| Wait(["⏳ Monitor polls\nuntil qa-passed\nor skip-qa label appears"])
+    Wait --> AutoMerge
     Merge --> Done(["✅ Issue closed\nCard → Done"])
+    Merge --> Reconcile["🩹 reconcile_merged\nheals cards closed\noutside the pipeline"]
+
+    WD -. monitors .-> B
+    Reconcile -.-> Done
 
     style A fill:#1976D2,color:#fff,stroke:#0D47A1
     style P fill:#6A1B9A,color:#fff,stroke:#4A148C
@@ -46,7 +63,15 @@ flowchart TD
     style NI fill:#F57C00,color:#fff,stroke:#E65100
     style ST fill:#C62828,color:#fff,stroke:#B71C1C
     style Merge fill:#388E3C,color:#fff,stroke:#1B5E20
+    style AutoMerge fill:#FF8F00,color:#fff,stroke:#E65100
+    style QAGate fill:#FF6F00,color:#fff,stroke:#E65100
+    style Wait fill:#5D4037,color:#fff,stroke:#3E2723
     style Done fill:#2E7D32,color:#fff,stroke:#1B5E20
+    style Reco fill:#AD1457,color:#fff,stroke:#880E4F
+    style Reconcile fill:#0277BD,color:#fff,stroke:#01579B
+    style WD fill:#37474F,color:#fff,stroke:#263238
+    style MX fill:#37474F,color:#fff,stroke:#263238
+    style ID fill:#37474F,color:#fff,stroke:#263238
 ```
 
 ![Daedalus dashboard — one card per managed project, showing kanban counts, open PRs with CI status, and cron schedule](docs/screenshots/guide/09-dashboard-with-project.png)
@@ -167,9 +192,15 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
    the reviewer/security/docs roles to it, so they only run once QA has passed. A prior
    version of this path bypassed the gate by parenting every downstream role directly to
    the developer card (fixed in #955).
-5. When you **merge** the PR, the next tick sets the card **Done** and **closes the
-   issue** (GitHub doesn't auto-close on a non-default-branch merge, so the dispatcher
-   does it).
+5. Once the documentation card completes and CI is green, the dispatcher's
+   **auto-merge monitor** checks for an explicit QA-passed signal (the QA card's
+   `latest_summary` contains `qa-passed`, OR the issue has a `skip-qa` label for
+   docs-only / emergency hotfixes). If the signal is present, the PR is merged
+   automatically. If not, the monitor polls on each tick until the signal arrives.
+   After merge, the next tick sets the card **Done** and **closes the issue**
+   (GitHub doesn't auto-close on a non-default-branch merge, so the dispatcher
+   does it). See [`docs/qa-gate-design.md`](docs/qa-gate-design.md) for the full
+   QA gate design specification.
 
 The kanban board and VCS board status are bookkept **in code on every tick**, so tracking is
 deterministic — never dependent on an agent remembering to update anything.
@@ -769,6 +800,16 @@ re-dispatched by the next polling tick (the card already exists on the board).
 blocked card and routes it to the agent that can clear it — the pipeline never
 stalls waiting for a human unless it has already retried 3 times.
 
+**Dispatcher mutex: FileLock.** The dispatcher acquires a process-level file lock
+(`<scripts-dir>/.daedalus_dispatch.lock`) on every tick. This prevents concurrent dispatcher
+instances from racing on the same board — a common failure mode when cron ticks overlap
+or when the dispatcher is invoked both by webhook and cron simultaneously. The mutex
+guarantees that only one dispatcher runs at a time, so no duplicate task creation, no
+double-decomposing epics, and no race conditions in the self-healing loop. If another
+dispatcher is already running, the new tick exits immediately (no-op) rather than queuing.
+The lock auto-releases after 300 seconds (5 minutes) even on crash, preventing stale locks
+from wedging future ticks.
+
 **Validator None-summary recovery.** When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
 
 1. **GitHub-comment fallback** — scans the issue for a comment with the mandatory `**Agent: validator**` attribution header and looks for `CONFIRMED` in the body. If found, advances directly to PM without re-running the validator.
@@ -1260,6 +1301,9 @@ conventions:
 |----------|---------|
 | [`SPEC.md`](SPEC.md) | Detailed specification of the pipeline's behavior — what each phase does, how agents interact, what the quality gates are. The README is an overview; SPEC.md is the reference. |
 | [`design-retry-cap-notification.md`](design-retry-cap-notification.md) | Design rationale for retry-cap exhaustion and intermediate retry-attempt notifications. |
+| [`qa-gate-design.md`](docs/qa-gate-design.md) | Full QA gate design specification — how the auto-merge gate validates the QA signal, edge cases, and the `skip-qa` label bypass. |
+| [`ci-plugin-lifecycle.md`](docs/ci-plugin-lifecycle.md) | CI integration patterns and plugin lifecycle hooks for pipeline automation. |
+| [`e2e-smoke-test.md`](docs/e2e-smoke-test.md) | End-to-end smoke testing procedures and regression test suites. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute: branch naming, commit conventions, PR process, code review. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes and notable changes per version. |
 
