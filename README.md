@@ -37,15 +37,13 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA Agent\nRuns test suite · coverage\nProduces qa-passed or qa-failed"]
-    Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
-    QA --> QAGate{{"🧪 QA GATE\nqa-passed? or skip-qa label?"}}
-    QAGate -->|"qa-passed"| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
-    QAGate -->|"qa-passed"| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
-    QAGate -->|"qa-passed"| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
-    QAGate -->|"qa-failed"| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
+    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
+    QA --> CI{CI}
+    CI -->|green & qa-passed| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    CI -->|green & qa-passed| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
+    CI -->|green & qa-passed| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
+    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3"]
     Fix --> Dev
-    CI -->|red| Fix
     Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
     Sec -->|cleared| Doc
     A11y -->|cleared| Doc
@@ -862,6 +860,28 @@ blocked card detected
                       post a comment to the card
                       leave it blocked for a human
                       no new fix cards are ever created beyond this cap
+```
+
+**Visual flow:**
+
+```mermaid
+flowchart TD
+    Scan["🔍 Scan blocked cards"] --> Classify{"classify_blocked()<br>core/iterate.py"}
+
+    Classify -->|"dev card<br>+ CI green<br>+ review-required"| AdvanceDev["advance()<br>_create_downstream_review_tasks()<br>creates qa-{n} parented by reviewer,<br>security-analyst, docs"]
+    Classify -->|"dev card<br>+ CI red"| DevFixCI["dev_fix_ci()<br>idempotent fix card<br>key: fix-ci-{id}-attempt-{N}"]
+    Classify -->|"reviewer/sec<br>+ changes requested"| PMRoute["pm_route()<br>PM reads findings<br>assigns fix owner"]
+    Classify -->|"reviewer/sec<br>+ approved"| ApproveAdv["approve_advance()<br>complete card<br>next stage starts"]
+    Classify -->|"attempt > 3"| Escalate["escalate()<br>post comment<br>leave blocked for human"]
+
+    AdvanceDev --> Done1["✅ Card unblocked"]
+    DevFixCI --> Done2["✅ Card unblocked"]
+    PMRoute --> Done3["✅ Card unblocked"]
+    ApproveAdv --> Done4["✅ Card unblocked"]
+    Escalate --> Done5["🛑 Card blocked<br>(human required)"]
+
+    style Escalate fill:#C62828,color:#fff,stroke:#B71C1C
+    style Done5 fill:#C62828,color:#fff,stroke:#B71C1C
 ```
 
 **Idempotency.** Fix cards are keyed `fix-ci-{card_id}-attempt-N` and
