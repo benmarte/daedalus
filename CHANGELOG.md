@@ -1,3 +1,5 @@
+## [bug: _create_downstream_review_tasks fallback bypasses QA gate by parenting all review roles to dev card](https://github.com/benmarte/daedalus/issues/955) — [PR #985](https://github.com/benmarte/daedalus/pull/985)
+
 ## [bug: kanban pipeline cards orphaned when issue reaches Done on board before pipeline completes](https://github.com/benmarte/daedalus/issues/957) — [PR #984](https://github.com/benmarte/daedalus/pull/984)
 
 ## [bug: kanban pipeline cards orphaned when issue reaches Done on board before pipeline completes](https://github.com/benmarte/daedalus/issues/957) — [PR #984](https://github.com/benmarte/daedalus/pull/984)
