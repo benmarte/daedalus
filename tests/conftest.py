@@ -409,6 +409,10 @@ class FakeProvider:
         self.labels.setdefault(issue_number, []).append(label)
         return True
 
+    def has_label(self, issue_number: int, label_name: str) -> bool:
+        """Return True if ``label_name`` is present for ``issue_number`` (#998)."""
+        return label_name in self.labels.get(issue_number, [])
+
     def get_issue_comments(self, issue_number: int) -> List[Dict[str, str]]:
         """Return comments previously posted to *issue_number* via this provider.
 

@@ -1,149 +1,286 @@
-"""Tests for QA gate logic in auto-merge monitor (issue #998).
+"""Tests for QA pass gate before auto-merge (fix/qa-passed-signal).
 
-Verifies that the auto-merge monitor evaluates the 'qa-passed' signal before
-proceeding. If QA has failed or the signal is missing, the monitor aborts the
-auto-merge sequence.
+Verifies that the iterate loop blocks auto-merge of a PR when the QA card
+for that issue has not produced a 'qa-passed' signal.
 """
+import pytest
+from unittest.mock import patch, MagicMock
 
-from __future__ import annotations
-
-import unittest
-from unittest.mock import MagicMock, patch
-
-from core.iterate import _qa_passed_for_issue
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-class TestQAGateAutoMerge(unittest.TestCase):
-    """Test QA gate logic in auto-merge monitor."""
+class TestQAPassedForIssue:
+    """Test the _qa_passed_for_issue helper function."""
 
-    @patch('core.iterate.kanban.list_tasks')
     @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_positive(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns True when QA has passed."""
-        # Setup: QA card exists and has 'qa-passed' in summary
+    @patch('core.iterate.kanban.list_tasks')
+    def test_qa_passed_for_issue_positive(self, mock_list_tasks, mock_show_card):
+        """_qa_passed_for_issue returns True when QA card summary contains 'qa-passed'."""
+        from core.iterate import _qa_passed_for_issue
+
+        # QA card exists with qa-passed signal
         mock_list_tasks.return_value = [
-            {'id': 'qa-123', 'idempotency_key': 'qa-42'}
+            {
+                'id': 'qa-card-1',
+                'title': 'QA: Issue #42',
+                'assignee': 'qa-daedalus',
+                'status': 'blocked',
+                'reason': 'qa-passed: PR #42',
+                'latest_summary': 'qa-passed: PR #42',
+                'body': '',
+                'idempotency_key': 'qa-42'
+            }
         ]
+
         mock_show_card.return_value = {
-            'latest_summary': 'All tests executed. qa-passed signal confirmed.'
+            'id': 'qa-card-1',
+            'latest_summary': 'qa-passed: PR #42'
         }
 
         result = _qa_passed_for_issue('test-board', 42)
-
-        self.assertTrue(result, "Should return True when QA has passed")
+        assert result is True, "Should return True when QA card contains 'qa-passed'"
         mock_list_tasks.assert_called_once_with('test-board')
-        mock_show_card.assert_called_once_with('test-board', 'qa-123')
+        mock_show_card.assert_called_once_with('test-board', 'qa-card-1')
 
-    @patch('core.iterate.kanban.list_tasks')
     @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_negative_failed(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns False when QA has failed."""
-        # Setup: QA card exists but has 'qa-failed' in summary
+    @patch('core.iterate.kanban.list_tasks')
+    def test_qa_passed_for_issue_negative_failed(self, mock_list_tasks, mock_show_card):
+        """_qa_passed_for_issue returns False when QA card summary contains 'qa-failed'."""
+        from core.iterate import _qa_passed_for_issue
+
+        # QA card exists with qa-failed signal
         mock_list_tasks.return_value = [
-            {'id': 'qa-123', 'idempotency_key': 'qa-42'}
+            {
+                'id': 'qa-card-1',
+                'title': 'QA: Issue #42',
+                'assignee': 'qa-daedalus',
+                'status': 'blocked',
+                'reason': 'qa-failed: tests broken',
+                'latest_summary': 'qa-failed: tests broken',
+                'body': '',
+                'idempotency_key': 'qa-42'
+            }
         ]
+
         mock_show_card.return_value = {
-            'latest_summary': 'QA process completed. qa-failed: tests broken.'
+            'id': 'qa-card-1',
+            'latest_summary': 'qa-failed: tests broken'
         }
 
         result = _qa_passed_for_issue('test-board', 42)
-
-        self.assertFalse(result, "Should return False when QA has failed")
-
-    @patch('core.iterate.kanban.list_tasks')
-    @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_negative_missing(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns False when QA signal is missing."""
-        # Setup: QA card exists but summary has no qa-passed signal
-        mock_list_tasks.return_value = [
-            {'id': 'qa-123', 'idempotency_key': 'qa-42'}
-        ]
-        mock_show_card.return_value = {
-            'latest_summary': 'QA process still running.'
-        }
-
-        result = _qa_passed_for_issue('test-board', 42)
-
-        self.assertFalse(result, "Should return False when QA signal is missing")
+        assert result is False, "Should return False when QA card contains 'qa-failed'"
 
     @patch('core.iterate.kanban.list_tasks')
-    @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_no_qa_card(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns False when no QA card exists."""
-        # Setup: No QA card on the board
+    def test_qa_passed_for_issue_no_qa_card(self, mock_list_tasks):
+        """_qa_passed_for_issue returns False when no QA card exists for issue."""
+        from core.iterate import _qa_passed_for_issue
+
+        # No QA card for this issue
         mock_list_tasks.return_value = []
 
         result = _qa_passed_for_issue('test-board', 42)
+        assert result is False, "Should return False when no QA card exists"
 
-        self.assertFalse(result, "Should return False when no QA card exists")
-        mock_show_card.assert_not_called()
-
-    @patch('core.iterate.kanban.list_tasks')
     @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_wrong_issue(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns False when QA card is for different issue."""
-        # Setup: QA card exists but for a different issue
+    @patch('core.iterate.kanban.list_tasks')
+    def test_qa_passed_for_issue_no_summary(self, mock_list_tasks, mock_show_card):
+        """_qa_passed_for_issue returns False when QA card has no summary."""
+        from core.iterate import _qa_passed_for_issue
+
+        # QA card exists but no summary
         mock_list_tasks.return_value = [
-            {'id': 'qa-123', 'idempotency_key': 'qa-99'}
+            {
+                'id': 'qa-card-1',
+                'title': 'QA: Issue #42',
+                'assignee': 'qa-daedalus',
+                'status': 'blocked',
+                'reason': '',
+                'latest_summary': '',
+                'body': '',
+                'idempotency_key': 'qa-42'
+            }
         ]
 
-        result = _qa_passed_for_issue('test-board', 42)
-
-        self.assertFalse(result, "Should return False when QA card is for different issue")
-        mock_show_card.assert_not_called()
-
-    @patch('core.iterate.kanban.list_tasks')
-    @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_card_details_unavailable(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns False when card details cannot be fetched."""
-        # Setup: QA card exists but show_card returns None
-        mock_list_tasks.return_value = [
-            {'id': 'qa-123', 'idempotency_key': 'qa-42'}
-        ]
-        mock_show_card.return_value = None
-
-        result = _qa_passed_for_issue('test-board', 42)
-
-        self.assertFalse(result, "Should return False when card details are unavailable")
-
-    @patch('core.iterate.kanban.list_tasks')
-    def test_qa_passed_for_issue_no_issue_number(self, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns False when issue number is None."""
-        result = _qa_passed_for_issue('test-board', None)
-
-        self.assertFalse(result, "Should return False when issue number is None")
-        mock_list_tasks.assert_not_called()
-
-    @patch('core.iterate.kanban.list_tasks')
-    @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_empty_summary(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue returns False when summary is empty."""
-        # Setup: QA card exists but summary is empty
-        mock_list_tasks.return_value = [
-            {'id': 'qa-123', 'idempotency_key': 'qa-42'}
-        ]
-        mock_show_card.return_value = {'latest_summary': ''}
-
-        result = _qa_passed_for_issue('test-board', 42)
-
-        self.assertFalse(result, "Should return False when summary is empty")
-
-    @patch('core.iterate.kanban.list_tasks')
-    @patch('core.iterate.kanban.show_card')
-    def test_qa_passed_for_issue_case_insensitive(self, mock_show_card, mock_list_tasks):
-        """Test that _qa_passed_for_issue is case-insensitive."""
-        # Setup: QA card has 'QA-PASSED' in uppercase
-        mock_list_tasks.return_value = [
-            {'id': 'qa-123', 'idempotency_key': 'qa-42'}
-        ]
         mock_show_card.return_value = {
-            'latest_summary': 'QA-PASSED: All checks successful.'
+            'id': 'qa-card-1',
+            'latest_summary': ''
         }
 
         result = _qa_passed_for_issue('test-board', 42)
+        assert result is False, "Should return False when QA card has no summary"
 
-        self.assertTrue(result, "Should be case-insensitive")
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.list_tasks')
+    def test_qa_passed_for_issue_case_insensitive(self, mock_list_tasks, mock_show_card):
+        """_qa_passed_for_issue is case-insensitive."""
+        from core.iterate import _qa_passed_for_issue
+
+        # QA card with uppercase QA-PASSED
+        mock_list_tasks.return_value = [
+            {
+                'id': 'qa-card-1',
+                'title': 'QA: Issue #42',
+                'assignee': 'qa-daedalus',
+                'status': 'blocked',
+                'reason': 'QA-PASSED: PR #42',
+                'latest_summary': 'QA-PASSED: PR #42',
+                'body': '',
+                'idempotency_key': 'qa-42'
+            }
+        ]
+
+        mock_show_card.return_value = {
+            'id': 'qa-card-1',
+            'latest_summary': 'QA-PASSED: PR #42'
+        }
+
+        result = _qa_passed_for_issue('test-board', 42)
+        assert result is True, "Should be case-insensitive"
+
+    def test_qa_passed_for_issue_none_issue_number(self):
+        """_qa_passed_for_issue returns False when issue_number is None."""
+        from core.iterate import _qa_passed_for_issue
+
+        result = _qa_passed_for_issue('test-board', None)
+        assert result is False, "Should return False when issue_number is None"
+
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.list_tasks')
+    def test_qa_passed_for_issue_wrong_issue(self, mock_list_tasks, mock_show_card):
+        """_qa_passed_for_issue returns False when QA card is for different issue."""
+        from core.iterate import _qa_passed_for_issue
+
+        # QA card exists but for issue #99 instead of #42
+        mock_list_tasks.return_value = [
+            {
+                'id': 'qa-card-1',
+                'title': 'QA: Issue #99',
+                'assignee': 'qa-daedalus',
+                'status': 'blocked',
+                'reason': 'qa-passed: PR #99',
+                'latest_summary': 'qa-passed: PR #99',
+                'body': '',
+                'idempotency_key': 'qa-99'
+            }
+        ]
+
+        result = _qa_passed_for_issue('test-board', 42)
+        assert result is False, "Should return False when QA card is for different issue"
+        # show_card should not be called since we didn't find the right QA card
+        mock_show_card.assert_not_called()
+
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.list_tasks')
+    def test_qa_passed_for_issue_card_details_none(self, mock_list_tasks, mock_show_card):
+        """_qa_passed_for_issue returns False when show_card returns None."""
+        from core.iterate import _qa_passed_for_issue
+
+        mock_list_tasks.return_value = [
+            {
+                'id': 'qa-card-1',
+                'title': 'QA: Issue #42',
+                'assignee': 'qa-daedalus',
+                'status': 'blocked',
+                'reason': 'qa-passed: PR #42',
+                'latest_summary': 'qa-passed: PR #42',
+                'body': '',
+                'idempotency_key': 'qa-42'
+            }
+        ]
+
+        # show_card returns None
+        mock_show_card.return_value = None
+
+        result = _qa_passed_for_issue('test-board', 42)
+        assert result is False, "Should return False when show_card returns None"
 
 
-if __name__ == '__main__':
-    unittest.main()
+class TestAutoMergeQAGateIntegration:
+    """Test that auto-merge gates on QA pass signal in run_iterate."""
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_blocked_when_qa_not_passed(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """Auto-merge should NOT proceed when QA has not passed."""
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        # Setup: docs card for PR #42
+        docs_card = {
+            'id': 'docs-card-1',
+            'title': 'Documentation: Issue #42',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'reason': 'review-required: PR #42',
+            'latest_summary': 'review-required: PR #42',
+            'body': 'Issue #42\nPR #42',
+            'idempotency_key': 'docs-42'
+        }
+        
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+
+        # QA has NOT passed
+        mock_qa_passed.return_value = False
+
+        provider = FakeProvider(ci_status='green', open_prs={42})
+        # PR is resolved via handoff "PR #42" — no branch fallback needed
+
+        result = run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider
+        )
+
+        # Should NOT have called merge_pr
+        assert len(provider.merged) == 0, "Auto-merge should not be called when QA has not passed"
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_allowed_when_qa_passed(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """Auto-merge SHOULD proceed when QA has passed."""
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        # Setup: docs card for PR #42
+        docs_card = {
+            'id': 'docs-card-1',
+            'title': 'Documentation: Issue #42',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'reason': 'docs posted: PR #42',
+            'latest_summary': 'docs posted: PR #42',
+            'body': 'Issue #42\nPR #42',
+            'idempotency_key': 'docs-42'
+        }
+
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+
+        # QA HAS passed
+        mock_qa_passed.return_value = True
+
+        provider = FakeProvider(ci_status='green', open_prs={42})
+
+        result = run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider
+        )
+
+        # Should have called merge_pr
+        assert len(provider.merged) > 0, "Auto-merge should be called when QA has passed"

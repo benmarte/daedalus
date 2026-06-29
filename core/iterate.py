@@ -180,6 +180,7 @@ def classify_blocked(
     raw_ci: Optional[str] = None,
     pr_is_open: Optional[bool] = None,
     pr_is_merged: Optional[bool] = None,
+    skip_qa: bool = False,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -209,6 +210,9 @@ def classify_blocked(
                 pipeline cards — instead of looping forever in PENDING_PR.
                 Checked before the ``pr_is_open is False`` gate because a merged
                 PR is also "not open" but means the opposite (done, not phantom).
+        skip_qa: When True, the QA card bypasses the ``qa-passed`` signal
+                 requirement and advances immediately (used when the PR has
+                 the ``skip-qa`` label applied).
 
     Returns one of: {advance, dev_fix_ci, pending_ci, pm_route, approve_advance,
     escalate, reconcile_merged}.
@@ -311,6 +315,9 @@ def classify_blocked(
     # or something unspecified (still running / unclear). CI is not a gate for
     # QA — the dispatcher acts on the signal directly.
     if assignee == "qa-daedalus":
+        # Bypass QA signal requirement when skip-qa label is present
+        if skip_qa:
+            return ADVANCE
         summary = (handoff_text or "").lower()
         if "qa-passed" in summary:
             return ADVANCE
@@ -478,6 +485,58 @@ def _handoff_from_card(card: dict) -> str:
             return reason
     # Fallback: check card-level reason
     return (card.get("reason") or "").strip()
+
+
+def _qa_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
+    """Check if QA has passed for an issue by examining kanban cards for QA signal.
+
+    Looks for a QA card for this issue (idempotency_key 'qa-{issue_number}')
+    and checks if its latest_summary contains 'qa-passed' (case-insensitive).
+
+    Args:
+        slug: The kanban board slug
+        issue_number: The issue number to check
+
+    Returns:
+        True if QA passed for this issue, False otherwise
+    """
+    if issue_number is None:
+        return False
+
+    expected_idempotency_key = f"qa-{issue_number}"
+
+    try:
+        tasks = kanban.list_tasks(slug)
+    except Exception as e:
+        logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
+        return False
+
+    qa_card = None
+    for task in tasks or []:
+        if task.get("idempotency_key") == expected_idempotency_key:
+            qa_card = task
+            break
+
+    if not qa_card:
+        logger.debug("iterate: no QA card found for issue #%s", issue_number)
+        return False
+
+    try:
+        card_details = kanban.show_card(slug, qa_card["id"])
+    except Exception as e:
+        logger.error("iterate: failed to get QA card %s: %s", qa_card["id"], e)
+        return False
+
+    if not card_details:
+        logger.error("iterate: QA card %s not found", qa_card["id"])
+        return False
+
+    latest_summary = card_details.get("latest_summary", "")
+    if not latest_summary:
+        logger.debug("iterate: QA card %s has no latest_summary", qa_card["id"])
+        return False
+
+    return "qa-passed" in latest_summary.lower()
 
 
 # ── action executors ────────────────────────────────────────────────────────
@@ -2096,10 +2155,16 @@ def run_iterate(
                 except Exception:
                     pr_is_merged = None
 
+        # Detect skip-qa label on PR (bypass QA gate)
+        skip_qa = False
+        if pr is not None and provider is not None:
+            skip_qa = bool(provider.has_label(pr, "skip-qa"))
+
         action = classify_blocked(assignee, handoff, ci_green,
                                   fix_attempts=fix_attempts, pr_number=pr,
                                   raw_ci=raw_ci, pr_is_open=pr_is_open,
-                                  pr_is_merged=pr_is_merged)
+                                  pr_is_merged=pr_is_merged,
+                                  skip_qa=skip_qa)
 
         # ── Escalation dedup (issue #35) ─────────────────────────────────
         # Before executing ESCALATE, check two layers of dedup:
@@ -2189,6 +2254,16 @@ def run_iterate(
                     and pr is not None
                     and provider is not None
                 ):
+                    # Check QA gate before merging
+                    issue_n = _extract_issue_number_from_card(card)
+                    if not _qa_passed_for_issue(slug, issue_n):
+                        logger.warning(
+                            "iterate: Skipping merge: QA has not passed for PR #%s (issue #%s). "
+                            "Wait for QA card to report 'qa-passed'.",
+                            pr, issue_n
+                        )
+                        continue
+
                     if dry_run:
                         logger.info(
                             "[dry-run] auto_merge=true: would merge PR #%s (%s)", pr, merge_method)
