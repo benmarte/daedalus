@@ -444,6 +444,24 @@ class VCSProvider(abc.ABC):
             return False
         return any(pr.number == pr_number for pr in self.list_prs(state="open"))
 
+    def is_pr_merged(self, pr_number: int) -> bool:
+        """True iff ``pr_number`` is a merged PR (#957).
+
+        Companion to ``is_pr_open``: a merged PR is also "not open", but it
+        means the developer's work has *landed* — the opposite of a phantom /
+        never-opened "PR #N" string. The dispatcher uses this to reconcile a
+        developer card (and its sibling pipeline cards) when a human merges the
+        review-required PR directly, instead of holding it forever in
+        PENDING_PR. Scans all PRs so any provider implementing ``list_prs``
+        gets it for free.
+        """
+        if not pr_number:
+            return False
+        return any(
+            pr.number == pr_number and pr.state == "merged"
+            for pr in self.list_prs(state="all")
+        )
+
     def _pr_for_issue(self, issue_number: int) -> Optional[PRSummary]:
         """Best PR referencing an issue — prefers merged over open."""
         open_pr: Optional[PRSummary] = None

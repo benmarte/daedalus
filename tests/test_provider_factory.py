@@ -69,6 +69,34 @@ def test_register_custom_provider():
         providers.PROVIDER_REGISTRY.pop("jira", None)
 
 
+def test_is_pr_merged_default_scans_list_prs():
+    """#957: base VCSProvider.is_pr_merged returns True only for a merged PR."""
+    from core.providers.base import PRSummary
+
+    class FakeMerge(VCSProvider):
+        name = "fakemerge"
+
+        def list_issues(self, state="open", labels=None, limit=50):
+            return []
+
+        def close_issue(self, issue_number):
+            return True
+
+        def list_prs(self, state="all", limit=50):
+            return [
+                PRSummary(number=10, state="open"),
+                PRSummary(number=20, state="merged"),
+                PRSummary(number=30, state="closed"),
+            ]
+
+    p = FakeMerge({})
+    assert p.is_pr_merged(20) is True       # merged
+    assert p.is_pr_merged(10) is False      # open, not merged
+    assert p.is_pr_merged(30) is False      # closed (not merged)
+    assert p.is_pr_merged(99) is False      # unknown PR
+    assert p.is_pr_merged(0) is False       # falsy guard
+
+
 def test_resolve_token_order():
     cfg = {"vcs": {"token_env": "MY_CUSTOM_TOKEN"}}
     with mock.patch.dict("os.environ",

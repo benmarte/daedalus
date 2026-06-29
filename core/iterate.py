@@ -36,6 +36,7 @@ PM_ROUTE = "pm_route"         # reviewer flagged changes → create PM routing c
 APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
 ESCALATE = "escalate"         # max iterations exceeded → log + notify
 PLANNER_DECOMPOSE = "planner_decompose"  # planner completed → create sub-issues
+RECONCILE_MERGED = "reconcile_merged"  # dev card whose PR merged outside the pipeline → close issue cards
 
 
 # Maximum fix attempts per PR before escalation
@@ -178,6 +179,7 @@ def classify_blocked(
     pr_number: Optional[int] = None,
     raw_ci: Optional[str] = None,
     pr_is_open: Optional[bool] = None,
+    pr_is_merged: Optional[bool] = None,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -200,8 +202,16 @@ def classify_blocked(
                 reports no open PR, so a developer card is held in PENDING_PR
                 instead of advancing — this prevents releasing the QA child
                 against a phantom/stale PR or a concurrent mid-edit tree.
+        pr_is_merged: Whether the resolved PR was *merged* per the provider
+                (#957). ``True`` means the developer's work landed (e.g. a human
+                merged the review-required PR directly, bypassing the pipeline),
+                so a developer card reconciles — completing it and its sibling
+                pipeline cards — instead of looping forever in PENDING_PR.
+                Checked before the ``pr_is_open is False`` gate because a merged
+                PR is also "not open" but means the opposite (done, not phantom).
 
-    Returns one of: {advance, dev_fix_ci, pending_ci, pm_route, approve_advance, escalate}.
+    Returns one of: {advance, dev_fix_ci, pending_ci, pm_route, approve_advance,
+    escalate, reconcile_merged}.
     """
     assignee = (card_assignee or "").lower().strip()
     handoff = _parse_handoff(handoff_text)
@@ -237,6 +247,16 @@ def classify_blocked(
             return ESCALATE
         # Review-required handoff with PR → check CI state
         if handoff["is_review_required"] and effective_pr:
+            # #957: the resolved PR was merged outside the pipeline (a human
+            # merged the review-required PR directly). The board may already
+            # show the issue as Done, so neither the board-sync nor the
+            # orphaned-close cleanup reaches this card — it would loop forever
+            # in PENDING_PR. The work has landed, so reconcile: complete this
+            # card and any sibling pipeline cards. Checked before the #953
+            # not-open gate below because a merged PR is also "not open" but
+            # means done, not phantom.
+            if pr_is_merged is True:
+                return RECONCILE_MERGED
             # #953 hard gate: never advance (which completes the dev card and
             # releases its QA child) when the provider affirmatively reports
             # the resolved PR is NOT open. The handoff's "PR #N" is just a
@@ -518,6 +538,54 @@ def _execute_advance(
             "iterate: advanced %s but could not extract issue number — "
             "skipping downstream review task creation", tid,
         )
+    return True
+
+
+def _execute_reconcile_merged(
+    slug: str,
+    card: dict,
+    repo: str,
+    handoff_text: str,
+    *,
+    dry_run: bool = False,
+    pr_number: Optional[int] = None,
+    **_kwargs: Any,
+) -> bool:
+    """Reconcile a developer card whose PR merged outside the pipeline (#957).
+
+    When a human merges the review-required PR directly, the issue may already
+    be Done on the board. Neither the board-sync nor the orphaned-close cleanup
+    reaches the card then — the latter deliberately skips issues with active
+    kanban tasks (the blocked dev card counts as active) to avoid clobbering an
+    accidental close. The dev card would otherwise loop forever in PENDING_PR.
+
+    The merged PR is the work landing, so there is nothing left to QA/review:
+    complete this card *and* all sibling pipeline cards for the issue so the
+    board reaches a terminal state. Reuses ``kanban.close_issue_tasks`` (the
+    same helper the dispatcher uses for externally-closed issues).
+    """
+    tid = (card.get("id") or "")
+    if not tid:
+        return False
+    pr = pr_number or _parse_pr_number(handoff_text)
+    issue_number = _extract_issue_number_from_card(card)
+    summary = f"skipped: PR #{pr} merged outside pipeline"
+    if dry_run:
+        logger.info(
+            "[dry-run] would reconcile %s (PR #%s merged) and close issue #%s pipeline cards",
+            tid, pr, issue_number)
+        return True
+    if issue_number is not None:
+        closed = kanban.close_issue_tasks(slug, issue_number, summary=summary)
+        logger.info(
+            "iterate: reconciled merged PR #%s for issue #%s — closed %d card(s): %s",
+            pr, issue_number, len(closed), closed)
+        return True
+    # No issue number on the card → at least complete this card so it doesn't
+    # loop in PENDING_PR forever.
+    if not kanban.complete(slug, tid, summary=summary):
+        return False
+    logger.info("iterate: reconciled merged PR #%s — completed %s (no issue number)", pr, tid)
     return True
 
 
@@ -1846,6 +1914,7 @@ _ACTION_EXECUTORS = {
     APPROVE_ADVANCE: _execute_approve_advance,
     ESCALATE: _execute_escalate,
     PLANNER_DECOMPOSE: _execute_planner_decompose,
+    RECONCILE_MERGED: _execute_reconcile_merged,
 }
 
 
@@ -1889,6 +1958,7 @@ def run_iterate(
         APPROVE_ADVANCE: 0,
         ESCALATE: 0,
         PLANNER_DECOMPOSE: 0,
+        RECONCILE_MERGED: 0,
     }
     advance_prs: List[int] = []  # PR numbers for cards that were advanced
     pending_ci_cards: List[Dict[str, Any]] = []  # Cards skipped due to PENDING CI
@@ -1961,6 +2031,7 @@ def run_iterate(
         # calls. Unverifiable (provider lacks the capability or errors) stays
         # None → prior behaviour; only an affirmative "not open" blocks advance.
         pr_is_open: Optional[bool] = None
+        pr_is_merged: Optional[bool] = None
         if (pr is not None and provider is not None
                 and assignee.lower().strip() == "developer-daedalus"
                 and hasattr(provider, "is_pr_open")):
@@ -1968,10 +2039,20 @@ def run_iterate(
                 pr_is_open = bool(provider.is_pr_open(pr))
             except Exception:
                 pr_is_open = None
+            # #957: only when the PR is not open is "merged" interesting — a
+            # merged PR means the work landed; reconcile the issue's cards
+            # instead of holding in PENDING_PR. Skip the extra provider call
+            # when the PR is open or its state is unverifiable.
+            if pr_is_open is False and hasattr(provider, "is_pr_merged"):
+                try:
+                    pr_is_merged = bool(provider.is_pr_merged(pr))
+                except Exception:
+                    pr_is_merged = None
 
         action = classify_blocked(assignee, handoff, ci_green,
                                   fix_attempts=fix_attempts, pr_number=pr,
-                                  raw_ci=raw_ci, pr_is_open=pr_is_open)
+                                  raw_ci=raw_ci, pr_is_open=pr_is_open,
+                                  pr_is_merged=pr_is_merged)
 
         # ── Escalation dedup (issue #35) ─────────────────────────────────
         # Before executing ESCALATE, check two layers of dedup:
