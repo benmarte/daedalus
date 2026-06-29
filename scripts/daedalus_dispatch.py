@@ -2854,7 +2854,11 @@ def _check_confirmed_validators(
                 if _validator_summary_burns_cap(_get_task_summary(t, slug))
             )
             max_validator_retries = _resolve_max_validator_retries((resolved or {}).get("execution") or {})
-            if cap_count >= max_validator_retries + 1:
+            # Hard ceiling: if total run count exceeds 3× the cap, stop even if every
+            # run produced an empty summary (e.g. closed issue, always-crashing agent).
+            # Without this, cap_count stays 0 forever and the loop is infinite (#958).
+            absolute_max = max(max_validator_retries * 3, max_validator_retries + 3)
+            if cap_count >= max_validator_retries + 1 or retry_count >= absolute_max:
                 logger.error(
                     "dispatch: validator for #%s has %d runs (cap %d) with no CONFIRMED — "
                     "manual intervention required",
