@@ -13,6 +13,8 @@ unavailability and assert:
 
 Tests sit alongside existing planner unit tests in ``tests/``.
 """
+from __future__ import annotations
+
 import sys
 import os
 import tempfile

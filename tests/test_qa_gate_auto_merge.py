@@ -230,8 +230,8 @@ class TestAutoMergeQAGateIntegration:
         # QA has NOT passed
         mock_qa_passed.return_value = False
 
-        provider = FakeProvider()
-        provider._ci = 'green'
+        # Configure FakeProvider properly (it's a test double, not a mock)
+        provider = FakeProvider(ci_status='green')
 
         result = run_iterate(
             'test-board',
@@ -273,9 +273,8 @@ class TestAutoMergeQAGateIntegration:
         # QA HAS passed
         mock_qa_passed.return_value = True
 
-        provider = FakeProvider()
-        provider._ci = 'green'
-        provider._open_prs = {42}
+        # Configure FakeProvider properly (it's a test double, not a mock)
+        provider = FakeProvider(ci_status='green', open_prs={42})
 
         result = run_iterate(
             'test-board',
