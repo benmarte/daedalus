@@ -2104,24 +2104,31 @@ def _execute_planner_decompose_inner(
         logger.info("[dry-run] planner_decompose #%s: would create %d sub-issues: %s",
                     parent_n, len(sub_titles), sub_titles)
         return True
+
+    # Compute blocking edges from file overlap analysis
+    blocking_edges = build_blocking_edges(
+        detect_file_overlap(per_sub_contexts),
+        total_tasks=len(per_sub_contexts),
+    )
+
     inherit_labels = [l for l in parent_labels if l and l.lower() != "epic"]
     created_numbers: List[int] = []
     ready_numbers: List[int] = []
     for idx, (title, scope) in enumerate(zip(sub_titles, sub_scopes)):
         sub_ctx = per_sub_contexts[idx] if idx < len(per_sub_contexts) else EpicContext()
-        # Determine depends_on via file/keyword overlap: only chain against prior
-        # sub-issues that touch the same files or share enough vocabulary.
-        # Tasks with no overlapping predecessors run in parallel (depends_on=[]).
-        # The body carries only the concise checklist-derived scope plus the
-        # affected files/symbols metadata — NOT raw source contents (issue #899).
-        overlapping_prior_numbers = _compute_sub_issue_dependencies(
-            per_sub_contexts, idx, created_numbers
+        # Compute dependencies based on file overlap with previous sub-issues
+        dependencies = _compute_sub_issue_dependencies(
+            per_sub_contexts,
+            index=idx,
+            created_numbers=created_numbers,
         )
+        # The body carries only the concise checklist-derived scope plus the
+        # affected files/symbols metadata and dependencies — NOT raw source contents (issue #899).
         sub_body = _sub_issue_body(
             parent_n,
             parent_title,
             scope,
-            overlapping_prior_numbers,
+            dependencies,
             file_paths=sub_ctx.file_paths,
             identifiers=sub_ctx.identifiers,
         )
@@ -2130,10 +2137,7 @@ def _execute_planner_decompose_inner(
         if sub_n is not None:
             created_numbers.append(sub_n)
             logger.info("iterate: planner_decompose — created sub-issue #%s: %s", sub_n, title)
-            
-            # Check if this sub-issue has any dependencies
-            dependencies = parse_depends_on(sub_body)
-            
+
             if not dependencies:
                 # No dependencies = immediately actionable, apply Ready label + enroll on board
                 provider.add_label(sub_n, "Ready")
