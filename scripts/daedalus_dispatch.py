@@ -2664,6 +2664,30 @@ def _check_confirmed_validators(
     p = profiles or _DEFAULT_PROFILES
     rs = role_skills or {}
     triggered: List[int] = []
+    # Per-tick memo caches keyed by issue number. A single issue with many done
+    # validator tasks (e.g. 13 retry rounds from a runaway loop) otherwise re-fetched
+    # the same issue + comments once per *task*, burning O(tasks) API calls and
+    # exhausting rate limits before the dispatcher reached Ready issues (#961).
+    # Both calls depend only on the issue number, so memoizing collapses them to
+    # O(unique issues) with no behavior change. The cache lives for one function
+    # call, so cross-tick freshness is unchanged.
+    _issue_fetch_cache: Dict[int, Any] = {}
+    _gh_outcome_cache: Dict[int, str] = {}
+
+    def _fetch_issue_cached(num: int):
+        if num not in _issue_fetch_cache:
+            _issue_fetch_cache[num] = (
+                _fetch_issue_with_retry(provider, num) if provider is not None else None
+            )
+        return _issue_fetch_cache[num]
+
+    def _gh_outcome_cached(num: int) -> str:
+        if num not in _gh_outcome_cache:
+            _gh_outcome_cache[num] = _validator_github_comment_outcome(
+                provider, num, p["validator"]
+            )
+        return _gh_outcome_cache[num]
+
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p["validator"]:
             continue
@@ -2684,7 +2708,7 @@ def _check_confirmed_validators(
                 # Validator couldn't proceed with a blocking issue — PM consultation.
                 issue_nt = issues_map.get(n_nr)
                 if not issue_nt and provider is not None:
-                    fetched = _fetch_issue_with_retry(provider, n_nr)
+                    fetched = _fetch_issue_cached(n_nr)
                     if fetched:
                         issue_nt = fetched.as_dict()
                         logger.info(
@@ -2797,13 +2821,13 @@ def _check_confirmed_validators(
             # its GitHub comment is the only record of its decision.
             issue_nr = issues_map.get(n_nr)
             if not issue_nr and provider is not None:
-                fetched = _fetch_issue_with_retry(provider, n_nr)
+                fetched = _fetch_issue_cached(n_nr)
                 if fetched:
                     issue_nr = fetched.as_dict()
                     logger.info(
                         "dispatch: #%s not in issues_map (gh-comment) — fell back to get_issue()", n_nr
                     )
-            gh_outcome = _validator_github_comment_outcome(provider, n_nr, p["validator"])
+            gh_outcome = _gh_outcome_cached(n_nr)
             if gh_outcome == "confirmed" and issue_nr:
                 # GitHub comment confirms — advance to PM without another validator run.
                 logger.warning(
