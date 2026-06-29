@@ -432,6 +432,18 @@ class VCSProvider(abc.ABC):
                 return pr.number
         return None
 
+    def is_pr_open(self, pr_number: int) -> bool:
+        """True iff ``pr_number`` is a currently-open PR (#953).
+
+        Source of truth for the dispatcher's pre-QA gate: a developer card
+        must not advance (and release its QA child) on a "PR #N" string that
+        does not correspond to a real, open PR. Scans the open PR list so any
+        provider that implements ``list_prs`` gets it for free.
+        """
+        if not pr_number:
+            return False
+        return any(pr.number == pr_number for pr in self.list_prs(state="open"))
+
     def _pr_for_issue(self, issue_number: int) -> Optional[PRSummary]:
         """Best PR referencing an issue — prefers merged over open."""
         open_pr: Optional[PRSummary] = None

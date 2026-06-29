@@ -175,6 +175,7 @@ def classify_blocked(
     fix_attempts: int = 0,
     pr_number: Optional[int] = None,
     raw_ci: Optional[str] = None,
+    pr_is_open: Optional[bool] = None,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -191,6 +192,12 @@ def classify_blocked(
         raw_ci: The raw CIStatus string (e.g. 'pending', 'red', 'green',
                 'unknown'). When None (default), treated as 'unknown' for
                 backward compatibility.
+        pr_is_open: Whether the resolved PR is a *real, currently-open* PR per
+                the provider (#953). ``True`` / ``None`` (unverified) preserve
+                prior behaviour; ``False`` means the provider affirmatively
+                reports no open PR, so a developer card is held in PENDING_PR
+                instead of advancing — this prevents releasing the QA child
+                against a phantom/stale PR or a concurrent mid-edit tree.
 
     Returns one of: {advance, dev_fix_ci, pending_ci, pm_route, approve_advance, escalate}.
     """
@@ -228,6 +235,14 @@ def classify_blocked(
             return ESCALATE
         # Review-required handoff with PR → check CI state
         if handoff["is_review_required"] and effective_pr:
+            # #953 hard gate: never advance (which completes the dev card and
+            # releases its QA child) when the provider affirmatively reports
+            # the resolved PR is NOT open. The handoff's "PR #N" is just a
+            # string the agent typed — it may be stale, wrong, or never opened
+            # (the developer was still mid-edit). Hold in PENDING_PR; the
+            # pending-PR executor re-checks the VCS for a real PR next tick.
+            if pr_is_open is False:
+                return PENDING_PR
             if ci_green:
                 return ADVANCE
             # raw_ci is None (backward compat) or UNKNOWN → treat as RED (actionable)
@@ -1939,9 +1954,23 @@ def run_iterate(
             else:
                 ci_green = (raw_ci == CIStatus.GREEN)
 
+        # #953: verify the resolved PR is a real, open PR before a developer
+        # card can advance and release its QA child. Only checked for developer
+        # cards (the only branch that gates on it) to avoid extra provider
+        # calls. Unverifiable (provider lacks the capability or errors) stays
+        # None → prior behaviour; only an affirmative "not open" blocks advance.
+        pr_is_open: Optional[bool] = None
+        if (pr is not None and provider is not None
+                and assignee.lower().strip() == "developer-daedalus"
+                and hasattr(provider, "is_pr_open")):
+            try:
+                pr_is_open = bool(provider.is_pr_open(pr))
+            except Exception:
+                pr_is_open = None
+
         action = classify_blocked(assignee, handoff, ci_green,
                                   fix_attempts=fix_attempts, pr_number=pr,
-                                  raw_ci=raw_ci)
+                                  raw_ci=raw_ci, pr_is_open=pr_is_open)
 
         # ── Escalation dedup (issue #35) ─────────────────────────────────
         # Before executing ESCALATE, check two layers of dedup:

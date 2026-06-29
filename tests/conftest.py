@@ -313,6 +313,7 @@ class FakeProvider:
         branch_prs: Optional[Dict[str, int]] = None,
         supports_ci_status: bool = True,
         blockers: Optional[Dict[int, List[int]]] = None,
+        open_prs: Optional[set[int]] = None,
         get_issue_failures: int = 0,
         closed_issues: Optional[set[int]] = None,
         close_issue_fail_for: Optional[set[int]] = None,
@@ -324,6 +325,9 @@ class FakeProvider:
         self._branch_prs = branch_prs or {}
         self.supports_ci_status = supports_ci_status
         self._blockers = blockers or {}
+        # #953: set of open PR numbers for the pre-QA gate. None (default) means
+        # "assume any resolved PR is open" — preserves pre-#953 advance tests.
+        self._open_prs = open_prs
         # Number of leading get_issue calls that return None before serving the
         # issue — models a transient outage that recovers (issue #185).
         self._get_issue_failures = get_issue_failures
@@ -351,6 +355,13 @@ class FakeProvider:
 
     def find_pr_for_branch(self, branch: str) -> Optional[int]:
         return self._branch_prs.get(branch)
+
+    def is_pr_open(self, pr_number: int) -> bool:
+        # Default (no open_prs configured): treat every PR as open so existing
+        # advance tests are unaffected. When configured, membership decides.
+        if self._open_prs is None:
+            return True
+        return pr_number in self._open_prs
 
     def get_issue(self, issue_number: int) -> Any:
         self.get_issue_calls += 1
