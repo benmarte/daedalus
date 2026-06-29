@@ -309,6 +309,20 @@ class GitHubProvider(VCSProvider):
             self._log.info("merge_pr: merged PR #%s (%s)", pr_number, method)
             return True
         except ProviderError as e:
+            # GitHub returns 405/422 when the PR is already merged or cleanup
+            # fails after the merge (e.g. branch in a worktree). Verify actual
+            # state before reporting failure — if MERGED on GitHub, it's a win.
+            try:
+                pr_data = self._http.get_json(f"/repos/{self.repo}/pulls/{pr_number}")
+                if pr_data and pr_data.get("merged_at"):
+                    self._log.warning(
+                        "merge_pr PR #%s: API error (%s) but PR is already MERGED — "
+                        "treating as success",
+                        pr_number, e,
+                    )
+                    return True
+            except ProviderError:
+                pass
             self._log.warning("merge_pr PR #%s failed: %s", pr_number, e)
             return False
 
