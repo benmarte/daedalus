@@ -706,7 +706,7 @@ def test_developer_card_stays_blocked_with_pending_ci():
 
         provider = FakeProvider(ci_status="pending", open_prs={pr_n})
 
-        counts, advance_prs, pending_ci_cards = iterate.run_iterate(
+        counts, advance_prs, pending_ci_cards, _qa_f = iterate.run_iterate(
             SLUG, REPO, provider=provider
         )
 

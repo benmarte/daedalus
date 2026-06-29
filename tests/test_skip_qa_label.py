@@ -139,7 +139,7 @@ def test_auto_merge_allowed_with_skip_qa_label_no_qa_passed(
 
     mock_qa_passed.return_value = False  # QA has NOT passed
 
-    counts, advance_prs, _ = iterate.run_iterate(
+    counts, advance_prs, _, _qa_f = iterate.run_iterate(
         "test-board",
         "benmarte/daedalus",
         resolved={"execution": {"auto_merge": True}},
@@ -169,7 +169,7 @@ def test_auto_merge_blocked_without_skip_qa_label_when_qa_not_passed(
 
     mock_qa_passed.return_value = False  # QA has NOT passed
 
-    counts, advance_prs, _ = iterate.run_iterate(
+    counts, advance_prs, _, _qa_f = iterate.run_iterate(
         "test-board",
         "benmarte/daedalus",
         resolved={"execution": {"auto_merge": True}},
@@ -198,7 +198,7 @@ def test_auto_merge_allowed_with_qa_passed_no_skip_qa_label(
 
     mock_qa_passed.return_value = True  # QA HAS passed
 
-    counts, advance_prs, _ = iterate.run_iterate(
+    counts, advance_prs, _, _qa_f = iterate.run_iterate(
         "test-board",
         "benmarte/daedalus",
         resolved={"execution": {"auto_merge": True}},

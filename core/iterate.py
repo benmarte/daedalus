@@ -2229,13 +2229,16 @@ def run_iterate(
     resolved: Optional[Dict[str, Any]] = None,
     provider: Optional[Any] = None,
     dry_run: bool = False,
-) -> tuple[Dict[str, int], List[int], List[Dict[str, Any]]]:
+) -> tuple[Dict[str, int], List[int], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run the auto-advance routing and self-healing loop.
 
     For every blocked card on the board, classify its state and execute the
-    appropriate action. Returns (counts, advance_prs, pending_ci_cards) where
-    advance_prs lists PR numbers for cards that were successfully advanced,
-    and pending_ci_cards lists cards skipped because CI was still pending.
+    appropriate action. Returns (counts, advance_prs, pending_ci_cards,
+    qa_failed_cards) where advance_prs lists PR numbers for cards that were
+    successfully advanced, pending_ci_cards lists cards skipped because CI was
+    still pending, and qa_failed_cards lists dicts with {issue_n, pr, reason}
+    for QA cards that reported qa-failed (used by the dispatcher to send
+    notifications — closes #1002).
 
     Args:
         slug: Kanban board slug.
@@ -2247,8 +2250,7 @@ def run_iterate(
         dry_run: If True, log intentions without mutating anything.
 
     Returns:
-        (counts, advance_prs, pending_ci_cards) tuple — counts has action→int,
-        advance_prs has PR numbers, pending_ci_cards has card info for retry.
+        (counts, advance_prs, pending_ci_cards, qa_failed_cards) tuple.
     """
     counts: Dict[str, int] = {
         ADVANCE: 0,
@@ -2263,6 +2265,7 @@ def run_iterate(
     }
     advance_prs: List[int] = []  # PR numbers for cards that were advanced
     pending_ci_cards: List[Dict[str, Any]] = []  # Cards skipped due to PENDING CI
+    qa_failed_cards: List[Dict[str, Any]] = []  # QA cards that reported qa-failed
 
     workdir = (resolved or {}).get("workdir", "")
     notify_target = (resolved or {}).get("cron", {}).get("deliver", "")
@@ -2273,7 +2276,7 @@ def run_iterate(
 
     blocked_cards = kanban.list_blocked(slug)
     if not blocked_cards:
-        return counts, advance_prs, pending_ci_cards
+        return counts, advance_prs, pending_ci_cards, qa_failed_cards
 
     # Collect PR→CI cache so we don't call the provider for the same PR twice.
     # Stores the raw CIStatus string (not bool) so UNKNOWN/PENDING are distinguishable.
@@ -2432,6 +2435,16 @@ def run_iterate(
                 pr_number=pr,
                 provider=provider,
             )
+            # Track QA failures before executor: notification fires whenever
+            # qa-daedalus reports qa-failed, regardless of fix-card success.
+            if action == DEV_FIX_CI and assignee == "qa-daedalus":
+                issue_n = _extract_issue_number_from_card(card)
+                qa_failed_cards.append({
+                    "issue_n": issue_n,
+                    "pr": pr,
+                    "reason": handoff,
+                })
+
             if ok:
                 counts[action] += 1
                 # Track PR number for advance actions so the human summary can
@@ -2481,5 +2494,5 @@ def run_iterate(
         except Exception as e:
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
 
-    return counts, advance_prs, pending_ci_cards
+    return counts, advance_prs, pending_ci_cards, qa_failed_cards
 

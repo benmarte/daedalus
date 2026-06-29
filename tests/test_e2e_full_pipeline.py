@@ -70,7 +70,7 @@ def _advance_stage(iterate, kanban, provider, tid, handoff, action):
     """
     kanban.block_task(SLUG, tid, handoff)
     assert kanban.tasks[tid]["status"] == "blocked"
-    counts, advance_prs, _pending = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, advance_prs, _pending, _qa_f = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[action] == 1, f"expected exactly one {action}, got {counts}"
     assert kanban.tasks[tid]["status"] == "done"
     return counts, advance_prs

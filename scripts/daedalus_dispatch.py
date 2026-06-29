@@ -71,7 +71,7 @@ _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-S
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready",
                  "security-escalation", "comment-mirror", "retry-cap-exhausted",
-                 "retry-attempt", "validator-blocked")
+                 "retry-attempt", "validator-blocked", "qa-failed")
 
 # Priority label ordering — P0 dispatched before P1 before P2 before unlabeled.
 _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
@@ -2927,6 +2927,50 @@ def _notify_validator_blocked(
             )
 
 
+def _notify_qa_failed(
+    *,
+    issue_number: Optional[int],
+    pr_number: Optional[int],
+    reason: str,
+    resolved: Dict[str, Any],
+    dry_run: bool = False,
+) -> None:
+    """Notify human channels when QA fails (closes #1002).
+
+    Fires when the qa-daedalus card reports ``qa-failed`` in its summary,
+    which blocks the PR from auto-merging. Routes through ``hermes send`` to
+    every target subscribed to the ``qa-failed`` event. When no targets are
+    configured, returns silently. Failures are logged, never raised.
+    """
+    targets = _notify_targets(resolved, "qa-failed")
+    if not targets:
+        return
+
+    issue_ref = f"#{issue_number}" if issue_number else "unknown issue"
+    pr_ref = f" (PR #{pr_number})" if pr_number else ""
+    reason_detail = f"\n\n**Reason**: {reason}" if reason else ""
+    body = (
+        f"🔴 **QA Failed: {issue_ref}**{pr_ref}\n\n"
+        f"The QA agent reported a failure for {issue_ref}{pr_ref}. "
+        f"The PR will NOT be auto-merged until the developer fixes the "
+        f"failures and QA re-runs successfully.{reason_detail}\n\n"
+        f"A developer fix card has been created automatically."
+    )
+
+    for target in targets:
+        if dry_run:
+            logger.info(
+                "[dry-run] would send qa-failed notification to %s for %s",
+                target, issue_ref,
+            )
+            continue
+        ok, _anchor = _hermes_send(target, body)
+        if ok:
+            logger.info("sent qa-failed notification to %s for %s", target, issue_ref)
+        else:
+            logger.warning("failed to send qa-failed notification to %s for %s", target, issue_ref)
+
+
 def _check_confirmed_validators(
     slug: str, repo: str, issues_map: Dict[int, Dict[str, Any]],
     iterations: int, workdir: str, notify_target: str, base_branch: str,
@@ -4327,9 +4371,17 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-running sweep failed: %s", exc)
 
-    iterate_counts, advance_prs, pending_ci_cards = iterate.run_iterate(
+    iterate_counts, advance_prs, pending_ci_cards, qa_failed_cards = iterate.run_iterate(
         slug, repo, resolved=resolved, provider=provider, dry_run=dry_run,
     )
+    for _qf in qa_failed_cards:
+        _notify_qa_failed(
+            issue_number=_qf.get("issue_n"),
+            pr_number=_qf.get("pr"),
+            reason=_qf.get("reason", ""),
+            resolved=resolved,
+            dry_run=dry_run,
+        )
     # Separate advance PR numbers from routed actions (dev_fix / escalate) for
     # the human summary so PR numbers are reported correctly.
     routed_actions = {k: v for k, v in iterate_counts.items()
