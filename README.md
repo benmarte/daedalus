@@ -215,7 +215,12 @@ dispatcher detects this via a case-insensitive regex, skips the planner's normal
 for it — routing the issue through the standard validator → PM → developer flow rather
 than leaving it stuck In Progress with no active child task. Idempotency is enforced
 via a `planner-fallback-validator-{n}` idempotency key so re-runs on subsequent ticks
-return the existing task instead of creating duplicates.
+return the existing task instead of creating duplicates. The handler scans **both
+`done` and `blocked` planner cards** for the signal (defense in depth — the planner
+soul instructs completion, but if the planner blocks instead the handler still detects
+the signal and routes correctly, preventing the stuck-In-Progress failure mode that
+the original #931 handler had). Diagnostic logging is added at each skip point so
+empty/unrelated summaries no longer fail silently.
 
 ### Tier promotion: dependency-aware sub-issue Ready-gating
 

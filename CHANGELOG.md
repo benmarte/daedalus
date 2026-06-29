@@ -1,5 +1,27 @@
 ## [bug: planner NOT SUITABLE FOR DECOMPOSITION leaves issue stuck In progress forever (no validator created)](https://github.com/benmarte/daedalus/issues/969) — [PR #976](https://github.com/benmarte/daedalus/pull/976)
 
+### Bug
+
+The `_check_planner_not_suitable()` handler introduced in PRs #941 / #943 for issue #931 only scanned planner cards with `status="done"`. Combined with two other failure modes — (1) the planner soul never instructed the planner *when* to emit the `NOT SUITABLE FOR DECOMPOSITION` signal, and (2) the planner could block its card with the signal rather than complete it (making the card invisible to the handler) — issues that the planner deemed unsuitable for decomposition were left `In Progress` on the board indefinitely with no downstream validator task, no comment, and no diagnostic log message explaining why.
+
+### Fix
+
+The planner soul (`config/souls/planner-daedalus.md`) now documents the `NOT SUITABLE FOR DECOMPOSITION` signal as a valid **completion** summary (Path C in the dispatcher signal reference) and explicitly warns that emitting it as a block reason will route to `PM_ROUTE`. The handler is extended to scan **both `done` and `blocked` planner cards** (defense in depth) so a blocked card with the signal no longer falls through silently. Diagnostic logging is added at every skip point — empty summary, non-matching pattern, missing issue, missing issue number — so future silent failures surface in the dispatch log. The `planner-fallback-validator-{n}` idempotency key prevents duplicate validator creation when the same issue appears in both done and blocked cards.
+
+### Tests
+
+- 14 existing tests in `tests/test_planner_not_suitable.py` + new tests covering blocked-card detection, idempotency between done/blocked, and soul contract verification.
+- Integration test added in `tests/test_planner_signal_integration.py` (`test_blocked_planner_with_not_suitable_triggers_handler`) verifying a blocked planner card with the signal still creates a validator task.
+
+### Affected files
+
+- `config/souls/planner-daedalus.md` — added Path C documentation + canonical-form guidance + what-breaks-self-healing note
+- `scripts/daedalus_dispatch.py` — `_check_planner_not_suitable()` now iterates done+blocked, adds `processed_ids` guard, emits diagnostic logs
+- `tests/test_planner_not_suitable.py` — AC-3 / AC-4 tests
+- `tests/test_planner_signal_integration.py` — blocked-card integration test
+
+---
+
 ## [bug: QA races developer mid-edit on shared working tree, sees uncommitted changes](https://github.com/benmarte/daedalus/issues/953) — [PR #954](https://github.com/benmarte/daedalus/pull/954)
 
 ## [bug: validator completes with summary=None when Claude Code delegation fails, silently burning retry cap](https://github.com/benmarte/daedalus/issues/916) — [PR #952](https://github.com/benmarte/daedalus/pull/952)
