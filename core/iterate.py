@@ -2256,13 +2256,19 @@ def run_iterate(
                 ):
                     # Check QA gate before merging
                     issue_n = _extract_issue_number_from_card(card)
-                    if not _qa_passed_for_issue(slug, issue_n):
+                    # Bypass QA gate when PR has the skip-qa label
+                    if not skip_qa and not _qa_passed_for_issue(slug, issue_n):
                         logger.warning(
                             "iterate: Skipping merge: QA has not passed for PR #%s (issue #%s). "
                             "Wait for QA card to report 'qa-passed'.",
                             pr, issue_n
                         )
                         continue
+                    if skip_qa:
+                        logger.info(
+                            "iterate: skip-qa label present on PR #%s — bypassing QA gate for auto-merge",
+                            pr,
+                        )
 
                     if dry_run:
                         logger.info(
