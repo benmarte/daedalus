@@ -37,18 +37,23 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QAGate{{"🧪 QA GATE checkpoint\ntest suite · coverage\ncard summary: qa-passed\nor qa-failed"}}
-    QAGate --> CI{CI}
-    CI -->|green| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
-    CI -->|green| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
-    CI -->|red| Fix["🔧 Fix card created\nidempotent · capped at 3\nunique retry key pm-{n}-r{k}"]
+    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
+    Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
+    
+    QA --> QAGate{{"🚦 QA Gate\nqa-passed?"}}
+    QAGate -->|yes| Rev["🔍 Reviewer\nCode review\nApprove / request changes"]
+    QAGate -->|yes| A11y["♿ Accessibility\nWCAG 2.1 AA audit\n(conditional on UI work)"]
+    QAGate -->|yes| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
+    QAGate -->|no| Fix["🔧 Fix card created\nidempotent · capped at 3"]
+    
+    CI -->|red| Fix
     Fix --> Dev
-    Rev -->|approved| Sec["🛡 Security Analyst\nOWASP audit\nSecrets · injection · authz"]
-    Sec -->|cleared| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Sec -->|cleared| Doc
     A11y -->|cleared| Doc
-    Doc --> AutoMerge{{"🚦 QA auto-merge gate\nQA-passed signal present\nOR skip-qa label?"}}
+    Doc --> AutoMerge{{"🚦 QA auto-merge gate\nqa-passed signal present\nOR skip-qa label?\nAND CI green?"}}
     AutoMerge -->|"yes"| Merge(["🔀 Auto-merge fires\nPR merged automatically"])
-    AutoMerge -->|"no signal yet"| Wait(["⏳ Monitor polls\nuntil qa-passed\nor skip-qa label appears"])
+    AutoMerge -->|"waiting"| Wait(["⏳ Monitor polls\nuntil qa-passed & CI green\nor skip-qa label appears"])
     Wait --> AutoMerge
     Merge --> Done(["✅ Issue closed\nCard → Done"])
     Merge --> Reconcile["🩹 reconcile_merged\nheals cards closed\noutside the pipeline"]
@@ -64,7 +69,6 @@ flowchart TD
     style ST fill:#C62828,color:#fff,stroke:#B71C1C
     style Merge fill:#388E3C,color:#fff,stroke:#1B5E20
     style AutoMerge fill:#FF8F00,color:#fff,stroke:#E65100
-    style QAGate fill:#FF6F00,color:#fff,stroke:#E65100
     style Wait fill:#5D4037,color:#fff,stroke:#3E2723
     style Done fill:#2E7D32,color:#fff,stroke:#1B5E20
     style Reco fill:#AD1457,color:#fff,stroke:#880E4F
@@ -885,6 +889,28 @@ blocked card detected
                       no new fix cards are ever created beyond this cap
 ```
 
+**Visual flow:**
+
+```mermaid
+flowchart TD
+    Scan["🔍 Scan blocked cards"] --> Classify{"classify_blocked()<br>core/iterate.py"}
+
+    Classify -->|"dev card<br>+ CI green<br>+ review-required"| AdvanceDev["advance()<br>_create_downstream_review_tasks()<br>creates qa-{n} parented by reviewer,<br>security-analyst, docs"]
+    Classify -->|"dev card<br>+ CI red"| DevFixCI["dev_fix_ci()<br>idempotent fix card<br>key: fix-ci-{id}-attempt-{N}"]
+    Classify -->|"reviewer/sec<br>+ changes requested"| PMRoute["pm_route()<br>PM reads findings<br>assigns fix owner"]
+    Classify -->|"reviewer/sec<br>+ approved"| ApproveAdv["approve_advance()<br>complete card<br>next stage starts"]
+    Classify -->|"attempt > 3"| Escalate["escalate()<br>post comment<br>leave blocked for human"]
+
+    AdvanceDev --> Done1["✅ Card unblocked"]
+    DevFixCI --> Done2["✅ Card unblocked"]
+    PMRoute --> Done3["✅ Card unblocked"]
+    ApproveAdv --> Done4["✅ Card unblocked"]
+    Escalate --> Done5["🛑 Card blocked<br>(human required)"]
+
+    style Escalate fill:#C62828,color:#fff,stroke:#B71C1C
+    style Done5 fill:#C62828,color:#fff,stroke:#B71C1C
+```
+
 **Idempotency.** Fix cards are keyed `fix-ci-{card_id}-attempt-N` and
 `pm-route-{card_id}-attempt-N`. Before creating one, the loop cross-checks the
 live board for a card with that key — multiple dispatcher instances (or a restart
@@ -961,6 +987,16 @@ is unchanged: it posts a per-card comment and stops escalating, but does not
 fire a chat notification. See
 [`design-retry-cap-notification.md`](design-retry-cap-notification.md) for the
 design rationale.
+
+**Validator-blocked notifications.** When a validator blocks with `BLOCKED:`,
+the dispatcher creates a PM consultation task with an incrementing idempotency
+key (`validator-blocked-{n}`, `validator-blocked-{n}-r1`, `validator-blocked-{n}-r2`, …)
+so each block cycle produces a fresh consultation instead of matching the
+already-done first one. A `validator-blocked` notification is fired to
+Slack/Discord on every block (including repeat blocks), ensuring stalled issues
+surface to humans immediately rather than sitting silently on the board. An
+in-flight guard (`_has_active_pm_consultation()`) prevents duplicate
+consultations while one is already active for the same issue.
 
 **Intermediate retry-attempt notifications.** When a validator or PM retry is
 actually about to happen (retry_count < max_retries), the dispatcher first fires

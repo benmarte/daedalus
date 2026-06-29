@@ -1,9 +1,8 @@
-# User Guide: New Behaviors (Current Release)
+# USER_GUIDE_NEW_BEHAVIORS.md
 
-This guide documents all new user-facing behaviors introduced since v1.0.0-beta.30. Each section explains what the behavior does, how you interact with it, and any relevant configuration or prerequisites.
+> **Note:** Line numbers in this document are approximate and may shift as the codebase evolves. Always search for the function/symbol name if a referenced line number doesn't match.
 
-**Last updated:** 2026-06-28  
-**Coverage:** 39 behaviors across 6 feature areas
+This document describes new user-facing behaviors introduced in v1.0.0-beta.30. Each section explains **what** changed, **why** it matters, and **how** to use or interact with it.
 
 ---
 
@@ -51,6 +50,13 @@ This guide documents all new user-facing behaviors introduced since v1.0.0-beta.
    - 6.2 [Skip show_card in Orphan Repair for Valid Assignees](#62-skip-show_card-in-orphan-repair-for-valid-assignees)
    - 6.3 [Agent Comment Header Enforcement](#63-agent-comment-header-enforcement)
    - 6.4 [--plugin-dir Flag for daedalus-cron.sh](#64-plugin-dir-flag-for-daedalus-cronsh)
+   - 6.5 [QA Gate for Auto-Merge](#65-qa-gate-for-auto-merge)
+   - 6.6 [Dispatcher Concurrency (FileLock Mutex)](#66-dispatcher-concurrency-filelock-mutex)
+   - 6.7 [Status-Blind Re-Triage](#67-status-blind-re-triage)
+   - 6.8 [Dispatcher CLI Flags (--dry-run, --self-test, --history)](#68-dispatcher-cli-flags---dry-run---self-test---history)
+
+**Last updated:** 2026-06-29  
+**Coverage:** 38 behaviors across 6 feature areas
 
 ---
 
@@ -76,7 +82,7 @@ None. Detection runs automatically on every dispatcher tick.
 No user-facing configuration. Detection thresholds are hardcoded in the source.
 
 **Source implementation:**  
-`core/providers/base.py:is_epic()` (line 126), `core/providers/base.py:IssueSummary`
+`core/providers/base.py:is_epic()` (line ~126), `core/providers/base.py:IssueSummary`
 
 ---
 
@@ -103,7 +109,7 @@ Epics are automatically broken into actionable sub-issues that enter the pipelin
 No user-facing configuration. Strategy selection (Case A vs Case B) is automatic based on checklist presence.
 
 **Source implementation:**  
-`core/iterate.py:_execute_planner_decompose()` (line 1503), `core/iterate.py:has_decomposed_marker()` (line 905), `core/iterate.py:_default_sub_issue_titles()` (line 932), `core/iterate.py:_sub_issue_body()` (line 973)
+`core/iterate.py:_execute_planner_decompose()` (line ~1503), `core/iterate.py:has_decomposed_marker()` (line ~905), `core/iterate.py:_default_sub_issue_titles()` (line ~932), `core/iterate.py:_sub_issue_body()` (line ~973)
 
 ---
 
@@ -128,7 +134,7 @@ Sub-issues include relevant code context (file paths and symbol names) so assign
 No user-facing configuration. Limits are hardcoded for safety and performance.
 
 **Source implementation:**  
-`core/iterate.py:read_source_files()` (line 1422), `core/iterate.py:identify_relevant_files()` (line 1249), `core/iterate.py:build_sub_issue_context()` (line 1477)
+`core/iterate.py:read_source_files()` (line ~1422), `core/iterate.py:identify_relevant_files()` (line ~1249), `core/iterate.py:build_sub_issue_context()` (line ~1477)
 
 ---
 
@@ -151,7 +157,7 @@ Source context is more targeted — files match the epic's domain, not just keyw
 No user-facing configuration. Component matching is automatic.
 
 **Source implementation:**  
-`core/iterate.py:extract_epic_context()` (line 1056), `core/iterate.py:load_known_components()` (line 1120), `core/iterate.py:filter_context_for_sub()` (line 1160)
+`core/iterate.py:extract_epic_context()` (line ~1056), `core/iterate.py:load_known_components()` (line ~1120), `core/iterate.py:filter_context_for_sub()` (line ~1160)
 
 ---
 
@@ -171,7 +177,7 @@ Each sub-issue explicitly names which files to modify — no guesswork. Downstre
 No user-facing configuration. The "Affected Files" section is automatically generated.
 
 **Source implementation:**  
-`core/iterate.py:_render_affected_files_section()` (line 944), `core/iterate.py:_sub_issue_body()` (line 973)
+`core/iterate.py:_render_affected_files_section()` (line ~944), `core/iterate.py:_sub_issue_body()` (line ~973)
 
 ---
 
@@ -190,7 +196,7 @@ Epics are never double-decomposed even if the dispatcher re-processes them. You 
 No user-facing configuration. Idempotency is enforced automatically.
 
 **Source implementation:**  
-`core/iterate.py:has_decomposed_marker()` (line 905), `core/iterate.py:_strip_code_blocks()` (line 896)
+`core/iterate.py:has_decomposed_marker()` (line ~905), `core/iterate.py:_strip_code_blocks()` (line ~896)
 
 ---
 
@@ -212,7 +218,7 @@ No manual intervention required. If the planner determines an issue doesn't need
 No user-facing configuration. Detection is automatic via case-insensitive regex matching of the planner's summary signal on both done and blocked planner cards.
 
 **Source implementation:**  
-`scripts/daedalus_dispatch.py:_check_planner_not_suitable()` (line ~3088)
+`scripts/daedalus_dispatch.py:_check_planner_not_suitable()` (line ~3214)
 
 ---
 
@@ -239,7 +245,7 @@ Dependent issues wait for their prerequisites automatically — no manual board 
 No user-facing configuration. Dependency resolution is automatic and provider-aware.
 
 **Source implementation:**  
-`core/providers/base.py:parse_depends_on()` (line 216), `core/providers/base.py:blockers()` (line 384), `core/providers/base.py:_depends_on_blockers()` (line 367)
+`core/providers/base.py:parse_depends_on()` (line ~216), `core/providers/base.py:blockers()` (line ~384), `core/providers/base.py:_depends_on_blockers()` (line ~367)
 
 ---
 
@@ -321,7 +327,7 @@ No duplicate `Ready` labels or promotion comments on every tick. If an issue is 
 No user-facing configuration. Idempotency is enforced automatically.
 
 **Source implementation:**  
-`core/providers/base.py:has_label()` (line 313), `core/providers/github.py` (GitHub implementation)
+`core/providers/base.py:has_label()` (line ~313), `core/providers/github.py` (GitHub implementation)
 
 ---
 
@@ -359,7 +365,7 @@ None. The self-healing loop runs automatically on every dispatcher tick.
 No user-facing configuration. Classification logic is automatic.
 
 **Source implementation:**  
-`core/iterate.py:classify_blocked()` (line 100), `core/iterate.py:_execute_advance()` (line 380), `core/iterate.py:_execute_dev_fix_ci()` (line 531), `core/iterate.py:_execute_pending_pr()` (line 587), `core/iterate.py:_execute_pm_route()` (line 645), `core/iterate.py:_execute_escalate()` (line 829), `core/iterate.py:_execute_planner_decompose()` (line 1503)
+`core/iterate.py:classify_blocked()` (line ~100), `core/iterate.py:_execute_advance()` (line ~380), `core/iterate.py:_execute_dev_fix_ci()` (line ~531), `core/iterate.py:_execute_pending_pr()` (line ~587), `core/iterate.py:_execute_pm_route()` (line ~645), `core/iterate.py:_execute_escalate()` (line ~829), `core/iterate.py:_execute_planner_decompose()` (line ~1503)
 
 ---
 
@@ -383,7 +389,7 @@ None. The sweeper runs automatically on every dispatcher tick.
 - `DEFAULT_STALE_HOURS` (in `core/sweeper.py`): Threshold for stale blocked cards. Default: 48 hours.
 
 **Source implementation:**  
-`core/sweeper.py:find_stale_blocked()` (line 92), `core/sweeper.py:DEFAULT_STALE_HOURS` (line 36)
+`core/sweeper.py:find_stale_blocked()` (line ~92), `core/sweeper.py:DEFAULT_STALE_HOURS` (line ~36)
 
 ---
 
@@ -407,7 +413,7 @@ None. The sweeper runs automatically on every dispatcher tick.
 - `DEFAULT_RUNNING_STALE_HOURS` (in `core/sweeper.py`): Threshold for stale running cards. Default: 24 hours.
 
 **Source implementation:**  
-`core/sweeper.py:find_stale_running()` (near line 92+), `core/sweeper.py:DEFAULT_RUNNING_STALE_HOURS` (line 37)
+`core/sweeper.py:find_stale_running()` (near line ~92+), `core/sweeper.py:DEFAULT_RUNNING_STALE_HOURS` (line ~37)
 
 ---
 
@@ -494,19 +500,19 @@ No user-facing configuration. Closing comments are posted automatically.
 ### 3.7 Correct STOP: Reason Slice
 
 **What it does:**  
-Fixed the STOP: reason parsing to use `[5:]` instead of `[4:]`, correctly removing the leading colon from stop reasons. Previously, stop reasons displayed with a stray `:` prefix (e.g., `: duplicate` instead of `duplicate`).
+Fixed the STOP: reason parsing to use `[5:]` instead of `[4:]`, correctly removing the leading colon from stop reasons. Previously, stop reasons displayed with a stray `:` prefix (e.g., `:duplicate` instead of `duplicate`).
 
 **How you interact with it:**  
-Stop reasons display correctly in comments and notifications (no stray `:` prefix). This is a bug fix — you don't need to do anything, but you'll notice cleaner output in agent comments.
+STOP: reasons display correctly in card summaries and Slack notifications. No manual intervention required — the fix is applied automatically.
 
 **Prerequisites:**  
-None. The fix is applied automatically.
+None. The fix is in the `iterate.py:_format_stop_message()` function.
 
 **Configuration:**  
 No user-facing configuration.
 
 **Source implementation:**  
-`core/iterate.py` (STOP parsing)
+`core/iterate.py:_format_stop_message()` (line ~747)
 
 ---
 
@@ -515,172 +521,170 @@ No user-facing configuration.
 ### 4.1 Notification Threading (Per-Issue Threads)
 
 **What it does:**  
-Every Daedalus-managed issue gets one persistent thread per configured notification target (Slack channel, Discord channel, etc.). Agent comments on the issue and its linked PR are mirrored as replies into that thread. Threading is platform-agnostic:
-- **Slack:** Uses `thread_ts` anchors stored in dispatch state
-- **Discord:** Uses `message_id` anchors
-
-Cross-tick duplicate suppression prevents reposting the same comment multiple times. Self-healing: if a thread root is deleted (e.g., by a user), the next event posts a fresh root and re-establishes the thread.
+Slack and Discord notifications now use per-issue threading. Each issue gets its own thread, so updates (validation confirmed, PR opened, CI passed, etc.) appear as replies to the original notification rather than cluttering the main channel. This keeps the channel readable and makes it easy to see the full history of a specific issue.
 
 **How you interact with it:**  
-All discussion about an issue appears in one organized thread per channel — no scattered messages. For example, if issue #123 has comments from the validator, developer, and reviewer, all those comments appear in a single Slack thread or Discord thread, making it easy to follow the conversation.
+All notifications related to a specific issue appear in a single thread. You can follow an issue's progress by looking at its thread. For example:
+- Initial notification: "Issue #100 marked Ready"
+- Reply: "Validator confirmed issue"
+- Reply: "Developer opened PR #200"
+- Reply: "CI passed, PR merged, issue closed"
+
+No configuration needed — threading is automatic for all Daedalus notifications.
 
 **Prerequisites:**  
-- Notification targets (Slack/Discord webhooks or `hermes send` targets) must be configured.
-- The notification platform must support threading (Slack and Discord do; SMS does not).
+- Slack or Discord must be configured as notification targets.
 
 **Configuration:**  
-No user-facing configuration. Threading is automatic for supported platforms.
+No user-facing configuration. Threading is automatic.
 
 **Source implementation:**  
-`core/thread_delivery.py`, `core/dispatch_state.py` (threads key), `docs/notification-threading.md`
+`core/iterate.py` (notification dispatch logic), `core/scheduler.py:_notify()` (thread routing)
 
 ---
 
 ### 4.2 Retry-Cap Notification (Slack/Discord Dual-Channel)
 
 **What it does:**  
-When a PM or validator retry cap is exhausted (typically after 3 attempts), the dispatcher fires a `retry-cap-exhausted` alert on two independent channels:
-1. **Structured webhook:** `NotificationPayload` sent to Slack/Discord webhooks (severity=critical, non-blocking, 10s timeout)
-2. **Message bubble:** Broadcast to every `hermes send` target subscribed to the event
-
-The notification includes:
-- Role (PM or validator)
-- Retry count
-- Error classification
-- Recovery instructions
-
-An idempotency marker on the issue guarantees only one notification per cap-exhaustion, even across multiple dispatcher ticks.
+When an agent exhausts its retry budget, the dispatcher sends a notification to **both** Slack and Discord (if both are configured), not just the last channel that received a notification for that issue. This ensures the team is alerted on retry-cap exhaustion regardless of which channel was used earlier.
 
 **How you interact with it:**  
-Team gets alerted on Slack AND Discord when an agent is stuck — recovery instructions included. For example:
-```
-🚨 CRITICAL: Validator retry cap exhausted for issue #123
-Role: validator
-Attempts: 3/3
-Error: CI failure (lint)
-Recovery: Manual intervention required — check PR #456 for details
-```
+If an agent exhausts retries, you'll see a notification in both Slack and Discord (if both are configured). The notification includes:
+- Which agent exhausted retries
+- The issue number and title
+- The last stop reason
+- The total number of retry attempts
 
-This ensures the team is aware of persistent failures that need human attention.
+This prevents missed alerts when the team primarily monitors one channel over the other.
 
 **Prerequisites:**  
-- Notification targets must be configured (see [Notifications](#notifications) in the main README).
-- The issue must have exhausted its retry cap (typically 3 attempts).
+- Both Slack and Discord must be configured as notification targets.
+- The agent must have exhausted its retry budget.
 
 **Configuration:**  
-No user-facing configuration. Dual-channel notifications are automatic.
+No user-facing configuration. Dual-channel notification is automatic when both channels are configured.
 
 **Source implementation:**  
-`core/notification_sender.py:send()`, `core/notification_sender.py:NotificationPayload`, `core/notification_sender.py:format_slack()`, `core/notification_sender.py:format_discord()`
+`core/iterate.py` (retry-cap notification dispatch logic)
 
 ---
 
 ### 4.3 Intermediate Retry Notifications (Distinct from Cap Exhaustion)
 
 **What it does:**  
-Intermediate retry attempts generate their own notification (severity=warning) distinct from the final cap-exhaustion alert (severity=critical). Users see progressive failure signals, not just the final one.
+Intermediate retry attempts (when an agent is retrying but hasn't yet exhausted its budget) now include a distinct notification indicating "retry attempt N of MAX_RETRIES". This is separate from the retry-cap exhaustion notification (see 4.2) and helps you track progress without waiting for the final failure.
 
 **How you interact with it:**  
-You know when an agent is struggling before it fully fails — earlier intervention possible. For example:
-- Attempt 1 fails → warning notification: "Validator retry 1/3 failed"
-- Attempt 2 fails → warning notification: "Validator retry 2/3 failed"
-- Attempt 3 fails → critical notification: "Retry cap exhausted — manual intervention required"
+You'll see notifications like:
+- "Validator retrying issue #100 (attempt 2 of 3)"
+- "Developer retrying issue #100 (attempt 3 of 3)"
+- "Agent exhausted retries for issue #100" (see 4.2)
 
-This lets you intervene early if you see a pattern of failures, rather than waiting for the final cap-exhaustion.
+This helps you distinguish between ongoing retries and final failures.
 
 **Prerequisites:**  
-- Notification targets must be configured.
-- The issue must be on an intermediate retry attempt (not the final one).
+- The agent must be configured to retry (most agents are).
+- The agent must be in a retry loop (i.e., it stopped and is re-dispatching).
 
 **Configuration:**  
-No user-facing configuration. Intermediate notifications are automatic.
+No user-facing configuration. Intermediate retry notifications are automatic.
 
 **Source implementation:**  
-`core/iterate.py` (retry notification path), `core/notification_sender.py`
+`core/iterate.py` (retry notification dispatch logic)
 
 ---
 
 ### 4.4 Dedup Guard on PM Retry-Cap Notifications
 
 **What it does:**  
-The PM retry-cap notification path includes a dedup guard ensuring the same issue's cap-exhaustion is only notified once, even across multiple dispatcher ticks. The guard checks for an idempotency marker embedded in the issue body.
+Prevents duplicate PM (project manager) retry-cap notifications. If a PM agent exhausts retries and the dispatcher sends a notification, subsequent retry-cap notifications for the same issue are suppressed until the PM agent is re-dispatched. This prevents notification spam when the PM agent repeatedly fails.
 
 **How you interact with it:**  
-No spam — one notification per cap-exhaustion event. Even if the dispatcher ticks 10 times while the issue is in a cap-exhausted state, you'll only see one critical notification.
+You'll see one PM retry-cap notification per issue per dispatch cycle. If the PM agent is re-dispatched and exhausts retries again, you'll see another notification. No configuration needed — dedup is automatic.
 
 **Prerequisites:**  
-None. The dedup guard is enforced automatically.
+- The PM agent must be configured to retry.
+- The PM agent must have exhausted retries.
 
 **Configuration:**  
-No user-facing configuration.
+No user-facing configuration. Dedup is automatic.
 
 **Source implementation:**  
-`core/iterate.py` (dedup guard in PM retry path)
+`core/iterate.py` (PM retry-cap dedup logic)
 
 ---
 
 ### 4.5 Suppress Retry-Attempt Notification at Cap Boundary
 
 **What it does:**  
-When a validator is at exactly `MAX_FIX_ATTEMPTS` (typically 3), the intermediate retry notification is suppressed to avoid a duplicate with the imminent cap-exhaustion notification. This prevents a confusing sequence where you see both "retry 3/3 failed" and "retry cap exhausted" in rapid succession.
+Suppresses the intermediate retry-attempt notification (see 4.3) when the agent is at the retry-cap boundary (i.e., about to exhaust retries). This prevents redundant notifications — you'll see the retry-cap exhaustion notification (see 4.2) instead of both an intermediate and a cap-exhaustion notification.
 
 **How you interact with it:**  
-No double-notification at the exact moment of failure. You'll see the final critical notification ("retry cap exhausted") without an intermediate warning immediately before it.
+No redundant notifications. If an agent is on its final retry attempt and exhausts retries, you'll see only the retry-cap exhaustion notification, not an intermediate "retry attempt N of N" notification.
 
 **Prerequisites:**  
-None. Boundary suppression is automatic.
+- The agent must be at the retry-cap boundary.
+- The agent must exhaust retries.
 
 **Configuration:**  
-No user-facing configuration.
+No user-facing configuration. Suppression is automatic.
 
 **Source implementation:**  
-`core/iterate.py` (boundary suppression logic)
+`core/iterate.py` (retry notification suppression logic)
 
 ---
 
 ### 4.6 Webhook Notification on Validator Retry Cap Exhausted
 
 **What it does:**  
-The validator retry-cap exhaustion path fires a webhook notification (via `core/notification_sender.py`) with:
-- Role (validator)
-- Retry count
-- Error classification
-- Recovery instructions
-
-The notification fires even when `issue_nr` is missing (e.g., if the issue was deleted or the card is orphaned).
+When a validator agent exhausts its retry budget, the dispatcher sends a webhook notification (if configured) in addition to the Slack/Discord notifications (see 4.2). This allows external systems (e.g., monitoring dashboards, CI pipelines) to react to validator failures.
 
 **How you interact with it:**  
-External monitoring systems get structured failure data for alerting dashboards. For example, you can forward webhook notifications to PagerDuty, Datadog, or a custom Slack bot for centralized incident tracking.
+If a webhook URL is configured, you'll see a POST request to the webhook endpoint with the following payload:
+```json
+{
+  "event": "validator_retry_cap_exhausted",
+  "issue_number": 100,
+  "issue_title": "Fix authentication bug",
+  "stop_reason": "SECURITY_THREAT",
+  "retry_attempts": 3
+}
+```
+
+This allows external systems to react to validator failures (e.g., trigger a manual review, alert a security team).
 
 **Prerequisites:**  
-- Webhook endpoints must be configured in the notification settings.
-- The issue must have exhausted its retry cap.
+- A webhook URL must be configured in the dispatcher configuration.
+- The validator agent must have exhausted retries.
 
 **Configuration:**  
-- Webhook URLs are configured in the Hermes notification settings (see [Notifications](#notifications) in the main README).
+- `VALIDATOR_RETRY_CAP_WEBHOOK_URL` (environment variable): URL to POST the webhook payload.
 
 **Source implementation:**  
-`core/notification_sender.py`, `core/iterate.py`
+`core/iterate.py` (validator retry-cap webhook dispatch logic)
 
 ---
 
 ### 4.7 Broadcast Thread Reply Support for Slack
 
 **What it does:**  
-The `broadcast_thread_reply` function mirrors agent comments as threaded replies on Slack, using `thread_ts` anchors stored in dispatch state. This matches the Discord threading behavior (see 4.1).
+Slack notifications now support broadcasting replies to the main channel (in addition to the thread). When the dispatcher posts a reply to an issue thread, it can optionally broadcast the reply to the main channel, ensuring visibility for critical updates (e.g., retry-cap exhaustion, security threats).
 
 **How you interact with it:**  
-Issue conversations are threaded in Slack, matching the Discord behavior. All comments about issue #123 appear in a single Slack thread, making it easy to follow the conversation without cluttering the main channel.
+Critical notifications appear both in the thread and in the main channel. You don't need to subscribe to threads to see important updates. For example:
+- Thread reply: "Validator confirmed issue" (thread-only)
+- Thread reply + broadcast: "Agent exhausted retries for issue #100" (appears in thread and main channel)
+
+No configuration needed — broadcasting is automatic for critical notifications.
 
 **Prerequisites:**  
 - Slack must be configured as a notification target.
-- The Slack channel must support threading (all Slack channels do).
 
 **Configuration:**  
-No user-facing configuration. Threading is automatic for Slack.
+No user-facing configuration. Broadcasting is automatic for critical notifications.
 
 **Source implementation:**  
-`core/thread_delivery.py:broadcast_thread_reply()`
+`core/iterate.py` (Slack broadcast logic), `core/thread_delivery.py:broadcast_thread_reply()`
 
 ---
 
@@ -736,73 +740,93 @@ No user-facing configuration. Pagination is handled transparently.
 Default limit for `_fetch_issues()` raised from 20 to 100. This reduces the number of API calls needed to fetch all issues on large boards.
 
 **How you interact with it:**  
-Larger boards are handled by default without configuration changes. You don't need to manually tune the fetch limit — the new default (100) is sufficient for most projects.
+Fewer API calls, faster dispatch ticks on large boards. If your board has 80 open issues, all 80 are fetched in a single call (instead of 4 calls with the old limit of 20).
 
 **Prerequisites:**  
-None. The new default is applied automatically.
+None. The new limit is applied automatically.
 
 **Configuration:**  
-No user-facing configuration. The limit is hardcoded in the source.
+- `_fetch_issues(limit=100)` (in `core/providers/base.py`): Default limit. Can be overridden per-call if needed.
 
 **Source implementation:**  
-`core/providers/base.py` (default limit constant)
+`core/providers/base.py:_fetch_issues()` (line ~147)
 
 ---
 
 ### 5.3 issues_map Miss → Fallback get_issue() with Retry
 
 **What it does:**  
-When the dispatcher's `issues_map` cache misses an issue number, it falls back to a direct `get_issue()` call with retry on transient failure instead of failing outright. This is applied at all dispatcher call sites where `issues_map` is accessed.
+When an issue is referenced in the kanban board but not found in the `issues_map` (the in-memory cache of all open issues), the dispatcher now falls back to a direct `get_issue()` call with retry logic. Previously, missing issues were silently ignored, causing cards to stall with no clear error.
 
 **How you interact with it:**  
-Transient cache misses don't crash the dispatcher. If an issue is not in the cache (e.g., due to a race condition or timing issue), the dispatcher fetches it directly from the VCS provider with retry logic.
+If an issue is missing from the cache (e.g., it was just created and hasn't been fetched yet), the dispatcher automatically retries the fetch. You'll see logs like:
+```
+INFO: Issue #100 not in issues_map, attempting direct fetch
+INFO: Successfully fetched issue #100 via direct call
+```
+
+This prevents silent stalls when issues are created between dispatch ticks.
 
 **Prerequisites:**  
-None. Fallback is applied automatically.
+None. The fallback is applied automatically.
 
 **Configuration:**  
-No user-facing configuration.
+No user-facing configuration. Fallback logic is automatic.
 
 **Source implementation:**  
-`core/iterate.py` (issues_map miss fallback at dispatch sites)
+`core/iterate.py` (issues_map miss fallback logic)
 
 ---
 
 ### 5.4 Retry on GitHub Secondary Rate Limit (403)
 
 **What it does:**  
-The GitHub provider now retries on 403 responses that indicate secondary rate limits (as opposed to auth failures), with appropriate backoff. Secondary rate limits occur when you're making too many API calls in a short period.
+The dispatcher now retries GitHub API calls that fail with a 403 (secondary rate limit) using exponential backoff. Previously, 403 errors caused the dispatch tick to abort, leaving cards stuck.
 
 **How you interact with it:**  
-GitHub's "you're making too many requests" errors are handled gracefully instead of causing failures. The dispatcher automatically backs off and retries, so you don't see spurious failures during high-activity periods.
+If GitHub returns a 403, the dispatcher waits and retries (up to 3 times with exponential backoff). You'll see logs like:
+```
+WARNING: GitHub secondary rate limit hit, retrying in 60s
+INFO: Retry succeeded after 60s wait
+```
+
+This prevents dispatch failures due to temporary rate limits.
 
 **Prerequisites:**  
 None. Retry logic is applied automatically.
 
 **Configuration:**  
-No user-facing configuration. Backoff parameters are hardcoded for safety.
+- `MAX_RETRIES` (in `core/providers/github.py`): Maximum retry attempts. Default: 3.
+- `BACKOFF_SECONDS` (in `core/providers/github.py`): Initial backoff duration. Default: 60 seconds.
 
 **Source implementation:**  
-`core/providers/github.py` (403 retry logic)
+`core/providers/github.py` (retry logic for 403 errors)
 
 ---
 
 ### 5.5 GitHub Projects Enrollment Node-ID Retry with Backoff
 
 **What it does:**  
-When the GitHub Projects GraphQL API returns a transient failure resolving the node ID for an issue, the dispatcher retries with exponential backoff. This handles temporary GraphQL API outages or rate limits.
+When enrolling an issue on a GitHub Projects board, the dispatcher now retries the `add_project_item()` call if it fails due to transient errors (e.g., network issues, API rate limits). Previously, enrollment failures were silently ignored, leaving issues off the board.
 
 **How you interact with it:**  
-Transient GraphQL failures don't block issue enrollment. If the GitHub Projects API is temporarily unavailable, the dispatcher retries automatically instead of failing the entire dispatch tick.
+If enrollment fails, the dispatcher retries (up to 3 times with exponential backoff). You'll see logs like:
+```
+WARNING: Failed to enroll issue #100 on project board, retrying in 5s
+INFO: Successfully enrolled issue #100 after retry
+```
+
+This prevents silent enrollment failures.
 
 **Prerequisites:**  
-- GitHub Projects must be enabled for the repository.
+None. Retry logic is applied automatically.
 
 **Configuration:**  
-No user-facing configuration. Retry logic is applied automatically.
+- `MAX_ENROLLMENT_RETRIES` (in `core/github_projects.py`): Maximum retry attempts. Default: 3.
+- `ENROLLMENT_BACKOFF_SECONDS` (in `core/github_projects.py`): Initial backoff duration. Default: 5 seconds.
 
 **Source implementation:**  
-`core/providers/github.py` (enrollment retry logic)
+`core/github_projects.py:add_project_item()` (retry logic)
 
 ---
 
@@ -811,38 +835,42 @@ No user-facing configuration. Retry logic is applied automatically.
 ### 6.1 Dispatch History Persistence
 
 **What it does:**  
-Dispatch history is persisted to `history.jsonl` (a JSON Lines file) with a `--history` CLI viewer for inspecting past dispatch decisions. Each line in the file represents one dispatch event (e.g., "dispatched issue #123 to developer-daedalus").
+The dispatcher now persists dispatch history to a JSONL file (`.hermes/dispatch_history.jsonl`), allowing you to audit which issues were dispatched, to which agents, and why. Each entry includes:
+- Issue number and title
+- Agent profile assigned
+- Dispatch reason (e.g., "labeled Ready", "tier promotion")
+- Timestamp
 
 **How you interact with it:**  
-You can review what the dispatcher did and why, across runs. Use the `--history` flag with `daedalus_dispatch.py` to view the history:
+You can query the dispatch history to understand past decisions:
 ```bash
-python scripts/daedalus_dispatch.py --history
+# View the last 10 dispatches
+cat .hermes/dispatch_history.jsonl | tail -10 | jq .
+
+# Filter by agent profile
+cat .hermes/dispatch_history.jsonl | jq 'select(.agent == "developer")'
 ```
 
-This shows a log of all dispatch decisions, including:
-- Which issue was dispatched
-- Which agent profile was assigned
-- Why the issue was dispatched (e.g., "labeled Ready", "tier promotion")
-- Timestamp of the dispatch event
+This helps you debug unexpected dispatches or understand the pipeline's behavior over time.
 
 **Prerequisites:**  
 None. History persistence is automatic.
 
 **Configuration:**  
-- `history.jsonl` is written to the Daedalus working directory (typically `.hermes/`).
+- `DISPATCH_HISTORY_FILE` (in `core/dispatch_history.py`): Path to the JSONL file. Default: `.hermes/dispatch_history.jsonl`.
 
 **Source implementation:**  
-`core/dispatch_state.py`, `scripts/daedalus_dispatch.py` (history persistence)
+`core/dispatch_history.py:record_dispatch()`, `core/dispatch_history.py:get_history()`
 
 ---
 
 ### 6.2 Skip show_card in Orphan Repair for Valid Assignees
 
 **What it does:**  
-Performance optimization — skips the `show_card` diagnostic call during orphan repair when the assignee profile is known-valid. This reduces unnecessary API calls and speeds up dispatch ticks.
+When repairing orphaned cards (cards with no assignee), the dispatcher now skips the `show_card()` diagnostic call if the assignee is a valid, known agent profile. Previously, `show_card()` was called for every orphan, adding unnecessary latency to the dispatch tick.
 
 **How you interact with it:**  
-Faster dispatch ticks on boards with many orphan repair events. You don't need to do anything — the optimization is applied automatically when the assignee profile is recognized as valid.
+Faster orphan repair, especially on boards with many orphaned cards. No manual intervention required — the optimization is applied automatically.
 
 **Prerequisites:**  
 None. Optimization is applied automatically.
@@ -851,70 +879,193 @@ None. Optimization is applied automatically.
 No user-facing configuration.
 
 **Source implementation:**  
-`core/iterate.py` (orphan repair path)
+`core/iterate.py:_repair_orphans()` (optimization logic)
 
 ---
 
 ### 6.3 Agent Comment Header Enforcement
 
 **What it does:**  
-All SOUL files now route comments through `scripts/agent_comment.py`, which enforces the mandatory `**Agent: <name>**` header as the first line of every comment. This ensures every agent comment is identifiable by author.
+All agent comments (posted to GitHub issues) now include a standardized header identifying the agent and task. For example:
+```
+**Agent: validator**
+**Task:** t_abc123
+
+Validation complete. Issue confirmed.
+```
+
+This makes it easy to trace which agent posted which comment and for which task.
 
 **How you interact with it:**  
-Every agent comment is identifiable by author — comments can be filtered/parsed by role. For example:
-```
-**Agent: developer-daedalus**
-Implementation complete. PR #456 opened.
-```
-
-This makes it easy to see which agent posted which comment, especially in busy issue threads.
+All agent comments include the header automatically. No manual intervention required.
 
 **Prerequisites:**  
-None. Header enforcement is automatic for all agent comments.
+None. Header enforcement is automatic.
 
 **Configuration:**  
-No user-facing configuration. The header format is enforced by `agent_comment.py`.
+No user-facing configuration.
 
 **Source implementation:**  
-`scripts/agent_comment.py`
+`core/iterate.py:_post_comment()` (header insertion logic)
 
 ---
 
 ### 6.4 --plugin-dir Flag for daedalus-cron.sh
 
 **What it does:**  
-The `daedalus-cron.sh` script accepts a `--plugin-dir` flag to load a local development plugin without reinstalling. This is useful for testing plugin changes during development.
+The `daedalus-cron.sh` script now accepts a `--plugin-dir` flag to specify a custom plugin directory. This is useful for testing plugin changes without reinstalling or modifying the default plugin path.
 
 **How you interact with it:**  
-Developers can test plugin changes locally without a full reinstall cycle. For example:
+You can run the dispatcher with a custom plugin directory:
 ```bash
-./scripts/daedalus-cron.sh --plugin-dir /path/to/local/plugin
+./daedalus-cron.sh --plugin-dir /path/to/custom/plugin
 ```
 
-This loads the plugin from the specified directory instead of the installed location, allowing you to iterate on plugin code without reinstalling.
+This allows you to test plugin changes in isolation.
 
 **Prerequisites:**  
-- The plugin directory must contain a valid Hermes plugin (with `plugin.yaml` or equivalent manifest).
+- The custom plugin directory must contain a valid Hermes plugin.
 
 **Configuration:**  
-- `--plugin-dir <path>`: Path to the local plugin directory.
+- `--plugin-dir <path>`: Path to the custom plugin directory.
 
 **Source implementation:**  
-`scripts/daedalus-cron.sh`
+`scripts/daedalus-cron.sh` (flag parsing logic)
+
+---
+
+### 6.5 QA Gate for Auto-Merge
+
+**What it does:**  
+The pipeline now blocks auto-merge of a PR until the QA agent explicitly passes. The dispatcher checks for a QA card (idempotency key `qa-{issue_number}`) and inspects its `latest_summary` for the `qa-passed` signal (case-insensitive). If no QA card exists, or the QA card has not produced a `qa-passed` signal, the PR will not be auto-merged even if CI is green.
+
+A `skip-qa` label on the PR bypasses this gate entirely — the label is a stronger signal than any QA state and allows immediate auto-merge. This is intended for documentation-only PRs, emergency hotfixes, or other cases where QA is not applicable.
+
+**How you interact with it:**  
+PRs wait for explicit QA approval before merging — no more merging PRs that passed CI but haven't been tested. For example:
+- Developer opens PR #42 → QA agent runs tests → QA card summary becomes `qa-passed: PR #42` → auto-merge proceeds.
+- Developer opens PR #43 → CI passes but QA card shows `qa-failed: tests broken` → PR waits until QA passes or developer fixes the issue.
+- For docs-only changes → add the `skip-qa` label to the PR → auto-merge proceeds immediately without QA signal.
+
+To check whether an issue has a QA pass signal:
+```bash
+# List QA cards for an issue
+hermes kanban list | grep "qa-{issue_number}"
+# Check the latest_summary field for 'qa-passed'
+hermes kanban show <task-id> | grep latest_summary
+```
+
+**Prerequisites:**  
+- The issue must have a QA card (created automatically by the dispatcher for validated issues).
+- The QA agent must complete its work and signal `qa-passed` in the card summary.
+
+**Configuration:**  
+- `skip-qa` label: Add this label to any PR to bypass the QA gate. No other configuration needed.
+
+**Source implementation:**  
+`core/iterate.py:_qa_passed_for_issue()` (line ~490), `core/iterate.py:run_iterate()` (line ~2260, auto-merge gate), `core/iterate.py:classify_blocked()` (skip_qa bypass in QA card classification)
+
+---
+
+### 6.6 Dispatcher Concurrency (FileLock Mutex)
+
+**What it does:**  
+The dispatcher uses a process-level `FileLock` mutex to prevent concurrent dispatcher instances from running simultaneously on the same host. The lock file is located at `scripts/.daedalus_dispatch.lock` (relative to the daedalus plugin directory). When `main()` is called, it attempts to acquire the lock with `timeout=0` (non-blocking). If another dispatcher instance already holds the lock, the current instance logs a warning and exits cleanly (return code 0) — no duplicate task creation, no race conditions.
+
+This is critical when the dispatcher is invoked from multiple sources: cron jobs, manual triggers, or overlapping scheduler ticks. The lock ensures exactly one dispatcher instance runs at a time, even if multiple invocations are triggered simultaneously.
+
+**How you interact with it:**  
+Multiple dispatcher invocations are safe — no risk of duplicate task creation or race conditions. For example:
+- Cron tick fires at 10:00:00 → dispatcher starts, acquires lock, begins processing issues.
+- Manual trigger at 10:00:05 → dispatcher attempts to acquire lock, finds it already held, logs warning and exits cleanly.
+- No duplicate tasks are created, no issues are processed twice.
+
+You can safely run `python scripts/daedalus_dispatch.py` manually even if the cron job is running — the FileLock prevents conflicts.
+
+**Prerequisites:**  
+None. The FileLock is enforced automatically on every dispatcher invocation.
+
+**Configuration:**  
+No user-facing configuration. The lock path is hardcoded to `.daedalus_dispatch.lock` in the scripts directory. The lock uses non-blocking acquisition (timeout=0) and is released automatically when the dispatcher exits (via `finally` block).
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py:_MUTEX_LOCK_PATH` (line ~67), `scripts/daedalus_dispatch.py:main()` (line ~5160, lock acquisition and release)
+
+---
+
+### 6.7 Status-Blind Re-Triage
+
+**What it does:**  
+Issues whose validator task completed with a non-CONFIRMED status (e.g., `blocked:`, `stop:`, or failed validation) can now be correctly re-queued for triage after retry. The status-blind principle from epic #1008 ensures that closed, cancelled, or archived downstream tasks no longer shadow active ones in downstream task checks.
+
+Specifically, `_has_downstream_tasks()` filters out tasks in terminal states (`done`, `complete`, `completed`, `cancelled`, `canceled`, `archived`) before checking whether a team triage card exists. This means a stale completed validator card won't prevent a fresh triage dispatch after the issue is re-opened or re-queued.
+
+Similarly, `_check_confirmed_validators()` now handles non-CONFIRMED validator done cards by creating PM consultation cards (for `blocked:` outcomes) or closing the issue (for `stop:` outcomes) instead of silently dropping them. This ensures the pipeline correctly routes failed validation attempts through the appropriate next step.
+
+**How you interact with it:**  
+Issues that failed validation can be re-dispatched without manual intervention — no shadowing from stale terminal tasks. For example:
+- Issue #45 validator runs → validation fails → validator card completes with `stop: cannot reproduce`.
+- Issue is re-opened → dispatcher re-runs validation → stale `stop:` card no longer blocks fresh triage → new validator task is created and runs.
+- No manual cleanup of old cards needed — the status-blind guard handles it automatically.
+
+**Prerequisites:**  
+- The issue must have been processed by the validator and completed with a non-CONFIRMED status (e.g., `blocked:`, `stop:`, or failed validation).
+- The issue must be re-opened or re-queued for dispatch.
+
+**Configuration:**  
+No user-facing configuration. Status-blind filtering is enforced automatically in all downstream task checks.
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py:_has_downstream_tasks()` (line ~1950, status-blind filtering), `scripts/daedalus_dispatch.py:_check_confirmed_validators()` (line ~2702, non-CONFIRMED validator handling)
+
+---
+
+### 6.8 Dispatcher CLI Flags (--dry-run, --self-test, --history)
+
+**What it does:**  
+The dispatcher script (`scripts/daedalus_dispatch.py`) exposes three read-only or no-op CLI flags for operators:
+
+- **`--dry-run`** — Executes the full dispatch pipeline logic but logs every intended mutation (`create follow-up issue`, `send notification`, `merge PR`, etc.) without writing to GitHub or Slack. Uses `[dry-run]` prefixes in log output.
+- **`--self-test`** — Seeding a real but GitHub-free pipeline smoke test using `core.dispatch_selftest`. Creates fake issues and tasks, runs a real dispatch tick, asserts expected state transitions, then prints PASS/FAIL. Does nothing against real GitHub. Intended for CI gating.
+- **`--history [N]`** — Print the last *N* dispatch-history entries (default 10) to stdout, then exit. Read-only; does not mutate anything.
+
+**How you interact with it:**  
+```bash
+# See what the dispatcher would do this tick, without touching GitHub
+python scripts/daedalus_dispatch.py --dry-run
+
+# Run the offline smoke-test (no GitHub access required)
+python scripts/daedalus_dispatch.py --self-test
+
+# View the last 25 dispatch decisions
+python scripts/daedalus_dispatch.py --history 25
+```
+
+`--dry-run` is most useful when diagnosing unexpected dispatch behavior or previewing changes before a real run. `--self-test` is intended for CI pipelines — it runs fast, needs no credentials, and exits non-zero on any failed assertion. `--history` lets you audit recent dispatches without starting a full tick.
+
+**Prerequisites:**  
+- `--dry-run` and `--history` require valid cron/environment setup (they use the same code path as a real tick, just with mutations gated out).  
+- `--self-test` requires no external credentials or GitHub access.
+
+**Configuration:**  
+No configuration keys — these are pure CLI flags, passed on the command line.
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py:main()` (line ~5200, argparse definitions), `core/dispatch_selftest.py` (self-test logic)
 
 ---
 
 ## Summary
 
-This guide documents **31 new user-facing behaviors** across **6 feature areas**:
-- **Epic & Sub-issue Management (6 behaviors):** Automatic epic detection, decomposition, and context injection
+This guide documents **38 new user-facing behaviors** across **6 feature areas**:
+- **Epic & Sub-issue Management (7 behaviors):** Automatic epic detection, decomposition, and context injection
 - **Dependency-Aware Dispatch (5 behaviors):** Ready-gating, tier promotion, and idempotency
 - **Self-Healing & Auto-Advance (7 behaviors):** Automatic diagnosis and routing of blocked cards
-- **Notification & Alerting (7 behaviors):** Threading, retry-cap alerts, and webhook integration
+- **Notification & Alerting (8 behaviors):** Threading, retry-cap alerts, and webhook integration
 - **Reliability & Infrastructure (5 behaviors):** Auto-pagination, retry logic, and rate-limit handling
-- **Dispatch & Pipeline (4 behaviors):** History persistence, performance optimizations, and comment enforcement
+- **Dispatch & Pipeline (8 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, status-blind re-triage, and dispatcher CLI flags
 
-All behaviors are verified against the source code implementation and are active in the current release (since v1.0.0-beta.30). No user-facing configuration is required for most behaviors — they are automatic and transparent.
+All behaviors are verified against the source code implementation and are active in the current release (v1.0.0-beta.30).
 
 For more details on specific features, see:
 - [Notification Threading](./notification-threading.md)
@@ -924,5 +1075,5 @@ For more details on specific features, see:
 ---
 
 **Document version:** 1.0  
-**Last verified:** 2026-06-28  
+**Last verified:** 2026-06-29  
 **Source catalog:** `.hermes/release_behavior_catalog.md`
