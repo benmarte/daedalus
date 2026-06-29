@@ -1596,6 +1596,9 @@ class _NoCIProvider:
     name = "generic"
     supports_ci_status = False
 
+    def has_label(self, pr_number, label_name):
+        return False
+
     def get_pr_ci_status(self, pr_number):
         return "unknown"
 
@@ -1607,6 +1610,9 @@ class _PendingProvider:
     """Provider that supports CI but returns PENDING initially."""
     name = "github"
     supports_ci_status = True
+
+    def has_label(self, pr_number, label_name):
+        return False
 
     def __init__(self, ci_status="pending"):
         self._status = ci_status
@@ -1884,6 +1890,8 @@ def test_run_iterate_qa_passed_advances():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_qa",
@@ -1914,6 +1922,8 @@ def test_run_iterate_accessibility_approved_advances():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_a11y",
@@ -1941,6 +1951,8 @@ def test_run_iterate_accessibility_changes_requested_routes_to_pm():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_a11y2",
@@ -1969,6 +1981,8 @@ def test_run_iterate_qa_failed_creates_fix_card():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_qa_fail",

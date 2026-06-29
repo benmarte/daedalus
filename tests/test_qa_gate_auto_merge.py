@@ -230,8 +230,8 @@ class TestAutoMergeQAGateIntegration:
         # QA has NOT passed
         mock_qa_passed.return_value = False
 
-        provider = FakeProvider(ci_status='green', open_prs={42})
-        # PR is resolved via handoff "PR #42" — no branch fallback needed
+        provider = FakeProvider()
+        provider._ci = 'green'
 
         result = run_iterate(
             'test-board',
@@ -273,7 +273,9 @@ class TestAutoMergeQAGateIntegration:
         # QA HAS passed
         mock_qa_passed.return_value = True
 
-        provider = FakeProvider(ci_status='green', open_prs={42})
+        provider = FakeProvider()
+        provider._ci = 'green'
+        provider._open_prs = {42}
 
         result = run_iterate(
             'test-board',
