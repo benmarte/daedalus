@@ -2070,7 +2070,116 @@ def test_check_confirmed_validators_blocked_still_creates_pm_consultation():
     fake_kanban.create_task.assert_called_once()
     call = fake_kanban.create_task.call_args
     assert "consult:" in call.args[1] or "consult:" in call.kwargs.get("title", "")
+    # First block uses the base key (no -rN suffix).
+    assert call.kwargs.get("idempotency_key") == "validator-blocked-503"
     assert 503 in triggered
+
+
+# ── _check_confirmed_validators: incrementing validator-blocked key (#994) ──────
+
+
+def _make_done_consult_card(tid, issue_number, ikey, status="done"):
+    """Build a PM consultation card dict for testing."""
+    return {
+        "id": tid,
+        "assignee": "project-manager-daedalus",
+        "title": f"consult: #{issue_number} Unstable repro",
+        "status": status,
+        "summary": "CLARIFIED: use the new API",
+        "latest_summary": "CLARIFIED: use the new API",
+        "idempotency_key": ikey,
+    }
+
+
+def test_check_confirmed_validators_second_block_creates_new_consultation():
+    """#994: a second validator block must create a NEW PM consultation with an
+    incrementing key, even though a *done* consultation exists with the base key.
+    """
+    done_val = _make_done_validator_card("t_val", "BLOCKED: still cannot reproduce", 503)
+    done_consult = _make_done_consult_card("t_consult1", 503, "validator-blocked-503")
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    def _list_tasks(*args, **kwargs):
+        if kwargs.get("status") == "done":
+            return [done_val]
+        return [done_val, done_consult]
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = _list_tasks
+    fake_kanban.create_task.return_value = "t_consult2"
+
+    with mock.patch.object(disp, "kanban", fake_kanban), \
+            mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as send:
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+            resolved={"cron": {"notifications": [
+                {"target": "slack:C1", "events": ["validator-blocked"]}]}},
+        )
+
+    # A second consultation IS created with the incremented key.
+    fake_kanban.create_task.assert_called_once()
+    assert fake_kanban.create_task.call_args.kwargs.get("idempotency_key") == "validator-blocked-503-r1"
+    assert 503 in triggered
+    # Slack/Discord notification fired for the second block.
+    send.assert_called_once()
+    assert send.call_args.args[0] == "slack:C1"
+
+
+def test_check_confirmed_validators_third_block_increments_again():
+    """#994: key increments per cycle — base, -r1, -r2 …"""
+    done_val = _make_done_validator_card("t_val", "BLOCKED: nope", 503)
+    consult0 = _make_done_consult_card("c0", 503, "validator-blocked-503")
+    consult1 = _make_done_consult_card("c1", 503, "validator-blocked-503-r1")
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    def _list_tasks(*args, **kwargs):
+        if kwargs.get("status") == "done":
+            return [done_val]
+        return [done_val, consult0, consult1]
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = _list_tasks
+    fake_kanban.create_task.return_value = "c2"
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    assert fake_kanban.create_task.call_args.kwargs.get("idempotency_key") == "validator-blocked-503-r2"
+
+
+def test_check_confirmed_validators_block_skips_when_consultation_active():
+    """#994 guard: while a consultation is still in flight, do NOT mint another
+    one each tick. The incrementing key must not fire until the prior consult
+    reaches a terminal state.
+    """
+    done_val = _make_done_validator_card("t_val", "BLOCKED: nope", 503)
+    active_consult = _make_done_consult_card(
+        "c0", 503, "validator-blocked-503", status="running")
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    def _list_tasks(*args, **kwargs):
+        if kwargs.get("status") == "done":
+            return [done_val]
+        return [done_val, active_consult]
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = _list_tasks
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    fake_kanban.create_task.assert_not_called()
+    assert 503 not in triggered
 
 
 def test_check_confirmed_validators_stop_no_provider_skips_close():
