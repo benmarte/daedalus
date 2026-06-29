@@ -310,29 +310,35 @@ levels. The planner can emit `depends_on: [...]` metadata in sub-issue bodies; t
 dispatcher parses them via the portable `Depends on: #N` convention so the tier graph works
 on any provider, not only GitHub's native dependencies.
 
-**Visual flow — epic decomposition and tier promotion:**
+**Visual flow — epic decomposition and tier promotion**
+(see `core/tier_promotion.py` for tier computation and
+`core/iterate.py:_execute_planner_decompose()` for decomposition):
 
 ```mermaid
 flowchart TD
-    Issue([Issue marked Ready]) --> Detect{is_epic?}
+    Issue(["Issue marked Ready"]) --> Detect{"is_epic()?\n≥4 checklist items\nOR epic label\nOR body ≥ 2000 chars"}
 
-    Detect -->|yes| Planner[Phase 3: Planner\ndecomposes into sub-issues]
-    Detect -->|no| Validator[Phase 1: Validator]
+    Detect -->|no| NormalPipeline["Normal pipeline\nvalidator → PM → …"]
+    Detect -->|yes| Planner["Route to planner-daedalus"]
 
-    Planner -->|PLANNING COMPLETE| SubI[Sub-issues created\neach follows full pipeline]
-    Planner -->|NOT SUITABLE| Validator
+    Planner -->|"PLANNING COMPLETE:"| Case{"Planner output"}
+    Case -->|"Case A:\nchecklist items present"| SubI_A["One sub-issue per checklist item\n(capped at 10)"]
+    Case -->|"Case B:\nno checklist"| SubI_B["Three default sub-issues:\n1. Research &amp; Scoping\n2. Implementation\n3. Testing &amp; Documentation"]
 
-    SubI --> ParentEach[For each sub-issue:\ninherit labels\ndepend_on metadata computed]
+    Planner -->|"NOT SUITABLE FOR DECOMPOSITION"| Validator["Validator picks up parent issue\n(fallback path)"]
 
-    ParentEach --> TierCheck{Tier level?}
+    SubI_A --> ParentEach["For each sub-issue:\n• Inherit labels (− epic, + subtask)\n• Idempotency marker on parent\n  <!-- daedalus:sub-issues:[N,…] -->\n• Compute tier via DAG deps"]
+    SubI_B --> ParentEach
 
-    TierCheck -->|tier 0| Ready[Apply Ready label immediately\nnext tick dispatches]
-    TierCheck -->|tier > 0| WaitForBlocker[Blocked — wait for tier-1 blockers]
+    ParentEach --> TierCheck{"Tier level?"}
 
-    WaitForBlocker -->|blocker merges| Promote[promote_waiting_tiers\nrelabel with Ready]
+    TierCheck -->|"tier 0"| Ready["Apply Ready label immediately\n→ pipeline starts next tick"]
+    TierCheck -->|"tier > 0"| WaitForBlocker["Apply Blocked label\nWait for tier-1 blockers' PRs to merge"]
+
+    WaitForBlocker -->|"blocker merges"| Promote["Tier promotion: apply Ready\n(next tick sweeps this)"]
     Promote --> Ready
 
-    Ready --> NormalPipeline[validator → PM → developer → QA → reviews → auto-merge]
+    Ready --> NormalPipeline
 ```
 
 ### Dependency-aware ready-gating
