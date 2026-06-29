@@ -332,6 +332,7 @@ class FakeProvider:
         # issue — models a transient outage that recovers (issue #185).
         self._get_issue_failures = get_issue_failures
         self.get_issue_calls = 0
+        self.get_issue_comments_calls = 0
         self.posted_issue_comments: List[tuple] = []
         self.posted_pr_comments: List[tuple] = []
         self.merged: List[tuple] = []
@@ -403,6 +404,7 @@ class FakeProvider:
         Decompose's second-pass idempotency check reads these to detect the
         marker comment it posted on the first pass (#891).
         """
+        self.get_issue_comments_calls += 1
         return [{"body": body} for (n, body) in self.posted_issue_comments if n == issue_number]
 
     def post_issue_comment(self, issue_number: int, body: str) -> bool:
