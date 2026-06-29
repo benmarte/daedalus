@@ -67,3 +67,40 @@ class TestKeychainFreeProvisioning:
         assert "env_passthrough" in provision_script
         for var in ("GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_PAT"):
             assert f'"{var}"' in provision_script, f"{var} missing from passthrough setup"
+
+
+class TestAdvanceHookRegistration:
+    """Issue #962: setup_role() must register the session-end advance hook in
+    every profile config.yaml, or the pipeline stalls until the hourly cron tick."""
+
+    def test_setup_role_invokes_advance_hook_helper(self, provision_script: str):
+        """setup_role must call register_advance_hook.py for each profile."""
+        assert "register_advance_hook.py" in provision_script, \
+            "setup_role does not register the session-end advance hook"
+        assert 'agent-hooks/daedalus-advance.sh' in provision_script, \
+            "advance hook path not referenced in provisioning"
+
+    def test_advance_hook_registered_per_profile(self, provision_script: str):
+        """The registration runs inside setup_role (per-profile), not once globally."""
+        setup_role_start = provision_script.index("setup_role() {")
+        # The first role invocation marks the end of the function body.
+        setup_role_end = provision_script.index("setup_role validator-daedalus")
+        body = provision_script[setup_role_start:setup_role_end]
+        assert "register_advance_hook.py" in body, \
+            "advance hook registration must live inside setup_role() so every role gets it"
+
+    def test_all_nine_roles_provisioned(self, provision_script: str):
+        """Every lifecycle role is provisioned, so none can silently miss the hook."""
+        roles = (
+            "validator-daedalus",
+            "project-manager-daedalus",
+            "planner-daedalus",
+            "developer-daedalus",
+            "reviewer-daedalus",
+            "security-analyst-daedalus",
+            "qa-daedalus",
+            "accessibility-daedalus",
+            "documentation-daedalus",
+        )
+        for role in roles:
+            assert f"setup_role {role}" in provision_script, f"{role} not provisioned"

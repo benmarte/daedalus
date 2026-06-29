@@ -324,6 +324,18 @@ with open(path, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
 
+  # CRITICAL: register the session-end advance hook so the pipeline advances in
+  # near-real-time. Hermes fires a profile's hooks.on_session_end commands when
+  # that profile's agent session ends; daedalus-advance.sh then resolves the
+  # worker's project and dispatches the next lifecycle stage immediately instead
+  # of waiting up to 60 min for the hourly cron tick. Without this block the
+  # session ends and the hook never runs — the planner-daedalus stall in #962.
+  # The helper is idempotent (one daedalus-advance.sh entry, matched by basename)
+  # and non-destructive (preserves any existing hooks/config).
+  local advance_hook="$HERMES/agent-hooks/daedalus-advance.sh"
+  python3 "$REPO_ROOT/scripts/register_advance_hook.py" \
+    "$PROFILES/$name/config.yaml" "$advance_hook"
+
   # Install role-specific SOUL.md from config/souls/ — overrides the generic
   # SOUL.md copied from default by --clone. This is critical: without it, every
   # re-provision wipes the role instructions and agents post no PR comments.
