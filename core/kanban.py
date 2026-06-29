@@ -425,11 +425,10 @@ def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:
 
 def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_run: bool = False) -> List[str]:
     """Complete all non-done kanban tasks that reference #issue_number in their title.
+    Uses word-boundary regex matching (#957 does not match #9571/#9570).
 
     Also walks the task tree to find any blocked children with review-required
-    summaries and completes them with the provided summary message. Used when a
-    GitHub/GitLab/Azure issue is closed externally (no merged PR), so the
-    decomposed sub-tasks (developer, reviewer, etc.) don't linger on the board.
+    summaries and completes them with the provided summary message.
     Returns the list of task IDs that were completed.
     
     Args:
@@ -439,15 +438,17 @@ def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_ru
         dry_run: If True, log what would be completed without acting
     """
     tasks = list_tasks(slug)
-    pattern = f"#{issue_number}"
+    pattern = re.compile(rf"(?<!\d)#{issue_number}(?!\d)")
     completed_ids: List[str] = []
     
-    # First pass: complete all non-done tasks that reference the issue in their title
+    # First pass: complete all non-done tasks whose title or body/handoff references the issue
     for t in tasks:
-        if pattern not in (t.get("title") or ""):
+        title = t.get("title") or ""
+        body = t.get("body") or ""
+        if not (pattern.search(title) or pattern.search(body)):
             continue
         status = (t.get("status") or "").lower()
-        if status in ("done", "complete", "completed"):
+        if status in ("done", "complete", "completed", "cancelled"):
             continue
         tid = t.get("id") or t.get("task_id")
         if not tid:
@@ -459,11 +460,11 @@ def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_ru
             completed_ids.append(str(tid))
     
     # Second pass: walk task trees and complete blocked/review-required children
-    # This handles cases where child tasks don't reference the issue in their title
-    # but are still blocked waiting for the parent issue to close
     if summary:
         for t in tasks:
-            if pattern not in (t.get("title") or ""):
+            title = t.get("title") or ""
+            body = t.get("body") or ""
+            if not (pattern.search(title) or pattern.search(body)):
                 continue
             tid = t.get("id") or t.get("task_id")
             if not tid:
@@ -479,10 +480,9 @@ def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_ru
                     continue
                 child_task = child_card.get("task", child_card)
                 child_status = (child_task.get("status") or "").lower()
-                # Skip already-done children
                 if child_status in ("done", "complete", "completed"):
                     continue
-                # Check if blocked with review-required summary
+                # Complete blocked/review-required children
                 if child_status == "blocked":
                     latest_summary = child_card.get("latest_summary") or ""
                     if latest_summary.startswith("review-required:"):

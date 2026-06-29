@@ -2391,6 +2391,40 @@ def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
     return active
 
 
+def _global_reconcile_orphan_cards(slug: str, provider, *, dry_run: bool = False) -> None:
+    """Sweep all non-terminal kanban cards and complete those whose issue is Done.
+
+    Safety net: if a card references an issue that's already Done on the board
+    but the card itself is still non-terminal (bug in earlier cleanup paths,
+    card added after the issue moved to Done, etc.), complete it here.
+    Idempotent — re-running never double-completes or thrashes terminal cards.
+    """
+    if provider is None:
+        return
+    board_done_nums = set(provider.board_numbers_with_statuses([provider.status_name("done")]))
+    terminal_states = {"done", "complete", "completed", "cancelled"}
+    for t in kanban.list_tasks(slug):
+        # Skip already-terminal cards
+        if (t.get("status") or "").lower() in terminal_states:
+            continue
+        # Resolve issue number from title or body
+        title = t.get("title") or ""
+        body = t.get("body") or ""
+        num = extract_issue_number(title)
+        if num is None:
+            num = extract_issue_number(body)
+        if num is None or num not in board_done_nums:
+            continue
+        # This card belongs to a Done issue — complete it
+        tid = t.get("id") or t.get("task_id")
+        if not tid:
+            continue
+        if dry_run:
+            logger.info("[dry-run] would complete orphan card %s (parent issue #%s is Done)", tid, num)
+        elif kanban.complete(slug, str(tid), summary="orphan: parent issue is Done"):
+            logger.info("dispatch: completed orphan card %s (parent issue #%s reached Done)", tid, num)
+
+
 def _repair_orphan_tasks(
     slug: str, profiles: Dict[str, str], *, dry_run: bool = False,
 ) -> int:
@@ -4403,6 +4437,13 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         # re-reporting on every tick when hermes kanban ls still returns done tasks.
         if closed_tasks:
             completed.append(n)
+
+    # ── Global reconcile: catch any orphaned cards not handled above ────────
+    # Safety net: if a card references an issue that's Done on the board but the
+    # card itself is still non-terminal (bug in earlier cleanup paths, card added
+    # after the issue moved to Done, etc.), complete it here.
+    if board_mode:
+        _global_reconcile_orphan_cards(slug, provider, dry_run=dry_run)
 
     # ── Tier promotion: re-evaluate sub-issue Ready labels after merges ──────
     # When sub-issues declare ``Depends on:`` dependencies (via the body convention),
