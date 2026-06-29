@@ -13,3 +13,4 @@
 pyyaml>=6.0      # config + daedalus.yaml parsing (core, config, scripts)
 httpx>=0.24      # VCS provider HTTP calls (core/providers)
 fastapi>=0.100   # dashboard plugin_api router (dashboard/plugin_api.py)
+filelock>=3.0    # cross-process mutex/lockfile support (core, scripts)
