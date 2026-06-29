@@ -11,7 +11,14 @@ notification channels (Slack, Discord, Telegram, Signal, WhatsApp, …).
 flowchart TD
     A([🏁 Issue marked Ready\nGitHub · GitLab · Azure]) -->|cron tick or\ncompletion trigger| B[Dispatcher\ndaedalus_dispatch.py]
 
-    B --> C["⚡ Phase 1\nValidator task created\n— only agent active —"]
+    B --> Epic{"Epic-sized?\n≥4 checklist items\nepic label · body ≥2000 chars"}
+    Epic -->|yes| P["🗺 Phase 3 — Planner\nScopes work · defines interfaces\nDecomposes into sub-issues"]
+    Epic -->|no| C
+
+    P -->|"PLANNING COMPLETE"| SubI(["📋 Sub-issues created\nEach follows the full pipeline"])
+    P -->|"NOT SUITABLE\nfor decomposition"| C
+
+    C["⚡ Phase 1\nValidator task created\n— only agent active —"]
     C --> V{Validator\nOutcome}
 
     V -->|"CONFIRMED: &lt;note&gt;"| E["📋 Phase 2\nPM decomposes work\nacross team roster"]
@@ -33,6 +40,8 @@ flowchart TD
     Merge --> Done(["✅ Issue closed\nCard → Done"])
 
     style A fill:#1976D2,color:#fff,stroke:#0D47A1
+    style P fill:#6A1B9A,color:#fff,stroke:#4A148C
+    style SubI fill:#1565C0,color:#fff,stroke:#0D47A1
     style AF fill:#757575,color:#fff,stroke:#424242
     style NI fill:#F57C00,color:#fff,stroke:#E65100
     style ST fill:#C62828,color:#fff,stroke:#B71C1C
