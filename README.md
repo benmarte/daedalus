@@ -12,7 +12,7 @@ flowchart TD
     subgraph Reliability["🛡 Pipeline reliability layer"]
         direction LR
         WD["🐕 Gateway watchdog\ndetects stalled dispatcher\n· 3 restarts/hr cap\n· exponential backoff"]
-        MX["🔒 FileLock mutex\n· concurrency-safe\n· 300s stale timeout"]
+        MX["🔒 FileLock mutex\n· non-blocking timeout=0\n· exits cleanly if held"]
         ID["🔑 Idempotency keys\n· per-role per-stage\n· prevents duplicate cards"]
     end
 
@@ -803,14 +803,15 @@ blocked card and routes it to the agent that can clear it — the pipeline never
 stalls waiting for a human unless it has already retried 3 times.
 
 **Dispatcher mutex: FileLock.** The dispatcher acquires a process-level file lock
-(`<scripts-dir>/.daedalus_dispatch.lock`) on every tick. This prevents concurrent dispatcher
-instances from racing on the same board — a common failure mode when cron ticks overlap
-or when the dispatcher is invoked both by webhook and cron simultaneously. The mutex
-guarantees that only one dispatcher runs at a time, so no duplicate task creation, no
-double-decomposing epics, and no race conditions in the self-healing loop. If another
-dispatcher is already running, the new tick exits immediately (no-op) rather than queuing.
-The lock auto-releases after 300 seconds (5 minutes) even on crash, preventing stale locks
-from wedging future ticks.
+(`<scripts-dir>/.daedalus_dispatch.lock`) when `main()` is invoked, using `timeout=0`
+(non-blocking). This prevents concurrent dispatcher instances from racing on the same
+board — a common failure mode when cron ticks overlap or when the dispatcher is invoked
+both by webhook and cron simultaneously. If another dispatcher instance already holds the
+lock, the new invocation logs `"FileLock already held by another dispatcher process"` and
+exits cleanly (rc=0), preventing duplicate task creation, double-decomposing epics, and
+race conditions in the self-healing loop. The lock is released explicitly in a `finally`
+block on normal exit; stale locks from crashes are handled by the filelock library's
+stale-lock detection mechanism.
 
 **Validator None-summary recovery.** When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
 
