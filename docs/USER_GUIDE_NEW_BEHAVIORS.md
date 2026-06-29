@@ -3,7 +3,7 @@
 This guide documents all new user-facing behaviors introduced since v1.0.0-beta.30. Each section explains what the behavior does, how you interact with it, and any relevant configuration or prerequisites.
 
 **Last updated:** 2026-06-28  
-**Coverage:** 32 behaviors across 6 feature areas
+**Coverage:** 39 behaviors across 6 feature areas
 
 ---
 
@@ -39,6 +39,7 @@ This guide documents all new user-facing behaviors introduced since v1.0.0-beta.
    - 4.5 [Suppress Retry-Attempt Notification at Cap Boundary](#45-suppress-retry-attempt-notification-at-cap-boundary)
    - 4.6 [Webhook Notification on Validator Retry Cap Exhausted](#46-webhook-notification-on-validator-retry-cap-exhausted)
    - 4.7 [Broadcast Thread Reply Support for Slack](#47-broadcast-thread-reply-support-for-slack)
+   - 4.8 [Validator-Blocked Notification with Incrementing Idempotency Keys](#48-validator-blocked-notification-with-incrementing-idempotency-keys)
 5. [Reliability & Infrastructure](#5-reliability--infrastructure)
    - 5.1 [Auto-Pagination of _fetch_issues](#51-auto-pagination-of-_fetch_issues)
    - 5.2 [Default Fetch Limit Raised to 100](#52-default-fetch-limit-raised-to-100)
@@ -680,6 +681,31 @@ No user-facing configuration. Threading is automatic for Slack.
 
 **Source implementation:**  
 `core/thread_delivery.py:broadcast_thread_reply()`
+
+---
+
+### 4.8 Validator-Blocked Notification with Incrementing Idempotency Keys
+
+**What it does:**  
+When a validator blocks with `BLOCKED:`, the dispatcher creates a PM consultation task. Previously, the idempotency key was static (`validator-blocked-{n}`), so after the first consultation completed and the validator blocked again on a subsequent tick, no new consultation was created — the issue stalled indefinitely with no human notification. Now the key increments per block cycle: `validator-blocked-{n}`, `validator-blocked-{n}-r1`, `validator-blocked-{n}-r2`, etc., ensuring each block creates a fresh consultation. Additionally, the dispatcher fires a new `validator-blocked` notification to Slack/Discord on every block (including repeat blocks) so stalled issues surface to humans immediately. An in-flight guard prevents duplicate consultations while one is already active for the same issue.
+
+**How you interact with it:**  
+If a validator blocks multiple times on the same issue (e.g., the PM resolves one blocker but the validator encounters another), you now get:
+1. A new PM consultation task on each block (not just the first)
+2. A Slack/Discord notification on every block, so you're alerted immediately
+3. No duplicate consultations while a PM is actively working on the current block
+
+This prevents silent stalls where an issue sits blocked with no human awareness.
+
+**Prerequisites:**  
+- Slack or Discord must be configured as notification targets to receive alerts.
+- The issue must have a validator that can block with `BLOCKED:`.
+
+**Configuration:**  
+No user-facing configuration. The incrementing key and notification are applied automatically.
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py:_check_confirmed_validators()`, `scripts/daedalus_dispatch.py:_notify_validator_blocked()`
 
 ---
 
