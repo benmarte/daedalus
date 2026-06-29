@@ -306,6 +306,31 @@ levels. The planner can emit `depends_on: [...]` metadata in sub-issue bodies; t
 dispatcher parses them via the portable `Depends on: #N` convention so the tier graph works
 on any provider, not only GitHub's native dependencies.
 
+**Visual flow — epic decomposition and tier promotion:**
+
+```mermaid
+flowchart TD
+    Issue([Issue marked Ready]) --> Detect{is_epic?}
+
+    Detect -->|yes| Planner[Phase 3: Planner\ndecomposes into sub-issues]
+    Detect -->|no| Validator[Phase 1: Validator]
+
+    Planner -->|PLANNING COMPLETE| SubI[Sub-issues created\neach follows full pipeline]
+    Planner -->|NOT SUITABLE| Validator
+
+    SubI --> ParentEach[For each sub-issue:\ninherit labels\ndepend_on metadata computed]
+
+    ParentEach --> TierCheck{Tier level?}
+
+    TierCheck -->|tier 0| Ready[Apply Ready label immediately\nnext tick dispatches]
+    TierCheck -->|tier > 0| WaitForBlocker[Blocked — wait for tier-1 blockers]
+
+    WaitForBlocker -->|blocker merges| Promote[promote_waiting_tiers\nrelabel with Ready]
+    Promote --> Ready
+
+    Ready --> NormalPipeline[validator → PM → developer → QA → reviews → auto-merge]
+```
+
 ### Dependency-aware ready-gating
 
 Marking an issue `Ready` is necessary but **not sufficient** — daedalus also checks
