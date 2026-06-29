@@ -835,6 +835,101 @@ def _validate_profiles(
     }
 
 
+def _resync_profiles_to_model(
+    workdir: str,
+    new_model: Optional[str],
+    new_provider: Optional[str],
+    old_values: Optional[Dict[str, str]],
+) -> int:
+    """Update model.default + model.provider in all *-daedalus Hermes profiles.
+
+    Skips profiles whose ``model.default`` is non-empty *and* differs from the
+    previous global default (``old_values["model_default"]``), treating them as
+    intentional per-profile overrides the user has set manually.
+
+    Returns the count of profiles actually updated.
+    """
+    import tempfile
+
+    import yaml as _yaml  # lazy — yaml may not be installed in all envs
+
+    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    profiles_dir = hermes_home / "profiles"
+    if not profiles_dir.is_dir():
+        return 0
+    old_model = (old_values or {}).get("model_default", "")
+    updated = 0
+    for profile_dir in sorted(profiles_dir.iterdir()):
+        if not profile_dir.name.endswith("-daedalus"):
+            continue
+        cfg_path = profile_dir / "config.yaml"
+        if not cfg_path.is_file():
+            continue
+        try:
+            cfg = _yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dispatch: resync — failed to read %s: %s", cfg_path, exc)
+            continue
+        model_block = cfg.get("model") or {}
+        current_model = (model_block.get("default") or "").strip()
+        # Skip explicit override: a non-empty model that wasn't the previous
+        # global default means the user changed it intentionally.
+        if current_model and current_model != old_model:
+            logger.debug(
+                "dispatch: resync — skipping %s (explicit override: %s)",
+                profile_dir.name, current_model,
+            )
+            continue
+        current_model_val = cfg.get("model") or {}
+        if current_model_val.get("default", "") == (new_model or ""):
+            continue  # already at target — no write needed
+        if not isinstance(cfg.get("model"), dict):
+            cfg["model"] = {}
+        cfg["model"]["default"] = new_model or ""
+        if new_provider is not None:
+            cfg["model"]["provider"] = new_provider
+        fd, tmp = tempfile.mkstemp(dir=cfg_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                _yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+            os.replace(tmp, cfg_path)
+            updated += 1
+        except Exception as exc:  # noqa: BLE001
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            logger.warning("dispatch: resync — failed to write %s: %s", cfg_path, exc)
+    return updated
+
+
+def _log_resync(
+    count: int,
+    new_model: str,
+    old_coding_agent: str,
+    new_coding_agent: str,
+    old_model: str,
+    new_model_for_log: str,
+) -> None:
+    """Emit the INFO-level resync log line describing what changed."""
+    model_display = new_model_for_log or "none"
+    parts = []
+    if (old_coding_agent or "") != (new_coding_agent or ""):
+        old_ca = old_coding_agent or "none"
+        new_ca = new_coding_agent or "none"
+        parts.append(f"coding_agent changed from {old_ca} to {new_ca}")
+    if (old_model or "") != (new_model_for_log or ""):
+        old_m = old_model or "none"
+        parts.append(f"global model changed from {old_m} to {model_display}")
+    if parts:
+        logger.info(
+            "Resynced %d profiles to model %s (%s)",
+            count, model_display, ", ".join(parts),
+        )
+    else:
+        logger.info("Resynced %d profiles to model %s", count, model_display)
+
+
 def _notify_targets(resolved: Dict[str, Any], event: str) -> List[str]:
     """Delivery targets for a notification event.
 
@@ -4105,6 +4200,36 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
         )
         dispatch_state.set_config_fingerprint(workdir, _config_fp)
         logger.debug("dispatch: config fingerprint = %s", _config_fp)
+        # Resync *-daedalus profiles when coding_agent or global model changes.
+        _stored_resync_fp = dispatch_state.get_resync_fingerprint(workdir)
+        if _config_fp != _stored_resync_fp:
+            _old_vals = dispatch_state.get_config_values(workdir)
+            if _old_vals is None:
+                # First tick: establish baseline without resyncing profiles.
+                dispatch_state.set_resync_fingerprint(workdir, _config_fp)
+                dispatch_state.set_config_values(workdir, coding_agent, active_model.get("model"))
+            else:
+                _project_name = resolved.get("name", workdir)
+                logger.info(
+                    "dispatch: config fingerprint changed for %s — triggering profile resync",
+                    _project_name,
+                )
+                _n_resynced = _resync_profiles_to_model(
+                    workdir,
+                    new_model=active_model.get("model"),
+                    new_provider=active_model.get("provider"),
+                    old_values=_old_vals,
+                )
+                dispatch_state.set_resync_fingerprint(workdir, _config_fp)
+                dispatch_state.set_config_values(workdir, coding_agent, active_model.get("model"))
+                _log_resync(
+                    count=_n_resynced,
+                    new_model=active_model.get("model") or "",
+                    old_coding_agent=_old_vals.get("coding_agent", ""),
+                    new_coding_agent=coding_agent or "",
+                    old_model=_old_vals.get("model_default", ""),
+                    new_model_for_log=active_model.get("model") or "",
+                )
     # Messaging target the documentation agent's completion report is sent to.
     notify_target = (resolved.get("cron") or {}).get("deliver", "")
     slug = _board_slug(repo, resolved.get("name", ""))
