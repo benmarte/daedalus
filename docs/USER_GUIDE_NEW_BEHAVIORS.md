@@ -1007,13 +1007,13 @@ No configuration keys — these are pure CLI flags, passed on the command line.
 
 ## Summary
 
-This guide documents **34 new user-facing behaviors** across **6 feature areas**:
-- **Epic & Sub-issue Management (6 behaviors):** Automatic epic detection, decomposition, and context injection
+This guide documents **38 new user-facing behaviors** across **6 feature areas**:
+- **Epic & Sub-issue Management (7 behaviors):** Automatic epic detection, decomposition, and context injection
 - **Dependency-Aware Dispatch (5 behaviors):** Ready-gating, tier promotion, and idempotency
 - **Self-Healing & Auto-Advance (7 behaviors):** Automatic diagnosis and routing of blocked cards
 - **Notification & Alerting (7 behaviors):** Threading, retry-cap alerts, and webhook integration
 - **Reliability & Infrastructure (5 behaviors):** Auto-pagination, retry logic, and rate-limit handling
-- **Dispatch & Pipeline (7 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, and status-blind re-triage
+- **Dispatch & Pipeline (8 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, status-blind re-triage, and dispatcher CLI flags
 
 All behaviors are verified against the source code implementation and are active in the current release (since v1.0.0-beta.30). No user-facing configuration is required for most behaviors — they are automatic and transparent.
 
