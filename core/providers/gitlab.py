@@ -297,17 +297,20 @@ class GitLabProvider(VCSProvider):
                     {"name": ldef["name"], "color": f"#{ldef['color']}"},
                 )
                 created.append(ldef["name"])
+                existing.add(ldef["name"])
                 self._log.info("ensure_labels: created %r", ldef["name"])
             except ProviderError as e:
                 if e.status_code == 409:
                     continue  # already exists — idempotent
                 self._log.warning("ensure_labels: create %r failed: %s", ldef["name"], e)
-        # Also ensure board lane labels (GitLab boards are label-driven)
+        # Reuse the already-fetched existing set — avoids a second list_labels() round-trip
         status_names = [v for v in self._status_map.values() if v]
-        created.extend(self.ensure_status_labels(status_names))
+        created.extend(self.ensure_status_labels(status_names, _existing=existing))
         return created
 
-    def ensure_status_labels(self, status_names: List[str]) -> List[str]:
+    def ensure_status_labels(
+        self, status_names: List[str], *, _existing: Optional[set] = None
+    ) -> List[str]:
         """Create any missing board status labels in the project (idempotent).
 
         Guarantees the Issue Board lists keyed to ``status_map`` exist so
@@ -316,7 +319,7 @@ class GitLabProvider(VCSProvider):
         success. Returns the names that were newly created.
         """
         created: List[str] = []
-        existing = {label.name for label in self.list_labels()}
+        existing = _existing if _existing is not None else {label.name for label in self.list_labels()}
         for name in status_names:
             if not name or name in existing:
                 continue

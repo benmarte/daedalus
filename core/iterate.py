@@ -1152,10 +1152,6 @@ def _build_decomposed_marker() -> str:
 #   <!--daedalus:decomposed:...-->
 #   <!--  daedalus:decomposed:...  -->
 # The marker is posted as an HTML comment on the parent issue body or a comment.
-_DECOMPOSED_MARKER_RE = re.compile(
-    r"<!--\s*daedalus:decomposed(?::\d+)?\s*-->", re.IGNORECASE
-)
-
 # Regex to match fenced code blocks (``` or ~~~) with optional language tag.
 _CODE_BLOCK_RE = re.compile(
     r"(?:^```[^\n]*\n.*?^```)|(?:^~~~[^\n]*\n.*?^~~~)",
@@ -1172,7 +1168,7 @@ def _strip_code_blocks(text: str) -> str:
     return _CODE_BLOCK_RE.sub("", text)
 
 
-# New format marker pattern (with optional timestamp)
+# Marker injected into parent issue body/comment to prevent re-decomposition.
 _DECOMPOSED_MARKER_RE = re.compile(r'<!--\s*daedalus:decomposed(?::\d+)?\s*-->', re.IGNORECASE)
 # Legacy format marker pattern (sub-issues list)
 _LEGACY_DECOMPOSED_MARKER_RE = re.compile(r'<!--\s*daedalus:sub-issues:\[.*?\]\s*-->', re.IGNORECASE)
@@ -2435,9 +2431,11 @@ def run_iterate(
                 pr_number=pr,
                 provider=provider,
             )
-            # Track QA failures before executor: notification fires whenever
-            # qa-daedalus reports qa-failed, regardless of fix-card success.
-            if action == DEV_FIX_CI and assignee == "qa-daedalus":
+
+            # Gate on ok=True: the fix card was freshly created this tick.
+            # Without this guard, the append fires every tick while the QA card
+            # stays blocked, sending a notification every ~60 min until fixed.
+            if action == DEV_FIX_CI and assignee == "qa-daedalus" and ok:
                 issue_n = _extract_issue_number_from_card(card)
                 qa_failed_cards.append({
                     "issue_n": issue_n,

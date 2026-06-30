@@ -24,7 +24,9 @@ from conftest import FakeKanban, FakeProvider
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _qa_card(pr: int = 99, summary: str = "qa-failed: tests broke"):
+def _qa_card(pr: int = 99, summary: str | None = None):
+    if summary is None:
+        summary = f"qa-failed: PR #{pr} — tests broke"
     return {
         "id": "t_qa_001",
         "title": "QA: Issue #42",
@@ -65,7 +67,8 @@ class TestRunIterateQaFailedCards:
             _, _, _, qa_failed = iterate.run_iterate("slug", "O/R")
 
         assert len(qa_failed) == 1
-        assert qa_failed[0]["pr"] == 99 or qa_failed[0]["issue_n"] == 42
+        assert qa_failed[0]["pr"] == 99
+        assert qa_failed[0]["issue_n"] == 42
 
     def test_developer_dev_fix_ci_not_in_qa_failed(self):
         """Developer CI-red card triggers DEV_FIX_CI but is NOT in qa_failed_cards."""

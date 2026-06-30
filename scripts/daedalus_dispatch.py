@@ -4418,7 +4418,8 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
                    "advance_prs": advance_prs, "routed_actions": routed_actions,
                    "issues_seen": 0, "spec_created": spec_created,
                    "slack_delivered": slack_delivered, "vcs_autoconfig": vcs_autoconfig,
-                   "stale_running": stale_running}
+                   "stale_running": stale_running,
+                   "enrollment_failures": sorted(set(getattr(provider, "enrollment_failures", [])))}
         logger.info("dispatch summary: %s", summary)
         return summary
 

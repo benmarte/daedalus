@@ -111,7 +111,7 @@ def test_scenario_1_full_pipeline_happy_path():
 
 
 def test_scenario_2_filelock_mutex_serialises_concurrent_dispatch(tmp_path):
-    """Two concurrent dispatcher invocations: FileLock serialises, one blocked."""
+    """Two concurrent dispatcher invocations: FileLock blocks contender while holder runs."""
     try:
         from filelock import FileLock, Timeout
     except ImportError:
@@ -119,32 +119,41 @@ def test_scenario_2_filelock_mutex_serialises_concurrent_dispatch(tmp_path):
 
     lock_path = str(tmp_path / "daedalus.lock")
     results = []
+    # Barrier: t1 signals when it holds the lock; t2 waits before trying to acquire.
+    holding = threading.Event()
+    release = threading.Event()
 
     def _hold_lock():
         lock = FileLock(lock_path)
         with lock:
+            holding.set()   # tell t2 "I hold the lock, try now"
+            release.wait()  # wait until t2 has attempted acquisition
             results.append("holder-ran")
 
     def _try_acquire():
+        holding.wait()  # wait until t1 definitively holds the lock
         lock = FileLock(lock_path, timeout=0)
         try:
             with lock:
                 results.append("contender-ran")
         except Timeout:
             results.append("contender-blocked")
+        finally:
+            release.set()  # unblock t1 to finish
 
     t1 = threading.Thread(target=_hold_lock)
     t2 = threading.Thread(target=_try_acquire)
     t1.start()
     t2.start()
-    t1.join()
-    t2.join()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
 
-    assert "holder-ran" in results
-    # Regardless of timing, at most one ran concurrently (the lock serialises)
-    ran_count = results.count("contender-ran")
-    blocked_count = results.count("contender-blocked")
-    assert ran_count + blocked_count == 1, f"unexpected results: {results}"
+    assert "holder-ran" in results, f"holder never ran: {results}"
+    # With the barrier, t2 always attempts acquisition while t1 holds the lock,
+    # so the contender MUST be blocked — not just "happened to run after".
+    assert "contender-blocked" in results, (
+        f"contender was not blocked — mutex did not serialise: {results}"
+    )
 
 
 # ── Scenario 3: auto-merge blocked without QA signal ─────────────────────────
