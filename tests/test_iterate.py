@@ -734,8 +734,8 @@ def test_run_iterate_dev_pr_merged_reconciles():
     check("close_issue_tasks invoked for issue 957", mk_close.call_args[0][1] == 957)
 
 
-def test_run_iterate_dev_fix_ci():
-    """Blocked dev card with red CI → dev_fix_ci."""
+def test_run_iterate_dev_red_ci_advances():
+    """Blocked dev card with red CI → ADVANCE (CI gated at merge-time)."""
     cards = [{
         "id": "t_dev",
         "assignee": "developer-daedalus",
@@ -747,7 +747,7 @@ def test_run_iterate_dev_fix_ci():
             with mock.patch.object(kanban, "comment", return_value=True):
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
                     counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
-    check("dev red CI → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
+    check("dev red CI → advance count 1", counts[iterate.ADVANCE] == 1)
 
 
 def test_run_iterate_reviewer_changes():
