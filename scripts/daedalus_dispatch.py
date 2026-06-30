@@ -1338,6 +1338,209 @@ def _is_epic(
     return is_epic(issue, epic_config=epic_config)
 
 
+# Pattern to extract sub-issue numbers from an epic body's checklist.
+# Matches ``- [ ] #NNN`` or ``- [x] [#NNN](url)`` style references.
+_SUB_ISSUE_NUM_RE = re.compile(r"#(\d+)")
+
+
+def _extract_sub_issue_numbers(body: str) -> List[int]:
+    """Extract sub-issue numbers referenced in an epic body's checklist items.
+
+    Scans ``- [ ] #NNN`` / ``- [x] [#NNN](...)`` checklist lines for GitHub issue
+    references.  Returns a deduplicated, sorted list of issue numbers.
+    """
+    if not body:
+        return []
+    numbers: List[int] = []
+    seen: set = set()
+    for m in _SUB_ISSUE_CHECKLIST_RE.finditer(body):
+        line = m.group(0)
+        for num_match in _SUB_ISSUE_NUM_RE.finditer(line):
+            num = int(num_match.group(1))
+            if num not in seen:
+                seen.add(num)
+                numbers.append(num)
+    return sorted(numbers)
+
+
+def _check_epic_qa_ready(
+    slug: str,
+    issue_number: int,
+    issue: Optional[Dict[str, Any]],
+    kanban_mod,
+    epic_config: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Pre-dispatch guard: return True if QA may be dispatched for this issue.
+
+    For non-epic issues, always returns True — the guard is a no-op for
+    single-issue flows.
+
+    For epic issues (issues with sub-issue decomposition), returns True only
+    when at least one sub-issue developer card has a ``review-required: PR #``
+    signal in its latest summary (i.e., at least one sub-issue PR exists).
+    Otherwise returns False — the QA card should be skipped this tick.
+
+    The guard never raises — any error in inspecting sub-issue cards returns
+    True (fail-open) so a transient kanban error does not permanently block QA.
+    """
+    if issue is None:
+        return True  # can't determine epic status — fail open
+
+    if not _is_epic(issue, epic_config=epic_config):
+        return True  # not an epic — always dispatch QA
+
+    sub_issue_numbers = _extract_sub_issue_numbers(issue.get("body") or "")
+    if not sub_issue_numbers:
+        return True  # epic with no parseable sub-issues — fail open
+
+    # Check if any sub-issue developer card has a review-required: PR # signal.
+    try:
+        all_tasks = kanban_mod.list_tasks(slug)
+    except Exception:
+        return True  # fail open on kanban errors
+
+    dev_profile = _DEFAULT_PROFILES["developer"]
+    for task in all_tasks:
+        title = task.get("title") or ""
+        # Look for sub-issue developer cards
+        if (task.get("assignee") or "").strip() != dev_profile:
+            continue
+        # Check if this card's title references any sub-issue number
+        task_issue_num = extract_issue_number(title)
+        if task_issue_num is None or task_issue_num not in sub_issue_numbers:
+            continue
+        # Check for review-required: PR # signal in the card summary
+        summary = _get_task_summary(task, slug)
+        if "review-required:" in (summary or "").lower() and "pr #" in (summary or "").lower():
+            return True  # at least one sub-issue has a PR
+
+    return False
+
+
+def _gate_epic_qa_tasks(
+    slug: str,
+    issues_map: Dict[int, Dict[str, Any]],
+    kanban_mod,
+    *,
+    epic_config: Optional[Dict[str, Any]] = None,
+    dry_run: bool = False,
+) -> int:
+    """Block ready/runnable QA cards for epics with no sub-issue PRs yet.
+
+    Scans the board for QA cards (assignee = qa-daedalus) whose issue is an epic
+    and for which no sub-issue developer card has signalled ``review-required:
+    PR #``.  Each such card is moved to ``blocked`` with reason
+    ``qa-deferred: no sub-issue PRs open yet for epic #{N}`` so the dispatcher
+    does not spawn a QA agent prematurely.
+
+    Returns the count of QA cards that were blocked (deferred) this tick.
+    On the next cron tick, if a sub-issue PR has appeared, the guard re-checks;
+    the card is unblocked and dispatched normally.
+
+    This is idempotent — a card already blocked with ``qa-deferred:`` is left
+    as-is (not re-blocked) and will be re-evaluated by
+    ``_maybe_undefer_epic_qa_tasks`` on the next tick.
+    """
+    qa_profile = _DEFAULT_PROFILES["qa"]
+    deferred = 0
+
+    try:
+        # Check both "ready" and "running" statuses — "running" cards that
+        # were spawned before the guard existed, and "ready"/"todo" cards
+        # that haven't been dispatched yet.
+        tasks = kanban_mod.list_tasks(slug)
+    except Exception:
+        return 0
+
+    for task in tasks:
+        if (task.get("assignee") or "").strip() != qa_profile:
+            continue
+        status = (task.get("status") or "").lower()
+        # Skip already-blocked or done cards (includes qa-deferred cards —
+        # those are re-evaluated by _maybe_undefer_epic_qa_tasks)
+        if status in ("blocked", "done", "complete", "completed", "archived"):
+            continue
+
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            continue
+        issue = issues_map.get(n)
+        if issue is None:
+            continue  # issue not in current window — can't check, fail open
+
+        if _check_epic_qa_ready(slug, n, issue, kanban_mod, epic_config=epic_config):
+            continue  # QA is ready (not an epic, or sub-issue PR exists)
+
+        # Block the QA card — it will be re-evaluated next tick
+        reason = f"qa-deferred: no sub-issue PRs open yet for epic #{n}"
+        tid = str(task.get("id") or task.get("task_id") or "")
+        if not tid:
+            continue
+        if dry_run:
+            logger.info(
+                "[dry-run] would block QA card %s for #%s — no sub-issue PRs yet",
+                tid, n,
+            )
+        else:
+            if kanban_mod.block_task(slug, tid, reason):
+                deferred += 1
+                logger.debug(
+                    "dispatch: deferred epic QA for #%s — no sub-issue PRs open yet",
+                    n,
+                )
+
+    return deferred
+
+
+def _maybe_undefer_epic_qa_tasks(
+    slug: str,
+    issues_map: Dict[int, Dict[str, Any]],
+    kanban_mod,
+    *,
+    epic_config: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Unblock QA cards previously deferred with ``qa-deferred:`` when ready.
+
+    Scans blocked QA cards for the ``qa-deferred:`` sentinel.  For each, re-
+    evaluates ``_check_epic_qa_ready``.  When a sub-issue PR now exists, unblocks
+    the card so the dispatcher can spawn it on the next ``kanban.dispatch()``.
+
+    Returns the count of QA cards unblocked this tick.
+    """
+    qa_profile = _DEFAULT_PROFILES["qa"]
+    unblocked = 0
+
+    try:
+        blocked_tasks = kanban_mod.list_blocked(slug)
+    except Exception:
+        return 0
+
+    for task in blocked_tasks:
+        if (task.get("assignee") or "").strip() != qa_profile:
+            continue
+        summary = _get_task_summary(task, slug) or ""
+        if "qa-deferred" not in summary.lower():
+            continue  # not a deferred QA card
+
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            continue
+        issue = issues_map.get(n)
+        if issue is None:
+            continue
+
+        if _check_epic_qa_ready(slug, n, issue, kanban_mod, epic_config=epic_config):
+            tid = str(task.get("id") or task.get("task_id") or "")
+            if tid and kanban_mod.unblock_task(slug, tid):
+                unblocked += 1
+                logger.info(
+                    "dispatch: unblocked deferred epic QA for #%s — sub-issue PR now open",
+                    n,
+                )
+
+    return unblocked
+
+
 def _planner_body(
     repo: str,
     issue: Dict[str, Any],
@@ -2181,6 +2384,9 @@ def _qa_task_body(
             f"### 6. Complete your kanban card\n"
             f"   - Tests pass: summary 'qa-passed: PR #<P>'\n"
             f"   - Tests fail: block with 'qa-failed: <reason>' — developer will fix\n"
+            f"   - This is an epic with sub-issues and NO PR for issue #{n}: "
+            f"block with 'qa-deferred: no sub-issue PRs found for epic #{n}' "
+            f"(the dispatcher will re-dispatch once a sub-issue PR opens)\n"
         ),
         coding_agent,
         coding_agent_cmd,
@@ -5347,6 +5553,19 @@ def run(
     issues_map: Dict[int, Dict[str, Any]] = {i["number"]: i for i in issues}
     _sec_targets = _notify_targets(resolved, "security-escalation")
     _label_ovr = (execution or {}).get("label_overrides", {})
+
+    # ── epic QA dispatch gate (issue #1098) ────────────────────────────────
+    # Before any dispatch call, unblock QA cards whose sub-issue PRs appeared
+    # since the last tick, then defer (block) QA cards for epics with no
+    # sub-issue PR yet.  This prevents the dispatcher from spawning a QA agent
+    # for an epic before any developer has opened a PR.
+    if not dry_run:
+        _maybe_undefer_epic_qa_tasks(
+            slug, issues_map, kanban, epic_config=epic_config
+        )
+        _gate_epic_qa_tasks(
+            slug, issues_map, kanban, epic_config=epic_config, dry_run=dry_run
+        )
 
     confirmed_triggered = _check_confirmed_validators(
         slug,
