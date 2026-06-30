@@ -723,7 +723,8 @@ def _create_downstream_review_tasks(
     pr_ref = f"PR #{pr_number}" if pr_number else "(PR number unknown)"
     base_body = (
         f"The developer has completed work for issue #{issue_number} "
-        f"({pr_ref}). The PR is open and CI is green.\n\n"
+        f"({pr_ref}). The PR is open. CI may still be running — reviews "
+        f"proceed in parallel with CI.\n\n"
         f"Developer card: {tid}\n"
         f"Workspace: {workspace}\n"
     )
