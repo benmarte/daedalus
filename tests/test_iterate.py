@@ -39,13 +39,13 @@ def test_classify_blocked_dev_green():
 
 
 def test_classify_blocked_dev_red():
-    """Developer + review-required with PR + CI red → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
+    """Developer + review-required with PR + QA failure → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     result = iterate.classify_blocked(
         "developer-daedalus",
         "review-required: PR #42 — CI failing",
         ci_green=False,
     )
-    check("dev red CI → advance (CI gated at merge-time)", result == iterate.ADVANCE)
+    check("dev QA-reported failures → advance (CI gated at merge-time)", result == iterate.ADVANCE)
 
 
 def test_classify_blocked_dev_advance_all_ci_states():
@@ -65,7 +65,7 @@ def test_classify_blocked_dev_advance_all_ci_states():
     )
     check("dev CI green → advance", result_green == iterate.ADVANCE)
 
-    # CI pending → ADVANCE (previously PENDING_CI)
+    # CI pending → ADVANCE (previously PENDING_SIGNAL)
     result_pending = iterate.classify_blocked(
         "developer-daedalus",
         "review-required: PR #42 waiting on CI",
@@ -74,16 +74,16 @@ def test_classify_blocked_dev_advance_all_ci_states():
     )
     check("dev CI pending → advance", result_pending == iterate.ADVANCE)
 
-    # CI red → ADVANCE (previously DEV_FIX_CI)
+    # QA failure → ADVANCE (previously QA_FIX)
     result_red = iterate.classify_blocked(
         "developer-daedalus",
         "review-required: PR #42 CI failing",
         ci_green=False,
         raw_ci=CIStatus.RED,
     )
-    check("dev CI red → advance", result_red == iterate.ADVANCE)
+    check("dev QA failure → advance", result_red == iterate.ADVANCE)
 
-    # CI unknown → ADVANCE (previously DEV_FIX_CI)
+    # CI unknown → ADVANCE (previously QA_FIX)
     result_unknown = iterate.classify_blocked(
         "developer-daedalus",
         "review-required: PR #42",
@@ -94,7 +94,7 @@ def test_classify_blocked_dev_advance_all_ci_states():
 
 
 def test_classify_blocked_dev_escalate():
-    """Developer + CI red + fix_attempts >= max → escalate."""
+    """Developer + QA failure + fix_attempts >= max → escalate."""
     result = iterate.classify_blocked(
         "developer-daedalus",
         "review-required: PR #42 — CI failing",
@@ -555,8 +555,8 @@ def test_execute_reconcile_merged_dry_run():
     check("dry_run does not complete", mk_complete.call_count == 0)
 
 
-def test_execute_dev_fix_ci():
-    """_execute_dev_fix_ci creates a fix task with idempotency key."""
+def test_execute_qa_fix():
+    """_execute_qa_fix creates a fix task with idempotency key."""
     with mock.patch.object(kanban, "create_task", return_value="t_fix") as mk_create:
         with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
             card = {
@@ -564,10 +564,10 @@ def test_execute_dev_fix_ci():
                 "runs": [{"metadata": {"fix_attempts": 0}}],
                 "workspace": "dir:/tmp",
             }
-            ok = iterate._execute_dev_fix_ci(
+            ok = iterate._execute_qa_fix(
                 "slug", card, "O/R", "review-required: PR #55 CI failing",
             )
-    check("dev_fix_ci returns True", ok is True)
+    check("qa_fix returns True", ok is True)
     mk_create.assert_called_once()
     # Check idempotency key includes attempt number
     call_args = mk_create.call_args[1]
@@ -649,16 +649,16 @@ def test_execute_escalate():
 
 
 def test_execute_dev_fix_escalate_when_over_cap():
-    """_execute_dev_fix_ci escalates when fix_attempts >= MAX."""
+    """_execute_qa_fix escalates when fix_attempts >= MAX."""
     card = {
         "id": "t_dev",
         "runs": [{"metadata": {"fix_attempts": 3}}],
     }
     with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
-        ok = iterate._execute_dev_fix_ci(
+        ok = iterate._execute_qa_fix(
             "slug", card, "O/R", "review-required: PR #42 CI failing",
         )
-    check("dev_fix_ci escalates when over cap", ok is True)
+    check("qa_fix escalates when over cap", ok is True)
     mk_comment.assert_called_once()
     # Make sure no create was called
     assert "escalate" in mk_comment.call_args[0][2].lower()
@@ -734,24 +734,24 @@ def test_run_iterate_dev_pr_merged_reconciles():
     check("close_issue_tasks invoked for issue 957", mk_close.call_args[0][1] == 957)
 
 
-def test_run_iterate_dev_fix_ci():
-    """Blocked dev card with red CI → ADVANCE (CI no longer gates ADVANCE, per epic #1074).
+def test_run_iterate_qa_fix():
+    """Blocked dev card with QA-reported failures → ADVANCE (CI no longer gates ADVANCE, per epic #1074).
 
-    The old behavior was DEV_FIX_CI (create fix card for red CI). Now the card
+    The old behavior was QA_FIX (create fix card for QA-reported failures). Now the card
     advances immediately and CI is enforced at merge-time only.
     """
     cards = [{
         "id": "t_dev",
         "assignee": "developer-daedalus",
-        "runs": [{"reason": "review-required: PR #42 CI red"}, {"metadata": {"fix_attempts": 0}}],
+        "runs": [{"reason": "review-required: PR #42 QA failure"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
                 counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
-    check("dev red CI → advance (CI gated at merge-time)", counts[iterate.ADVANCE] == 1)
-    check("dev red CI → no dev_fix_ci", counts[iterate.DEV_FIX_CI] == 0)
+    check("dev QA-reported failures → advance (CI gated at merge-time)", counts[iterate.ADVANCE] == 1)
+    check("dev QA-reported failures → no qa_fix", counts[iterate.QA_FIX] == 0)
 
 
 def test_run_iterate_reviewer_changes():
@@ -791,7 +791,7 @@ def test_run_iterate_escalate():
         "id": "t_dev",
         "assignee": "developer-daedalus",
         "runs": [
-            {"reason": "review-required: PR #42 CI red",
+            {"reason": "review-required: PR #42 QA failure",
              "metadata": {"fix_attempts": 3}},  # at cap
         ],
     }]
@@ -827,7 +827,7 @@ def test_run_iterate_mixed():
                 counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("mixed: advance count 1", counts[iterate.ADVANCE] == 1)
     check("mixed: approve_advance count 1", counts[iterate.APPROVE_ADVANCE] == 1)
-    check("mixed: no other actions", counts[iterate.DEV_FIX_CI] == 0
+    check("mixed: no other actions", counts[iterate.QA_FIX] == 0
           and counts[iterate.PM_ROUTE] == 0
           and counts[iterate.ESCALATE] == 0)
 
@@ -927,7 +927,7 @@ def test_human_summary_format():
             "created": [1, 2],
             "completed": [3],
             "advance_prs": [42, 99],
-            "routed_actions": {"dev_fix_ci": 1, "escalate": 2},
+            "routed_actions": {"qa_fix": 1, "escalate": 2},
             "reconciled": [("5", "In review")],
         }
     }
@@ -935,7 +935,7 @@ def test_human_summary_format():
     check("summary mentions PR #42", "#42" in msg)
     check("summary mentions #99", "#99" in msg)
     check("summary does NOT contain count tuples", "count" not in msg)
-    check("summary has ci-fix count", "CI fixes: 1x" in msg)
+    check("summary has ci-fix count", "QA fixes: 1x" in msg)
     check("summary has escalate count", "Escalations: 2x" in msg)
     check("summary has dispatched issues", "#1" in msg and "#2" in msg)
     check("summary has closed issues", "✅" in msg and "#3" in msg)
@@ -973,12 +973,12 @@ def test_human_summary_pm_route():
         "my-repo": {
             "mode": "kanban",
             "advance_prs": [7],
-            "routed_actions": {"pm_route": 2, "dev_fix_ci": 1},
+            "routed_actions": {"pm_route": 2, "qa_fix": 1},
         }
     }
     msg = disp._human_summary(summaries)
     check("summary has pm-route count", "PM routes: 2x" in msg)
-    check("summary has ci-fix count", "CI fixes: 1x" in msg)
+    check("summary has ci-fix count", "QA fixes: 1x" in msg)
     check("old review-fix NOT present", "review-fix" not in msg)
 
 
@@ -1217,7 +1217,7 @@ def test_run_iterate_handoff_pr_still_works():
 
 
 def test_run_iterate_branch_pr_fallback_ci_red():
-    """branch PR + CI red → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
+    """branch PR + QA failure → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     cards = [{
         "id": "t_dev",
         "assignee": "developer-daedalus",
@@ -1696,7 +1696,7 @@ def test_run_iterate_no_ci_provider_advances_immediately():
     check("no-CI provider → no pending", pending == [])
 
 
-def test_run_iterate_pending_ci_returns_pending_cards():
+def test_run_iterate_pending_signal_returns_pending_cards():
     """CI PENDING → ADVANCE (CI no longer gates ADVANCE, per epic #1074). Card is completed, no pending cards."""
     pp = _PendingProvider("pending")
     cards = [{
@@ -1713,7 +1713,7 @@ def test_run_iterate_pending_ci_returns_pending_cards():
 
 
 def test_run_iterate_green_ci_no_pending_cards():
-    """CI green → advance, pending_ci_cards is empty."""
+    """CI green → advance, pending_signal_cards is empty."""
     gp_green = _PendingProvider("green")
     cards = [{
         "id": "t_dev",
@@ -1729,22 +1729,22 @@ def test_run_iterate_green_ci_no_pending_cards():
 
 
 def test_run_iterate_red_ci_no_pending_cards():
-    """CI red → ADVANCE (CI no longer gates ADVANCE, per epic #1074). No pending cards."""
+    """QA failure → ADVANCE (CI no longer gates ADVANCE, per epic #1074). No pending cards."""
     gp_red = _PendingProvider("red")
     cards = [{
         "id": "t_dev",
         "assignee": "developer-daedalus",
-        "runs": [{"reason": "review-required: PR #42 CI red"}, {"metadata": {"fix_attempts": 0}}],
+        "runs": [{"reason": "review-required: PR #42 QA failure"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
-    check("red CI → advance count 1", counts[iterate.ADVANCE] == 1)
-    check("red CI → no pending", pending == [])
+    check("QA-reported failures → advance count 1", counts[iterate.ADVANCE] == 1)
+    check("QA-reported failures → no pending", pending == [])
 
 
-def test_run_iterate_pending_ci_multiple_cards():
+def test_run_iterate_pending_signal_multiple_cards():
     """Multiple cards with PENDING CI → all ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     pp = _PendingProvider("pending")
     cards = [
@@ -1767,10 +1767,10 @@ def test_run_iterate_pending_ci_multiple_cards():
     check("multi pending → no pending cards", pending == [])
 
 
-# ── Issue #30: PENDING_CI classification ──────────────────────────────────────
+# ── Issue #30: PENDING_SIGNAL classification ──────────────────────────────────────
 
 
-def test_classify_blocked_pending_ci_returns_advance():
+def test_classify_blocked_pending_signal_returns_advance():
     """Developer + review-required + PR + CI PENDING → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     from core.providers.base import CIStatus
     result = iterate.classify_blocked(
@@ -1793,7 +1793,7 @@ def test_classify_blocked_red_ci_returns_advance():
         pr_number=42,
         raw_ci=CIStatus.RED,
     )
-    check("dev red CI (explicit) → advance (CI gated at merge-time)", result == iterate.ADVANCE)
+    check("dev QA-reported failures (explicit) → advance (CI gated at merge-time)", result == iterate.ADVANCE)
 
 
 def test_classify_blocked_unknown_ci_returns_advance():
@@ -1820,7 +1820,7 @@ def test_classify_blocked_default_raw_ci_backward_compat():
     check("default raw_ci → advance (CI gated at merge-time)", result == iterate.ADVANCE)
 
 
-def test_run_iterate_pending_ci_classified_correctly():
+def test_run_iterate_pending_signal_classified_correctly():
     """run_iterate: PENDING CI → ADVANCE (CI no longer gates ADVANCE, per epic #1074). Card is completed."""
     pp = _PendingProvider("pending")
     cards = [{
@@ -1832,7 +1832,7 @@ def test_run_iterate_pending_ci_classified_correctly():
         with mock.patch.object(kanban, "complete", return_value=True):
             counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=pp)
     check("pending CI → ADVANCE count 1", counts[iterate.ADVANCE] == 1)
-    check("pending CI → DEV_FIX_CI count 0", counts[iterate.DEV_FIX_CI] == 0)
+    check("pending CI → QA_FIX count 0", counts[iterate.QA_FIX] == 0)
     check("pending CI → no pending cards", len(pending) == 0)
 
 
@@ -1850,33 +1850,33 @@ def test_classify_blocked_qa_passed():
 
 
 def test_classify_blocked_qa_failed():
-    """QA card with qa-failed handoff → DEV_FIX_CI."""
+    """QA card with qa-failed handoff → QA_FIX."""
     result = iterate.classify_blocked(
         "qa-daedalus",
         "review-required: qa-failed: PR #5 — lint failure in src/foo.py",
         ci_green=True,
     )
-    check("qa qa-failed → dev_fix_ci", result == iterate.DEV_FIX_CI)
+    check("qa qa-failed → qa_fix", result == iterate.QA_FIX)
 
 
-def test_classify_blocked_qa_pending_ci():
-    """QA card without explicit qa-passed/qa-failed signal → PENDING_CI fallback."""
+def test_classify_blocked_qa_pending_signal():
+    """QA card without explicit qa-passed/qa-failed signal → PENDING_SIGNAL fallback."""
     result = iterate.classify_blocked(
         "qa-daedalus",
         "review-required: qa-checking: PR #5",
         ci_green=True,
     )
-    check("qa unspecified signal → pending_ci", result == iterate.PENDING_CI)
+    check("qa unspecified signal → pending_signal", result == iterate.PENDING_SIGNAL)
 
 
 def test_classify_blocked_qa_failed_ci_red():
-    """QA card with qa-failed + CI red → still DEV_FIX_CI (CI doesn't gate QA)."""
+    """QA card with qa-failed + QA failure → still QA_FIX (CI doesn't gate QA)."""
     result = iterate.classify_blocked(
         "qa-daedalus",
         "review-required: qa-failed: PR #5 — test failures",
         ci_green=False,
     )
-    check("qa qa-failed + red CI → dev_fix_ci", result == iterate.DEV_FIX_CI)
+    check("qa qa-failed + QA-reported failures → qa_fix", result == iterate.QA_FIX)
 
 
 # ── accessibility-daedalus classify_blocked paths ────────────────────────────
@@ -1923,13 +1923,13 @@ def test_classify_blocked_accessibility_changes_requested():
 
 
 def test_classify_blocked_accessibility_pending():
-    """Accessibility card without a clear outcome → PENDING_CI."""
+    """Accessibility card without a clear outcome → PENDING_SIGNAL."""
     result = iterate.classify_blocked(
         "accessibility-daedalus",
         "review-required: PR #5 audit in progress",
         ci_green=True,
     )
-    check("accessibility unspecified signal → pending_ci", result == iterate.PENDING_CI)
+    check("accessibility unspecified signal → pending_signal", result == iterate.PENDING_SIGNAL)
 
 
 def test_run_iterate_qa_passed_advances():
@@ -2024,7 +2024,7 @@ def test_run_iterate_accessibility_changes_requested_routes_to_pm():
 
 
 def test_run_iterate_qa_failed_creates_fix_card():
-    """run_iterate: qa-daedalus with qa-failed → DEV_FIX_CI."""
+    """run_iterate: qa-daedalus with qa-failed → QA_FIX."""
     from core.providers.base import CIStatus
 
     class _GreenProvider4:
@@ -2050,7 +2050,7 @@ def test_run_iterate_qa_failed_creates_fix_card():
                         counts, prs, pending, _qa_f, *_ = iterate.run_iterate(
                             "slug", "O/R", provider=_GreenProvider4(),
                         )
-    check("run_iterate qa-failed → DEV_FIX_CI 1", counts[iterate.DEV_FIX_CI] == 1)
+    check("run_iterate qa-failed → QA_FIX 1", counts[iterate.QA_FIX] == 1)
     check("run_iterate qa-failed → no pending", pending == [])
 
 
@@ -2060,15 +2060,15 @@ def test_run_iterate_red_ci_classified_correctly():
     cards = [{
         "id": "t_dev",
         "assignee": "developer-daedalus",
-        "runs": [{"reason": "review-required: PR #42 CI red"}, {"metadata": {"fix_attempts": 0}}],
+        "runs": [{"reason": "review-required: PR #42 QA failure"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
-    check("red CI → ADVANCE count 1", counts[iterate.ADVANCE] == 1)
-    check("red CI → DEV_FIX_CI count 0", counts[iterate.DEV_FIX_CI] == 0)
-    check("red CI → no pending cards", pending == [])
+    check("QA-reported failures → ADVANCE count 1", counts[iterate.ADVANCE] == 1)
+    check("QA-reported failures → QA_FIX count 0", counts[iterate.QA_FIX] == 0)
+    check("QA-reported failures → no pending cards", pending == [])
 
 
 # ── Issue #35: escalation dedup tests ───────────────────────────────────────
@@ -2320,7 +2320,7 @@ if __name__ == "__main__":
         test_count_fix_attempts_pm_route_key,
         test_handoff_from_card,
         test_execute_advance,
-        test_execute_dev_fix_ci,
+        test_execute_qa_fix,
         test_execute_pm_route,
         test_execute_pm_route_empty_profile_fallback,
         test_execute_approve_advance,
@@ -2328,7 +2328,7 @@ if __name__ == "__main__":
         test_execute_dev_fix_escalate_when_over_cap,
         test_run_iterate_empty,
         test_run_iterate_dev_advance,
-        test_run_iterate_dev_fix_ci,
+        test_run_iterate_qa_fix,
         test_run_iterate_reviewer_changes,
         test_run_iterate_reviewer_approved,
         test_run_iterate_escalate,
@@ -2370,19 +2370,19 @@ if __name__ == "__main__":
         test_extract_issue_number_none,
         test_extract_issue_number_prefers_repo_qualified,
         test_run_iterate_no_ci_provider_advances_immediately,
-        test_run_iterate_pending_ci_returns_pending_cards,
+        test_run_iterate_pending_signal_returns_pending_cards,
         test_run_iterate_green_ci_no_pending_cards,
         test_run_iterate_red_ci_no_pending_cards,
-        test_run_iterate_pending_ci_multiple_cards,
-        test_classify_blocked_pending_ci_returns_advance,
+        test_run_iterate_pending_signal_multiple_cards,
+        test_classify_blocked_pending_signal_returns_advance,
         test_classify_blocked_red_ci_returns_advance,
         test_classify_blocked_unknown_ci_returns_advance,
         test_classify_blocked_default_raw_ci_backward_compat,
-        test_run_iterate_pending_ci_classified_correctly,
+        test_run_iterate_pending_signal_classified_correctly,
         test_run_iterate_red_ci_classified_correctly,
         test_classify_blocked_qa_passed,
         test_classify_blocked_qa_failed,
-        test_classify_blocked_qa_pending_ci,
+        test_classify_blocked_qa_pending_signal,
         test_classify_blocked_qa_failed_ci_red,
         test_classify_blocked_accessibility_approved,
         test_classify_blocked_accessibility_na,

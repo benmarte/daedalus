@@ -136,7 +136,7 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 **Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
 
-⛔ **The prefixes `qa-passed` and `qa-failed` must appear exactly as substrings in your block reason.** Other phrasings (e.g. `qa pass:`, `tests passed:`, `qa approved:`) fall to `PENDING_CI` — the dispatcher waits silently and retries indefinitely. Always use the canonical form.
+⛔ **The prefixes `qa-passed` and `qa-failed` must appear exactly as substrings in your block reason.** Other phrasings (e.g. `qa pass:`, `tests passed:`, `qa approved:`) fall to `PENDING_SIGNAL` — the dispatcher waits silently and retries indefinitely. Always use the canonical form.
 
 ---
 
@@ -155,8 +155,8 @@ handoff before matching):
 | Handoff text contains | Signal | Dispatcher action |
 |------------------------|--------|-------------------|
 | `qa-passed` | `ADVANCE` | Pipeline moves to reviewer/security |
-| `qa-failed` | `DEV_FIX_CI` | Creates a developer-daedalus fix card |
-| any other text (agent still running, crash, typo) | `PENDING_CI` | Card idles — dispatcher waits for next tick |
+| `qa-failed` | `QA_FIX` | Creates a developer-daedalus fix card |
+| any other text (agent still running, crash, typo) | `PENDING_SIGNAL` | Card idles — dispatcher waits for next tick |
 
 ### The innermost timeout: CODING_AGENT_MAX_WAIT
 
@@ -194,7 +194,7 @@ After the developer fix completes and CI is re-checked, the dispatcher validates
 the fix-attempt counter against `MAX_FIX_ATTEMPTS` (currently 3). This validation
 occurs in `classify_blocked()` at `core/iterate.py:157-158`: if
 `fix_attempts >= MAX_FIX_ATTEMPTS`, the action is `ESCALATE` (Stage 3) rather than
-`DEV_FIX_CI` (spawn another fix card). The counter increments after each spawned
+`QA_FIX` (spawn another fix card). The counter increments after each spawned
 fix card and persists in `.hermes/daedalus-fix-attempts.json`. When the threshold
 is reached, no new fix cards are spawned — the dispatcher transitions directly to
 Stage 3.
@@ -213,7 +213,7 @@ the worker hits the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writes
 (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
 `coding_agent_timeout`, `exited with code`, `agent crash`). For QA cards these
 markers are *not* special-cased — a QA crash (including a timeout) leaves the
-card stuck in `PENDING_CI` until the sweeper notices. **Your role:** you crashed
+card stuck in `PENDING_SIGNAL` until the sweeper notices. **Your role:** you crashed
 before emitting a verdict, so the pipeline halts.
 
 **Stage 5 — Stale-card sweeper (notification, not recovery)**
@@ -230,9 +230,9 @@ optionally archive it if no longer actionable. **Your role:** you cannot
 self-recover at this stage. A human must assess whether QA should be re-run,
 skipped, or the PR restructured.
 
-**Unrecognized signal (fallback to PENDING_CI)**
+**Unrecognized signal (fallback to PENDING_SIGNAL)**
 Typo in verdict, missing `qa-passed:` / `qa-failed:` keyword → dispatcher
-cannot classify, falls through to `PENDING_CI`. The card idles until the sweeper
+cannot classify, falls through to `PENDING_SIGNAL`. The card idles until the sweeper
 alerts (at 24h/48h) or a human unblocks. **Your role:** ensure your verdict
 uses the canonical forms exactly.
 
@@ -261,7 +261,7 @@ auto-fix you — it is a notification mechanism, not a recovery mechanism.
 ### What breaks self-healing
 
 - Emitting a non-canonical verdict (typo, missing `qa-passed`/`qa-failed`). The
-  dispatcher falls through to `PENDING_CI` and your card idles.
+  dispatcher falls through to `PENDING_SIGNAL` and your card idles.
 - Not blocking with `review-required` after posting your verdict. The dispatcher
   reads block reasons, not PR comments.
 - Crashing before `qa-passed` / `qa-failed` is written to the handoff. The sweeper
@@ -283,8 +283,8 @@ This SOUL is consumed by the `qa-daedalus` branch of `classify_blocked()` in `co
 | Block reason substring | Dispatcher action |
 |---|---|
 | `qa-passed` (e.g. `qa-passed: PR #N verified`) | `ADVANCE` — advances pipeline to reviewer/security |
-| `qa-failed` (e.g. `qa-failed: <reason>`) | `DEV_FIX_CI` — dispatches developer fix card |
-| ANY OTHER PHRASING | `PENDING_CI` — **silent retry** (dispatcher waits for CI to finish; no action taken) |
+| `qa-failed` (e.g. `qa-failed: <reason>`) | `QA_FIX` — dispatches developer fix card |
+| ANY OTHER PHRASING | `PENDING_SIGNAL` — **silent retry** (dispatcher waits for CI to finish; no action taken) |
 
 **Canonical forms you must emit:**
 - Passed → `qa-passed: PR #<n> verified` (contains `qa-passed`)

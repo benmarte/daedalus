@@ -206,8 +206,8 @@ def test_developer_advances_without_ci_wait(pipeline, fake_issue, fake_provider)
 
     CI no longer gates the ADVANCE action — QA/reviewer/security are dispatched
     as soon as the PR is opened. This test verifies:
-    1. ADVANCE fires with CI pending (previously PENDING_CI)
-    2. ADVANCE fires with CI red (previously DEV_FIX_CI)
+    1. ADVANCE fires with CI pending (previously PENDING_SIGNAL)
+    2. ADVANCE fires with QA failure (previously QA_FIX)
     3. Downstream tasks are created in both cases
     """
     disp, iterate_mod, kanban = pipeline.disp, pipeline.iterate, pipeline.kanban
@@ -242,16 +242,16 @@ def test_developer_advances_without_ci_wait(pipeline, fake_issue, fake_provider)
     assert counts1[iterate_mod.ADVANCE] == 1, f"expected ADVANCE with pending CI, got {counts1}"
     assert kanban.tasks[dev_tid1]["status"] == "done"
     assert 999 in advance_prs1
-    # No cards in pending_ci list
-    assert len(pending1) == 0, f"expected no pending_ci cards, got {pending1}"
+    # No cards in pending_signal list
+    assert len(pending1) == 0, f"expected no pending_signal cards, got {pending1}"
     # Accessibility card created by the advance
     acc_card1 = kanban.created_with_key(f"accessibility-{n1}")
     assert acc_card1 is not None, "accessibility card should be created after advance"
 
-    # ── Sub-test 2: CI red → ADVANCE ────────────────────────────────────────
+    # ── Sub-test 2: QA failure → ADVANCE ────────────────────────────────────────
     provider_red = fake_provider(ci_status="red")
     n2 = 241
-    issue2 = fake_issue(n2, "Feature with red CI", "Test red CI advance.")
+    issue2 = fake_issue(n2, "Feature with QA-reported failures", "Test QA-reported failures advance.")
     issues_map2 = {n2: issue2}
 
     kanban.seed(
@@ -273,12 +273,12 @@ def test_developer_advances_without_ci_wait(pipeline, fake_issue, fake_provider)
         SLUG, REPO, provider=provider_red
     )
 
-    # ADVANCE must fire even with CI red
-    assert counts2[iterate_mod.ADVANCE] == 1, f"expected ADVANCE with red CI, got {counts2}"
+    # ADVANCE must fire even with QA failure
+    assert counts2[iterate_mod.ADVANCE] == 1, f"expected ADVANCE with QA-reported failures, got {counts2}"
     assert kanban.tasks[dev_tid2]["status"] == "done"
     assert 998 in advance_prs2
-    # No DEV_FIX_CI was created
-    assert counts2[iterate_mod.DEV_FIX_CI] == 0, "DEV_FIX_CI should not fire for dev cards"
+    # No QA_FIX was created
+    assert counts2[iterate_mod.QA_FIX] == 0, "QA_FIX should not fire for dev cards"
     # Accessibility card created by the advance
     acc_card2 = kanban.created_with_key(f"accessibility-{n2}")
     assert acc_card2 is not None, "accessibility card should be created after advance"

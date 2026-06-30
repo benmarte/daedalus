@@ -33,7 +33,7 @@ All notable changes to Daedalus are documented here. The format loosely follows
 - `ensure_labels()` calls `list_labels()` exactly once — eliminated a redundant API round-trip on every label-ensure path
 - `_resolve_web_path()` lazy-fetch + log injection hardening — `path_with_namespace` only fetched when needed; raw API response sanitized via `unicode_escape` before logging
 - `VCSProvider.enrollment_failures` moved to instance `__init__` — eliminates shared mutable class-level default
-- Document `_execute_dev_fix_ci` `True`/`False` return semantics in docstring
+- Document `_execute_qa_fix` `True`/`False` return semantics in docstring
 
 ### New Features
 

@@ -283,8 +283,8 @@ def render_dispatch_summary(
 
     if routed:
         parts = []
-        if routed.get("dev_fix_ci"):
-            parts.append(f"CI fixes: {routed['dev_fix_ci']}x")
+        if routed.get("qa_fix"):
+            parts.append(f"QA fixes: {routed['qa_fix']}x")
         if routed.get("pm_route"):
             parts.append(f"PM routes: {routed['pm_route']}x")
         if routed.get("escalate"):

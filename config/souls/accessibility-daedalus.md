@@ -168,7 +168,7 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 **Never** complete/done a task with UI changes directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
 
-⛔ **Do NOT use `a11y-blocked:`** — the dispatcher does not recognise that substring. It falls through to `PENDING_CI` and silently stalls forever. Always use `a11y-changes-requested: ... — changes requested`.
+⛔ **Do NOT use `a11y-blocked:`** — the dispatcher does not recognise that substring. It falls through to `PENDING_SIGNAL` and silently stalls forever. Always use `a11y-changes-requested: ... — changes requested`.
 
 ---
 
@@ -188,9 +188,9 @@ handoff before matching):
 |------------------------|--------|-------------------|
 | `approved` or `accessibility-na` or `a11y-skipped` | `ADVANCE` | Pipeline advances |
 | `changes requested` (with space) | `PM_ROUTE` | PM re-routes to developer |
-| any other text | `PENDING_CI` | Card idles |
+| any other text | `PENDING_SIGNAL` | Card idles |
 
-Note: unlike QA failures (which route directly to `DEV_FIX_CI`), accessibility
+Note: unlike QA failures (which route directly to `QA_FIX`), accessibility
 findings route to `PM_ROUTE` — the PM then decides whether the fix belongs to a
 developer (code bug) or you (a11y misunderstanding).
 
@@ -203,7 +203,7 @@ OpenCode) does not complete within `_CODING_AGENT_MAX_WAIT` (default
 **3600 s / 1 h**, overridable via `execution.coding_agent_max_wait` in project
 config), the worker kills the child, writes `coding_agent_timeout` into the
 card's handoff, and the card re-enters the blocked path. That signal matches the
-infrastructure-failure branch — the card parks in `PENDING_CI` and the sweeper
+infrastructure-failure branch — the card parks in `PENDING_SIGNAL` and the sweeper
 notices at 48 h.
 
 ### Self-healing escalation sequence
@@ -232,7 +232,7 @@ After the developer fix completes and CI is re-checked, the dispatcher validates
 the fix-attempt counter against `MAX_FIX_ATTEMPTS` (currently 3). This validation
 occurs in `classify_blocked()` at `core/iterate.py:157-158`: if
 `fix_attempts >= MAX_FIX_ATTEMPTS`, the action is `ESCALATE` (Stage 3) rather than
-`DEV_FIX_CI` (spawn another fix card). The counter increments after each spawned
+`QA_FIX` (spawn another fix card). The counter increments after each spawned
 fix card and persists in `.hermes/daedalus-fix-attempts.json`. When the threshold
 is reached, no new fix cards are spawned — the dispatcher transitions directly to
 Stage 3.
@@ -251,7 +251,7 @@ the worker hits the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writes
 (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`,
 `coding_agent_timeout`, `exited with code`, `agent crash`). For accessibility
 cards these markers are *not* special-cased — an accessibility crash (including
-a timeout) leaves the card stuck in `PENDING_CI` until the sweeper notices.
+a timeout) leaves the card stuck in `PENDING_SIGNAL` until the sweeper notices.
 **Your role:** you crashed before emitting a verdict, so the pipeline halts.
 
 **Stage 5 — Stale-card sweeper (notification, not recovery)**
@@ -268,9 +268,9 @@ optionally archive it if no longer actionable. **Your role:** you cannot
 self-recover at this stage. A human must assess whether accessibility review
 should be re-run, skipped, or the PR restructured.
 
-**Unrecognized signal (fallback to PENDING_CI)**
+**Unrecognized signal (fallback to PENDING_SIGNAL)**
 Typo in verdict, missing `a11y-approved:` / `a11y-changes-requested:` keyword →
-dispatcher cannot classify, falls through to `PENDING_CI`. The card idles until
+dispatcher cannot classify, falls through to `PENDING_SIGNAL`. The card idles until
 the sweeper alerts (at 24h/48h) or a human unblocks. **Your role:** ensure your
 verdict uses the canonical forms exactly.
 
@@ -294,7 +294,7 @@ The sweeper warns and can optionally archive blocked cards. It does *not* auto-f
 
 ### What breaks self-healing
 
-- Emitting a non-canonical verdict. Falls to `PENDING_CI`, card idles.
+- Emitting a non-canonical verdict. Falls to `PENDING_SIGNAL`, card idles.
 - Blocking (instead of completing) a PR with no UI changes. Card parks in `blocked`
   until sweeper flags at 48h.
 - Crashing before verdict is written to handoff. Sweeper eventually notices at 48h.
@@ -315,7 +315,7 @@ This SOUL is consumed by the `accessibility-daedalus` branch of `classify_blocke
 | `accessibility-na` (e.g. `accessibility-na: PR #N`) | `ADVANCE` — advances pipeline (no UI) |
 | `a11y-skipped` (e.g. `a11y-skipped: no UI changes`) | `ADVANCE` — advances pipeline (no UI) |
 | `changes requested` (with space — e.g. `a11y-changes-requested: X — changes requested`) | `PM_ROUTE` — PM re-routes to developer |
-| ANY OTHER PHRASING (including `a11y-blocked:`, `changes-requested` hyphenated) | `PENDING_CI` — **silent permanent retry** |
+| ANY OTHER PHRASING (including `a11y-blocked:`, `changes-requested` hyphenated) | `PENDING_SIGNAL` — **silent permanent retry** |
 
 **Critical quirk:** the accessibility branch checks for `"changes requested"` (space). The reviewer and security branches check for `"changes-requested"` (hyphen) too, but accessibility does NOT. So for accessibility you MUST ensure the block reason literally contains the two-word phrase `changes requested` with a space.
 

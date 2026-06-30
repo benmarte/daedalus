@@ -30,8 +30,8 @@ logger = logging.getLogger("daedalus.iterate")
 
 # Actions that classify_blocked can return
 ADVANCE = "advance"            # dev card with open PR → complete, advance chain (CI gated at merge-time)
-DEV_FIX_CI = "dev_fix_ci"     # QA card with failing tests → create fix card
-PENDING_CI = "pending_ci"     # QA/accessibility card with CI still pending → wait (cron handles retry)
+QA_FIX = "qa_fix"     # QA card with failing tests → create fix card
+PENDING_SIGNAL = "pending_signal"     # QA/accessibility card with unrecognized QA/a11y signal → wait (cron handles retry)
 PENDING_PR = "pending_pr"     # dev card with awaiting-pr block → search VCS for PR, update when found
 PM_ROUTE = "pm_route"         # reviewer flagged changes → create PM routing card
 APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
@@ -215,7 +215,7 @@ def classify_blocked(
                  requirement and advances immediately (used when the PR has
                  the ``skip-qa`` label applied).
 
-    Returns one of: {advance, dev_fix_ci, pending_ci, pm_route, approve_advance,
+    Returns one of: {advance, qa_fix, pending_signal, pm_route, approve_advance,
     escalate, reconcile_merged}.
 
     Note: For developer-daedalus cards with ``review-required: PR #N``, ADVANCE
@@ -328,8 +328,8 @@ def classify_blocked(
         if "qa-passed" in summary:
             return ADVANCE
         if "qa-failed" in summary:
-            return DEV_FIX_CI
-        return PENDING_CI
+            return QA_FIX
+        return PENDING_SIGNAL
 
     # ── accessibility-daedalus card ───────────────────────────────────────
     # Accessibility auditors PRs for WCAG 2.1 AA compliance. Posts
@@ -341,7 +341,7 @@ def classify_blocked(
             return ADVANCE
         if "changes requested" in summary:
             return PM_ROUTE
-        return PENDING_CI
+        return PENDING_SIGNAL
 
     # ── validator-daedalus card ───────────────────────────────────────────
     # Validators should only ever complete (CONFIRMED/BLOCKED/ALREADY_FIXED).
@@ -426,7 +426,7 @@ def _count_fix_attempts(card: dict, slug: str = "", workdir: str = "") -> int:
             ikey = (task.get("idempotency_key") or "")
             status = (task.get("status") or "").lower()
             # Fix card idempotency keys:
-            #   fix-ci-{tid}-attempt-N   (dev fix for CI-red)
+            #   fix-ci-{tid}-attempt-N   (dev fix for QA-reported test failures)
             #   fix-review-{tid}-attempt-N  (legacy direct-dev review fix)
             #   pm-route-{tid}-attempt-N   (PM routing card)
             if f"-{tid}-attempt-" in ikey and status not in ("done", "completed"):
@@ -800,7 +800,7 @@ def _create_downstream_review_tasks(
     return created
 
 
-def _execute_dev_fix_ci(
+def _execute_qa_fix(
     slug: str,
     card: dict,
     repo: str,
@@ -811,7 +811,7 @@ def _execute_dev_fix_ci(
     pr_number: Optional[int] = None,
     **_kwargs: Any,
 ) -> bool:
-    """Create a developer fix card for CI-red PR, idempotent per (card, attempt).
+    """Create a developer fix card for QA-reported test failures, idempotent per (card, attempt).
 
     Returns True when a fix card was successfully created (or would be in dry_run),
     False when no PR number could be found or kanban.create_task returned falsy.
@@ -821,7 +821,7 @@ def _execute_dev_fix_ci(
     tid = card.get("id")
     pr = pr_number or _parse_pr_number(handoff_text)
     if not pr:
-        logger.warning("iterate: dev_fix_ci on %s but no PR found in handoff", tid)
+        logger.warning("iterate: qa_fix on %s but no PR found in handoff", tid)
         return False
     # Read-then-increment is not atomic, but the dispatcher is a single-process
     # cron (projects processed sequentially) — no lock needed unless that changes.
@@ -829,9 +829,9 @@ def _execute_dev_fix_ci(
     if fix_attempts > MAX_FIX_ATTEMPTS:
         return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
 
-    title = f"Task 2.3 FIX — CI red on PR #{pr} — fix and push"
+    title = f"Task 2.3 FIX — QA failure on PR #{pr} — fix and push"
     body = (
-        f"CI is red on PR #{pr} (repo {repo}). "
+        f"QA reported failing tests on PR #{pr} (repo {repo}). "
         f"Fix the failing tests/build and push. Fix attempt {fix_attempts}/{MAX_FIX_ATTEMPTS}."
     )
 
@@ -2222,7 +2222,7 @@ def _execute_planner_decompose_inner(
 
 _ACTION_EXECUTORS = {
     ADVANCE: _execute_advance,
-    DEV_FIX_CI: _execute_dev_fix_ci,
+    QA_FIX: _execute_qa_fix,
     PENDING_PR: _execute_pending_pr,
     PM_ROUTE: _execute_pm_route,
     APPROVE_ADVANCE: _execute_approve_advance,
@@ -2246,10 +2246,10 @@ def run_iterate(
     """Run the auto-advance routing and self-healing loop.
 
     For every blocked card on the board, classify its state and execute the
-    appropriate action. Returns (counts, advance_prs, pending_ci_cards,
+    appropriate action. Returns (counts, advance_prs, pending_signal_cards,
     qa_failed_cards, escalated_cards) where advance_prs lists PR numbers for
-    cards that were successfully advanced, pending_ci_cards lists cards skipped
-    because CI was still pending, qa_failed_cards lists dicts with
+    cards that were successfully advanced, pending_signal_cards lists cards skipped
+    because QA/a11y signal was unrecognized, qa_failed_cards lists dicts with
     {issue_n, pr, reason} for QA cards that created a developer fix card, and
     escalated_cards lists dicts with {issue_n, pr, reason} for QA cards that
     exhausted MAX_FIX_ATTEMPTS and triggered escalation.
@@ -2264,12 +2264,12 @@ def run_iterate(
         dry_run: If True, log intentions without mutating anything.
 
     Returns:
-        (counts, advance_prs, pending_ci_cards, qa_failed_cards, escalated_cards) tuple.
+        (counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards) tuple.
     """
     counts: Dict[str, int] = {
         ADVANCE: 0,
-        DEV_FIX_CI: 0,
-        PENDING_CI: 0,
+        QA_FIX: 0,
+        PENDING_SIGNAL: 0,
         PENDING_PR: 0,
         PM_ROUTE: 0,
         APPROVE_ADVANCE: 0,
@@ -2278,7 +2278,7 @@ def run_iterate(
         RECONCILE_MERGED: 0,
     }
     advance_prs: List[int] = []  # PR numbers for cards that were advanced
-    pending_ci_cards: List[Dict[str, Any]] = []  # Cards skipped due to PENDING CI
+    pending_signal_cards: List[Dict[str, Any]] = []  # Cards with unrecognized QA/a11y signal
     qa_failed_cards: List[Dict[str, Any]] = []  # QA cards that created a fix card
     escalated_cards: List[Dict[str, Any]] = []  # QA cards that hit MAX_FIX_ATTEMPTS
 
@@ -2291,7 +2291,7 @@ def run_iterate(
 
     blocked_cards = kanban.list_blocked(slug)
     if not blocked_cards:
-        return counts, advance_prs, pending_ci_cards, qa_failed_cards, escalated_cards
+        return counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards
 
     # Collect PR→CI cache so we don't call the provider for the same PR twice.
     # Stores the raw CIStatus string (not bool) so UNKNOWN/PENDING are distinguishable.
@@ -2415,12 +2415,13 @@ def run_iterate(
             if issue_n is not None:
                 escalated_issues[issue_n] = tid
 
-        # PENDING_CI is a skip-action: card goes to pending_ci_cards for the
-        # CI retry cron to pick up when CI resolves. No executor needed.
-        if action == PENDING_CI:
-            pending_ci_cards.append({"tid": tid, "pr": pr, "card": card})
-            counts[PENDING_CI] += 1
-            logger.info("iterate: %s CI still pending — deferred to retry cron", tid)
+        # PENDING_SIGNAL is a skip-action: card goes to pending_signal_cards
+        # because the QA/a11y agent posted an unrecognized signal (still running,
+        # crash, typo). No executor needed — the next cron tick re-evaluates.
+        if action == PENDING_SIGNAL:
+            pending_signal_cards.append({"tid": tid, "pr": pr, "card": card})
+            counts[PENDING_SIGNAL] += 1
+            logger.info("iterate: %s unrecognized QA/a11y signal — deferred to next tick", tid)
             continue
 
         # PENDING_PR: run the executor inline (it updates the block reason when
@@ -2480,7 +2481,7 @@ def run_iterate(
             # (no PR number found, or kanban.create_task returned None/False).
             # Distinguish fix-card creation from escalation so callers can send
             # the right notification for each case.
-            if action == DEV_FIX_CI and assignee == "qa-daedalus" and ok:
+            if action == QA_FIX and assignee == "qa-daedalus" and ok:
                 issue_n = _extract_issue_number_from_card(card)
                 entry = {"issue_n": issue_n, "pr": pr, "reason": handoff}
                 # Escalation: fix_attempts file counter already at MAX before this
@@ -2558,5 +2559,5 @@ def run_iterate(
         except Exception as e:
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
 
-    return counts, advance_prs, pending_ci_cards, qa_failed_cards, escalated_cards
+    return counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards
 
