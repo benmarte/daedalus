@@ -70,8 +70,14 @@ class TestRunIterateQaFailedCards:
         assert qa_failed[0]["pr"] == 99
         assert qa_failed[0]["issue_n"] == 42
 
-    def test_developer_dev_fix_ci_not_in_qa_failed(self):
-        """Developer CI-red card triggers DEV_FIX_CI but is NOT in qa_failed_cards."""
+    def test_developer_red_ci_advances_not_in_qa_failed(self):
+        """Developer CI-red card triggers ADVANCE (not DEV_FIX_CI) and is NOT in qa_failed_cards.
+
+        Per epic #1074, CI no longer gates ADVANCE for developer cards — CI is
+        enforced at merge-time only. So a developer card with red CI advances
+        immediately. qa_failed_cards is only for QA-daedalus DEV_FIX_CI, not
+        developer ADVANCE.
+        """
         provider = FakeProvider()
         provider._ci = "red"
         provider._open_prs = {77}
@@ -81,12 +87,12 @@ class TestRunIterateQaFailedCards:
             mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
-            mock.patch("core.iterate.kanban.create_task", return_value="t_fix"),
-            mock.patch("core.iterate.kanban.comment", return_value=True),
+            mock.patch("core.iterate.kanban.complete", return_value=True),
         ):
             counts, _, _, qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=provider)
 
         assert qa_failed == []
+        assert counts[iterate.ADVANCE] == 1
 
     def test_qa_failed_not_appended_when_create_task_fails(self):
         """When create_task returns None (kanban down), qa_failed_cards stays empty."""

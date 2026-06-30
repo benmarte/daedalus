@@ -362,3 +362,90 @@ class TestAutoMergeQAGateIntegration:
         assert len(provider.merged) == 0, (
             "merge_pr must NOT be called when auto_merge key is absent (defaults to disabled)"
         )
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_blocked_when_ci_not_green(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """Auto-merge must NOT proceed when CI is not green (per epic #1074).
+
+        CI gating moved from ADVANCE-time to merge-time. Even if QA has passed
+        and auto_merge is enabled, the merge must be blocked when CI is red
+        or pending.
+        """
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        docs_card = {
+            'id': 'docs-card-ci-red',
+            'title': 'Documentation: Issue #55',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'latest_summary': 'docs posted: PR #55',
+            'body': 'Issue #55\nPR #55',
+        }
+
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+        mock_qa_passed.return_value = True  # QA passed
+
+        provider = FakeProvider()
+        provider._ci = 'red'  # CI is red
+        provider._open_prs = {55}
+
+        run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider,
+        )
+
+        # Should NOT have called merge_pr — CI is red
+        assert len(provider.merged) == 0, (
+            "Auto-merge should NOT be called when CI is red (CI gated at merge-time per epic #1074)"
+        )
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_allowed_when_ci_green(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """Auto-merge SHOULD proceed when CI is green and QA has passed (no regression)."""
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        docs_card = {
+            'id': 'docs-card-ci-green',
+            'title': 'Documentation: Issue #56',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'latest_summary': 'docs posted: PR #56',
+            'body': 'Issue #56\nPR #56',
+        }
+
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+        mock_qa_passed.return_value = True  # QA passed
+
+        provider = FakeProvider()
+        provider._ci = 'green'  # CI is green
+        provider._open_prs = {56}
+
+        run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider,
+        )
+
+        # Should have called merge_pr — CI is green and QA passed
+        assert len(provider.merged) > 0, (
+            "Auto-merge should be called when CI is green and QA has passed"
+        )

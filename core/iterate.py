@@ -29,9 +29,9 @@ from core.util import extract_pr_number_from_summary
 logger = logging.getLogger("daedalus.iterate")
 
 # Actions that classify_blocked can return
-ADVANCE = "advance"            # dev card with green CI → complete, advance chain
-DEV_FIX_CI = "dev_fix_ci"     # dev card with red CI → create fix card
-PENDING_CI = "pending_ci"     # dev card with CI still pending → wait (cron handles retry)
+ADVANCE = "advance"            # dev card with open PR → complete, advance chain (CI gated at merge-time)
+DEV_FIX_CI = "dev_fix_ci"     # QA card with failing tests → create fix card
+PENDING_CI = "pending_ci"     # QA/accessibility card with CI still pending → wait (cron handles retry)
 PENDING_PR = "pending_pr"     # dev card with awaiting-pr block → search VCS for PR, update when found
 PM_ROUTE = "pm_route"         # reviewer flagged changes → create PM routing card
 APPROVE_ADVANCE = "approve_advance"  # reviewer approved → complete card
@@ -217,6 +217,12 @@ def classify_blocked(
 
     Returns one of: {advance, dev_fix_ci, pending_ci, pm_route, approve_advance,
     escalate, reconcile_merged}.
+
+    Note: For developer-daedalus cards with ``review-required: PR #N``, ADVANCE
+    fires immediately regardless of CI state — CI gating is enforced at
+    merge-time only (per epic #1074). The ``ci_green`` and ``raw_ci`` parameters
+    are still accepted for backward compatibility and merge-gate logic but no
+    longer gate the ADVANCE action for developer cards.
     """
     assignee = (card_assignee or "").lower().strip()
     handoff = _parse_handoff(handoff_text)
@@ -250,7 +256,9 @@ def classify_blocked(
         # Exceeded max fix attempts → escalate
         if fix_attempts >= MAX_FIX_ATTEMPTS:
             return ESCALATE
-        # Review-required handoff with PR → check CI state
+        # Review-required handoff with PR → ADVANCE immediately (CI no longer gates)
+        # CI gating is enforced at merge-time only (per epic #1074), so
+        # QA/reviewer/security dispatch happens as soon as the PR is opened.
         if handoff["is_review_required"] and effective_pr:
             # #957: the resolved PR was merged outside the pipeline (a human
             # merged the review-required PR directly). The board may already
@@ -270,14 +278,11 @@ def classify_blocked(
             # pending-PR executor re-checks the VCS for a real PR next tick.
             if pr_is_open is False:
                 return PENDING_PR
-            if ci_green:
-                return ADVANCE
-            # raw_ci is None (backward compat) or UNKNOWN → treat as RED (actionable)
-            resolved_ci = (raw_ci or CIStatus.UNKNOWN)
-            if resolved_ci == CIStatus.PENDING:
-                return PENDING_CI
-            else:
-                return DEV_FIX_CI
+            # CI state is no longer a gate for ADVANCE — the PR is open and
+            # review-required, so dispatch QA/reviewer/security immediately.
+            # CI status is still captured by the main loop (ci_cache) and
+            # enforced at merge-time by the auto-merge gate.
+            return ADVANCE
         # Awaiting-PR block: Claude Code was spawned but hasn't opened a PR yet.
         # The executor will search VCS for a matching PR and update the block reason.
         if handoff["is_review_required"] and "awaiting-pr" in (handoff_text or "").lower():
@@ -553,7 +558,12 @@ def _execute_advance(
     pr_number: Optional[int] = None,
     **_kwargs: Any,
 ) -> bool:
-    """Complete a developer card with green CI to advance the chain.
+    """Complete a developer card to advance the chain (CI no longer gates this).
+
+    The developer card advances as soon as its PR is opened and confirmed
+    real/open — CI status is no longer a gate for dispatch of QA/reviewer/
+    security (per epic #1074). CI is enforced at merge-time by the auto-merge
+    gate instead.
 
     Also unblocks any reviewer/security cards that were blocked with
     'awaiting-fix: {this_card_id}' so they re-engage after the fix lands.
@@ -565,11 +575,11 @@ def _execute_advance(
         return False
     pr = pr_number or _parse_pr_number(handoff_text)
     if dry_run:
-        logger.info("[dry-run] would advance %s (PR #%s CI green)", tid, pr)
+        logger.info("[dry-run] would advance %s (PR #%s)", tid, pr)
         return True
     if not kanban.complete(slug, tid):
         return False
-    logger.info("iterate: advanced %s — PR #%s CI green", tid, pr)
+    logger.info("iterate: advanced %s — PR #%s (CI gated at merge-time)", tid, pr)
 
     # Re-engage: unblock any cards that were blocked awaiting this fix.
     # When a reviewer flags changes and a dev fix card is created, the
@@ -895,7 +905,7 @@ def _execute_pending_pr(
         logger.debug("iterate: pending_pr %s — no PR found yet for issue #%s", tid, issue_n)
         return False
 
-    new_handoff = f"review-required: PR #{found_pr} — awaiting CI"
+    new_handoff = f"review-required: PR #{found_pr}"
     if dry_run:
         logger.info("[dry-run] pending_pr %s — would update block reason to '%s'", tid, new_handoff)
         return True
@@ -2490,6 +2500,21 @@ def run_iterate(
                             "iterate: skip-qa label present on PR #%s — bypassing QA gate for auto-merge",
                             pr,
                         )
+
+                    # CI gate: CI must be green before merging (per epic #1074 —
+                    # CI gating moved from ADVANCE-time to merge-time). The CI
+                    # status was fetched earlier in this tick and cached in
+                    # ci_cache. If the provider doesn't support CI status checks
+                    # (UNKNOWN), treat as green to avoid blocking repos with no CI.
+                    ci_status_for_merge = ci_cache.get(pr, CIStatus.UNKNOWN)
+                    provider_supports_ci = getattr(provider, "supports_ci_status", False)
+                    if provider_supports_ci and ci_status_for_merge != CIStatus.GREEN:
+                        logger.warning(
+                            "iterate: Skipping merge: CI not green for PR #%s (status: %s). "
+                            "CI is enforced at merge-time per epic #1074.",
+                            pr, ci_status_for_merge,
+                        )
+                        continue
 
                     if dry_run:
                         logger.info(

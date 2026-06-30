@@ -200,3 +200,87 @@ def test_post_developer_dedup_with_preexisting_tasks(pipeline):
         assert count == 1, f"{key} should have exactly 1 task, got {count}"
 
 
+def test_developer_advances_without_ci_wait(pipeline, fake_issue, fake_provider):
+    """Integration: developer card with review-required: PR #N advances immediately
+    regardless of CI state (per epic #1074).
+
+    CI no longer gates the ADVANCE action — QA/reviewer/security are dispatched
+    as soon as the PR is opened. This test verifies:
+    1. ADVANCE fires with CI pending (previously PENDING_CI)
+    2. ADVANCE fires with CI red (previously DEV_FIX_CI)
+    3. Downstream tasks are created in both cases
+    """
+    disp, iterate_mod, kanban = pipeline.disp, pipeline.iterate, pipeline.kanban
+
+    # ── Sub-test 1: CI pending → ADVANCE ────────────────────────────────────
+    provider_pending = fake_provider(ci_status="pending")
+    n1 = 240
+    issue1 = fake_issue(n1, "Feature with pending CI", "Test pending CI advance.")
+    issues_map1 = {n1: issue1}
+
+    # Stage 1-2: validator → PM → team cards
+    kanban.seed(
+        assignee=VALIDATOR,
+        title=f"#{n1} {issue1['title']}",
+        status="done",
+        summary="CONFIRMED: scope clear",
+    )
+    assert _check_validators(disp, issues_map1) == [n1]
+    pm_card1 = kanban.created_with_key(f"pm-{n1}")
+    kanban.complete(SLUG, pm_card1["id"], "SPEC: criteria defined")
+    assert _check_pm(disp, issues_map1) == [n1]
+    role_cards1 = {r: kanban.created_with_key(f"{r}-{n1}") for r in _SPEC_TIME_ROLES}
+
+    # Stage 3: developer blocks with review-required, CI is pending
+    dev_tid1 = role_cards1["developer"]["id"]
+    kanban.block_task(SLUG, dev_tid1, f"review-required: PR #999 opened for {REPO}#{n1}")
+    counts1, advance_prs1, pending1, _qa_f1, *_ = iterate_mod.run_iterate(
+        SLUG, REPO, provider=provider_pending
+    )
+
+    # ADVANCE must fire even with CI pending
+    assert counts1[iterate_mod.ADVANCE] == 1, f"expected ADVANCE with pending CI, got {counts1}"
+    assert kanban.tasks[dev_tid1]["status"] == "done"
+    assert 999 in advance_prs1
+    # No cards in pending_ci list
+    assert len(pending1) == 0, f"expected no pending_ci cards, got {pending1}"
+    # Accessibility card created by the advance
+    acc_card1 = kanban.created_with_key(f"accessibility-{n1}")
+    assert acc_card1 is not None, "accessibility card should be created after advance"
+
+    # ── Sub-test 2: CI red → ADVANCE ────────────────────────────────────────
+    provider_red = fake_provider(ci_status="red")
+    n2 = 241
+    issue2 = fake_issue(n2, "Feature with red CI", "Test red CI advance.")
+    issues_map2 = {n2: issue2}
+
+    kanban.seed(
+        assignee=VALIDATOR,
+        title=f"#{n2} {issue2['title']}",
+        status="done",
+        summary="CONFIRMED: scope clear",
+    )
+    assert _check_validators(disp, issues_map2) == [n2]
+    pm_card2 = kanban.created_with_key(f"pm-{n2}")
+    kanban.complete(SLUG, pm_card2["id"], "SPEC: criteria defined")
+    assert _check_pm(disp, issues_map2) == [n2]
+    role_cards2 = {r: kanban.created_with_key(f"{r}-{n2}") for r in _SPEC_TIME_ROLES}
+
+    # Stage 3: developer blocks with review-required, CI is red
+    dev_tid2 = role_cards2["developer"]["id"]
+    kanban.block_task(SLUG, dev_tid2, f"review-required: PR #998 opened for {REPO}#{n2}")
+    counts2, advance_prs2, pending2, _qa_f2, *_ = iterate_mod.run_iterate(
+        SLUG, REPO, provider=provider_red
+    )
+
+    # ADVANCE must fire even with CI red
+    assert counts2[iterate_mod.ADVANCE] == 1, f"expected ADVANCE with red CI, got {counts2}"
+    assert kanban.tasks[dev_tid2]["status"] == "done"
+    assert 998 in advance_prs2
+    # No DEV_FIX_CI was created
+    assert counts2[iterate_mod.DEV_FIX_CI] == 0, "DEV_FIX_CI should not fire for dev cards"
+    # Accessibility card created by the advance
+    acc_card2 = kanban.created_with_key(f"accessibility-{n2}")
+    assert acc_card2 is not None, "accessibility card should be created after advance"
+
+

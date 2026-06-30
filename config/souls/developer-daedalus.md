@@ -204,7 +204,7 @@ When you complete a sub-issue belonging to an epic with dependency DAGs (``Depen
 
 ### 6.2 Pipeline Self-Healing — Developer Behavior
 
-- **PENDING_PR handling:** When you block with `review-required: awaiting-pr`, the dispatcher searches GitHub for an open PR linked to the issue number on each cron tick. If found, it updates the block reason to `review-required: PR #N — awaiting CI` so the pipeline can advance. If not found, the card stays blocked until the next cron tick searches again. You must create the PR before blocking.
+- **PENDING_PR handling:** When you block with `review-required: awaiting-pr`, the dispatcher searches GitHub for an open PR linked to the issue number on each cron tick. If found, it updates the block reason to `review-required: PR #N` so the pipeline can advance immediately. If not found, the card stays blocked until the next cron tick searches again. You must create the PR before blocking.
   
 - **awaiting-fix: auto-unblock (self-healing pipeline):** When QA/tests fail or a reviewer requests changes on your PR, a fix card is dispatched (either through a PM routing card or directly in the legacy path). Your card — the one that originally requested review — is then blocked with `awaiting-fix: <fix_card_id>` so its state is visible on the board. When the fix card completes successfully, the dispatcher (`_execute_advance` in `core/iterate.py`) scans every blocked card and automatically unblocks any whose block reason contains both `awaiting-fix` AND the completed fix card's task ID; your card is then re-queued for re-review.
 
@@ -236,9 +236,7 @@ This SOUL is consumed by the `developer-daedalus` branch of `classify_blocked()`
 
 | Handoff/block reason substring | Dispatcher action |
 |---|---|
-| `review-required:` + `PR #N` + CI green | `ADVANCE` — complete card, create downstream QA/reviewer/security/docs tasks |
-| `review-required:` + `PR #N` + CI pending | `PENDING_CI` — wait for next cron tick |
-| `review-required:` + `PR #N` + CI red | `DEV_FIX_CI` — create fix card |
+| `review-required:` + `PR #N` (any CI state) | `ADVANCE` — complete card, create downstream QA/reviewer/security/docs tasks immediately (CI gated at merge-time, per epic #1074) |
 | `review-required:` + `awaiting-pr` | `PENDING_PR` — search VCS for PR, update when found |
 | Crash markers (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`) | `""` — silent no-op (infrastructure failure, human must fix env) |
 | `fix_attempts >= 3` | `ESCALATE` — max fix attempts exceeded, human intervention required |

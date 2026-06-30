@@ -39,13 +39,58 @@ def test_classify_blocked_dev_green():
 
 
 def test_classify_blocked_dev_red():
-    """Developer + review-required with PR + CI red → dev_fix_ci."""
+    """Developer + review-required with PR + CI red → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     result = iterate.classify_blocked(
         "developer-daedalus",
         "review-required: PR #42 — CI failing",
         ci_green=False,
     )
-    check("dev red CI → dev_fix_ci", result == iterate.DEV_FIX_CI)
+    check("dev red CI → advance (CI gated at merge-time)", result == iterate.ADVANCE)
+
+
+def test_classify_blocked_dev_advance_all_ci_states():
+    """Developer + review-required + PR → ADVANCE regardless of CI state (per epic #1074).
+
+    CI gating moved from ADVANCE-time to merge-time only. This test verifies
+    all three CI states (green, pending, red/unknown) produce ADVANCE.
+    """
+    from core.providers.base import CIStatus
+
+    # CI green → ADVANCE
+    result_green = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped",
+        ci_green=True,
+        raw_ci=CIStatus.GREEN,
+    )
+    check("dev CI green → advance", result_green == iterate.ADVANCE)
+
+    # CI pending → ADVANCE (previously PENDING_CI)
+    result_pending = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 waiting on CI",
+        ci_green=False,
+        raw_ci=CIStatus.PENDING,
+    )
+    check("dev CI pending → advance", result_pending == iterate.ADVANCE)
+
+    # CI red → ADVANCE (previously DEV_FIX_CI)
+    result_red = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 CI failing",
+        ci_green=False,
+        raw_ci=CIStatus.RED,
+    )
+    check("dev CI red → advance", result_red == iterate.ADVANCE)
+
+    # CI unknown → ADVANCE (previously DEV_FIX_CI)
+    result_unknown = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42",
+        ci_green=False,
+        raw_ci=CIStatus.UNKNOWN,
+    )
+    check("dev CI unknown → advance", result_unknown == iterate.ADVANCE)
 
 
 def test_classify_blocked_dev_escalate():
@@ -1168,7 +1213,7 @@ def test_run_iterate_handoff_pr_still_works():
 
 
 def test_run_iterate_branch_pr_fallback_ci_red():
-    """branch PR + CI red → dev_fix_ci still created."""
+    """branch PR + CI red → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     cards = [{
         "id": "t_dev",
         "assignee": "developer-daedalus",
@@ -1177,12 +1222,12 @@ def test_run_iterate_branch_pr_fallback_ci_red():
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
-        with mock.patch.object(kanban, "create_task", return_value="t_fix"):
-            with mock.patch.object(kanban, "comment", return_value=True):
-                with mock.patch.object(gp, "find_pr_for_branch", return_value=99):
-                    with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
+        with mock.patch.object(kanban, "complete", return_value=True):
+            with mock.patch.object(gp, "find_pr_for_branch", return_value=99):
+                with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
+                    with mock.patch.object(gp, "is_pr_open", return_value=True):
                         counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
-    check("branch PR ci red → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
+    check("branch PR ci red → advance count 1", counts[iterate.ADVANCE] == 1)
 
 
 
@@ -1641,7 +1686,7 @@ def test_run_iterate_no_ci_provider_advances_immediately():
 
 
 def test_run_iterate_pending_ci_returns_pending_cards():
-    """CI still PENDING → card skipped, returned in pending_ci_cards list."""
+    """CI PENDING → ADVANCE (CI no longer gates ADVANCE, per epic #1074). Card is completed, no pending cards."""
     pp = _PendingProvider("pending")
     cards = [{
         "id": "t_dev",
@@ -1651,11 +1696,9 @@ def test_run_iterate_pending_ci_returns_pending_cards():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=pp)
-    check("pending CI → no advance", counts[iterate.ADVANCE] == 0)
-    check("pending CI → no prs", prs == [])
-    check("pending CI → one pending card", len(pending) == 1)
-    check("pending CI → tid captured", pending[0]["tid"] == "t_dev")
-    check("pending CI → pr captured", pending[0]["pr"] == 42)
+    check("pending CI → advance count 1", counts[iterate.ADVANCE] == 1)
+    check("pending CI → prs", prs == [42])
+    check("pending CI → no pending cards", pending == [])
 
 
 def test_run_iterate_green_ci_no_pending_cards():
@@ -1675,7 +1718,7 @@ def test_run_iterate_green_ci_no_pending_cards():
 
 
 def test_run_iterate_red_ci_no_pending_cards():
-    """CI red → dev_fix_ci action, no pending (RED is actionable, not waiting)."""
+    """CI red → ADVANCE (CI no longer gates ADVANCE, per epic #1074). No pending cards."""
     gp_red = _PendingProvider("red")
     cards = [{
         "id": "t_dev",
@@ -1684,15 +1727,14 @@ def test_run_iterate_red_ci_no_pending_cards():
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
-        with mock.patch.object(kanban, "create_task", return_value="t_fix"):
-            with mock.patch.object(kanban, "comment", return_value=True):
-                counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
-    check("red CI → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
+        with mock.patch.object(kanban, "complete", return_value=True):
+            counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
+    check("red CI → advance count 1", counts[iterate.ADVANCE] == 1)
     check("red CI → no pending", pending == [])
 
 
 def test_run_iterate_pending_ci_multiple_cards():
-    """Multiple cards with PENDING CI → all returned in pending_ci_cards."""
+    """Multiple cards with PENDING CI → all ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     pp = _PendingProvider("pending")
     cards = [
         {
@@ -1709,16 +1751,16 @@ def test_run_iterate_pending_ci_multiple_cards():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=pp)
-    check("multi pending → 2 pending cards", len(pending) == 2)
-    check("multi pending → tids captured", {p["tid"] for p in pending} == {"t_a", "t_b"})
-    check("multi pending → prs captured", {p["pr"] for p in pending} == {1, 2})
+    check("multi pending → advance count 2", counts[iterate.ADVANCE] == 2)
+    check("multi pending → prs captured", set(prs) == {1, 2})
+    check("multi pending → no pending cards", pending == [])
 
 
 # ── Issue #30: PENDING_CI classification ──────────────────────────────────────
 
 
-def test_classify_blocked_pending_ci_returns_pending_ci():
-    """Developer + review-required + PR + CI PENDING → PENDING_CI."""
+def test_classify_blocked_pending_ci_returns_advance():
+    """Developer + review-required + PR + CI PENDING → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     from core.providers.base import CIStatus
     result = iterate.classify_blocked(
         "developer-daedalus",
@@ -1727,11 +1769,11 @@ def test_classify_blocked_pending_ci_returns_pending_ci():
         pr_number=42,
         raw_ci=CIStatus.PENDING,
     )
-    check("dev pending CI → pending_ci", result == iterate.PENDING_CI)
+    check("dev pending CI → advance (CI gated at merge-time)", result == iterate.ADVANCE)
 
 
-def test_classify_blocked_red_ci_returns_dev_fix_ci():
-    """Developer + review-required + PR + CI RED → DEV_FIX_CI (explicit raw_ci)."""
+def test_classify_blocked_red_ci_returns_advance():
+    """Developer + review-required + PR + CI RED → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     from core.providers.base import CIStatus
     result = iterate.classify_blocked(
         "developer-daedalus",
@@ -1740,11 +1782,11 @@ def test_classify_blocked_red_ci_returns_dev_fix_ci():
         pr_number=42,
         raw_ci=CIStatus.RED,
     )
-    check("dev red CI (explicit) → dev_fix_ci", result == iterate.DEV_FIX_CI)
+    check("dev red CI (explicit) → advance (CI gated at merge-time)", result == iterate.ADVANCE)
 
 
-def test_classify_blocked_unknown_ci_returns_dev_fix_ci():
-    """Developer + review-required + PR + CI UNKNOWN → DEV_FIX_CI (actionable)."""
+def test_classify_blocked_unknown_ci_returns_advance():
+    """Developer + review-required + PR + CI UNKNOWN → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     from core.providers.base import CIStatus
     result = iterate.classify_blocked(
         "developer-daedalus",
@@ -1753,22 +1795,22 @@ def test_classify_blocked_unknown_ci_returns_dev_fix_ci():
         pr_number=42,
         raw_ci=CIStatus.UNKNOWN,
     )
-    check("dev unknown CI → dev_fix_ci", result == iterate.DEV_FIX_CI)
+    check("dev unknown CI → advance (CI gated at merge-time)", result == iterate.ADVANCE)
 
 
 def test_classify_blocked_default_raw_ci_backward_compat():
-    """classify_blocked() with no raw_ci (default None) → DEV_FIX_CI for ci_green=False."""
-    # Ensures backward compat: existing callers without raw_ci still get DEV_FIX_CI
+    """classify_blocked() with no raw_ci (default None) → ADVANCE for ci_green=False (per epic #1074)."""
+    # CI no longer gates ADVANCE for developer cards — backward compat callers get ADVANCE
     result = iterate.classify_blocked(
         "developer-daedalus",
         "review-required: PR #42 CI failing",
         ci_green=False,
     )
-    check("default raw_ci → dev_fix_ci (backward compat)", result == iterate.DEV_FIX_CI)
+    check("default raw_ci → advance (CI gated at merge-time)", result == iterate.ADVANCE)
 
 
 def test_run_iterate_pending_ci_classified_correctly():
-    """run_iterate: PENDING CI → counts[PENDING_CI] == 1, no DEV_FIX_CI, card in pending list."""
+    """run_iterate: PENDING CI → ADVANCE (CI no longer gates ADVANCE, per epic #1074). Card is completed."""
     pp = _PendingProvider("pending")
     cards = [{
         "id": "t_dev",
@@ -1778,10 +1820,9 @@ def test_run_iterate_pending_ci_classified_correctly():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=pp)
-    check("pending CI → PENDING_CI count 1", counts[iterate.PENDING_CI] == 1)
+    check("pending CI → ADVANCE count 1", counts[iterate.ADVANCE] == 1)
     check("pending CI → DEV_FIX_CI count 0", counts[iterate.DEV_FIX_CI] == 0)
-    check("pending CI → no fix task created", pending[0]["tid"] == "t_dev")
-    check("pending CI → no advance", counts[iterate.ADVANCE] == 0)
+    check("pending CI → no pending cards", len(pending) == 0)
 
 
 # ── qa-daedalus classify_blocked paths ──────────────────────────────────────
@@ -2003,7 +2044,7 @@ def test_run_iterate_qa_failed_creates_fix_card():
 
 
 def test_run_iterate_red_ci_classified_correctly():
-    """run_iterate: RED CI → counts[DEV_FIX_CI] == 1, no PENDING_CI."""
+    """run_iterate: RED CI → ADVANCE (CI no longer gates ADVANCE, per epic #1074)."""
     gp_red = _PendingProvider("red")
     cards = [{
         "id": "t_dev",
@@ -2012,11 +2053,10 @@ def test_run_iterate_red_ci_classified_correctly():
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
-        with mock.patch.object(kanban, "create_task", return_value="t_fix"):
-            with mock.patch.object(kanban, "comment", return_value=True):
-                counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
-    check("red CI → DEV_FIX_CI count 1", counts[iterate.DEV_FIX_CI] == 1)
-    check("red CI → PENDING_CI count 0", counts[iterate.PENDING_CI] == 0)
+        with mock.patch.object(kanban, "complete", return_value=True):
+            counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
+    check("red CI → ADVANCE count 1", counts[iterate.ADVANCE] == 1)
+    check("red CI → DEV_FIX_CI count 0", counts[iterate.DEV_FIX_CI] == 0)
     check("red CI → no pending cards", pending == [])
 
 
@@ -2242,6 +2282,7 @@ if __name__ == "__main__":
     for fn in (
         test_classify_blocked_dev_green,
         test_classify_blocked_dev_red,
+        test_classify_blocked_dev_advance_all_ci_states,
         test_classify_blocked_dev_escalate,
         test_classify_blocked_dev_no_pr,
         test_classify_blocked_dev_pr_merged_reconciles,
@@ -2276,7 +2317,7 @@ if __name__ == "__main__":
         test_execute_dev_fix_escalate_when_over_cap,
         test_run_iterate_empty,
         test_run_iterate_dev_advance,
-        test_run_iterate_dev_fix_ci,
+        test_run_iterate_dev_red_ci_advances,
         test_run_iterate_reviewer_changes,
         test_run_iterate_reviewer_approved,
         test_run_iterate_escalate,
@@ -2322,9 +2363,9 @@ if __name__ == "__main__":
         test_run_iterate_green_ci_no_pending_cards,
         test_run_iterate_red_ci_no_pending_cards,
         test_run_iterate_pending_ci_multiple_cards,
-        test_classify_blocked_pending_ci_returns_pending_ci,
-        test_classify_blocked_red_ci_returns_dev_fix_ci,
-        test_classify_blocked_unknown_ci_returns_dev_fix_ci,
+        test_classify_blocked_pending_ci_returns_advance,
+        test_classify_blocked_red_ci_returns_advance,
+        test_classify_blocked_unknown_ci_returns_advance,
         test_classify_blocked_default_raw_ci_backward_compat,
         test_run_iterate_pending_ci_classified_correctly,
         test_run_iterate_red_ci_classified_correctly,
