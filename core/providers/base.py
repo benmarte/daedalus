@@ -298,6 +298,9 @@ class VCSProvider(abc.ABC):
         vcs = self._cfg.get("vcs") or {}
         self._status_map: Dict[str, str] = {**DEFAULT_STATUS_MAP, **(vcs.get("status_map") or {})}
         self._log = logging.getLogger(f"daedalus.providers.{self.name}")
+        # Populated by enroll_repo(); surfaced in dispatch summary under enrollment_failures.
+        # Defined here so getattr(provider, "enrollment_failures", []) is never needed.
+        self.enrollment_failures: List[int] = []
 
     # ── status mapping ───────────────────────────────────────────────────────
     def status_name(self, canonical: str) -> str:

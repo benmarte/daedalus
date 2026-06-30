@@ -323,9 +323,10 @@ class GitHubProvider(VCSProvider):
                     return True
             except ProviderError as check_err:
                 self._log.warning(
-                    "merge_pr PR #%s: fallback state-check GET also failed: %s",
-                    pr_number, check_err,
+                    "merge_pr PR #%s: PUT failed (%s); fallback state-check GET also failed: %s",
+                    pr_number, e, check_err,
                 )
+                return False
             self._log.warning("merge_pr PR #%s failed: %s", pr_number, e)
             return False
 

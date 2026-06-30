@@ -800,7 +800,13 @@ def _execute_dev_fix_ci(
     pr_number: Optional[int] = None,
     **_kwargs: Any,
 ) -> bool:
-    """Create a developer fix card for CI-red PR, idempotent per (card, attempt)."""
+    """Create a developer fix card for CI-red PR, idempotent per (card, attempt).
+
+    Returns True when a fix card was successfully created (or would be in dry_run),
+    False when no PR number could be found or kanban.create_task returned falsy.
+    Callers that gate side-effects on True (e.g. qa_failed_cards) will only fire
+    on genuine card creation, not on executor errors.
+    """
     tid = card.get("id")
     pr = pr_number or _parse_pr_number(handoff_text)
     if not pr:

@@ -12,7 +12,7 @@ sent as the PRIVATE-TOKEN header.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote
 
 from .base import (CIStatus, Comment, IssueSummary, LabelDef, PRSummary,
@@ -309,7 +309,7 @@ class GitLabProvider(VCSProvider):
         return created
 
     def ensure_status_labels(
-        self, status_names: List[str], *, _existing: Optional[set] = None
+        self, status_names: List[str], *, _existing: Optional[Set[str]] = None
     ) -> List[str]:
         """Create any missing board status labels in the project (idempotent).
 

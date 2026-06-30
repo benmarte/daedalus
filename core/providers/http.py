@@ -54,9 +54,12 @@ class HTTPClient:
 
     # ── core ─────────────────────────────────────────────────────────────────
     def _redact(self, text: str) -> str:
-        if self._token and self._token in (text or ""):
-            return text.replace(self._token, "<REDACTED>")
-        return text or ""
+        if not self._token or not text:
+            return text or ""
+        from urllib.parse import quote as _quote
+        for variant in (self._token, _quote(self._token, safe="")):
+            text = text.replace(variant, "<REDACTED>")
+        return text
 
     def request(self, method: str, path: str, *,
                 params: Optional[Dict[str, Any]] = None,

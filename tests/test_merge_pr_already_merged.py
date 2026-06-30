@@ -71,6 +71,22 @@ class TestMergePrAlreadyMerged:
         result = provider.merge_pr(42)
         assert result is False
 
+    def test_both_put_and_get_fail_logs_warning(self, caplog):
+        """When both PUT and fallback GET fail, a warning is emitted with both errors."""
+        import logging
+        provider = _make_provider()
+        provider._http = MagicMock()
+        provider._http.put_json.side_effect = ProviderError("PUT failed")
+        provider._http.get_json.side_effect = ProviderError("GET failed")
+
+        with caplog.at_level(logging.WARNING, logger="daedalus.providers.github"):
+            provider.merge_pr(42)
+
+        assert any(
+            "fallback state-check GET also failed" in r.message and "PUT failed" in r.message
+            for r in caplog.records
+        ), f"expected combined warning not found in: {[r.message for r in caplog.records]}"
+
     def test_returns_true_on_successful_put(self):
         """Normal path: PUT succeeds → return True without any GET."""
         provider = _make_provider()

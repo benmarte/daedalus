@@ -937,6 +937,48 @@ def test_dispatch_summary_has_slack_delivered():
     disp.kanban.create_task = _orig_create_task
     disp.kanban.list_tasks = _orig_list_tasks
 
+    # kanban-only mode enrollment_failures key
+    check("kanban summary has enrollment_failures", "enrollment_failures" in s1)
+
+
+def test_dispatch_summary_enrollment_failures_contents():
+    """kanban-only summary includes enrollment_failures from provider."""
+    disp = _load_dispatch()
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_issue_numbers = lambda s: set()
+    disp.kanban.decompose_all_triage = lambda s: True
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+
+    class _ProviderWithFailures(_FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.enrollment_failures = [5, 99]
+
+    with mock.patch.object(disp, "_deliver_doc_reports", return_value=[]):
+        s = disp.run({"repo": "O/R", "workdir": "/tmp", "name": "x",
+                      "issues": {"filters": {}}, "execution": {},
+                      "tracking": {}}, provider=_ProviderWithFailures())
+    check("enrollment_failures populated from provider",
+          s.get("enrollment_failures") == [5, 99])
+
+
+def test_dispatch_summary_enrollment_failures_empty_when_no_attr():
+    """kanban-only summary returns [] when provider lacks enrollment_failures."""
+    disp = _load_dispatch()
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_issue_numbers = lambda s: set()
+    disp.kanban.decompose_all_triage = lambda s: True
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+
+    with mock.patch.object(disp, "_deliver_doc_reports", return_value=[]):
+        s = disp.run({"repo": "O/R", "workdir": "/tmp", "name": "x",
+                      "issues": {"filters": {}}, "execution": {},
+                      "tracking": {}}, provider=_FakeProvider())
+    check("enrollment_failures defaults to []",
+          s.get("enrollment_failures") == [])
+
 
 def test_notify_targets():
     """_notify_targets: notifications[] wins, event-filters, falls back to deliver."""
