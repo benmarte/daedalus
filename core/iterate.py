@@ -2440,6 +2440,31 @@ def run_iterate(
             logger.warning("iterate: unknown action '%s' for card %s", action, tid)
             continue
 
+        # ── Pre-executor CI gate for docs auto-merge (issue #1085) ──────────
+        # When the docs card is about to be completed (APPROVE_ADVANCE) and
+        # auto_merge is enabled, CI must be green BEFORE we complete the card.
+        # If CI is not green, we skip the executor entirely so the card stays
+        # blocked — the next cron tick will re-evaluate and merge when CI
+        # turns green. Without this gate, the card would be completed and
+        # disappear from list_blocked, making the deferred merge impossible.
+        if (
+            action == APPROVE_ADVANCE
+            and assignee == "documentation-daedalus"
+            and auto_merge
+            and pr is not None
+            and provider is not None
+        ):
+            ci_status_for_merge = ci_cache.get(pr, CIStatus.UNKNOWN)
+            provider_supports_ci = getattr(provider, "supports_ci_status", False)
+            if provider_supports_ci and ci_status_for_merge != CIStatus.GREEN:
+                logger.info(
+                    "iterate: deferring docs card %s — CI not green for PR #%s (status: %s). "
+                    "Card stays blocked; next tick will retry when CI passes.",
+                    tid, pr, ci_status_for_merge,
+                )
+                counts[action] = counts.get(action, 0)  # no increment — nothing executed
+                continue
+
         try:
             ok = executor(
                 slug, card, repo, handoff,
