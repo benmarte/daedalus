@@ -917,14 +917,12 @@ blocked card detected
 flowchart TD
     Scan["🔍 Scan blocked cards"] --> Classify{"classify_blocked()<br>core/iterate.py"}
 
-    Classify -->|"dev card<br>+ CI green<br>+ review-required"| AdvanceDev["advance()<br>_create_downstream_review_tasks()<br>creates qa-{n} parented by reviewer,<br>security-analyst, docs"]
-    Classify -->|"dev card<br>+ CI red"| DevFixCI["dev_fix_ci()<br>idempotent fix card<br>key: fix-ci-{id}-attempt-{N}"]
+    Classify -->|"dev card<br>+ review-required<br>+ PR #N (any CI)"| AdvanceDev["advance()<br>_create_downstream_review_tasks()<br>creates qa-{n} parented by reviewer,<br>security-analyst, docs<br>(CI gated at merge-time)"]
     Classify -->|"reviewer/sec<br>+ changes requested"| PMRoute["pm_route()<br>PM reads findings<br>assigns fix owner"]
     Classify -->|"reviewer/sec<br>+ approved"| ApproveAdv["approve_advance()<br>complete card<br>next stage starts"]
     Classify -->|"attempt > 3"| Escalate["escalate()<br>post comment<br>leave blocked for human"]
 
     AdvanceDev --> Done1["✅ Card unblocked"]
-    DevFixCI --> Done2["✅ Card unblocked"]
     PMRoute --> Done3["✅ Card unblocked"]
     ApproveAdv --> Done4["✅ Card unblocked"]
     Escalate --> Done5["🛑 Card blocked<br>(human required)"]
@@ -1114,8 +1112,7 @@ on `origin/dev` at commit `70c1340`.
    PR. Every cron tick calls `_execute_pending_pr()` (lines 601–657), which
    searches open PRs via `provider.list_prs()` and matches them against the
    issue number in the PR title/body/branch. Once a PR appears, the block
-   reason is updated to `review-required: PR #N — awaiting CI` so CI checks
-   can drive the next stage. This eliminates the race where the agent opens a
+   reason is updated to `review-required: PR #N` so the pipeline can advance. This eliminates the race where the agent opens a
    PR but the dispatcher keeps classifying the card as "no PR found."
 
 5. **PM `awaiting-fix:` silent no-op.** The project-manager profile's
@@ -1208,8 +1205,9 @@ Each piece exists because the obvious approach failed:
   (developer / reviewer / security-analyst / documentation), not one agent grading its
   own homework.
 - **Auto-advance** — workers *block for review* instead of completing, which stalls the
-  chain. The dispatcher completes a review-required handoff once its PR's CI is green,
-  so the pipeline is genuinely hands-off (the PR still waits for a human merge).
+  chain. The dispatcher completes a review-required handoff as soon as the PR is opened
+  (CI no longer gates ADVANCE — it is enforced at merge-time per epic #1074),
+  so the pipeline is genuinely hands-off (QA/reviewer/security dispatch immediately).
 - **Post-developer handoff safety net** — when `_execute_advance()` completes a developer
   card, it calls `_create_downstream_review_tasks()` as a guard. If the initial Phase 2
   decompose (triage → developer + reviewer + security + docs) failed to create any of the
@@ -1219,8 +1217,8 @@ Each piece exists because the obvious approach failed:
   and docs tasks had to be manually created by the human operator (issue #21).
 - **Self-healing loop** (`core/iterate.py`) — every blocked card is classified into one
   of 5 actions and routed to the agent that can clear it:
-    - `advance` — dev PR green + review-required → complete dev card, then `_create_downstream_review_tasks()` creates a `qa-{n}` task and parents reviewer/security/docs to it so they run only after QA passes (idempotent keys `qa-{n}`, `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
-    - `dev_fix_ci` — CI red → creates idempotent developer fix card
+    - `advance` — dev PR opened + review-required → complete dev card immediately (CI no longer gates this; enforced at merge-time per epic #1074), then `_create_downstream_review_tasks()` creates a `qa-{n}` task and parents reviewer/security/docs to it so they run only after QA passes (idempotent keys `qa-{n}`, `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
+    - `dev_fix_ci` — QA reports failing tests → creates idempotent developer fix card
     - `pm_route` — reviewer/security requests changes → creates PM routing card with findings; PM decides owner (developer, security-analyst, re-spec), then fix lands. Reviewer cards are marked "awaiting-fix" and auto-unblocked when the fix completes.
     - `approve_advance` — reviewer/security approved → complete the card
     - `escalate` — cap at 3 fix attempts per PR → log + notify, set card aside (no infinite loop)

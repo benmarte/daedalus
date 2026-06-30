@@ -628,11 +628,11 @@ def _setup_ci_gate_board(fk: FakeKanban, issue_n: int, pr_n: int) -> str:
     )
 
 
-def test_developer_card_stays_blocked_when_ci_is_red():
-    """Developer card with 'review-required: PR #N' stays blocked when CI is red (CI gate).
+def test_developer_card_advances_with_red_ci():
+    """Developer card with 'review-required: PR #N' advances even when CI is red.
 
-    This is the pre-green-CI invariant: run_iterate must NOT advance the card
-    (complete it) when the PR's CI is failing. The card must remain 'blocked'.
+    CI no longer gates ADVANCE — it is enforced at merge-time only (per epic #1074).
+    The card should be completed (advance) regardless of CI state.
     """
     from core import iterate
 
@@ -649,19 +649,19 @@ def test_developer_card_stays_blocked_when_ci_is_red():
         iterate.run_iterate(SLUG, REPO, provider=provider)
 
         dev_card = fk.tasks[dev_tid]
-        check("developer card is still blocked with red CI",
-              (dev_card.get("status") or "") == "blocked")
-        check("developer card was NOT completed with red CI",
-              dev_tid not in [tid for (tid, _) in fk.completed])
+        check("developer card is done with red CI (CI gated at merge-time)",
+              (dev_card.get("status") or "") == "done")
+        check("developer card was completed by iterate advance",
+              dev_tid in [tid for (tid, _) in fk.completed])
     finally:
         iterate.kanban = saved
 
 
 def test_developer_card_advances_when_ci_turns_green():
-    """Developer card with 'review-required: PR #N' advances to done when CI is green (CI gate).
+    """Developer card with 'review-required: PR #N' advances to done when CI is green.
 
-    This is the post-green-CI invariant: run_iterate must complete the blocked
-    developer card once CI turns green, releasing any downstream QA children.
+    CI green still results in ADVANCE — this is the pre-existing behaviour,
+    now also the behaviour for CI red and CI pending (per epic #1074).
     """
     from core import iterate
 
@@ -687,12 +687,11 @@ def test_developer_card_advances_when_ci_turns_green():
         iterate.kanban = saved
 
 
-def test_developer_card_stays_blocked_with_pending_ci():
-    """Developer card stays blocked (pending, not advanced) when CI is pending (#CI-gate).
+def test_developer_card_advances_with_pending_ci():
+    """Developer card advances even when CI is pending (CI no longer gates ADVANCE, per epic #1074).
 
-    PENDING_CI is a soft-block: the card stays blocked and is deferred to the
-    retry cron, not completed. This tests the PENDING_CI branch distinct from
-    DEV_FIX_CI (red) and ADVANCE (green).
+    CI gating is enforced at merge-time only. The card should be completed
+    (advance) immediately, not held in PENDING_CI.
     """
     from core import iterate
 
@@ -711,11 +710,12 @@ def test_developer_card_stays_blocked_with_pending_ci():
         )
 
         dev_card = fk.tasks[dev_tid]
-        check("developer card is still blocked with pending CI",
-              (dev_card.get("status") or "") == "blocked")
-        check("run_iterate reported PENDING_CI count >= 1", counts.get("pending_ci", 0) >= 1)
-        check("developer card was NOT completed with pending CI",
-              dev_tid not in [tid for (tid, _) in fk.completed])
+        check("developer card is done with pending CI",
+              (dev_card.get("status") or "") == "done")
+        check("run_iterate reported ADVANCE count >= 1", counts.get("advance", 0) >= 1)
+        check("no pending_ci cards (CI no longer gates ADVANCE)", len(pending_ci_cards) == 0)
+        check("developer card was completed by iterate advance",
+              dev_tid in [tid for (tid, _) in fk.completed])
     finally:
         iterate.kanban = saved
 
