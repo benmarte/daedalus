@@ -3680,6 +3680,11 @@ def _check_confirmed_validators(
             # Empty or unrecognized summary — check GitHub comments before retrying.
             # When a validator's context window fills before kanban_complete runs,
             # its GitHub comment is the only record of its decision.
+            if not summary:
+                logger.warning(
+                    "dispatch: validator for #%s completed with no summary — scheduling retry",
+                    n_nr,
+                )
             issue_nr = issues_map.get(n_nr)
             if not issue_nr and provider is not None:
                 fetched = _fetch_issue_cached(n_nr)
@@ -3827,8 +3832,32 @@ def _check_confirmed_validators(
                             )
                 continue
             if not issue_nr:
-                # issue_nr not in issues_map — skip retry, but the cap check above
-                # has already emitted the notification if retries are exhausted (#378)
+                # Unresolvable issue: warn + notify instead of silent drop (#1099).
+                if not summary:
+                    logger.warning(
+                        "dispatch: validator for #%s completed with no summary "
+                        "but issue is unresolvable — cannot retry without issue "
+                        "context; manual intervention required",
+                        n_nr,
+                    )
+                    if resolved is not None and not _has_notified_block(
+                        slug, n_nr, validator_profile=p["validator"],
+                        marker=_RETRY_CAP_MARKER,
+                    ):
+                        _send_retry_cap_notification(
+                            role="validator",
+                            issue_number=n_nr,
+                            retry_count=retry_count,
+                            max_retries=max_validator_retries,
+                            resolved=resolved,
+                            dry_run=dry_run,
+                        )
+                        if not dry_run:
+                            _mark_notified_block(
+                                slug, n_nr,
+                                validator_profile=p["validator"],
+                                marker=_RETRY_CAP_MARKER,
+                            )
                 continue
             # Intermediate retry — send a distinct "retry-attempt" notification before retrying (#287).
             # Fires only when we are actually about to create a new retry task (not at cap exhaustion).
@@ -3873,8 +3902,8 @@ def _check_confirmed_validators(
             )
             if vid:
                 logger.warning(
-                    "dispatch: validator done with empty summary for #%s — "
-                    "retrying (run %d/%d, key=%s)",
+                    "dispatch: validator for #%s completed with no summary — "
+                    "scheduling retry (run %d/%d, key=%s)",
                     n_nr,
                     retry_count,
                     max_validator_retries,
