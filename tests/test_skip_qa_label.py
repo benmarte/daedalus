@@ -120,12 +120,15 @@ def _make_docs_card(pr: int, issue: int) -> dict:
     }
 
 
+@mock.patch("core.iterate._security_passed_for_issue", return_value=True)
+@mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True)
 @mock.patch("core.iterate._qa_passed_for_issue")
 @mock.patch("core.iterate.kanban.list_blocked")
 @mock.patch("core.iterate.kanban.show_card")
 @mock.patch("core.iterate.kanban.complete", return_value=True)
 def test_auto_merge_allowed_with_skip_qa_label_no_qa_passed(
-    mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed,
+    mock_reviewer_passed, mock_security_passed
 ):
     """skip-qa label: auto-merge proceeds EVEN WHEN _qa_passed_for_issue returns False."""
     provider = FakeProvider()
@@ -179,12 +182,15 @@ def test_auto_merge_blocked_without_skip_qa_label_when_qa_not_passed(
     assert len(provider.merged) == 0, "Auto-merge should NOT be called when QA failed and no skip-qa"
 
 
+@mock.patch("core.iterate._security_passed_for_issue", return_value=True)
+@mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True)
 @mock.patch("core.iterate._qa_passed_for_issue")
 @mock.patch("core.iterate.kanban.list_blocked")
 @mock.patch("core.iterate.kanban.show_card")
 @mock.patch("core.iterate.kanban.complete", return_value=True)
 def test_auto_merge_allowed_with_qa_passed_no_skip_qa_label(
-    mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed,
+    mock_reviewer_passed, mock_security_passed
 ):
     """Without skip-qa label but QA passed: auto-merge proceeds (baseline, no regression)."""
     provider = FakeProvider()
@@ -223,7 +229,9 @@ def test_run_iterate_detects_skip_qa_label_via_provider():
     with mock.patch("core.iterate.kanban.list_blocked", return_value=[docs_card]), \
          mock.patch("core.iterate.kanban.show_card", return_value=docs_card), \
          mock.patch("core.iterate.kanban.complete", return_value=True), \
-         mock.patch("core.iterate._qa_passed_for_issue", return_value=False):
+         mock.patch("core.iterate._qa_passed_for_issue", return_value=False), \
+         mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True), \
+         mock.patch("core.iterate._security_passed_for_issue", return_value=True):
 
         iterate.run_iterate(
             "test-board",
@@ -248,7 +256,9 @@ def test_run_iterate_no_skip_qa_label_qa_gate_enforced():
     with mock.patch("core.iterate.kanban.list_blocked", return_value=[docs_card]), \
          mock.patch("core.iterate.kanban.show_card", return_value=docs_card), \
          mock.patch("core.iterate.kanban.complete", return_value=True), \
-         mock.patch("core.iterate._qa_passed_for_issue", return_value=False):
+         mock.patch("core.iterate._qa_passed_for_issue", return_value=False), \
+         mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True), \
+         mock.patch("core.iterate._security_passed_for_issue", return_value=True):
 
         iterate.run_iterate(
             "test-board",

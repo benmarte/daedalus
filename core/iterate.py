@@ -545,6 +545,93 @@ def _qa_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
     return "qa-passed" in latest_summary.lower()
 
 
+def _reviewer_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
+    """Check if the reviewer has approved the PR for an issue.
+
+    Looks for a reviewer card (idempotency_key 'reviewer-{issue_number}')
+    and checks if its latest_summary contains an approval signal
+    ('approved', 'review-approved', 'lgtm', 'sign-off') case-insensitively.
+    Returns False if no reviewer card exists or it hasn't approved yet.
+    """
+    if issue_number is None:
+        return False
+    return _gate_card_passed(slug, issue_number, "reviewer", [
+        "approved", "review-approved", "lgtm", "sign-off", "signoff",
+        "looks good", "no findings", ":+1:",
+    ])
+
+
+def _security_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
+    """Check if the security analyst has approved the PR for an issue.
+
+    Looks for a security card (idempotency_key 'security-{issue_number}')
+    and checks if its latest_summary contains a security approval signal
+    ('security-approved', 'security-passed', 'no findings') case-insensitively.
+    Returns False if no security card exists or it hasn't approved yet.
+    """
+    if issue_number is None:
+        return False
+    return _gate_card_passed(slug, issue_number, "security", [
+        "security-approved", "security approved",
+        "security-passed", "security passed",
+        "no findings", "approved",
+    ])
+
+
+def _gate_card_passed(
+    slug: str,
+    issue_number: int,
+    role_prefix: str,
+    approval_signals: list,
+) -> bool:
+    """Check if a role-specific gate card has posted an approval signal.
+
+    Args:
+        slug: Kanban board slug.
+        issue_number: The issue number to check.
+        role_prefix: The idempotency_key prefix (e.g. 'reviewer', 'security').
+        approval_signals: List of lowercase substrings that indicate approval.
+
+    Returns:
+        True if the card exists and its latest_summary contains any approval
+        signal, False otherwise.
+    """
+    expected_idempotency_key = f"{role_prefix}-{issue_number}"
+
+    try:
+        tasks = kanban.list_tasks(slug)
+    except Exception as e:
+        logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
+        return False
+
+    gate_card = None
+    for task in tasks or []:
+        if task.get("idempotency_key") == expected_idempotency_key:
+            gate_card = task
+            break
+
+    if not gate_card:
+        logger.debug("iterate: no %s card found for issue #%s", role_prefix, issue_number)
+        return False
+
+    try:
+        card_details = kanban.show_card(slug, gate_card["id"])
+    except Exception as e:
+        logger.error("iterate: failed to get %s card %s: %s", role_prefix, gate_card["id"], e)
+        return False
+
+    if not card_details:
+        logger.error("iterate: %s card %s not found", role_prefix, gate_card["id"])
+        return False
+
+    latest_summary = (card_details.get("latest_summary") or "").lower()
+    if not latest_summary:
+        logger.debug("iterate: %s card %s has no latest_summary", role_prefix, gate_card["id"])
+        return False
+
+    return any(sig in latest_summary for sig in approval_signals)
+
+
 # ── action executors ────────────────────────────────────────────────────────
 
 
@@ -2527,6 +2614,25 @@ def run_iterate(
                             pr,
                         )
 
+                    # Reviewer gate: reviewer must have approved the PR before
+                    # merge (per issue #1085 — all gates must pass before merge).
+                    if not _reviewer_passed_for_issue(slug, issue_n):
+                        logger.warning(
+                            "iterate: Skipping merge: reviewer has not approved PR #%s (issue #%s). "
+                            "Wait for reviewer card to report approval.",
+                            pr, issue_n
+                        )
+                        continue
+
+                    # Security gate: security analyst must have approved the PR.
+                    if not _security_passed_for_issue(slug, issue_n):
+                        logger.warning(
+                            "iterate: Skipping merge: security has not approved PR #%s (issue #%s). "
+                            "Wait for security card to report approval.",
+                            pr, issue_n
+                        )
+                        continue
+
                     # CI gate: CI must be green before merging (per epic #1074 —
                     # CI gating moved from ADVANCE-time to merge-time). The CI
                     # status was fetched earlier in this tick and cached in
@@ -2541,6 +2647,37 @@ def run_iterate(
                             pr, ci_status_for_merge,
                         )
                         continue
+
+                    # Idempotency: skip if the PR has already been merged (by a
+                    # previous cron tick or a human). This prevents double-merge
+                    # attempts and errors on already-merged PRs.
+                    if hasattr(provider, "is_pr_merged"):
+                        try:
+                            if provider.is_pr_merged(pr):
+                                logger.info(
+                                    "iterate: Skipping merge: PR #%s is already merged — "
+                                    "no action needed (idempotent skip)",
+                                    pr,
+                                )
+                                continue
+                        except Exception as e:
+                            logger.warning(
+                                "iterate: is_pr_merged check failed for PR #%s: %s — "
+                                "proceeding with merge attempt",
+                                pr, e,
+                            )
+
+                    # All gates passed — log the merge attempt for auditability.
+                    # This records the cron-tick-to-merge transition, including
+                    # the deferred case where CI passed after docs completion.
+                    logger.info(
+                        "iterate: all gates passed for PR #%s (QA: %s, reviewer: %s, "
+                        "security: %s, CI: %s) — triggering merge on cron tick",
+                        pr,
+                        "skip-qa" if skip_qa else "passed",
+                        "passed", "passed",
+                        ci_status_for_merge if provider_supports_ci else "n/a",
+                    )
 
                     if dry_run:
                         logger.info(
