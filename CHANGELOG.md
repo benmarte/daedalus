@@ -1,3 +1,5 @@
+## [feat: dispatch QA/reviewer/security immediately on PR open — move CI gate to merge only](https://github.com/benmarte/daedalus/issues/1074) — [PR #1095](https://github.com/benmarte/daedalus/pull/1095)
+
 ## [fix: trigger ADVANCE immediately on review-required without waiting for CI](https://github.com/benmarte/daedalus/issues/1075) — [PR #1090](https://github.com/benmarte/daedalus/pull/1090)
 
 - Developer cards with `review-required: PR #N` now ADVANCE immediately regardless of CI state (per epic #1074). CI gating moved from ADVANCE-time to merge-time only. QA/reviewer/security dispatch happens as soon as the PR is opened.
