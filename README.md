@@ -1237,6 +1237,14 @@ Each piece exists because the obvious approach failed:
   bypasses the gate entirely for low-risk changes (docs-only, config, dependency bumps). See
   [`qa-gate-design.md`](qa-gate-design.md) for the full design spec, edge cases, and signal
   format reference.
+- **Reviewer and security merge gates** (`core/iterate.py`, issue #1085) — in addition to the
+  QA gate, the auto-merge path now checks that the reviewer and security-analyst have approved
+  the PR before merging. `_reviewer_passed_for_issue()` and `_security_passed_for_issue()`
+  examine the respective cards' `latest_summary` fields for approval signals (`approved`,
+  `review-approved`, `lgtm`, `sign-off` for reviewers; `security-approved`, `security-passed`,
+  `no findings` for security). If either gate has not passed, the merge is skipped with a
+  warning log. A `skip-qa` label bypasses both gates (preserving the pre-existing skip-qa
+  behaviour per issue #1074 non-regression).
 - **Tier promotion** — epic decomposition produces multiple sub-issues, but marking
   all of them `Ready` at once overwhelms the validator pipeline and bypasses dependency
   semantics. Instead, sub-issues with no declared blockers get the `Ready` label on

@@ -959,10 +959,13 @@ hermes kanban show <task-id> | grep latest_summary
 - The QA agent must complete its work and signal `qa-passed` in the card summary.
 
 **Configuration:**  
-- `skip-qa` label: Add this label to any PR to bypass the QA gate. No other configuration needed.
+- `skip-qa` label: Add this label to any PR to bypass the QA gate (and the reviewer/security merge gates). No other configuration needed.
+
+**Reviewer and security merge gates (issue #1085):**  
+In addition to the QA gate, the auto-merge path now checks that the reviewer and security-analyst have approved the PR. `_reviewer_passed_for_issue()` and `_security_passed_for_issue()` inspect the respective cards' `latest_summary` for approval signals (`approved`, `review-approved`, `lgtm`, `sign-off` for reviewers; `security-approved`, `security-passed`, `no findings` for security). If either gate has not passed, the merge is skipped with a warning log. A `skip-qa` label bypasses both gates to preserve the pre-existing skip-qa behaviour (issue #1074 non-regression).
 
 **Source implementation:**  
-`core/iterate.py:_qa_passed_for_issue()` (line ~490), `core/iterate.py:run_iterate()` (line ~2260, auto-merge gate), `core/iterate.py:classify_blocked()` (skip_qa bypass in QA card classification)
+`core/iterate.py:_qa_passed_for_issue()` (line ~490), `core/iterate.py:_reviewer_passed_for_issue()`, `core/iterate.py:_security_passed_for_issue()`, `core/iterate.py:run_iterate()` (line ~2260, auto-merge gate), `core/iterate.py:classify_blocked()` (skip_qa bypass in QA card classification)
 
 ---
 

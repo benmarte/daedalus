@@ -482,5 +482,173 @@ class TestEmptySummaryDoesNotBurnCap(unittest.TestCase):
         self.assertTrue(burns("ran but produced no clear verdict"))
 
 
+class TestEmptySummaryUnresolvableIssue(unittest.TestCase):
+    """#1099: validator done with empty summary + unresolvable issue must not
+    be silently dropped.  The dispatcher must emit a WARNING log and fire the
+    retry-cap notification (idempotency-guarded) instead of a bare continue.
+    """
+
+    def setUp(self):
+        self.disp = _load_dispatch()
+
+    def test_unresolvable_issue_empty_summary_logs_warning(self):
+        """Empty summary + issue not in issues_map and fetch returns None ->
+        WARNING is logged with 'completed with no summary' text."""
+        fake_tasks = [
+            {"title": "#555 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t1"},
+        ]
+        provider = FakeProvider()
+
+        with self.assertLogs("daedalus.dispatch", level="WARNING") as cm:
+            with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+                 mock.patch.object(self.disp.kanban, "show_card",
+                                   return_value={"latest_summary": ""}), \
+                 mock.patch.object(self.disp.kanban, "comment"), \
+                 mock.patch.object(self.disp, "_fetch_issue_with_retry", return_value=None), \
+                 mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+                 mock.patch.object(self.disp, "_send_retry_cap_notification"), \
+                 mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+                 mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+                 mock.patch.object(self.disp, "_mark_notified_block"):
+                self.disp._check_confirmed_validators(
+                    "slug", "owner/repo",
+                    {},  # empty issues_map -> issue_nr will be None
+                    3, "/tmp", "", "main", "github",
+                    provider=provider,
+                    resolved=_minimal_resolved(),
+                )
+
+        joined = "\n".join(cm.output)
+        self.assertIn("completed with no summary", joined,
+                      "Expected a WARNING log mentioning 'completed with no summary'")
+
+    def test_unresolvable_issue_empty_summary_sends_notification(self):
+        """Empty summary + unresolvable issue -> retry-cap notification fires
+        (no silent drop)."""
+        fake_tasks = [
+            {"title": "#555 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t1"},
+        ]
+        provider = FakeProvider()
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": ""}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp, "_fetch_issue_with_retry", return_value=None), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification") as send_cap, \
+             mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+             mock.patch.object(self.disp, "_mark_notified_block"):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {},  # empty issues_map -> issue_nr will be None
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        send_cap.assert_called_once()
+
+    def test_unresolvable_issue_none_summary_no_crash(self):
+        """None summary (from show_card) + unresolvable issue -> no crash,
+        warning logged, notification sent."""
+        fake_tasks = [
+            {"title": "#556 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t1"},
+        ]
+        provider = FakeProvider()
+
+        with self.assertLogs("daedalus.dispatch", level="WARNING") as cm:
+            with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+                 mock.patch.object(self.disp.kanban, "show_card",
+                                   return_value={"latest_summary": None}), \
+                 mock.patch.object(self.disp.kanban, "comment"), \
+                 mock.patch.object(self.disp, "_fetch_issue_with_retry", return_value=None), \
+                 mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+                 mock.patch.object(self.disp, "_send_retry_cap_notification"), \
+                 mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+                 mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+                 mock.patch.object(self.disp, "_mark_notified_block"):
+                self.disp._check_confirmed_validators(
+                    "slug", "owner/repo",
+                    {},  # empty issues_map -> issue_nr will be None
+                    3, "/tmp", "", "main", "github",
+                    provider=provider,
+                    resolved=_minimal_resolved(),
+                )
+
+        joined = "\n".join(cm.output)
+        self.assertIn("completed with no summary", joined)
+
+    def test_unresolvable_issue_notification_idempotent(self):
+        """If _has_notified_block returns True, notification is not re-sent."""
+        fake_tasks = [
+            {"title": "#557 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t1"},
+        ]
+        provider = FakeProvider()
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": ""}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp, "_fetch_issue_with_retry", return_value=None), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification") as send_cap, \
+             mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=True), \
+             mock.patch.object(self.disp, "_mark_notified_block"):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {},  # empty issues_map -> issue_nr will be None
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        send_cap.assert_not_called()
+
+    def test_resolvable_issue_empty_summary_retries(self):
+        """Empty summary + resolvable issue -> retry card created (existing path,
+        no regression)."""
+        fake_tasks = [
+            {"title": "#903 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": "t1"},
+        ]
+        provider = FakeProvider()
+        created: list = []
+
+        def fake_create_task(*args, **kwargs):
+            created.append(kwargs.get("idempotency_key", ""))
+            return "new_task_id"
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": ""}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp.kanban, "create_task", side_effect=fake_create_task), \
+             mock.patch.object(self.disp, "_validator_body", return_value="body"), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification"), \
+             mock.patch.object(self.disp, "_send_retry_attempt_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+             mock.patch.object(self.disp, "_mark_notified_block"):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {903: {"number": 903, "title": "fix bug", "body": ""}},
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        self.assertTrue(
+            any(k.startswith("validator-retry-903") for k in created),
+            "Empty-summary run with resolvable issue should be retried",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
