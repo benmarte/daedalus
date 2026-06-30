@@ -12,8 +12,8 @@ from core.providers.gitlab import GitLabProvider  # noqa: E402
 from core.providers.http import ProviderError  # noqa: E402
 
 
-def _provider(extra_vcs=None, tracking=None):
-    cfg = {"repo": "group/proj",
+def _provider(extra_vcs=None, tracking=None, repo="group/proj"):
+    cfg = {"repo": repo,
            "vcs": {"provider": "gitlab", **(extra_vcs or {})}}
     if tracking:
         cfg["tracking"] = tracking
@@ -35,6 +35,73 @@ def test_project_path_is_url_encoded(provider):
 def test_project_id_takes_precedence():
     p = _provider(extra_vcs={"project_id": 42})
     assert p._proj == "/projects/42"
+
+
+def test_issue_url_with_project_path(provider):
+    assert provider.issue_url(7) == "https://gitlab.com/group/proj/-/issues/7"
+    provider._http.get_json.assert_not_called()
+
+
+def test_pr_url_with_project_path(provider):
+    assert provider.pr_url(3) == "https://gitlab.com/group/proj/-/merge_requests/3"
+    provider._http.get_json.assert_not_called()
+
+
+def test_issue_url_with_numeric_project_id_fetches_path():
+    # repo has no "/" so _project_web_path starts as None — must be fetched from API.
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "mygroup/myproject"}
+    assert p.issue_url(5) == "https://gitlab.com/mygroup/myproject/-/issues/5"
+    p._http.get_json.assert_called_once_with("/projects/42")
+
+
+def test_pr_url_with_numeric_project_id_fetches_path():
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "mygroup/myproject"}
+    assert p.pr_url(9) == "https://gitlab.com/mygroup/myproject/-/merge_requests/9"
+    p._http.get_json.assert_called_once_with("/projects/42")
+
+
+def test_resolve_web_path_cached_after_first_call():
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "g/p"}
+    p.issue_url(1)
+    p.issue_url(2)
+    p.pr_url(3)
+    assert p._http.get_json.call_count == 1  # fetched once, shared by both methods
+
+
+def test_resolve_web_path_api_error_caches_failure():
+    # After a ProviderError, the failure is cached — no retry on subsequent calls.
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.side_effect = ProviderError("403", status_code=403)
+    assert p.issue_url(1) == ""
+    assert p.pr_url(1) == ""
+    assert p._http.get_json.call_count == 1  # one attempt, then cached as ""
+
+
+def test_resolve_web_path_invalid_path_rejected():
+    # Malformed path_with_namespace must be rejected for URL safety.
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"path_with_namespace": "../../evil"}
+    assert p.issue_url(1) == ""
+    assert p._http.get_json.call_count == 1  # still cached after rejection
+
+
+def test_resolve_web_path_null_or_missing_key_returns_empty():
+    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
+    p._http.get_json.return_value = {"default_branch": "main"}  # no path key
+    assert p.issue_url(1) == ""
+    assert p._http.get_json.call_count == 1
+
+
+
+def test_get_default_branch_does_not_overwrite_known_web_path(provider):
+    # Pre-set from project_path at init — get_default_branch must not clobber it.
+    provider._http.get_json.return_value = {"default_branch": "main",
+                                            "path_with_namespace": "other/proj"}
+    provider.get_default_branch()
+    assert provider._project_web_path == "group/proj"  # unchanged
 
 
 def test_self_hosted_base_url():
