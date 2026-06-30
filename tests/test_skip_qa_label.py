@@ -270,6 +270,137 @@ def test_run_iterate_no_skip_qa_label_qa_gate_enforced():
     assert len(provider.merged) == 0, "Merge should be blocked without skip-qa and QA not passed"
 
 
+# ── skip-qa bypasses reviewer/security gates at merge time (#1074) ────────────
+#
+# Pre-epic #1074, skip-qa bypassed the QA gate at merge and there were no
+# reviewer/security gates. The epic added reviewer and security gates at merge
+# time but did NOT teach them about skip-qa. A skip-qa PR now blocks waiting for
+# reviewer/security approval it never needed before — a regression. These tests
+# enforce that skip-qa also bypasses those new gates.
+
+
+@mock.patch("core.iterate._security_passed_for_issue", return_value=False)
+@mock.patch("core.iterate._reviewer_passed_for_issue", return_value=False)
+@mock.patch("core.iterate._qa_passed_for_issue", return_value=False)
+@mock.patch("core.iterate.kanban.list_blocked")
+@mock.patch("core.iterate.kanban.show_card")
+@mock.patch("core.iterate.kanban.complete", return_value=True)
+def test_skip_qa_bypasses_reviewer_and_security_gates(
+    mock_complete, mock_show_card, mock_list_blocked,
+    mock_qa_passed, mock_reviewer_passed, mock_security_passed,
+):
+    """skip-qa label: merge proceeds even when reviewer AND security have NOT passed.
+
+    Pre-epic, skip-qa PRs merged without any review gate. The epic added
+    reviewer/security gates but skip-qa must still bypass them — otherwise
+    docs-only skip-qa PRs would block indefinitely waiting for reviews that
+    were never dispatched.
+    """
+    provider = FakeProvider()
+    provider._ci = "green"
+    provider._open_prs = {42}
+    provider.labels[42] = ["skip-qa"]
+
+    docs_card = _make_docs_card(42, 77)
+    mock_list_blocked.return_value = [docs_card]
+    mock_show_card.return_value = docs_card
+
+    # All three gates return False — skip-qa must bypass ALL of them
+    mock_qa_passed.return_value = False
+    mock_reviewer_passed.return_value = False
+    mock_security_passed.return_value = False
+
+    iterate.run_iterate(
+        "test-board",
+        "benmarte/daedalus",
+        resolved={"execution": {"auto_merge": True}},
+        provider=provider,
+    )
+
+    assert any(pr == 42 for pr, _ in provider.merged), (
+        "skip-qa label must bypass reviewer and security gates — PR should merge"
+    )
+
+
+@mock.patch("core.iterate._security_passed_for_issue", return_value=False)
+@mock.patch("core.iterate._reviewer_passed_for_issue", return_value=False)
+@mock.patch("core.iterate._qa_passed_for_issue", return_value=True)
+@mock.patch("core.iterate.kanban.list_blocked")
+@mock.patch("core.iterate.kanban.show_card")
+@mock.patch("core.iterate.kanban.complete", return_value=True)
+def test_no_skip_qa_blocked_by_reviewer_gate(
+    mock_complete, mock_show_card, mock_list_blocked,
+    mock_qa_passed, mock_reviewer_passed, mock_security_passed,
+):
+    """Without skip-qa: merge is blocked when reviewer has not approved.
+
+    This confirms the reviewer gate is still enforced for normal PRs —
+    the skip-qa bypass doesn't weaken the gate for non-skip-qa PRs.
+    """
+    provider = FakeProvider()
+    provider._ci = "green"
+    provider._open_prs = {42}
+    # No skip-qa label
+
+    docs_card = _make_docs_card(42, 77)
+    mock_list_blocked.return_value = [docs_card]
+    mock_show_card.return_value = docs_card
+
+    mock_qa_passed.return_value = True       # QA passed
+    mock_reviewer_passed.return_value = False  # reviewer has NOT approved
+    mock_security_passed.return_value = False  # security has NOT approved
+
+    iterate.run_iterate(
+        "test-board",
+        "benmarte/daedalus",
+        resolved={"execution": {"auto_merge": True}},
+        provider=provider,
+    )
+
+    assert len(provider.merged) == 0, (
+        "Without skip-qa, merge must be blocked when reviewer hasn't approved"
+    )
+
+
+@mock.patch("core.iterate._security_passed_for_issue", return_value=False)
+@mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True)
+@mock.patch("core.iterate._qa_passed_for_issue", return_value=True)
+@mock.patch("core.iterate.kanban.list_blocked")
+@mock.patch("core.iterate.kanban.show_card")
+@mock.patch("core.iterate.kanban.complete", return_value=True)
+def test_no_skip_qa_blocked_by_security_gate(
+    mock_complete, mock_show_card, mock_list_blocked,
+    mock_qa_passed, mock_reviewer_passed, mock_security_passed,
+):
+    """Without skip-qa: merge is blocked when security has not approved.
+
+    This confirms the security gate is still enforced for normal PRs.
+    """
+    provider = FakeProvider()
+    provider._ci = "green"
+    provider._open_prs = {42}
+    # No skip-qa label
+
+    docs_card = _make_docs_card(42, 77)
+    mock_list_blocked.return_value = [docs_card]
+    mock_show_card.return_value = docs_card
+
+    mock_qa_passed.return_value = True         # QA passed
+    mock_reviewer_passed.return_value = True   # reviewer approved
+    mock_security_passed.return_value = False   # security has NOT approved
+
+    iterate.run_iterate(
+        "test-board",
+        "benmarte/daedalus",
+        resolved={"execution": {"auto_merge": True}},
+        provider=provider,
+    )
+
+    assert len(provider.merged) == 0, (
+        "Without skip-qa, merge must be blocked when security hasn't approved"
+    )
+
+
 # ── classify_blocked: skip_qa on non-QA cards has no effect ───────────────────
 
 

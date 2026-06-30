@@ -2616,7 +2616,11 @@ def run_iterate(
 
                     # Reviewer gate: reviewer must have approved the PR before
                     # merge (per issue #1085 — all gates must pass before merge).
-                    if not _reviewer_passed_for_issue(slug, issue_n):
+                    # skip-qa bypasses this gate: pre-epic #1074, skip-qa PRs
+                    # merged without any review gate. The epic added reviewer/
+                    # security gates but skip-qa must still bypass them to
+                    # preserve the pre-existing behaviour (#1074 non-regression).
+                    if not skip_qa and not _reviewer_passed_for_issue(slug, issue_n):
                         logger.warning(
                             "iterate: Skipping merge: reviewer has not approved PR #%s (issue #%s). "
                             "Wait for reviewer card to report approval.",
@@ -2625,7 +2629,8 @@ def run_iterate(
                         continue
 
                     # Security gate: security analyst must have approved the PR.
-                    if not _security_passed_for_issue(slug, issue_n):
+                    # Also bypassed by skip-qa (same rationale as reviewer gate).
+                    if not skip_qa and not _security_passed_for_issue(slug, issue_n):
                         logger.warning(
                             "iterate: Skipping merge: security has not approved PR #%s (issue #%s). "
                             "Wait for security card to report approval.",
@@ -2675,7 +2680,8 @@ def run_iterate(
                         "security: %s, CI: %s) — triggering merge on cron tick",
                         pr,
                         "skip-qa" if skip_qa else "passed",
-                        "passed", "passed",
+                        "skip-qa" if skip_qa else "passed",
+                        "skip-qa" if skip_qa else "passed",
                         ci_status_for_merge if provider_supports_ci else "n/a",
                     )
 
