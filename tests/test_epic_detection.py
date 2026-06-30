@@ -3,6 +3,7 @@
 Heuristic tests use ``is_epic`` from ``core.providers.base`` directly (Phase 1,
 #138). Planner-body and dispatcher-routing tests use the dispatch module (#149).
 """
+
 from __future__ import annotations
 
 import sys
@@ -11,13 +12,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core.providers.base import is_epic, _EPIC_CHECKLIST_MIN, _EPIC_BODY_SIZE_MIN
+from core.providers.base import (
+    is_epic,
+    _EPIC_CHECKLIST_MIN,
+    _EPIC_BODY_SIZE_MIN,
+    _CHECKLIST_LINE_RE,
+)
 from conftest import _load_dispatch  # noqa: E402
 
 disp = _load_dispatch()
 
 
-def _make_issue(body: str = "", labels=None, title: str = "Test", number: int = 1) -> dict:
+def _make_issue(
+    body: str = "", labels=None, title: str = "Test", number: int = 1
+) -> dict:
     return {
         "number": number,
         "title": title,
@@ -85,11 +93,16 @@ class TestEpicLabelHeuristic:
         """
         # Subtask + epic-like label → still excluded
         assert is_epic(_make_issue(labels=[{"name": "subtask"}])) is False
-        assert is_epic(_make_issue(labels=[{"name": "subtask"}, {"name": "epic"}])) is False
+        assert (
+            is_epic(_make_issue(labels=[{"name": "subtask"}, {"name": "epic"}]))
+            is False
+        )
         assert is_epic(_make_issue(labels=[{"name": "SUBTASK"}])) is False
         assert is_epic(_make_issue(labels=["subtask"])) is False
         # Subtask + huge body → still excluded (body-size heuristic must not fire)
-        assert is_epic(_make_issue(body="x" * 5000, labels=[{"name": "subtask"}])) is False
+        assert (
+            is_epic(_make_issue(body="x" * 5000, labels=[{"name": "subtask"}])) is False
+        )
         # Subtask + checklist → still excluded
         body = "\n".join(f"- [ ] task {i}" for i in range(10))
         assert is_epic(_make_issue(body=body, labels=[{"name": "subtask"}])) is False
@@ -111,7 +124,10 @@ class TestEpicLabelHeuristic:
         assert is_epic(_make_issue(labels=[{"name": "myth-epic"}])) is False
 
     def test_unrelated_labels(self):
-        assert is_epic(_make_issue(labels=[{"name": "bug"}, {"name": "priority"}])) is False
+        assert (
+            is_epic(_make_issue(labels=[{"name": "bug"}, {"name": "priority"}]))
+            is False
+        )
 
     def test_empty_labels(self):
         assert is_epic(_make_issue(labels=[])) is False
@@ -124,15 +140,19 @@ class TestEpicLabelHeuristic:
         assert is_epic(_make_issue(labels=[{"name": "epic"}])) is True
 
 
-# ── Heuristic 3: body size ──────────────────────────────────────────────────
+# ── Heuristic 3 (removed): body size alone no longer classifies as epic ───────
+# Issue #1100: body length is not a reliable signal — detailed bug reports with
+# long acceptance criteria sections were misclassified. See TestSemanticEpicDetection.
 
 
 class TestBodySizeHeuristic:
-    def test_at_threshold_is_epic(self):
-        assert is_epic(_make_issue(body="x" * _EPIC_BODY_SIZE_MIN)) is True
+    def test_at_threshold_not_epic_without_semantic_signals(self):
+        # Body at the old threshold with no semantic signals → NOT epic (#1100)
+        assert is_epic(_make_issue(body="x" * _EPIC_BODY_SIZE_MIN)) is False
 
-    def test_above_threshold_is_epic(self):
-        assert is_epic(_make_issue(body="x" * (_EPIC_BODY_SIZE_MIN + 1000))) is True
+    def test_above_threshold_not_epic_without_semantic_signals(self):
+        # Body above the old threshold with no semantic signals → NOT epic (#1100)
+        assert is_epic(_make_issue(body="x" * (_EPIC_BODY_SIZE_MIN + 1000))) is False
 
     def test_below_threshold_not_epic(self):
         assert is_epic(_make_issue(body="x" * (_EPIC_BODY_SIZE_MIN - 1))) is False
@@ -149,10 +169,12 @@ class TestInputShapes:
         class FakeIssue:
             body = "- [ ] a\n- [ ] b\n- [ ] c\n- [ ] d"
             labels = []
+
         assert is_epic(FakeIssue()) is True
 
     def test_dict_shape(self):
-        assert is_epic({"body": "x" * 3000, "labels": []}) is True
+        # Large body alone no longer classifies as epic (#1100)
+        assert is_epic({"body": "x" * 3000, "labels": []}) is False
 
     def test_none_input(self):
         assert is_epic(None) is False
@@ -161,7 +183,8 @@ class TestInputShapes:
         assert is_epic({"labels": []}) is False
 
     def test_missing_labels_key(self):
-        assert is_epic({"body": "y" * 3000}) is True
+        # Large body alone no longer classifies as epic (#1100)
+        assert is_epic({"body": "y" * 3000}) is False
 
     def test_none_body(self):
         assert is_epic({"body": None, "labels": []}) is False
@@ -181,11 +204,14 @@ class TestOrCombination:
     def test_only_label_triggers(self):
         assert is_epic(_make_issue(labels=[{"name": "epic"}])) is True
 
-    def test_only_size_triggers(self):
-        assert is_epic(_make_issue(body="z" * _EPIC_BODY_SIZE_MIN)) is True
+    def test_only_size_no_longer_triggers(self):
+        # Body size alone is no longer a trigger (#1100)
+        assert is_epic(_make_issue(body="z" * _EPIC_BODY_SIZE_MIN)) is False
 
     def test_no_triggers_not_epic(self):
-        assert is_epic(_make_issue(body="small issue", labels=[{"name": "bug"}])) is False
+        assert (
+            is_epic(_make_issue(body="small issue", labels=[{"name": "bug"}])) is False
+        )
 
 
 # ── _planner_body output (dispatch-specific, #149) ─────────────────────────
@@ -246,3 +272,99 @@ class TestDispatcherRouting:
     def test_planner_in_role_tmp_prefix(self):
         assert "planner" in disp._ROLE_TMP_PREFIX
         assert disp._ROLE_TMP_PREFIX["planner"] == "planner"
+
+
+# ── Semantic signal detection (issue #1100) ──────────────────────────────────
+
+
+class TestSemanticEpicDetection:
+    """Body length alone must NOT classify an issue as epic (issue #1100).
+
+    Semantic signals — sub-issue checklist references, decomposition language —
+    are required. Detailed bug reports with long acceptance criteria sections
+    should route to the validator, not the planner.
+    """
+
+    def test_long_body_bug_report_not_epic(self):
+        """Long-body bug report with a single AC block is NOT classified as epic."""
+        body = (
+            "## Bug Report: epic-detection misclassifies detailed bug reports\n\n"
+            "### Problem\n"
+            "The dispatcher misclassifies large-body bug reports as epics. "
+            "This is a detailed description of the bug with full context about what goes wrong, "
+            "when it happens, and what the observed vs expected behavior is. "
+            "The root cause is that the heuristic uses raw body length as a proxy for epic size. "
+            "Bug reports with detailed acceptance criteria, observed/expected sections, "
+            "or reproduction steps exceed the length threshold and get routed to the planner "
+            "instead of the validator, adding unnecessary latency and burning retry caps.\n\n"
+            "### Root Cause Analysis\n"
+            "The `is_epic` function in `core/providers/base.py` has three heuristics. "
+            "Heuristic 3 fires when `len(body) >= 2000`. A well-written bug report with "
+            "detailed reproduction steps, environment notes, observed vs expected sections, "
+            "and a full acceptance criteria block routinely exceeds this threshold. "
+            "The body length is a weak proxy: it correlates with writing quality, not with "
+            "the complexity of the work. An epic should require multiple independent deliverables "
+            "that different agents might tackle in parallel, not just a long description.\n\n"
+            "### Observed Behavior\n"
+            "Issues with bodies exceeding 2000 characters route to the planner for "
+            "unnecessary decomposition, even when the issue is a single well-scoped bug fix "
+            "with a clear acceptance criteria block and a single PR.\n\n"
+            "### Expected Behavior\n"
+            "Issues with long bodies but no sub-issue checklists and no multi-phase "
+            "language should route to the validator, not the planner. "
+            "Body length alone is not a sufficient signal for epic classification.\n\n"
+            "### Reproduction Steps\n"
+            "1. Create a GitHub issue with a detailed bug report exceeding 2000 characters\n"
+            "2. Ensure the body contains only a single '## Acceptance Criteria' section\n"
+            "3. Do not include checklist items referencing issue numbers (- [ ] #N)\n"
+            "4. Do not include decomposition language\n"
+            "5. Trigger the dispatcher and observe it routes to the planner\n\n"
+            "### Environment\n"
+            "- Daedalus dispatcher version: current dev branch\n"
+            "- Affected module: core/providers/base.py, function is_epic\n"
+            "- Related: daedalus-epic-detection-hazard memory entry\n\n"
+            "## Acceptance Criteria\n"
+            "- [ ] Epic detection uses semantic signals instead of body length\n"
+            "- [ ] Long-body bug reports route to the validator\n"
+            "- [ ] Tests cover this scenario\n"
+        )
+        assert len(body) > _EPIC_BODY_SIZE_MIN, (
+            f"body must exceed {_EPIC_BODY_SIZE_MIN} chars for this test"
+        )
+        assert is_epic(_make_issue(body=body)) is False
+
+    def test_short_body_with_decomposition_language_is_epic(self):
+        """Short body containing Phase 1/2/3 decomposition language IS an epic."""
+        body = (
+            "## Auth Overhaul Epic\n\n"
+            "This epic tracks the authentication system overhaul.\n\n"
+            "Phase 1: OAuth integration and provider setup\n"
+            "Phase 2: Session management redesign\n"
+            "Phase 3: Security audit and hardening\n"
+        )
+        assert len(body) < _EPIC_BODY_SIZE_MIN, (
+            f"body must be under {_EPIC_BODY_SIZE_MIN} chars for this test"
+        )
+        assert is_epic(_make_issue(body=body)) is True
+
+    def test_sub_issue_checklist_is_epic(self):
+        """Body with sub-issue checklist references (- [ ] #N) IS an epic."""
+        body = (
+            "This epic tracks the following sub-issues:\n\n"
+            "- [ ] #201 Implement OAuth\n"
+            "- [ ] #202 Update session handling\n"
+        )
+        # Fewer than _EPIC_CHECKLIST_MIN items so checklist density alone does not fire
+        assert len(_CHECKLIST_LINE_RE.findall(body)) < _EPIC_CHECKLIST_MIN
+        assert is_epic(_make_issue(body=body)) is True
+
+    def test_decompose_into_language_is_epic(self):
+        """Body with 'decompose into' language IS classified as an epic."""
+        body = "We should decompose into three independent sub-issues for this work."
+        assert is_epic(_make_issue(body=body)) is True
+
+    def test_long_body_with_sub_issue_checklist_is_epic(self):
+        """Long body that also has sub-issue checklist references remains an epic."""
+        body = "background context " * 120 + "\n- [ ] #201 sub-task one\n"
+        assert len(body) > _EPIC_BODY_SIZE_MIN
+        assert is_epic(_make_issue(body=body)) is True

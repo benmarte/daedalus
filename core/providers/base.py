@@ -9,6 +9,7 @@ Capability flags let the dispatcher and dashboard degrade gracefully when a
 provider can't do something (e.g. GitLab issue boards are label-driven, so
 ``supports_boards`` is False and board calls are no-ops).
 """
+
 from __future__ import annotations
 
 import abc
@@ -44,6 +45,7 @@ def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
             return val
     return ""
 
+
 # Sentinel for "report already delivered" PR comments. The literal string is
 # kept from the Slack-only era so previously-marked PRs are not re-delivered.
 DELIVERY_MARKER = "<!-- daedalus:slack-delivered -->"
@@ -51,12 +53,21 @@ DELIVERY_MARKER = "<!-- daedalus:slack-delivered -->"
 # Labels that Daedalus requires in every VCS repo it manages.
 # Providers create these on first dispatch via ensure_labels().
 REQUIRED_LABELS: List[Dict[str, str]] = [
-    {"name": "epic",    "color": "7057ff",
-     "description": "Large issue requiring decomposition into sub-issues"},
-    {"name": "subtask", "color": "0075ca",
-     "description": "Child issue created from an epic decomposition"},
-    {"name": "Ready",   "color": "a2eeef",
-     "description": "Issue ready for developer work — no outstanding dependencies blockers"},
+    {
+        "name": "epic",
+        "color": "7057ff",
+        "description": "Large issue requiring decomposition into sub-issues",
+    },
+    {
+        "name": "subtask",
+        "color": "0075ca",
+        "description": "Child issue created from an epic decomposition",
+    },
+    {
+        "name": "Ready",
+        "color": "a2eeef",
+        "description": "Issue ready for developer work — no outstanding dependencies blockers",
+    },
 ]
 
 # Canonical pipeline statuses → default provider-facing names. Overridable per
@@ -87,25 +98,59 @@ class IssueSummary:
 
     def as_dict(self) -> Dict[str, Any]:
         """Dict shape the dispatcher's triage path consumes."""
-        return {"number": self.number, "title": self.title, "body": self.body,
-                "labels": [{"name": n} for n in self.labels], "url": self.url}
+        return {
+            "number": self.number,
+            "title": self.title,
+            "body": self.body,
+            "labels": [{"name": n} for n in self.labels],
+            "url": self.url,
+        }
 
 
-# ── Epic detection (Phase 1, issue #138) ────────────────────────────────────
+# ── Epic detection (Phase 1, issue #138; semantic signals issue #1100) ────────
 #
 # Heuristic: an issue is "epic-sized" if ANY of these hold:
 #   • body contains >= _EPIC_CHECKLIST_MIN markdown checklist items
 #     (``- [ ]`` / ``* [x]`` / ``+ [X]``, indented or not)
 #   • labels include an exact match for "epic" (case-insensitive)
-#   • body length >= _EPIC_BODY_SIZE_MIN chars
+#   • body contains sub-issue checklist references (``- [ ] #N``)  [#1100]
+#   • body contains explicit decomposition language               [#1100]
+#     ("Phase 1/2/3", "decompose into", "decompose this")
+#
+# Body length alone is NOT a sufficient signal — detailed bug reports with
+# long acceptance criteria sections were misclassified (issue #1100).
+# _EPIC_BODY_SIZE_MIN is retained as a named constant for config compatibility
+# but is no longer used as a standalone classifier.
 #
 # Accepts a raw provider dict (``{"body": ..., "labels": [...]}``), an
 # :class:`IssueSummary`, or any object exposing ``.body`` / ``.labels``.
 # Never raises — missing/None fields default to False.
 
 _EPIC_CHECKLIST_MIN = 4
-_EPIC_BODY_SIZE_MIN = 2000
+_EPIC_BODY_SIZE_MIN = (
+    2000  # retained for config compatibility; no longer a standalone trigger
+)
 _CHECKLIST_LINE_RE = re.compile(r"^\s*[-*+]\s+\[[\sxX]\]", re.MULTILINE)
+
+# Matches checklist items that reference GitHub issue numbers: "- [ ] #123 ..."
+_SUB_ISSUE_CHECKLIST_RE = re.compile(r"^\s*[-*+]\s+\[[\sxX]\]\s*#\d+", re.MULTILINE)
+
+# Explicit epic decomposition language patterns (issue #1100)
+_DECOMPOSITION_PATTERNS: List[re.Pattern] = [
+    re.compile(r"\bphase\s+[1-9]\b", re.IGNORECASE),
+    re.compile(r"\bdecompose\s+into\b", re.IGNORECASE),
+    re.compile(r"\bdecompose\s+this\b", re.IGNORECASE),
+]
+
+
+def _has_sub_issue_checklist(body: str) -> bool:
+    """Return True if *body* contains checklist items referencing issue numbers."""
+    return bool(_SUB_ISSUE_CHECKLIST_RE.search(body))
+
+
+def _has_decomposition_language(body: str) -> bool:
+    """Return True if *body* contains explicit epic decomposition language."""
+    return any(p.search(body) for p in _DECOMPOSITION_PATTERNS)
 
 
 def _label_names(labels: Any) -> List[str]:
@@ -125,15 +170,15 @@ def _label_names(labels: Any) -> List[str]:
 
 def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
     """Return True if ``issue`` looks epic-sized per the heuristics above.
-    
+
     When ``epic_config`` is provided (from execution.epic_detection), its values
     override the defaults. Otherwise uses _EPIC_CHECKLIST_MIN and _EPIC_BODY_SIZE_MIN.
-    
+
     The config can disable epic detection entirely by setting ``enabled=False``.
     """
     if issue is None:
         return False
-    
+
     # Resolve thresholds from config or use constants
     if epic_config:
         # Check if epic detection is enabled (defaults to True)
@@ -142,17 +187,15 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
             enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
         if not enabled:
             return False
-        
+
         min_checklist = int(epic_config.get("min_deliverables", 4))
-        min_body_size = int(epic_config.get("size_threshold", 2000))
         epic_label = str(epic_config.get("epic_label", "epic"))
         child_label = str(epic_config.get("child_label", "subtask"))
     else:
         min_checklist = _EPIC_CHECKLIST_MIN
-        min_body_size = _EPIC_BODY_SIZE_MIN
         epic_label = "epic"
         child_label = "subtask"
-    
+
     # Accept both IssueSummary / dataclass and raw provider dict.
     if isinstance(issue, dict):
         body = issue.get("body") or ""
@@ -165,7 +208,7 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
     if child_label in {n.lower() for n in _label_names(labels)}:
         return False
 
-    # Heuristic 1: checklist density
+    # Heuristic 1: checklist density (>= min_checklist checkbox items)
     if len(_CHECKLIST_LINE_RE.findall(body)) >= min_checklist:
         return True
 
@@ -173,8 +216,13 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
     if any(name.lower() == epic_label for name in _label_names(labels)):
         return True
 
-    # Heuristic 3: body size
-    if len(body) >= min_body_size:
+    # Heuristic 3: sub-issue checklist (- [ ] #N references) [#1100]
+    if _has_sub_issue_checklist(body):
+        return True
+
+    # Heuristic 4: explicit decomposition language [#1100]
+    # "Phase 1/2/3", "decompose into", "decompose this"
+    if _has_decomposition_language(body):
         return True
 
     return False
@@ -183,9 +231,9 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
 @dataclass
 class PRSummary:
     number: int
-    state: str = "open"          # open | merged | closed
+    state: str = "open"  # open | merged | closed
     head_branch: str = ""
-    base_branch: str = ""        # target branch the PR merges INTO
+    base_branch: str = ""  # target branch the PR merges INTO
     title: str = ""
     body: str = ""
     url: str = ""
@@ -235,7 +283,9 @@ _CLOSING_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\
 # provider-agnostic fallback for dependency-aware ready-gating (issue #139) when
 # native issue links aren't present. Leading list/quote markers are tolerated so
 # it works inside markdown bullets.
-_DEPENDS_RE = re.compile(r"(?im)^[ \t>*\-]*(?:depends[ _-]on|blocked[ _-]by)\s*:?[ \t]*(.+)$")
+_DEPENDS_RE = re.compile(
+    r"(?im)^[ \t>*\-]*(?:depends[ _-]on|blocked[ _-]by)\s*:?[ \t]*(.+)$"
+)
 _ISSUE_REF_RE = re.compile(r"#(\d+)")
 
 
@@ -266,8 +316,12 @@ def issue_linked_to_pr(pr: PRSummary, issue_number: int) -> bool:
     n = str(issue_number)
     head = pr.head_branch or ""
     body = pr.body or ""
-    return (f"issue-{n}" in head or f"/{n}-" in head or head.endswith(f"-{n}")
-            or any(m.group(1) == n for m in _CLOSING_RE.finditer(body)))
+    return (
+        f"issue-{n}" in head
+        or f"/{n}-" in head
+        or head.endswith(f"-{n}")
+        or any(m.group(1) == n for m in _CLOSING_RE.finditer(body))
+    )
 
 
 def ensure_closing_keyword(body: str, issue_number: int) -> str:
@@ -296,7 +350,10 @@ class VCSProvider(abc.ABC):
     def __init__(self, resolved: Dict[str, Any]):
         self._cfg = resolved or {}
         vcs = self._cfg.get("vcs") or {}
-        self._status_map: Dict[str, str] = {**DEFAULT_STATUS_MAP, **(vcs.get("status_map") or {})}
+        self._status_map: Dict[str, str] = {
+            **DEFAULT_STATUS_MAP,
+            **(vcs.get("status_map") or {}),
+        }
         self._log = logging.getLogger(f"daedalus.providers.{self.name}")
         # Populated by enroll_repo(); surfaced in dispatch summary under enrollment_failures.
         # Defined here so getattr(provider, "enrollment_failures", []) is never needed.
@@ -309,8 +366,9 @@ class VCSProvider(abc.ABC):
 
     # ── issues ───────────────────────────────────────────────────────────────
     @abc.abstractmethod
-    def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
-                    limit: int = 50) -> List[IssueSummary]: ...
+    def list_issues(
+        self, state: str = "open", labels: Optional[List[str]] = None, limit: int = 50
+    ) -> List[IssueSummary]: ...
 
     @abc.abstractmethod
     def close_issue(self, issue_number: int) -> bool: ...
@@ -327,8 +385,9 @@ class VCSProvider(abc.ABC):
         """
         return None
 
-    def create_issue(self, title: str, body: str,
-                     labels: Optional[List[str]] = None) -> Optional[int]:
+    def create_issue(
+        self, title: str, body: str, labels: Optional[List[str]] = None
+    ) -> Optional[int]:
         """Create a new issue. Returns the issue number on success, None on failure.
 
         Providers that support issue creation override this; default is a no-op.
@@ -359,6 +418,7 @@ class VCSProvider(abc.ABC):
         Never raises — returns ``[]`` on any provider error.
         """
         import re as _re
+
         # Aligned with EPIC_REF_RE in core/tier_promotion.py so both code paths
         # agree on what counts as a parent-epic reference.
         pattern = _re.compile(
@@ -376,7 +436,11 @@ class VCSProvider(abc.ABC):
             else:
                 body = getattr(issue, "body", "") or ""
             if pattern.search(body):
-                n = issue.get("number") if isinstance(issue, dict) else getattr(issue, "number", None)
+                n = (
+                    issue.get("number")
+                    if isinstance(issue, dict)
+                    else getattr(issue, "number", None)
+                )
                 if n is not None:
                     results.append(int(n))
         return results
@@ -393,8 +457,9 @@ class VCSProvider(abc.ABC):
         return []
 
     # ── cross-issue dependencies (ready-gating, issue #139) ──────────────────
-    def _depends_on_blockers(self, issue_number: int,
-                             *, body: Optional[str] = None) -> List[int]:
+    def _depends_on_blockers(
+        self, issue_number: int, *, body: Optional[str] = None
+    ) -> List[int]:
         """Open blockers from the portable ``Depends on:`` body convention.
 
         Fetches the issue body when not supplied, parses the convention, and
@@ -407,8 +472,7 @@ class VCSProvider(abc.ABC):
         if body is None:
             issue = self.get_issue(issue_number)
             body = issue.body if issue else ""
-        return [n for n in parse_depends_on(body)
-                if self.get_issue_state(n) == "open"]
+        return [n for n in parse_depends_on(body) if self.get_issue_state(n) == "open"]
 
     def blockers(self, issue_number: int) -> List[int]:
         """Open issue numbers that block ``issue_number`` (``[]`` when unblocked).
@@ -547,11 +611,14 @@ class VCSProvider(abc.ABC):
         return self._cfg.get("repo") or ""
 
     def pr_has_delivery_marker(self, pr_number: int) -> bool:
-        return any(DELIVERY_MARKER in (c.body or "") for c in self.list_pr_comments(pr_number))
+        return any(
+            DELIVERY_MARKER in (c.body or "") for c in self.list_pr_comments(pr_number)
+        )
 
     def post_delivery_marker(self, pr_number: int, report_body: str = "") -> bool:
         return self.post_pr_comment(
-            pr_number, f"{DELIVERY_MARKER}\n\nDelivered:\n\n{report_body}")
+            pr_number, f"{DELIVERY_MARKER}\n\nDelivered:\n\n{report_body}"
+        )
 
     # ── board / project tracking (high-level; provider caches its own meta) ──
     def board_configured(self) -> bool:
