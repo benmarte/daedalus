@@ -1456,12 +1456,9 @@ def _gate_epic_qa_tasks(
         if (task.get("assignee") or "").strip() != qa_profile:
             continue
         status = (task.get("status") or "").lower()
-        # Skip already-blocked or done cards
+        # Skip already-blocked or done cards (includes qa-deferred cards —
+        # those are re-evaluated by _maybe_undefer_epic_qa_tasks)
         if status in ("blocked", "done", "complete", "completed", "archived"):
-            continue
-        # Skip cards already deferred by a prior tick
-        summary = _get_task_summary(task, slug)
-        if status == "blocked" and "qa-deferred" in (summary or "").lower():
             continue
 
         n = extract_issue_number(task.get("title") or "")
