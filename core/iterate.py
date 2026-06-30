@@ -329,6 +329,14 @@ def classify_blocked(
             return ADVANCE
         if "qa-failed" in summary:
             return QA_FIX
+        # Belt-and-suspenders (issue #1098): if QA self-defers because no
+        # sub-issue PR exists for an epic, treat it as a pending signal —
+        # no retry cap burn, no fix card. The dispatcher's pre-dispatch
+        # gate (_gate_epic_qa_tasks) should prevent QA from spawning at
+        # all, but this handles the edge case where QA was already running
+        # when the gate was added or the gate failed to block in time.
+        if "qa-deferred" in summary:
+            return PENDING_SIGNAL
         return PENDING_SIGNAL
 
     # ── accessibility-daedalus card ───────────────────────────────────────
