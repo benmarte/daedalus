@@ -735,7 +735,11 @@ def test_run_iterate_dev_pr_merged_reconciles():
 
 
 def test_run_iterate_dev_fix_ci():
-    """Blocked dev card with red CI → dev_fix_ci."""
+    """Blocked dev card with red CI → ADVANCE (CI no longer gates ADVANCE, per epic #1074).
+
+    The old behavior was DEV_FIX_CI (create fix card for red CI). Now the card
+    advances immediately and CI is enforced at merge-time only.
+    """
     cards = [{
         "id": "t_dev",
         "assignee": "developer-daedalus",
@@ -743,11 +747,11 @@ def test_run_iterate_dev_fix_ci():
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
-        with mock.patch.object(kanban, "create_task", return_value="t_fix"):
-            with mock.patch.object(kanban, "comment", return_value=True):
-                with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
-                    counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
-    check("dev red CI → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
+        with mock.patch.object(kanban, "complete", return_value=True):
+            with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
+                counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
+    check("dev red CI → advance (CI gated at merge-time)", counts[iterate.ADVANCE] == 1)
+    check("dev red CI → no dev_fix_ci", counts[iterate.DEV_FIX_CI] == 0)
 
 
 def test_run_iterate_reviewer_changes():
@@ -1323,6 +1327,13 @@ def test_create_downstream_happy_path():
     check("created 5 tasks", len(created) == 5)
     check("returns correct ids", created == ["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"])
     check("create_task called 5 times", mk_create.call_count == 5)
+
+    # Verify body text reflects parallel CI (per epic #1074 — no longer says "CI is green")
+    bodies = [call.kwargs.get("body", "") for call in mk_create.call_args_list]
+    check("body mentions 'CI may still be running'",
+          all("CI may still be running" in b for b in bodies))
+    check("body does NOT say 'CI is green'",
+          all("CI is green" not in b for b in bodies))
 
     # Verify assignees
     assignees = [call.kwargs["assignee"] for call in mk_create.call_args_list]
@@ -2317,7 +2328,7 @@ if __name__ == "__main__":
         test_execute_dev_fix_escalate_when_over_cap,
         test_run_iterate_empty,
         test_run_iterate_dev_advance,
-        test_run_iterate_dev_red_ci_advances,
+        test_run_iterate_dev_fix_ci,
         test_run_iterate_reviewer_changes,
         test_run_iterate_reviewer_approved,
         test_run_iterate_escalate,
