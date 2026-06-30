@@ -87,7 +87,7 @@ def test_scenario_1_full_pipeline_happy_path():
         mock.patch("core.iterate.kanban.show_card", return_value=qa_card),
         mock.patch("core.iterate.kanban.complete", return_value=True),
     ):
-        counts_qa, _, _, qa_failed = iterate.run_iterate(SLUG, REPO, provider=provider)
+        counts_qa, _, _, qa_failed, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
 
     assert counts_qa[iterate.ADVANCE] == 1, "QA card should advance on qa-passed"
     assert qa_failed == [], "No QA failure when signal is qa-passed"
@@ -99,7 +99,7 @@ def test_scenario_1_full_pipeline_happy_path():
         mock.patch("core.iterate.kanban.complete", return_value=True),
         mock.patch("core.iterate._qa_passed_for_issue", return_value=True),
     ):
-        counts_docs, _, _, _ = iterate.run_iterate(
+        counts_docs, *_ = iterate.run_iterate(
             SLUG, REPO, provider=provider, resolved=resolved
         )
 

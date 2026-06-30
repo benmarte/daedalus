@@ -71,7 +71,7 @@ _LIFECYCLE = ("Triage → Spec → Plan → Build → Test → Review → Code-S
 # Notification event types a cron.notifications[] entry can subscribe to.
 NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready",
                  "security-escalation", "comment-mirror", "retry-cap-exhausted",
-                 "retry-attempt", "validator-blocked", "qa-failed")
+                 "retry-attempt", "validator-blocked", "qa-failed", "max-fix-attempts")
 
 # Priority label ordering — P0 dispatched before P1 before P2 before unlabeled.
 _PRIORITY = {"p0": 0, "P0": 0, "p1": 1, "P1": 1, "p2": 2, "P2": 2}
@@ -2927,6 +2927,13 @@ def _notify_validator_blocked(
             )
 
 
+# Per-process dedup sets: prevent repeat notifications within the same dispatcher
+# lifetime for events that can fire every tick while the card stays blocked.
+# Sets reset on process restart — acceptable for cron mode (one restart per tick).
+_QA_FAILED_NOTIFIED: set = set()   # keys: (issue_n, pr)
+_MAX_FIX_NOTIFIED: set = set()     # keys: (issue_n, pr)
+
+
 def _notify_qa_failed(
     *,
     issue_number: Optional[int],
@@ -2941,7 +2948,15 @@ def _notify_qa_failed(
     which blocks the PR from auto-merging. Routes through ``hermes send`` to
     every target subscribed to the ``qa-failed`` event. When no targets are
     configured, returns silently. Failures are logged, never raised.
+    Deduplicates per (issue_number, pr_number) within the process lifetime
+    to prevent per-tick spam while the QA card stays blocked.
     """
+    dedup_key = (issue_number, pr_number)
+    if dedup_key in _QA_FAILED_NOTIFIED:
+        logger.debug("qa-failed notification for #%s already sent this session — skipping", issue_number)
+        return
+    _QA_FAILED_NOTIFIED.add(dedup_key)
+
     targets = _notify_targets(resolved, "qa-failed")
     if not targets:
         return
@@ -2969,6 +2984,57 @@ def _notify_qa_failed(
             logger.info("sent qa-failed notification to %s for %s", target, issue_ref)
         else:
             logger.warning("failed to send qa-failed notification to %s for %s", target, issue_ref)
+
+
+def _notify_max_fix_attempts(
+    *,
+    issue_number: Optional[int],
+    pr_number: Optional[int],
+    reason: str,
+    resolved: Dict[str, Any],
+    dry_run: bool = False,
+) -> None:
+    """Notify human channels when a QA fix card exhausts MAX_FIX_ATTEMPTS.
+
+    Fires when _execute_dev_fix_ci escalates instead of creating another fix
+    card, meaning the developer has failed to fix CI after the maximum number
+    of attempts and the issue now requires manual intervention. Routes through
+    ``hermes send`` to every target subscribed to the ``max-fix-attempts``
+    event. Deduplicates per (issue_number, pr_number) within the process
+    lifetime.
+    """
+    dedup_key = (issue_number, pr_number)
+    if dedup_key in _MAX_FIX_NOTIFIED:
+        logger.debug("max-fix-attempts notification for #%s already sent this session — skipping", issue_number)
+        return
+    _MAX_FIX_NOTIFIED.add(dedup_key)
+
+    targets = _notify_targets(resolved, "max-fix-attempts")
+    if not targets:
+        return
+
+    issue_ref = f"#{issue_number}" if issue_number else "unknown issue"
+    pr_ref = f" (PR #{pr_number})" if pr_number else ""
+    reason_detail = f"\n\n**Last failure**: {reason}" if reason else ""
+    body = (
+        f"🚨 **Max Fix Attempts Reached: {issue_ref}**{pr_ref}\n\n"
+        f"The developer has exhausted the maximum number of CI fix attempts "
+        f"for {issue_ref}{pr_ref}. The issue has been escalated and requires "
+        f"manual intervention.{reason_detail}"
+    )
+
+    for target in targets:
+        if dry_run:
+            logger.info(
+                "[dry-run] would send max-fix-attempts notification to %s for %s",
+                target, issue_ref,
+            )
+            continue
+        ok, _anchor = _hermes_send(target, body)
+        if ok:
+            logger.info("sent max-fix-attempts notification to %s for %s", target, issue_ref)
+        else:
+            logger.warning("failed to send max-fix-attempts notification to %s for %s", target, issue_ref)
 
 
 def _check_confirmed_validators(
@@ -4371,7 +4437,7 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-running sweep failed: %s", exc)
 
-    iterate_counts, advance_prs, pending_ci_cards, qa_failed_cards = iterate.run_iterate(
+    iterate_counts, advance_prs, pending_ci_cards, qa_failed_cards, escalated_cards = iterate.run_iterate(
         slug, repo, resolved=resolved, provider=provider, dry_run=dry_run,
     )
     for _qf in qa_failed_cards:
@@ -4379,6 +4445,14 @@ def run(resolved: Dict[str, Any], *, assignee: Optional[str] = None, max_dispatc
             issue_number=_qf.get("issue_n"),
             pr_number=_qf.get("pr"),
             reason=_qf.get("reason", ""),
+            resolved=resolved,
+            dry_run=dry_run,
+        )
+    for _esc in escalated_cards:
+        _notify_max_fix_attempts(
+            issue_number=_esc.get("issue_n"),
+            pr_number=_esc.get("pr"),
+            reason=_esc.get("reason", ""),
             resolved=resolved,
             dry_run=dry_run,
         )

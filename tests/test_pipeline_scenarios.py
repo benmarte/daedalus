@@ -86,7 +86,7 @@ def test_scenario_a_happy_path(pipeline, fake_issue, fake_provider):
     dev_tid = kanban.created_with_key(f"developer-{n}")["id"]
     kanban.block_task(SLUG, dev_tid, f"review-required: PR #501 opened for {REPO}#{n}")
     provider = fake_provider(ci_status="green")
-    counts, advance_prs, pending, _qa_f = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, advance_prs, pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[ADVANCE] == 1
     assert 501 in advance_prs
     assert kanban.tasks[dev_tid]["status"] == "done"
@@ -94,7 +94,7 @@ def test_scenario_a_happy_path(pipeline, fake_issue, fake_provider):
     # 4. Reviewer approves → terminal complete.
     rev_tid = kanban.created_with_key(f"reviewer-{n}")["id"]
     kanban.block_task(SLUG, rev_tid, "approved — LGTM, no findings. PR #501")
-    counts, _prs, _pending, _qa_f = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, _prs, _pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[APPROVE_ADVANCE] == 1
     assert kanban.tasks[rev_tid]["status"] == "done"
 
@@ -168,7 +168,7 @@ def test_scenario_c_human_review_escalation(pipeline, fake_blocked_card, fake_pr
 
     # Drive the route: run_iterate creates a PM routing card and blocks the reviewer.
     provider = fake_provider(ci_status="green")
-    counts, _prs, _pending, _qa_f = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, _prs, _pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[PM_ROUTE] == 1
     pm_route = next(
         (t for t in kanban.tasks.values() if t["assignee"] == PM and t["status"] == "running"),
@@ -185,7 +185,7 @@ def test_scenario_c_human_review_escalation(pipeline, fake_blocked_card, fake_pr
     assert classify_blocked(PM, "anything at all", False) == ESCALATE
 
     # Next tick: escalation fires (comment posted), no card is completed.
-    counts, _prs, _pending, _qa_f = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, _prs, _pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[ESCALATE] == 1
     escalation_comments = [c for c in kanban.comments_on(pm_tid) if "ESCALATE" in c]
     assert escalation_comments, "expected an escalation comment on the PM card"

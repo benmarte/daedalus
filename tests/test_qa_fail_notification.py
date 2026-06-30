@@ -64,7 +64,7 @@ class TestRunIterateQaFailedCards:
             mock.patch("core.iterate.kanban.create_task", return_value="t_fix"),
             mock.patch("core.iterate.kanban.comment", return_value=True),
         ):
-            _, _, _, qa_failed = iterate.run_iterate("slug", "O/R")
+            _, _, _, qa_failed, *_ = iterate.run_iterate("slug", "O/R")
 
         assert len(qa_failed) == 1
         assert qa_failed[0]["pr"] == 99
@@ -84,7 +84,7 @@ class TestRunIterateQaFailedCards:
             mock.patch("core.iterate.kanban.create_task", return_value="t_fix"),
             mock.patch("core.iterate.kanban.comment", return_value=True),
         ):
-            counts, _, _, qa_failed = iterate.run_iterate("slug", "O/R", provider=provider)
+            counts, _, _, qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=provider)
 
         assert qa_failed == []
 
@@ -98,14 +98,14 @@ class TestRunIterateQaFailedCards:
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.create_task", return_value=None),
         ):
-            _, _, _, qa_failed = iterate.run_iterate("slug", "O/R")
+            _, _, _, qa_failed, *_ = iterate.run_iterate("slug", "O/R")
 
         assert qa_failed == [], "qa_failed_cards must not fire when fix card creation fails"
 
     def test_empty_board_returns_empty_qa_failed(self):
         """No blocked cards → all return lists are empty."""
         with mock.patch("core.iterate.kanban.list_blocked", return_value=[]):
-            _, _, _, qa_failed = iterate.run_iterate("slug", "O/R")
+            _, _, _, qa_failed, *_ = iterate.run_iterate("slug", "O/R")
         assert qa_failed == []
 
     def test_qa_passed_not_in_qa_failed(self):
@@ -125,7 +125,7 @@ class TestRunIterateQaFailedCards:
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.complete", return_value=True),
         ):
-            counts, _, _, qa_failed = iterate.run_iterate("slug", "O/R")
+            counts, _, _, qa_failed, *_ = iterate.run_iterate("slug", "O/R")
 
         assert qa_failed == []
         assert counts[iterate.ADVANCE] == 1
@@ -135,6 +135,15 @@ class TestRunIterateQaFailedCards:
 
 
 class TestNotifyQaFailed:
+
+    def setup_method(self):
+        """Clear module-level dedup sets so tests don't pollute each other."""
+        try:
+            import scripts.daedalus_dispatch as disp
+            disp._QA_FAILED_NOTIFIED.clear()
+            disp._MAX_FIX_NOTIFIED.clear()
+        except ImportError:
+            pass
 
     def _import_dispatch(self):
         """Import daedalus_dispatch, patching away heavy optional imports."""
@@ -263,3 +272,97 @@ class TestNotifyQaFailed:
             pytest.skip("dispatch import requires filelock")
 
         assert "qa-failed" in disp.NOTIFY_EVENTS
+
+    def test_qa_failed_dedup_not_notified_twice(self):
+        """Second call with same (issue, pr) is skipped — no duplicate notification."""
+        try:
+            import scripts.daedalus_dispatch as disp
+        except ImportError:
+            pytest.skip("dispatch import requires filelock")
+
+        resolved = {
+            "cron": {
+                "notifications": [
+                    {"platform": "slack", "target": "slack:C123", "events": ["qa-failed"]},
+                ]
+            }
+        }
+        with mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as mock_send:
+            disp._notify_qa_failed(issue_number=42, pr_number=99, reason="tests failed", resolved=resolved)
+            disp._notify_qa_failed(issue_number=42, pr_number=99, reason="tests failed", resolved=resolved)
+
+        assert mock_send.call_count == 1, "notification must not be sent twice for the same (issue, pr)"
+
+    def test_max_fix_attempts_in_notify_events(self):
+        """'max-fix-attempts' is listed in NOTIFY_EVENTS."""
+        try:
+            import scripts.daedalus_dispatch as disp
+        except ImportError:
+            pytest.skip("dispatch import requires filelock")
+
+        assert "max-fix-attempts" in disp.NOTIFY_EVENTS
+
+    def test_notify_max_fix_attempts_sends_to_subscriber(self):
+        """_notify_max_fix_attempts sends to targets subscribed to max-fix-attempts."""
+        try:
+            import scripts.daedalus_dispatch as disp
+        except ImportError:
+            pytest.skip("dispatch import requires filelock")
+
+        resolved = {
+            "cron": {
+                "notifications": [
+                    {"platform": "slack", "target": "slack:C999", "events": ["max-fix-attempts"]},
+                ]
+            }
+        }
+        with mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as mock_send:
+            disp._notify_max_fix_attempts(
+                issue_number=7, pr_number=55, reason="CI still red after 3 attempts", resolved=resolved,
+            )
+
+        mock_send.assert_called_once()
+        body = mock_send.call_args[0][1]
+        assert "#7" in body
+        assert "PR #55" in body
+        assert "manual intervention" in body
+
+    def test_max_fix_attempts_dedup_not_notified_twice(self):
+        """Second max-fix-attempts call for same (issue, pr) is skipped."""
+        try:
+            import scripts.daedalus_dispatch as disp
+        except ImportError:
+            pytest.skip("dispatch import requires filelock")
+
+        resolved = {
+            "cron": {
+                "notifications": [
+                    {"platform": "slack", "target": "slack:C999", "events": ["max-fix-attempts"]},
+                ]
+            }
+        }
+        with mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as mock_send:
+            disp._notify_max_fix_attempts(issue_number=7, pr_number=55, reason="red", resolved=resolved)
+            disp._notify_max_fix_attempts(issue_number=7, pr_number=55, reason="red", resolved=resolved)
+
+        assert mock_send.call_count == 1, "max-fix-attempts notification must not fire twice for same issue"
+
+    def test_escalated_cards_populated_in_fifth_slot(self):
+        """run_iterate 5th slot: escalated card when fix_attempts file counter is at MAX."""
+        card = _qa_card()
+        fk = FakeKanban()
+        # Pass a workdir so the file-counter check runs; mock it to return MAX_FIX_ATTEMPTS.
+        resolved = {"workdir": "/tmp/fake-workdir"}
+        with (
+            mock.patch("core.iterate.kanban", fk),
+            mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
+            mock.patch("core.iterate.kanban.show_card", return_value=card),
+            mock.patch("core.iterate.kanban.create_task", return_value="t_esc"),
+            mock.patch("core.iterate.kanban.comment", return_value=True),
+            mock.patch("core.iterate._read_fix_attempts", return_value={"t_qa_001": iterate.MAX_FIX_ATTEMPTS}),
+        ):
+            _, _, _, qa_failed, escalated = iterate.run_iterate("slug", "O/R", resolved=resolved)
+
+        assert qa_failed == [], "escalated card must NOT appear in qa_failed slot"
+        assert len(escalated) == 1, "escalated card must appear in 5th slot"
+        assert escalated[0]["issue_n"] == 42
