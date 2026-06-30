@@ -1,3 +1,5 @@
+## [fix: validator agent must not create kanban tasks or write board state (read-only enforcement)](https://github.com/benmarte/daedalus/issues/1105) — [PR #1107](https://github.com/benmarte/daedalus/pull/1107)
+
 ## [fix: epic-detection heuristic misclassifies large-body bug reports as epics — route to validator instead](https://github.com/benmarte/daedalus/issues/1100) — [PR #1103](https://github.com/benmarte/daedalus/pull/1103)
 
 ## [feat: dispatch QA/reviewer/security immediately on PR open — move CI gate to merge only](https://github.com/benmarte/daedalus/issues/1074) — [PR #1095](https://github.com/benmarte/daedalus/pull/1095)
