@@ -252,3 +252,16 @@ execution:
   # Defaults to 3600 (1 hour).
   #
   # coding_agent_max_wait: 3600
+
+# ── Dev mode ────────────────────────────────────────────────────────────────
+# Redirect the installed plugin's dispatcher to a local development checkout so
+# edits take effect immediately without `hermes plugins update daedalus`.
+# When enabled, the dispatcher re-execs itself from <path>/scripts/daedalus_dispatch.py
+# via os.execve (replaces the process — no double FileLock). The DAEDALUS_DEV
+# environment variable is set automatically to prevent infinite re-exec loops.
+# Set enabled: false (or remove this block) to restore normal installed-plugin
+# behaviour.
+#
+# dev_mode:
+#   enabled: true
+#   path: /path/to/local/daedalus/checkout

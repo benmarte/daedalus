@@ -1281,6 +1281,17 @@ Each piece exists because the obvious approach failed:
   dispatcher's sweep such that the sweep has the issue's number but not its body.
   A one-shot `get_issue()` retry on transient failure prevents a single API flake
   from stalling the entire tick.
+- **Dev mode redirect** — testing dispatcher changes normally requires
+  `hermes plugins update daedalus` after every push. A `dev_mode` block in
+  `daedalus.yaml` lets operators point the installed plugin at a local checkout
+  so edits take effect immediately. When `dev_mode.enabled: true` and
+  `dev_mode.path` points at a valid checkout containing
+  `scripts/daedalus_dispatch.py`, the dispatcher re-execs itself from that path
+  via `os.execve` (replaces the process — no double FileLock). The
+  `DAEDALUS_DEV` environment variable is set automatically to prevent infinite
+  re-exec loops. Set `enabled: false` (or remove the block) to restore normal
+  installed-plugin behaviour. See `templates/daedalus.yaml` for the commented-out
+  config block.
 
 ---
 
@@ -1323,7 +1334,7 @@ on its board.
 
 | Path | What it is |
 |------|------------|
-| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
+| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |

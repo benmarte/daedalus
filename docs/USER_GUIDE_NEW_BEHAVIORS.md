@@ -52,9 +52,10 @@
    - 6.6 [Dispatcher Concurrency (FileLock Mutex)](#66-dispatcher-concurrency-filelock-mutex)
    - 6.7 [Status-Blind Re-Triage](#67-status-blind-re-triage)
    - 6.8 [Dispatcher CLI Flags (--dry-run, --self-test, --history)](#68-dispatcher-cli-flags---dry-run---self-test---history)
+   - 6.9 [Dev Mode Redirect (Local Dev Checkout)](#69-dev-mode-redirect-local-dev-checkout)
 
-**Last updated:** 2026-06-29  
-**Coverage:** 38 behaviors across 6 feature areas
+**Last updated:** 2026-06-30  
+**Coverage:** 39 behaviors across 6 feature areas
 
 ---
 
@@ -1053,15 +1054,57 @@ No configuration keys — these are pure CLI flags, passed on the command line.
 
 ---
 
+### 6.9 Dev Mode Redirect (Local Dev Checkout)
+
+**What it does:**  
+The dispatcher can redirect itself from the installed plugin to a local development checkout, so edits to `scripts/daedalus_dispatch.py` take effect immediately without running `hermes plugins update daedalus`. When `dev_mode.enabled: true` and `dev_mode.path` points at a valid checkout containing `scripts/daedalus_dispatch.py`, the dispatcher re-execs itself via `os.execve` — replacing the current process image so the FileLock is not double-held. The `DAEDALUS_DEV` environment variable is set to `"1"` automatically to prevent infinite re-exec loops.
+
+**Guard chain (all must pass before re-exec):**
+1. Skip if `DAEDALUS_DEV` env var is already set (infinite-loop guard)
+2. Skip if `dev_mode` config is not a dict (bad config / missing key)
+3. Skip if `dev_mode.enabled` is falsy
+4. Skip if `dev_mode.path` is absent or empty
+5. Warn + skip if `<path>/scripts/daedalus_dispatch.py` does not exist
+6. Skip if `abspath(dev_script) == abspath(__file__)` (already running from dev)
+7. Set `DAEDALUS_DEV=1`, prepend `path` to `PYTHONPATH`, call `os.execve`
+
+On any skip condition or unexpected error, the function returns `None` and the caller continues with the installed-plugin code path (fail safe — never crashes the dispatcher).
+
+**How you interact with it:**  
+Add a `dev_mode` block to your project's `.hermes/daedalus.yaml`:
+```yaml
+dev_mode:
+  enabled: true
+  path: /path/to/local/daedalus/checkout
+```
+
+Set `enabled: false` (or remove the block) to restore normal installed-plugin behaviour.
+
+**Prerequisites:**  
+- The path must point to a valid Daedalus checkout containing `scripts/daedalus_dispatch.py`.
+- `dev_mode.path` supports `~` expansion via `os.path.expanduser`.
+
+**Configuration:**  
+- `dev_mode.enabled` (bool): Toggle the redirect. Default: `false` (block is commented out in template).
+- `dev_mode.path` (string): Absolute or `~`-relative path to the local checkout.
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py` — `_DEV_MODE_ENV` constant (line ~79), `_maybe_redirect_dev_mode()` function (line ~6520), called at 2 sites in `_main_inner()` after `resolve_repo_config()`.
+
+**Tests:**  
+`tests/test_dev_mode_redirect.py` — 11 tests covering the full guard chain, edge cases (non-dict config, permission errors, execve failure), and an integration test verifying the end-to-end redirect chain.
+
+---
+
 ## Summary
 
-This guide documents **38 new user-facing behaviors** across **6 feature areas**:
+This guide documents **39 new user-facing behaviors** across **6 feature areas**:
 - **Epic & Sub-issue Management (7 behaviors):** Automatic epic detection, decomposition, and context injection
 - **Dependency-Aware Dispatch (5 behaviors):** Ready-gating, tier promotion, and idempotency
 - **Self-Healing & Auto-Advance (7 behaviors):** Automatic diagnosis and routing of blocked cards
 - **Notification & Alerting (8 behaviors):** Threading, retry-cap alerts, and webhook integration
 - **Reliability & Infrastructure (5 behaviors):** Auto-pagination, retry logic, and rate-limit handling
-- **Dispatch & Pipeline (8 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, status-blind re-triage, and dispatcher CLI flags
+- **Dispatch & Pipeline (9 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, status-blind re-triage, dispatcher CLI flags, and dev-mode redirect
 
 All behaviors are verified against the source code implementation and are active in the current release (v1.0.0-beta.30).
 
