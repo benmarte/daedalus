@@ -3995,6 +3995,433 @@ _FakeProvider.board_ensure_status_option = lambda self, *a: True
 _FakeProvider.append_changelog = lambda self, *a: False
 
 
+# ── issue #1104: empty-summary retry for PM and developer roles ─────────────
+
+
+def _completed_developer_tasks(issue_number, summary="", title=None):
+    """Minimal done developer task fixture for _check_completed_developer tests."""
+    return [
+        {
+            "id": f"t_dev_{issue_number}",
+            "assignee": "developer-daedalus",
+            "status": "done",
+            "title": title or f"#{issue_number} Developer: some feature",
+            "summary": summary,
+        }
+    ]
+
+
+def test_resolve_max_developer_retries_default():
+    """_resolve_max_developer_retries returns default=2 when no config set."""
+    disp = _load_dispatch()
+    val = disp._resolve_max_developer_retries({})
+    check("default max_developer_retries is 2", val == 2)
+
+
+def test_resolve_max_developer_retries_config_override():
+    """_resolve_max_developer_retries reads execution.max_developer_retries."""
+    disp = _load_dispatch()
+    val = disp._resolve_max_developer_retries({"max_developer_retries": 5})
+    check("config override for max_developer_retries", val == 5)
+
+
+def test_developer_task_state_none():
+    """_developer_task_state returns ('none', 0) when no developer task exists."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: []
+    state, stale = disp._developer_task_state("slug", 5)
+    check("no tasks -> state is none", state == "none")
+    check("no tasks -> stale_count is 0", stale == 0)
+
+
+def test_developer_task_state_running():
+    """_developer_task_state returns ('running', 0) for an in-progress developer task."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {
+            "title": "#5 Developer: feature",
+            "assignee": "developer-daedalus",
+            "status": "in_progress",
+        },
+    ]
+    state, stale = disp._developer_task_state("slug", 5)
+    check("in-progress developer -> state is running", state == "running")
+    check("in-progress developer -> stale_count is 0", stale == 0)
+
+
+def test_developer_task_state_complete():
+    """_developer_task_state returns ('complete', 0) for done developer task with PR in summary."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {
+            "title": "#5 Developer: feature",
+            "assignee": "developer-daedalus",
+            "status": "done",
+            "summary": "review-required: PR #42 -> dev",
+        },
+    ]
+    state, stale = disp._developer_task_state("slug", 5)
+    check("done+PR developer -> state is complete", state == "complete")
+    check("done+PR developer -> stale_count is 0", stale == 0)
+
+
+def test_developer_task_state_stale():
+    """_developer_task_state returns ('stale', 1) for done developer task with no PR in summary."""
+    disp = _load_dispatch()
+    disp.kanban.list_tasks = lambda s: [
+        {
+            "title": "#5 Developer: feature",
+            "assignee": "developer-daedalus",
+            "id": "t_dev",
+            "status": "done",
+            "summary": "",
+        },
+    ]
+    disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+    state, stale = disp._developer_task_state("slug", 5)
+    check("done+no-PR developer -> state is stale", state == "stale")
+    check("done+no-PR developer -> stale_count is 1", stale == 1)
+
+
+def test_check_confirmed_validators_github_fallback_cap_exhausted():
+    """PM github-fallback path enforces max_pm_retries cap — no infinite PM creation."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    # Simulate 4 stale PM tasks (cap is 3 by default) — should be at cap
+    stale_pm_tasks = [
+        {
+            "title": "#9 crash bug",
+            "assignee": "project-manager-daedalus",
+            "summary": "",
+            "status": "done",
+            "id": f"t_pm_stale_{i}",
+        }
+        for i in range(4)
+    ]
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return [
+                {
+                    "title": "#9 crash bug",
+                    "assignee": "validator-daedalus",
+                    "summary": None,
+                    "status": "done",
+                    "id": "t_v",
+                }
+            ] + stale_pm_tasks
+        return stale_pm_tasks
+
+    class _FP:
+        name = "github"
+
+        def get_issue_comments(self, n):
+            return [
+                {
+                    "body": "**Agent: validator**\nCONFIRMED — issue is real.",
+                }
+            ]
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    _orig_has_notified = disp._has_notified_block
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+        disp.kanban.create_task = (
+            lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+                created_keys.append(idempotency_key) or "t_new"
+            )
+        )
+        disp._has_notified_block = lambda *a, **kw: False
+        disp._send_retry_cap_notification = lambda **kw: None
+        disp._mark_notified_block = lambda *a, **kw: None
+        disp._check_confirmed_validators(
+            "slug",
+            "O/R",
+            {9: {"number": 9, "title": "crash bug", "body": ""}},
+            3,
+            "/tmp",
+            "",
+            "main",
+            "github",
+            provider=_FP(),
+            resolved={"execution": {}, "notifications": []},
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+        disp._has_notified_block = _orig_has_notified
+
+    # At cap: no new PM task should be created
+    pm_keys = [k for k in created_keys if k.startswith("pm-")]
+    check("github-fallback at cap: no PM task created", len(pm_keys) == 0)
+
+
+def test_check_confirmed_validators_github_fallback_under_cap_retries():
+    """PM github-fallback path under cap — creates a PM retry task with incrementing key."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    # Simulate 1 stale PM task (cap is 3, so we're under cap)
+    stale_pm_tasks = [
+        {
+            "title": "#9 crash bug",
+            "assignee": "project-manager-daedalus",
+            "summary": "",
+            "status": "done",
+            "id": "t_pm_stale_0",
+        },
+    ]
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return [
+                {
+                    "title": "#9 crash bug",
+                    "assignee": "validator-daedalus",
+                    "summary": None,
+                    "status": "done",
+                    "id": "t_v",
+                }
+            ] + stale_pm_tasks
+        return stale_pm_tasks
+
+    class _FP:
+        name = "github"
+
+        def get_issue_comments(self, n):
+            return [
+                {
+                    "body": "**Agent: validator**\nCONFIRMED — issue is real.",
+                }
+            ]
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+        disp.kanban.create_task = (
+            lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+                created_keys.append(idempotency_key) or "t_new"
+            )
+        )
+        disp._send_retry_attempt_notification = lambda **kw: None
+        disp._check_confirmed_validators(
+            "slug",
+            "O/R",
+            {9: {"number": 9, "title": "crash bug", "body": ""}},
+            3,
+            "/tmp",
+            "",
+            "main",
+            "github",
+            provider=_FP(),
+            resolved={"execution": {}, "notifications": []},
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+
+    # Under cap: a PM retry task should be created with -r1 key
+    pm_keys = [k for k in created_keys if k.startswith("pm-")]
+    check("github-fallback under cap: PM retry task created", len(pm_keys) == 1)
+    check("github-fallback under cap: retry key is pm-9-r1", pm_keys[0] == "pm-9-r1")
+
+
+def test_check_completed_pm_warns_on_empty_summary():
+    """_check_completed_pm logs a warning (not silent continue) when a PM task has summary=None."""
+    disp = _load_dispatch()
+    orig_list = disp.kanban.list_tasks
+    orig_show = disp.kanban.show_card
+    try:
+        disp.kanban.list_tasks = lambda slug, status=None: (
+            [
+                {
+                    "id": "t_pm_empty",
+                    "assignee": "project-manager-daedalus",
+                    "status": "done",
+                    "title": "#7 some feature",
+                    "summary": "",
+                }
+            ]
+            if status == "done"
+            else []
+        )
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+
+        with mock.patch.object(disp.logger, "warning") as mock_warn:
+            disp._check_completed_pm(
+                "slug",
+                "O/R",
+                {7: {"number": 7, "title": "some feature", "body": ""}},
+                3,
+                "/tmp",
+                "",
+                "main",
+                "github",
+            )
+
+        # At least one warning should mention the empty summary
+        warnings = [str(c) for c in mock_warn.call_args_list]
+        check(
+            "empty PM summary logs a warning",
+            any("no summary" in w.lower() for w in warnings),
+        )
+    finally:
+        disp.kanban.list_tasks = orig_list
+        disp.kanban.show_card = orig_show
+
+
+def test_check_completed_developer_retries_empty_summary():
+    """_check_completed_developer creates a retry task when developer completes with no PR in summary."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return _completed_developer_tasks(10, summary="")
+        # Non-filtered call used by _developer_task_state
+        return _completed_developer_tasks(10, summary="")
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    _orig_has_notified = disp._has_notified_block
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+        disp.kanban.create_task = (
+            lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+                created_keys.append(idempotency_key) or "t_new"
+            )
+        )
+        disp._has_notified_block = lambda *a, **kw: False
+        disp._send_retry_attempt_notification = lambda **kw: None
+        disp._check_completed_developer(
+            "slug",
+            "O/R",
+            {10: {"number": 10, "title": "feature", "body": ""}},
+            3,
+            "/tmp",
+            "main",
+            "github",
+            provider=None,
+            resolved={"execution": {}, "notifications": []},
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+        disp._has_notified_block = _orig_has_notified
+
+    # Under cap (1 stale, max=2): retry task created with developer-10-r1 key
+    dev_keys = [k for k in created_keys if k.startswith("developer-")]
+    check("developer empty summary: retry task created", len(dev_keys) == 1)
+    check("developer empty summary: retry key is developer-10-r1", dev_keys[0] == "developer-10-r1")
+
+
+def test_check_completed_developer_cap_exhausted():
+    """_check_completed_developer stops retrying and notifies when cap is exhausted."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    # Simulate 3 stale developer tasks (cap is 2) — should be at cap
+    stale_dev_tasks = [
+        {
+            "title": "#10 Developer: feature",
+            "assignee": "developer-daedalus",
+            "summary": "",
+            "status": "done",
+            "id": f"t_dev_stale_{i}",
+        }
+        for i in range(3)
+    ]
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return stale_dev_tasks
+        return stale_dev_tasks
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    _orig_has_notified = disp._has_notified_block
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+        disp.kanban.create_task = (
+            lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+                created_keys.append(idempotency_key) or "t_new"
+            )
+        )
+        disp._has_notified_block = lambda *a, **kw: False
+        disp._send_retry_cap_notification = lambda **kw: None
+        disp._mark_notified_block = lambda *a, **kw: None
+        disp._check_completed_developer(
+            "slug",
+            "O/R",
+            {10: {"number": 10, "title": "feature", "body": ""}},
+            3,
+            "/tmp",
+            "main",
+            "github",
+            provider=None,
+            resolved={"execution": {}, "notifications": []},
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+        disp._has_notified_block = _orig_has_notified
+
+    # At cap: no new developer task should be created
+    dev_keys = [k for k in created_keys if k.startswith("developer-")]
+    check("developer cap exhausted: no retry task created", len(dev_keys) == 0)
+
+
+def test_check_completed_developer_well_formed_summary_no_retry():
+    """_check_completed_developer does NOT retry when developer summary contains a PR number."""
+    disp = _load_dispatch()
+    created_keys = []
+
+    def fake_list_tasks(slug, status=None):
+        if status == "done":
+            return _completed_developer_tasks(
+                11, summary="review-required: PR #99 -> dev"
+            )
+        return _completed_developer_tasks(
+            11, summary="review-required: PR #99 -> dev"
+        )
+
+    _orig_create = disp.kanban.create_task
+    _orig_show = disp.kanban.show_card
+    try:
+        disp.kanban.list_tasks = fake_list_tasks
+        disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
+        disp.kanban.create_task = (
+            lambda slug, title, *, assignee="", idempotency_key="", **kw: (
+                created_keys.append(idempotency_key) or "t_new"
+            )
+        )
+        disp._check_completed_developer(
+            "slug",
+            "O/R",
+            {11: {"number": 11, "title": "feature", "body": ""}},
+            3,
+            "/tmp",
+            "main",
+            "github",
+            provider=None,
+            resolved={"execution": {}, "notifications": []},
+        )
+    finally:
+        disp.kanban.create_task = _orig_create
+        disp.kanban.show_card = _orig_show
+
+    # Well-formed summary: no retry task should be created
+    dev_keys = [k for k in created_keys if k.startswith("developer-")]
+    check("developer well-formed summary: no retry", len(dev_keys) == 0)
+
+
 if __name__ == "__main__":
     print("Daedalus tests")
     print("-" * 60)
@@ -4109,6 +4536,19 @@ if __name__ == "__main__":
         test_schedule_to_crontab_30m,
         test_schedule_to_crontab_2h,
         test_schedule_to_crontab_passthrough_crontab,
+        # ── issue #1104: empty-summary retry for PM and developer roles ──
+        test_resolve_max_developer_retries_default,
+        test_resolve_max_developer_retries_config_override,
+        test_developer_task_state_none,
+        test_developer_task_state_running,
+        test_developer_task_state_complete,
+        test_developer_task_state_stale,
+        test_check_confirmed_validators_github_fallback_cap_exhausted,
+        test_check_confirmed_validators_github_fallback_under_cap_retries,
+        test_check_completed_pm_warns_on_empty_summary,
+        test_check_completed_developer_retries_empty_summary,
+        test_check_completed_developer_cap_exhausted,
+        test_check_completed_developer_well_formed_summary_no_retry,
     ):
         fn()
     print("-" * 60)
