@@ -449,3 +449,63 @@ class TestAutoMergeQAGateIntegration:
         assert len(provider.merged) > 0, (
             "Auto-merge should be called when CI is green and QA has passed"
         )
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_deferred_then_merges_when_ci_passes(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """CI eventually passes after docs completes → next cron tick triggers merge (#1085).
+
+        Per epic #1074: CI is checked at merge-time only. When the docs card
+        completes but CI is still pending, the merge is deferred (continue).
+        On the next cron tick, when CI has turned green, the merge proceeds.
+        """
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        docs_card = {
+            'id': 'docs-card-ci-deferred',
+            'title': 'Documentation: Issue #77',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'latest_summary': 'docs posted: PR #77',
+            'body': 'Issue #77\nPR #77',
+        }
+
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+        mock_qa_passed.return_value = True
+
+        # Tick 1: CI is pending — merge should be deferred
+        provider_pending = FakeProvider()
+        provider_pending._ci = 'pending'
+        provider_pending._open_prs = {77}
+
+        run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider_pending,
+        )
+        assert len(provider_pending.merged) == 0, (
+            "Auto-merge should NOT be called when CI is pending (deferred to next tick)"
+        )
+
+        # Tick 2: CI is now green — merge should proceed
+        provider_green = FakeProvider()
+        provider_green._ci = 'green'
+        provider_green._open_prs = {77}
+
+        run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider_green,
+        )
+        assert len(provider_green.merged) > 0, (
+            "Auto-merge should be called on the next cron tick once CI turns green"
+        )
