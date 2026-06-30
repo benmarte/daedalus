@@ -1,3 +1,38 @@
+# Session — Beta.32 Audit + Feature Additions (PR #225)
+
+## Bug Fixes
+- [x] AC1 — Gate `qa_failed_cards` on executor `ok=True`
+- [x] AC2 — Add `enrollment_failures` to kanban-only dispatch summary
+- [x] AC3 — Combine PUT+GET failure into single warning in `merge_pr()`
+- [x] AC4 — Extend `_redact()` to cover URL-percent-encoded token variants
+- [x] AC5 — `ensure_labels()` calls `list_labels()` exactly once
+- [x] AC6 — `_resolve_web_path()`: lazy-fetch + sanitize raw API output
+- [x] AC7 — `VCSProvider.enrollment_failures` as instance attr in `__init__`
+- [x] AC8 — Document `_execute_dev_fix_ci` return semantics
+
+## New Features
+- [x] AC9 — `max-fix-attempts` NOTIFY_EVENT + `_notify_max_fix_attempts()`
+- [x] AC10 — `run_iterate()` returns 5-tuple; 5th slot = `escalated_cards`
+- [x] AC11 — `_notify_qa_failed()` deduped per `(issue_n, pr)` via `_QA_FAILED_NOTIFIED`
+- [x] AC12 — `_notify_max_fix_attempts()` deduped per `(issue_n, pr)` via `_MAX_FIX_NOTIFIED`
+
+## E2E Tests
+- [x] AC13 — 5-scenario QA gate smoke suite (`test_e2e_qa_gate_filelock_smoke.py`)
+- [x] AC14 — Scenario 2 deterministic with `threading.Event` barriers
+
+## Test Coverage
+- [x] AC15–AC19 — ok=False path, ensure_labels dedup, enrollment_failures, combined warning, notification dedup
+
+## Lifecycle
+- [x] Spec: `tasks/spec-session-beta32-audit.md`
+- [x] Build: all ACs above
+- [x] Test: 2551 passed, 0 failures
+- [x] Review: GO — all findings applied
+- [x] Ship: GO — PR #225 open; human gate: user merges dev → main
+- [ ] PR merge: **HUMAN GATE** — user merges PR #225
+
+---
+
 # Phase 3 (#151) — Epic Sub-Issue Creation
 
 ## Tasks

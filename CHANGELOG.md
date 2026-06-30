@@ -8,6 +8,33 @@ All notable changes to Daedalus are documented here. The format loosely follows
 
 ---
 
+## [1.0.0-beta.33] — 2026-06-30
+
+### Bug Fixes
+
+- Gate `qa_failed_cards` on executor `ok=True` — prevents spurious QA-failed notifications when kanban is unreachable ([#1002])
+- Add `enrollment_failures` key to kanban-only dispatch summary — prevents `KeyError` for callers reading the summary dict
+- Combine `merge_pr()` PUT + fallback GET failure into a single warning log entry with both errors visible ([#1034])
+- Extend `_redact()` to cover URL-percent-encoded token variants — tokens encoded via `urllib.parse.quote` no longer leak in transport error messages
+- `ensure_labels()` calls `list_labels()` exactly once — eliminated a redundant API round-trip on every label-ensure path
+- `_resolve_web_path()` lazy-fetch + log injection hardening — `path_with_namespace` only fetched when needed; raw API response sanitized via `unicode_escape` before logging
+- `VCSProvider.enrollment_failures` moved to instance `__init__` — eliminates shared mutable class-level default
+- Document `_execute_dev_fix_ci` `True`/`False` return semantics in docstring
+
+### New Features
+
+- **`max-fix-attempts` notification event** — operators can subscribe to receive an alert when a QA fix card exhausts `MAX_FIX_ATTEMPTS` and requires manual intervention (see `docs/adr/adr-006-max-fix-attempts-notification.md`)
+- **`run_iterate()` 5-tuple return** — new 5th slot `escalated_cards` carries cards at the attempt ceiling, distinct from `qa_failed_cards` (first failure)
+- **Per-process notification dedup** — `_notify_qa_failed` and `_notify_max_fix_attempts` each maintain a module-level set keyed on `(issue_n, pr)`; eliminates per-tick notification spam while a blocked card persists (see `docs/adr/adr-005-qa-failed-notification-dedup.md`)
+
+### Tests
+
+- 5-scenario E2E QA gate smoke suite (`tests/test_e2e_qa_gate_filelock_smoke.py`) — covers happy path, FileLock mutex (deterministic via `threading.Event` barriers), auto-merge blocked without QA signal, auto-merge fires on qa-passed, skip-qa bypass ([#1038])
+- 19 new unit tests: `ok=False` kanban-down path, `ensure_labels` single-call dedup, `enrollment_failures` in kanban summary, combined PUT+GET warning log, notification dedup for both events, `max-fix-attempts` subscriber delivery, escalated 5th-slot assertion
+- Total: 2551 tests passing
+
+---
+
 ## [1.0.0-beta.32] — 2026-06-29
 
 ### Model & Profile Sync
