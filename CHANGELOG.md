@@ -4,6 +4,7 @@
 
 - Developer cards with `review-required: PR #N` now ADVANCE immediately regardless of CI state (per epic #1074). CI gating moved from ADVANCE-time to merge-time only. QA/reviewer/security dispatch happens as soon as the PR is opened.
 - Auto-merge gate enforces CI green before merging (issue #1085, PR #1092). If CI is not green when docs completes, the merge is deferred to the next cron tick.
+- Reviewer and security merge gates added (issue #1085, PR #1093): `_reviewer_passed_for_issue()` and `_security_passed_for_issue()` check that the reviewer and security-analyst have approved the PR before auto-merge. A `skip-qa` label bypasses both gates (issue #1074 non-regression, PR #1094).
 - Downstream review task body text updated to reflect that CI may still be running (issue #1082, PR #1091).
 
 ## [feat: dev_mode YAML flag to redirect dispatcher to local dev checkout](https://github.com/benmarte/daedalus/issues/1071) — [PR #1089](https://github.com/benmarte/daedalus/pull/1089)
