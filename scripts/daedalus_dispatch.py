@@ -6528,16 +6528,18 @@ def _maybe_redirect_dev_mode(resolved: Dict[str, Any]) -> None:
 
     Guard chain (all must pass before re-exec):
       1. Skip if ``DAEDALUS_DEV`` env var is already set (infinite-loop guard).
-      2. Skip if ``resolved["dev_mode"]["enabled"]`` is falsy.
-      3. Skip if ``dev_mode.path`` is absent or empty.
-      4. Warn + skip if ``<path>/scripts/daedalus_dispatch.py`` does not exist.
-      5. Skip if ``abspath(dev_script) == abspath(__file__)`` (already in dev).
-      6. Set ``DAEDALUS_DEV=1``, prepend *path* to ``PYTHONPATH``, call
-         :func:`os.execve`.
+      2. Skip if ``resolved["dev_mode"]`` is not a dict (bad config / missing key).
+      3. Skip if ``resolved["dev_mode"]["enabled"]`` is falsy.
+      4. Skip if ``dev_mode.path`` is absent or empty.
+      5. Warn + skip if ``<path>/scripts/daedalus_dispatch.py`` does not exist.
+      6. Skip if ``abspath(dev_script) == abspath(__file__)`` (already in dev).
+      7. Set ``DAEDALUS_DEV=1``, prepend *path* to ``PYTHONPATH``, call
+         :func:`os.execve` with ``sys.executable`` as the interpreter.
 
     This function never returns when it redirects — :func:`os.execve` replaces
-    the process image.  On any skip condition it returns ``None`` so the caller
-    continues with the installed-plugin code path.
+    the process image.  On any skip condition (or unexpected error during the
+    filesystem / execve path) it returns ``None`` so the caller continues with
+    the installed-plugin code path (fail safe — never crash the dispatcher).
     """
     import os
 
@@ -6545,32 +6547,48 @@ def _maybe_redirect_dev_mode(resolved: Dict[str, Any]) -> None:
     if os.environ.get(_DEV_MODE_ENV):
         return
 
-    dev_cfg = resolved.get("dev_mode") or {}
-    # 2. dev_mode must be explicitly enabled.
+    # 2. dev_mode must be a dict (guards against missing key, string, bool, etc.)
+    dev_cfg = resolved.get("dev_mode")
+    if not isinstance(dev_cfg, dict):
+        return
+
+    # 3. dev_mode must be explicitly enabled.
     if not dev_cfg.get("enabled"):
         return
 
-    # 3. A path must be configured.
-    dev_path_raw = (dev_cfg.get("path") or "").strip()
+    # 4. A path must be configured and must be a string.
+    raw_path = dev_cfg.get("path")
+    if not isinstance(raw_path, str):
+        return
+    dev_path_raw = raw_path.strip()
     if not dev_path_raw:
         return
 
     dev_path = os.path.expanduser(dev_path_raw)
     dev_script = os.path.join(dev_path, "scripts", "daedalus_dispatch.py")
 
-    # 4. The dev checkout must contain the dispatcher script.
-    if not os.path.isfile(dev_script):
+    # 5. The dev checkout must contain the dispatcher script.
+    #    Wrapped in try/except so permission errors fail safe (no redirect).
+    try:
+        script_exists = os.path.isfile(dev_script)
+    except (OSError, PermissionError):
+        logger.warning(
+            "dispatch: dev_mode enabled but cannot stat %s — skipping redirect",
+            dev_script,
+        )
+        return
+    if not script_exists:
         logger.warning(
             "dispatch: dev_mode enabled but %s does not exist — skipping redirect",
             dev_script,
         )
         return
 
-    # 5. Don't re-exec if we are already running from the dev checkout.
+    # 6. Don't re-exec if we are already running from the dev checkout.
     if os.path.abspath(dev_script) == os.path.abspath(__file__):
         return
 
-    # 6. Replace the current process with the dev copy.
+    # 7. Replace the current process with the dev copy.
     logger.info("dispatch: dev_mode redirect — re-execing from %s", dev_script)
     env = dict(os.environ)
     env[_DEV_MODE_ENV] = "1"
@@ -6579,7 +6597,13 @@ def _maybe_redirect_dev_mode(resolved: Dict[str, Any]) -> None:
     if existing_pp:
         python_path_parts.append(existing_pp)
     env["PYTHONPATH"] = os.pathsep.join(python_path_parts)
-    os.execve(dev_script, [dev_script, *sys.argv[1:]], env)
+    try:
+        os.execve(sys.executable, [sys.executable, dev_script, *sys.argv[1:]], env)
+    except (OSError, PermissionError) as e:
+        logger.warning(
+            "dispatch: dev_mode re-exec failed (%s) — continuing with installed plugin",
+            e,
+        )
 
 
 # ── Dispatch history (issue #235) ───────────────────────────────────────────
