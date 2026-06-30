@@ -88,6 +88,20 @@ class TestRunIterateQaFailedCards:
 
         assert qa_failed == []
 
+    def test_qa_failed_not_appended_when_create_task_fails(self):
+        """When create_task returns None (kanban down), qa_failed_cards stays empty."""
+        card = _qa_card()
+        fk = FakeKanban()
+        with (
+            mock.patch("core.iterate.kanban", fk),
+            mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
+            mock.patch("core.iterate.kanban.show_card", return_value=card),
+            mock.patch("core.iterate.kanban.create_task", return_value=None),
+        ):
+            _, _, _, qa_failed = iterate.run_iterate("slug", "O/R")
+
+        assert qa_failed == [], "qa_failed_cards must not fire when fix card creation fails"
+
     def test_empty_board_returns_empty_qa_failed(self):
         """No blocked cards → all return lists are empty."""
         with mock.patch("core.iterate.kanban.list_blocked", return_value=[]):

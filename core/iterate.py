@@ -2432,9 +2432,10 @@ def run_iterate(
                 provider=provider,
             )
 
-            # Gate on ok=True: the fix card was freshly created this tick.
-            # Without this guard, the append fires every tick while the QA card
-            # stays blocked, sending a notification every ~60 min until fixed.
+            # Gate on ok=True: prevents notification when the executor fails
+            # (no PR number found, or kanban.create_task returned None/False).
+            # Note: each tick may still create a new fix card (attempt-N key),
+            # so per-tick dedup belongs in _notify_qa_failed, not here.
             if action == DEV_FIX_CI and assignee == "qa-daedalus" and ok:
                 issue_n = _extract_issue_number_from_card(card)
                 qa_failed_cards.append({

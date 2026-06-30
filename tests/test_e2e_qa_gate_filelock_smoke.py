@@ -148,6 +148,11 @@ def test_scenario_2_filelock_mutex_serialises_concurrent_dispatch(tmp_path):
     t1.join(timeout=5)
     t2.join(timeout=5)
 
+    # Liveness guards: if either thread hung the join silently succeeds but
+    # results is incomplete — catch deadlock with a clear message.
+    assert not t1.is_alive(), "holder thread timed out — possible deadlock"
+    assert not t2.is_alive(), "contender thread timed out — possible deadlock"
+
     assert "holder-ran" in results, f"holder never ran: {results}"
     # With the barrier, t2 always attempts acquisition while t1 holds the lock,
     # so the contender MUST be blocked — not just "happened to run after".

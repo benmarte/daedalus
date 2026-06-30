@@ -356,7 +356,10 @@ class GitLabProvider(VCSProvider):
                 self._project_web_path = raw
             else:
                 if raw:
-                    self._log.warning("_resolve_web_path: unexpected path_with_namespace %r", raw)
+                    # Sanitize before logging: API response may contain control
+                    # chars that could forge log entries in SIEM pipelines.
+                    safe = raw.encode("unicode_escape").decode("ascii")[:120]
+                    self._log.warning("_resolve_web_path: unexpected path_with_namespace %s", safe)
                 self._project_web_path = ""  # cache the failure — don't retry
         return self._project_web_path
 

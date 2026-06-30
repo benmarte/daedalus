@@ -232,6 +232,25 @@ def test_ensure_status_labels_noop_when_all_exist(provider):
     provider._http.post_json.assert_not_called()
 
 
+def test_ensure_labels_calls_list_labels_exactly_once(provider):
+    """ensure_labels() must not make a second list_labels() round-trip for status labels."""
+    provider._http.get_paginated.return_value = []  # no labels exist yet
+    provider._http.post_json.return_value = {"id": 1, "name": "epic", "color": "#000"}
+    provider.ensure_labels()
+    # Only one get_paginated call allowed — ensure_status_labels reuses the set
+    assert provider._http.get_paginated.call_count == 1, (
+        "ensure_labels() must pass _existing to ensure_status_labels() "
+        "to avoid a redundant list_labels() API call"
+    )
+
+
+def test_ensure_status_labels_accepts_existing_set_skips_list_labels(provider):
+    """_existing kwarg prevents list_labels() call inside ensure_status_labels()."""
+    provider.ensure_status_labels(["Ready", "Done"], _existing={"Ready", "Done"})
+    provider._http.get_paginated.assert_not_called()
+    provider._http.post_json.assert_not_called()
+
+
 def test_errors_degrade_gracefully(provider):
     provider._http.get_json.side_effect = ProviderError("500", status_code=500)
     assert provider.list_issues() == []
