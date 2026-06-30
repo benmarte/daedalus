@@ -1,3 +1,5 @@
+## [fix: _check_completed_planner silently drops done planner tasks with non-PLANNING-COMPLETE summary](https://github.com/benmarte/daedalus/issues/1072) — [PR #1073](https://github.com/benmarte/daedalus/pull/1073)
+
 # Changelog
 
 All notable changes to Daedalus are documented here. The format loosely follows
