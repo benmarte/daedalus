@@ -1,3 +1,5 @@
+## [fix: epic-detection heuristic misclassifies large-body bug reports as epics — route to validator instead](https://github.com/benmarte/daedalus/issues/1100) — [PR #1103](https://github.com/benmarte/daedalus/pull/1103)
+
 ## [feat: dispatch QA/reviewer/security immediately on PR open — move CI gate to merge only](https://github.com/benmarte/daedalus/issues/1074) — [PR #1095](https://github.com/benmarte/daedalus/pull/1095)
 
 ## [fix: trigger ADVANCE immediately on review-required without waiting for CI](https://github.com/benmarte/daedalus/issues/1075) — [PR #1090](https://github.com/benmarte/daedalus/pull/1090)
