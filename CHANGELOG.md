@@ -1,3 +1,5 @@
+## [fix: gate epic-level QA dispatch until at least one sub-issue PR is open](https://github.com/benmarte/daedalus/issues/1098) — [PR #1106](https://github.com/benmarte/daedalus/pull/1106)
+
 ## [fix: validator agent must not create kanban tasks or write board state (read-only enforcement)](https://github.com/benmarte/daedalus/issues/1105) — [PR #1107](https://github.com/benmarte/daedalus/pull/1107)
 
 ## [fix: epic-detection heuristic misclassifies large-body bug reports as epics — route to validator instead](https://github.com/benmarte/daedalus/issues/1100) — [PR #1103](https://github.com/benmarte/daedalus/pull/1103)
