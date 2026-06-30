@@ -195,7 +195,10 @@ class FakeKanban:
             return False
         t["status"] = "done"
         t["summary"] = summary
-        t["latest_summary"] = summary
+        # Preserve latest_summary when no new summary is provided — mirrors
+        # the real kanban CLI which doesn't overwrite on empty summary.
+        if summary:
+            t["latest_summary"] = summary
         self.completed.append((task_id, summary))
         return True
 

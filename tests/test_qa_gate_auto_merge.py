@@ -509,3 +509,270 @@ class TestAutoMergeQAGateIntegration:
         assert len(provider_green.merged) > 0, (
             "Auto-merge should be called on the next cron tick once CI turns green"
         )
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_blocked_when_ci_pending(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """Auto-merge must NOT proceed when CI is pending (distinct from red).
+
+        Per epic #1074 / issue #1085: CI pending means the merge is deferred
+        (not failed). The PR is left open and the next cron tick will retry
+        when CI resolves.
+        """
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        docs_card = {
+            'id': 'docs-card-ci-pending',
+            'title': 'Documentation: Issue #88',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'latest_summary': 'docs posted: PR #88',
+            'body': 'Issue #88\nPR #88',
+        }
+
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+        mock_qa_passed.return_value = True
+
+        provider = FakeProvider()
+        provider._ci = 'pending'
+        provider._open_prs = {88}
+
+        run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider,
+        )
+
+        assert len(provider.merged) == 0, (
+            "Auto-merge should NOT be called when CI is pending (deferred to next tick)"
+        )
+
+
+class TestAutoMergeCIGateIntegration:
+    """End-to-end integration tests for CI gate at merge-time (issue #1085).
+
+    Uses the FakeKanban in-memory board to verify the full flow without
+    mocking the kanban module — the card state transitions are real.
+    """
+
+    def test_ci_gate_end_to_end_pending_then_green(self):
+        """Full pipeline: docs card with CI pending defers merge, then merges when CI passes.
+
+        Tick 1: docs card is blocked, CI is pending → card stays blocked (no merge).
+        Tick 2: same docs card still blocked, CI now green → card completes and merge fires.
+        """
+        from core import iterate
+        from tests.conftest import FakeKanban, FakeProvider
+
+        fk = FakeKanban()
+        saved = getattr(iterate, "kanban", None)
+        iterate.kanban = fk
+        try:
+            issue_n = 9100
+            pr_n = 9100
+
+            docs_tid = fk.seed(
+                assignee="documentation-daedalus",
+                title=f"Documentation: Issue #{issue_n}",
+                status="blocked",
+                reason=f"docs posted: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+            )
+
+            fk.seed(
+                assignee="qa-daedalus",
+                title=f"QA: Issue #{issue_n}",
+                status="blocked",
+                reason=f"qa-passed: PR #{pr_n}",
+                summary=f"qa-passed: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+                idempotency_key=f"qa-{issue_n}",
+            )
+
+            resolved = {
+                'execution': {'auto_merge': True, 'merge_method': 'squash'},
+            }
+
+            # Tick 1: CI is pending — card should stay blocked, no merge
+            provider_pending = FakeProvider(ci_status="pending", open_prs={pr_n})
+            iterate.run_iterate(
+                'test-board', 'test/repo',
+                resolved=resolved, provider=provider_pending,
+            )
+            assert len(provider_pending.merged) == 0, (
+                "Tick 1: auto-merge should NOT fire when CI is pending"
+            )
+            assert fk.tasks[docs_tid].get("status") == "blocked", (
+                "Tick 1: docs card should stay blocked when CI is pending (not completed)"
+            )
+
+            # Tick 2: CI is now green — card completes and merge fires
+            provider_green = FakeProvider(ci_status="green", open_prs={pr_n})
+            iterate.run_iterate(
+                'test-board', 'test/repo',
+                resolved=resolved, provider=provider_green,
+            )
+            assert len(provider_green.merged) > 0, (
+                "Tick 2: auto-merge should fire once CI turns green"
+            )
+            assert provider_green.merged[0][0] == pr_n, (
+                f"Tick 2: should merge PR #{pr_n}, got #{provider_green.merged[0][0]}"
+            )
+        finally:
+            iterate.kanban = saved
+
+    def test_ci_gate_end_to_end_red_ci_blocks_merge(self):
+        """Full pipeline: docs card with CI red → card stays blocked, no merge."""
+        from core import iterate
+        from tests.conftest import FakeKanban, FakeProvider
+
+        fk = FakeKanban()
+        saved = getattr(iterate, "kanban", None)
+        iterate.kanban = fk
+        try:
+            issue_n = 9101
+            pr_n = 9101
+
+            docs_tid = fk.seed(
+                assignee="documentation-daedalus",
+                title=f"Documentation: Issue #{issue_n}",
+                status="blocked",
+                reason=f"docs posted: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+            )
+
+            fk.seed(
+                assignee="qa-daedalus",
+                title=f"QA: Issue #{issue_n}",
+                status="blocked",
+                reason=f"qa-passed: PR #{pr_n}",
+                summary=f"qa-passed: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+                idempotency_key=f"qa-{issue_n}",
+            )
+
+            resolved = {
+                'execution': {'auto_merge': True, 'merge_method': 'squash'},
+            }
+
+            provider_red = FakeProvider(ci_status="red", open_prs={pr_n})
+            iterate.run_iterate(
+                'test-board', 'test/repo',
+                resolved=resolved, provider=provider_red,
+            )
+            assert len(provider_red.merged) == 0, (
+                "Auto-merge should NOT fire when CI is red"
+            )
+            assert fk.tasks[docs_tid].get("status") == "blocked", (
+                "Docs card should stay blocked when CI is red (not completed)"
+            )
+        finally:
+            iterate.kanban = saved
+
+    def test_ci_gate_end_to_end_green_ci_merges(self):
+        """Full pipeline: docs card with CI green → card completes and merge fires."""
+        from core import iterate
+        from tests.conftest import FakeKanban, FakeProvider
+
+        fk = FakeKanban()
+        saved = getattr(iterate, "kanban", None)
+        iterate.kanban = fk
+        try:
+            issue_n = 9102
+            pr_n = 9102
+
+            fk.seed(
+                assignee="documentation-daedalus",
+                title=f"Documentation: Issue #{issue_n}",
+                status="blocked",
+                reason=f"docs posted: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+            )
+
+            fk.seed(
+                assignee="qa-daedalus",
+                title=f"QA: Issue #{issue_n}",
+                status="blocked",
+                reason=f"qa-passed: PR #{pr_n}",
+                summary=f"qa-passed: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+                idempotency_key=f"qa-{issue_n}",
+            )
+
+            resolved = {
+                'execution': {'auto_merge': True, 'merge_method': 'squash'},
+            }
+
+            provider_green = FakeProvider(ci_status="green", open_prs={pr_n})
+            iterate.run_iterate(
+                'test-board', 'test/repo',
+                resolved=resolved, provider=provider_green,
+            )
+            assert len(provider_green.merged) > 0, (
+                "Auto-merge should fire when CI is green and QA has passed"
+            )
+            assert provider_green.merged[0][0] == pr_n, (
+                f"Should merge PR #{pr_n}, got #{provider_green.merged[0][0]}"
+            )
+        finally:
+            iterate.kanban = saved
+
+    def test_ci_gate_no_ci_support_treated_as_green(self):
+        """Provider without CI status support → UNKNOWN treated as green (no block).
+
+        Repos without CI should not be permanently blocked by the merge gate.
+        """
+        from core import iterate
+        from tests.conftest import FakeKanban, FakeProvider
+
+        fk = FakeKanban()
+        saved = getattr(iterate, "kanban", None)
+        iterate.kanban = fk
+        try:
+            issue_n = 9103
+            pr_n = 9103
+
+            fk.seed(
+                assignee="documentation-daedalus",
+                title=f"Documentation: Issue #{issue_n}",
+                status="blocked",
+                reason=f"docs posted: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+            )
+
+            fk.seed(
+                assignee="qa-daedalus",
+                title=f"QA: Issue #{issue_n}",
+                status="blocked",
+                reason=f"qa-passed: PR #{pr_n}",
+                summary=f"qa-passed: PR #{pr_n}",
+                body=f"Issue #{issue_n}\nPR #{pr_n}",
+                idempotency_key=f"qa-{issue_n}",
+            )
+
+            resolved = {
+                'execution': {'auto_merge': True, 'merge_method': 'squash'},
+            }
+
+            provider = FakeProvider(
+                ci_status="unknown",
+                open_prs={pr_n},
+                supports_ci_status=False,
+            )
+            iterate.run_iterate(
+                'test-board', 'test/repo',
+                resolved=resolved, provider=provider,
+            )
+            assert len(provider.merged) > 0, (
+                "Auto-merge should fire when provider has no CI support (UNKNOWN → green)"
+            )
+        finally:
+            iterate.kanban = saved
