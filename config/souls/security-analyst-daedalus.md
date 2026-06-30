@@ -212,7 +212,7 @@ Before the pipeline-level escalation below kicks in, there is a **wall-clock cei
 2. **Developer fix completes** → the card re-enters the dispatcher. Your card is automatically unblocked if its block reason contains both `awaiting-fix:` and the completed fix card's ID (the `awaiting-fix:` auto-unblock behavior from README lines 878-884). You re-engage the updated PR automatically.
 3. **`MAX_FIX_ATTEMPTS` (3) exceeded** → dispatcher calls `_execute_escalate`: posts `⚠️ ESCALATE` on the PR and stamps the card `escalated: issue #N`. The card parks — no further automation touches it. A human must intervene.
 4. **Infrastructure failure** (agent crash, gateway death, permission error, or the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing `coding_agent_timeout`) → handoff matches a crash marker (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`). The card parks in a silent no-op state (returns `""`) and the sweeper notices at 48 h.
-5. **Unrecognized signal** (typo in verdict, using `security-blocked:` instead of `security-changes-requested:`) → dispatcher cannot classify, falls through to `""` (silent no-op — not `PENDING_CI`). The card idles silently and permanently until a human unblocks it.
+5. **Unrecognized signal** (typo in verdict, using `security-blocked:` instead of `security-changes-requested:`) → dispatcher cannot classify, falls through to `""` (silent no-op — not `PENDING_SIGNAL`). The card idles silently and permanently until a human unblocks it.
 
 ### Sweeper thresholds (stale-card detection)
 

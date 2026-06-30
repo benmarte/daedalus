@@ -615,7 +615,7 @@ def test_has_downstream_tasks_excludes_planner_profile():
           result_with_dev is True)
 
 
-# ── CI gating — developer card must not advance on red CI ────────────────────
+# ── CI gating — developer card must not advance on QA-reported failures ────────────────────
 
 
 def _setup_ci_gate_board(fk: FakeKanban, issue_n: int, pr_n: int) -> str:
@@ -649,7 +649,7 @@ def test_developer_card_advances_with_red_ci():
         iterate.run_iterate(SLUG, REPO, provider=provider)
 
         dev_card = fk.tasks[dev_tid]
-        check("developer card is done with red CI (CI gated at merge-time)",
+        check("developer card is done with QA-reported failures (CI gated at merge-time)",
               (dev_card.get("status") or "") == "done")
         check("developer card was completed by iterate advance",
               dev_tid in [tid for (tid, _) in fk.completed])
@@ -661,7 +661,7 @@ def test_developer_card_advances_when_ci_turns_green():
     """Developer card with 'review-required: PR #N' advances to done when CI is green.
 
     CI green still results in ADVANCE — this is the pre-existing behaviour,
-    now also the behaviour for CI red and CI pending (per epic #1074).
+    now also the behaviour for QA failure and CI pending (per epic #1074).
     """
     from core import iterate
 
@@ -687,11 +687,11 @@ def test_developer_card_advances_when_ci_turns_green():
         iterate.kanban = saved
 
 
-def test_developer_card_advances_with_pending_ci():
+def test_developer_card_advances_with_pending_signal():
     """Developer card advances even when CI is pending (CI no longer gates ADVANCE, per epic #1074).
 
     CI gating is enforced at merge-time only. The card should be completed
-    (advance) immediately, not held in PENDING_CI.
+    (advance) immediately, not held in PENDING_SIGNAL.
     """
     from core import iterate
 
@@ -705,7 +705,7 @@ def test_developer_card_advances_with_pending_ci():
 
         provider = FakeProvider(ci_status="pending", open_prs={pr_n})
 
-        counts, advance_prs, pending_ci_cards, _qa_f, *_ = iterate.run_iterate(
+        counts, advance_prs, pending_signal_cards, _qa_f, *_ = iterate.run_iterate(
             SLUG, REPO, provider=provider
         )
 
@@ -713,7 +713,7 @@ def test_developer_card_advances_with_pending_ci():
         check("developer card is done with pending CI",
               (dev_card.get("status") or "") == "done")
         check("run_iterate reported ADVANCE count >= 1", counts.get("advance", 0) >= 1)
-        check("no pending_ci cards (CI no longer gates ADVANCE)", len(pending_ci_cards) == 0)
+        check("no pending_signal cards (CI no longer gates ADVANCE)", len(pending_signal_cards) == 0)
         check("developer card was completed by iterate advance",
               dev_tid in [tid for (tid, _) in fk.completed])
     finally:

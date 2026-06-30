@@ -199,7 +199,7 @@ Before the pipeline-level escalation below kicks in, each spawned coding-agent i
 ### Self-healing escalation sequence
 
 1. **Plan completion detected** → dispatcher's completion-handler fires `_execute_planner_decompose` (in `core/iterate.py`). Sub-issues are created for the epic with `Depends on:` headers establishing tier ordering; dependency-free sub-issues are labelled `Ready`. Triage cards decompose via the LLM into specialist tasks (developer, QA, reviewer, security-analyst, and—non-deterministically—accessibility/documentation).
-2. **Agent crash mid-plan** → the planner worker's handoff contains `coding_agent_timeout` or another crash marker. There is no special-case handler for planner — a crash (including timeout) leaves the card in `PENDING_CI` or parks it in `blocked` depending on what was completed. The sweeper notices at 48 h on blocked cards, 24 h on running cards.
+2. **Agent crash mid-plan** → the planner worker's handoff contains `coding_agent_timeout` or another crash marker. There is no special-case handler for planner — a crash (including timeout) leaves the card in `PENDING_SIGNAL` or parks it in `blocked` depending on what was completed. The sweeper notices at 48 h on blocked cards, 24 h on running cards.
 3. **Unrecognized completion signal** (e.g., missing `PLAN:` prefix entirely, or garbled output) → dispatcher falls through to `PM_ROUTE`. The PM is notified and can re-route or escalate.
 4. **Planner blocks instead of completing** → `classify_blocked()` returns `PM_ROUTE` (for any block reason other than `PLANNING COMPLETE` or infrastructure failure). PM re-routes or escalates.
 

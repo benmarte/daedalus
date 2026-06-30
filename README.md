@@ -1131,12 +1131,12 @@ on `origin/dev` at commit `70c1340`.
 >   warning comment.** `PENDING_PR` currently keeps searching silently until
 >   a PR appears; there is no timeout constant or escalation path yet.
 >   Tracked in epic #180.
-> - **QA/accessibility `PENDING_CI` escalation after `MAX_FIX_ATTEMPTS` (3)
->   silent ticks.** `classify_blocked()` returns `PENDING_CI` for
+> - **QA/accessibility `PENDING_SIGNAL` escalation after `MAX_FIX_ATTEMPTS` (3)
+>   silent ticks.** `classify_blocked()` returns `PENDING_SIGNAL` for
 >   non-canonical QA/a11y signals (anything that isn't `qa-passed:` /
 >   `qa-failed:` / `approved:` / `a11y-na:` / `a11y-skipped:` /
 >   `changes requested`), but there is no fix-attempt counter or escalation
->   path for the `PENDING_CI` case itself.
+>   path for the `PENDING_SIGNAL` case itself.
 > - **Empty-summary developer skip.** Developers that block with no
 >   recognizable signal still route to `PM_ROUTE` for downstream review —
 >   the "skip PM consult when the developer has no signal" branch was not
@@ -1160,10 +1160,10 @@ resolve them:
   `qa-failed:` (lowercase, with the colon). Accessibility must use
   `approved:`, `a11y-approved:`, `a11y-na:`, `a11y-skipped:`, or
   `a11y-changes-requested:`. Any other phrasing (e.g., `qa-blocked:`,
-  `a11y-failed:`) returns `PENDING_CI` from `classify_blocked()`, which stays
-  in the pending queue indefinitely. The `PENDING_CI` retry cron eventually
+  `a11y-failed:`) returns `PENDING_SIGNAL` from `classify_blocked()`, which stays
+  in the pending queue indefinitely. The `PENDING_SIGNAL` retry cron eventually
   resolves when a proper signal arrives, but the `MAX_FIX_ATTEMPTS` escalation
-  does not apply to `PENDING_CI` cards — so a QA/a11y agent that keeps posting
+  does not apply to `PENDING_SIGNAL` cards — so a QA/a11y agent that keeps posting
   ambiguous signals will sit in the queue with no automatic human alert.
   Operators should watch the board and re-queue or cancel cards that never
   reach a canonical signal.
@@ -1218,7 +1218,7 @@ Each piece exists because the obvious approach failed:
 - **Self-healing loop** (`core/iterate.py`) — every blocked card is classified into one
   of 5 actions and routed to the agent that can clear it:
     - `advance` — dev PR opened + review-required → complete dev card immediately (CI no longer gates this; enforced at merge-time per epic #1074), then `_create_downstream_review_tasks()` creates a `qa-{n}` task and parents reviewer/security/docs to it so they run only after QA passes (idempotent keys `qa-{n}`, `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
-    - `dev_fix_ci` — QA reports failing tests → creates idempotent developer fix card
+    - `qa_fix` — QA reports failing tests → creates idempotent developer fix card
     - `pm_route` — reviewer/security requests changes → creates PM routing card with findings; PM decides owner (developer, security-analyst, re-spec), then fix lands. Reviewer cards are marked "awaiting-fix" and auto-unblocked when the fix completes.
     - `approve_advance` — reviewer/security approved → complete the card
     - `escalate` — cap at 3 fix attempts per PR → log + notify, set card aside (no infinite loop)

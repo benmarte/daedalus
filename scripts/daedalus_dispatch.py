@@ -3393,8 +3393,8 @@ def _notify_max_fix_attempts(
 ) -> None:
     """Notify human channels when a QA fix card exhausts MAX_FIX_ATTEMPTS.
 
-    Fires when _execute_dev_fix_ci escalates instead of creating another fix
-    card, meaning the developer has failed to fix CI after the maximum number
+    Fires when _execute_qa_fix escalates instead of creating another fix
+    card, meaning the developer has failed to fix QA-reported failures after the maximum number
     of attempts and the issue now requires manual intervention. Routes through
     ``hermes send`` to every target subscribed to the ``max-fix-attempts``
     event. Deduplicates per (issue_number, pr_number) within the process
@@ -5119,7 +5119,7 @@ def run(
 
     # ── auto-advance (CI-aware routing + self-healing) ────────────────────────
     # For every blocked card: classify its state (dev+green CI → advance,
-    # dev+red CI → fix card, reviewer with findings → PM routing card, etc.) and
+    # dev+QA-reported failures → fix card, reviewer with findings → PM routing card, etc.) and
     # execute the appropriate action. The self-healing loop creates fix-up tasks
     # for failing CI/review and escalates after MAX_FIX_ATTEMPTS.
     #
@@ -5167,7 +5167,7 @@ def run(
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-running sweep failed: %s", exc)
 
-    iterate_counts, advance_prs, pending_ci_cards, qa_failed_cards, escalated_cards = (
+    iterate_counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards = (
         iterate.run_iterate(
             slug,
             repo,
@@ -5198,7 +5198,7 @@ def run(
         k: v
         for k, v in iterate_counts.items()
         if v > 0
-        and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE, iterate.PENDING_CI)
+        and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE, iterate.PENDING_SIGNAL)
     }
     if any(c > 0 for c in iterate_counts.values()) and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

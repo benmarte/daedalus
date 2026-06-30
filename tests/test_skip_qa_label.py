@@ -70,26 +70,26 @@ def test_qa_card_skip_qa_bypass_with_pending():
     check("skip_qa overrides pending → advance", result == iterate.ADVANCE)
 
 
-def test_qa_card_no_skip_qa_no_signal_returns_pending_ci():
-    """skip_qa=False, no qa-passed signal, no qa-failed → PENDING_CI."""
+def test_qa_card_no_skip_qa_no_signal_returns_pending_signal():
+    """skip_qa=False, no qa-passed signal, no qa-failed → PENDING_SIGNAL."""
     result = iterate.classify_blocked(
         "qa-daedalus",
         "running: QA in progress",
         ci_green=False,
         skip_qa=False,
     )
-    check("no skip_qa + no signal → pending_ci", result == iterate.PENDING_CI)
+    check("no skip_qa + no signal → pending_signal", result == iterate.PENDING_SIGNAL)
 
 
-def test_qa_card_no_skip_qa_qa_failed_returns_dev_fix_ci():
-    """skip_qa=False, qa-failed signal → DEV_FIX_CI."""
+def test_qa_card_no_skip_qa_qa_failed_returns_qa_fix():
+    """skip_qa=False, qa-failed signal → QA_FIX."""
     result = iterate.classify_blocked(
         "qa-daedalus",
         "qa-failed: tests broken",
         ci_green=False,
         skip_qa=False,
     )
-    check("no skip_qa + qa-failed → dev_fix_ci", result == iterate.DEV_FIX_CI)
+    check("no skip_qa + qa-failed → qa_fix", result == iterate.QA_FIX)
 
 
 def test_qa_card_no_skip_qa_qa_passed_returns_advance():

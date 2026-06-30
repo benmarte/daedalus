@@ -336,9 +336,9 @@ No user-facing configuration. Idempotency is enforced automatically.
 
 **What it does:**  
 For every blocked card, `classify_blocked()` categorizes its state into one of:
-- `advance`: Green CI → complete the card and advance the dependency chain
-- `dev_fix_ci`: Red CI → create a fix card for the developer
-- `pending_ci`: CI still running → wait and re-check next tick
+- `advance`: Developer card with open PR + `review-required` → complete the card and advance the dependency chain (CI no longer gates this — enforced at merge-time per epic #1074)
+- `qa_fix`: QA card with failing tests → create a fix card for the developer
+- `pending_signal`: QA/accessibility card with unrecognized QA/a11y signal → wait and re-check next tick
 - `pending_pr`: Awaiting PR → search VCS and auto-link the PR to the card
 - `pm_route`: Reviewer requested changes → create a PM routing card to address feedback
 - `approve_advance`: PR approved → complete the card and advance
@@ -353,7 +353,7 @@ Each action has a dedicated executor function that performs the appropriate VCS 
 Blocked cards are automatically diagnosed and routed — most resolve without human intervention. You don't need to manually unblock cards or figure out why a card is stuck — the self-healing loop identifies the blocker and takes corrective action.
 
 For example:
-- If CI fails, a `dev_fix_ci` card is created and assigned to a developer
+- If QA reports failing tests, a `qa_fix` card is created and assigned to a developer
 - If a PR is approved, the card auto-completes and the next tier promotes
 - If an agent exhausts retries, the team is notified (see 4.2)
 
@@ -364,7 +364,7 @@ None. The self-healing loop runs automatically on every dispatcher tick.
 No user-facing configuration. Classification logic is automatic.
 
 **Source implementation:**  
-`core/iterate.py:classify_blocked()` (line ~100), `core/iterate.py:_execute_advance()` (line ~380), `core/iterate.py:_execute_dev_fix_ci()` (line ~531), `core/iterate.py:_execute_pending_pr()` (line ~587), `core/iterate.py:_execute_pm_route()` (line ~645), `core/iterate.py:_execute_escalate()` (line ~829), `core/iterate.py:_execute_planner_decompose()` (line ~1503)
+`core/iterate.py:classify_blocked()` (line ~100), `core/iterate.py:_execute_advance()` (line ~380), `core/iterate.py:_execute_qa_fix()` (line ~531), `core/iterate.py:_execute_pending_pr()` (line ~587), `core/iterate.py:_execute_pm_route()` (line ~645), `core/iterate.py:_execute_escalate()` (line ~829), `core/iterate.py:_execute_planner_decompose()` (line ~1503)
 
 ---
 

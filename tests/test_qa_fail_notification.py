@@ -3,7 +3,7 @@
 Verifies that when a qa-daedalus card reports 'qa-failed', the dispatcher:
   1. Returns the card info in qa_failed_cards (4th return from run_iterate)
   2. Fires a notification to configured 'qa-failed' targets via _notify_qa_failed
-  3. Does NOT fire notifications for developer DEV_FIX_CI (CI-red) cards
+  3. Does NOT fire notifications for developer QA_FIX (QA-reported test failures) cards
   4. Works correctly under dry_run (logs intent, no actual send)
 """
 from __future__ import annotations
@@ -71,11 +71,11 @@ class TestRunIterateQaFailedCards:
         assert qa_failed[0]["issue_n"] == 42
 
     def test_developer_red_ci_advances_not_in_qa_failed(self):
-        """Developer CI-red card triggers ADVANCE (not DEV_FIX_CI) and is NOT in qa_failed_cards.
+        """Developer QA-reported test failures card triggers ADVANCE (not QA_FIX) and is NOT in qa_failed_cards.
 
         Per epic #1074, CI no longer gates ADVANCE for developer cards — CI is
-        enforced at merge-time only. So a developer card with red CI advances
-        immediately. qa_failed_cards is only for QA-daedalus DEV_FIX_CI, not
+        enforced at merge-time only. So a developer card with QA-reported failures advances
+        immediately. qa_failed_cards is only for QA-daedalus QA_FIX, not
         developer ADVANCE.
         """
         provider = FakeProvider()
