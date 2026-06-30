@@ -728,7 +728,9 @@ end of the session, triggering the next phase within seconds rather than waiting
 the next cron tick.
 
 For example, as soon as the developer blocks with `review-required`, the session ends,
-the dispatcher fires, detects CI green, and promotes the reviewer task.
+the dispatcher fires, detects `review-required: PR #N`, and immediately
+promotes the reviewer and QA tasks (CI is no longer a gate for ADVANCE —
+it is enforced at merge-time per epic #1074).
 
 This end-of-session trigger is the `daedalus-advance.sh` hook, wired into each profile's
 `hooks.on_session_end` in its `config.yaml`. Registration is **per profile** — a profile
@@ -757,7 +759,7 @@ PM / project-manager runs → SPEC: <note>
       │   └─ session ends → dispatcher triggers next phase
       ▼
 developer → review-required
-      │   └─ session ends → dispatcher detects CI green → QA starts
+      │   └─ session ends → dispatcher triggers ADVANCE (no CI wait) → QA starts
       ▼
 QA → qa-passed (or qa-failed → dev fix card)
       │   └─ session ends → dispatcher creates reviewer + security-analyst
@@ -877,21 +879,16 @@ capped at 3 retries. Previously this stalled the pipeline indefinitely.
 ```
 blocked card detected
         │
-        ├─ developer card + CI green + review-required?
+        ├─ developer card + review-required + PR #N (any CI state)?
         │       └──► advance
-        │             complete the developer card
+        │             complete the developer card (CI no longer gates ADVANCE —
+        │             enforced at merge-time per epic #1074)
         │             _create_downstream_review_tasks() fires:
         │               creates a qa-{n} task and parents reviewer,
         │                 security-analyst, docs to it — QA gate enforced
         │                 (downstream roles run only after qa-passed)
         │               idempotency keys: qa-{n}, reviewer-{n}, security-{n}, docs-{n}
         │               skips any whose key already exists on the board
-        │
-        ├─ developer card + CI red?
-        │       └──► dev_fix_ci
-        │             create an idempotent fix card assigned to developer-daedalus
-        │             key: fix-ci-{card_id}-attempt-{N}
-        │             only fires when CI is definitively RED (not UNKNOWN/PENDING)
         │
         ├─ reviewer or security-analyst card + changes requested?
         │       └──► pm_route
