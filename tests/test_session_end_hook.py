@@ -50,7 +50,7 @@ class TestOnSessionEnd(unittest.TestCase):
                 **kwargs,
             )
             # Give the daemon thread a moment to fire
-            time.sleep(0.1)
+            time.sleep(0.02)
 
         return mock_run, fired
 
@@ -64,6 +64,39 @@ class TestOnSessionEnd(unittest.TestCase):
         _, fired = self._call(kanban_task="t_abc123")
         self.assertEqual(len(fired), 1)
         self.assertIn("daedalus-cron.sh", fired[0][-1])
+
+    def test_worker_session_scopes_to_repo_at_cwd(self):
+        """Issue #137: cwd inside a registered project → dispatch passes --repo <path>."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as repo:
+            repo_path = str(Path(repo).resolve())
+            reg = Path(repo) / "registry"
+            reg.write_text(repo_path + "\n")
+
+            fired = []
+
+            def fake_run(cmd, **kw):
+                fired.append(cmd)
+
+            env = {"HERMES_KANBAN_TASK": "t1", "HERMES_HOME": "/fake/hermes",
+                   "HERMES_ORCH_REGISTRY": str(reg)}
+            orig = os.getcwd()
+            try:
+                os.chdir(repo_path)
+                with patch.dict(os.environ, env, clear=True), \
+                     patch("os.path.isfile", return_value=True), \
+                     patch("os.access", return_value=True), \
+                     patch("subprocess.run", side_effect=fake_run):
+                    _on_session_end(session_id="s", completed=True, interrupted=False,
+                                    model="x", platform="cli")
+                    time.sleep(0.02)
+            finally:
+                os.chdir(orig)
+
+        self.assertEqual(len(fired), 1)
+        self.assertIn("--repo", fired[0])
+        self.assertIn(repo_path, fired[0])
 
     def test_missing_cron_script_skipped_gracefully(self):
         """Cron script file absent → no subprocess call, no exception."""
@@ -87,7 +120,7 @@ class TestOnSessionEnd(unittest.TestCase):
                 session_id="s1", completed=True, interrupted=False,
                 model="x", platform="cli",
             )
-            time.sleep(0.1)  # let thread run
+            time.sleep(0.02)  # let thread run
 
     def test_extra_kwargs_accepted(self):
         """Hook must accept arbitrary **kwargs without error."""

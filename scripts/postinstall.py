@@ -102,11 +102,81 @@ def _install_cron_wrapper() -> tuple[bool, str]:
 
     script_content = (
         "#!/usr/bin/env bash\n"
+        "# daedalus-cron.sh — wrapper invoked by the Hermes dispatch cron.\n"
+        "#\n"
+        "# Usage: daedalus-cron.sh [--plugin-dir <path>] [dispatcher args...]\n"
+        "#\n"
+        "#   --plugin-dir <path>   Load the dispatcher from a LOCAL development\n"
+        "#                         checkout at <path> instead of the installed plugin\n"
+        "#                         (~/.hermes/plugins/daedalus). Prepends <path> to\n"
+        "#                         PYTHONPATH and runs <path>/scripts/daedalus_dispatch.py\n"
+        "#                         so code changes take effect without a\n"
+        "#                         'hermes plugins update daedalus'. A warning is logged\n"
+        "#                         whenever it is active — never leave it in a production\n"
+        "#                         cron command. (#233)\n"
+        "#\n"
+        "# All other arguments are forwarded to daedalus_dispatch.py unchanged.\n"
+        "\n"
         "# Source Hermes environment variables (including GITHUB_TOKEN)\n"
         "if [ -f \"$HOME/.hermes/.env\" ]; then\n"
         "  export $(grep -v '^#' \"$HOME/.hermes/.env\" | xargs)\n"
         "fi\n"
-        'exec python3 "$HOME/.hermes/plugins/daedalus/scripts/daedalus_dispatch.py" "$@"\n'
+        "\n"
+        "# --- Parse --plugin-dir (consumed here, NOT forwarded to the dispatcher) ----\n"
+        "# The installed plugin is the default source. --plugin-dir overrides it with a\n"
+        "# local dev checkout so the development loop is write → test, not\n"
+        "# write → install → test. Remaining args are collected and forwarded verbatim.\n"
+        "PLUGIN_DIR=\"\"\n"
+        "ARGS=()\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    --plugin-dir) PLUGIN_DIR=\"$2\"; shift; shift || true ;;\n"
+        "    --plugin-dir=*) PLUGIN_DIR=\"${1#*=}\"; shift ;;\n"
+        "    *) ARGS+=(\"$1\"); shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "DISPATCH_HOME=\"$HOME/.hermes/plugins/daedalus\"\n"
+        "if [ -n \"$PLUGIN_DIR\" ]; then\n"
+        "  echo \"daedalus-cron: WARNING --plugin-dir active — loading dispatcher from\" \\\n"
+        "       \"$PLUGIN_DIR (local dev checkout, NOT the installed plugin)\" >&2\n"
+        "  export PYTHONPATH=\"$PLUGIN_DIR${PYTHONPATH:+:$PYTHONPATH}\"\n"
+        "  DISPATCH_HOME=\"$PLUGIN_DIR\"\n"
+        "fi\n"
+        "# ---------------------------------------------------------------------------\n"
+        "\n"
+        "# --- Gateway watchdog (#383) ---\n"
+        "# HTTP health probe + rate-limited restart + silent-death detection\n"
+        "# Overlap protection: mkdir-based lock\n"
+        'WATCHDOG_HTTP_SCRIPT="$DISPATCH_HOME/scripts/watchdog.py"\n'
+        'WATCHDOG_HTTP_LOCK="$HOME/.hermes/gateway-watchdog-http.lock"\n'
+        "if [ -f \"$WATCHDOG_HTTP_SCRIPT\" ]; then\n"
+        "  if mkdir \"$WATCHDOG_HTTP_LOCK\" 2>/dev/null; then\n"
+        "    echo \"daedalus-cron: running HTTP watchdog (#383)\" >&2\n"
+        "    python3 \"$WATCHDOG_HTTP_SCRIPT\" || \\\n"
+        "      echo \"daedalus-cron: HTTP watchdog exited with code $?\" >&2\n"
+        "  fi\n"
+        "fi\n"
+        "# ---------------------------------------------------------------------------\n"
+        "\n"
+        "# --- Gateway watchdog (#799) ---\n"
+        "# STOP-marker + exponential backoff + crash-log detection\n"
+        "# Overlap protection: mkdir-based lock\n"
+        'WATCHDOG_SCRIPT="$DISPATCH_HOME/scripts/gateway_watchdog.py"\n'
+        'WATCHDOG_LOCK="$HOME/.hermes/gateway-watchdog.lock"\n'
+        "if [ -f \"$WATCHDOG_SCRIPT\" ]; then\n"
+        "  if mkdir \"$WATCHDOG_LOCK\" 2>/dev/null; then\n"
+        "    echo \"daedalus-cron: running gateway watchdog (#799)\" >&2\n"
+        "    python3 \"$WATCHDOG_SCRIPT\" --no-dispatch || \\\n"
+        "      echo \"daedalus-cron: gateway watchdog exited with code $?\" >&2\n"
+        "  fi\n"
+        "fi\n"
+        "# ---------------------------------------------------------------------------\n"
+        "\n"
+        "# Combined EXIT trap to clean up BOTH watchdog locks\n"
+        'trap \'rmdir "$WATCHDOG_HTTP_LOCK" 2>/dev/null; rmdir "$WATCHDOG_LOCK" 2>/dev/null\' EXIT\n'
+        "# ---------------------------------------------------------------------------\n"
+        "\n"
+        'exec python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"\n'
     )
 
     try:
@@ -141,6 +211,99 @@ def _install_webhook_handler() -> tuple[bool, str]:
         return True, f"OK: webhook handler installed at {target}"
     except OSError as exc:
         return False, f"FAIL: could not install webhook handler at {target}: {exc}"
+
+
+def _install_advance_hook() -> tuple[bool, str]:
+    """Install the session-end advance hook to ~/.hermes/agent-hooks/ (idempotent).
+
+    Copies BOTH scripts/daedalus-advance.sh and scripts/daedalus_resolve_project.py
+    from the repo to the user's agent-hooks dir; the shell script is made
+    executable. When a daedalus pipeline worker finishes, the hook resolves the
+    worker's project via daedalus_resolve_project.py and fires the dispatcher scoped
+    to that project so the pipeline advances immediately instead of waiting for the
+    next cron tick.
+
+    NOTE: copying the script here is necessary but NOT sufficient. Hermes only runs
+    a profile-agent's session-end hooks when they are registered in that profile's
+    config.yaml under hooks.on_session_end. That per-profile registration is owned by
+    scripts/provision_roster.sh (via register_advance_hook.py) — a profile missing
+    the block stalls the pipeline for up to 60 minutes (issue #962).
+    """
+    real_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+    hooks_dir = real_home / ".hermes" / "agent-hooks"
+    source_dir = Path(__file__).resolve().parent
+    sh_source = source_dir / "daedalus-advance.sh"
+    py_source = source_dir / "daedalus_resolve_project.py"
+
+    for source in (sh_source, py_source):
+        if not source.is_file():
+            return False, f"MISSING: source script not found at {source}"
+
+    try:
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        sh_target = hooks_dir / "daedalus-advance.sh"
+        sh_target.write_text(sh_source.read_text())
+        sh_target.chmod(0o755)
+        py_target = hooks_dir / "daedalus_resolve_project.py"
+        py_target.write_text(py_source.read_text())
+        py_target.chmod(0o644)
+        return True, f"OK: advance hook installed at {sh_target} (+ {py_target.name})"
+    except OSError as exc:
+        return False, f"FAIL: could not install advance hook in {hooks_dir}: {exc}"
+
+
+def _install_watchdog_script() -> tuple[bool, str]:
+    """Install the gateway watchdog script to ~/.hermes/plugins/daedalus/scripts/ (idempotent).
+
+    Copies scripts/gateway_watchdog.py from the repo to the plugin's scripts dir.
+    The watchdog detects silent gateway death and restarts with safeguards.
+    """
+    source_dir = Path(__file__).resolve().parent
+    source = source_dir / "gateway_watchdog.py"
+
+    if not source.is_file():
+        return False, f"MISSING: watchdog script not found at {source}"
+
+    target = _HERMES_HOME / "plugins" / "daedalus" / "scripts"
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        target_file = target / "gateway_watchdog.py"
+        target_file.write_text(source.read_text())
+        target_file.chmod(0o755)
+        return True, f"OK: watchdog script installed at {target_file}"
+    except OSError as exc:
+        return False, f"FAIL: could not install watchdog script at {target}: {exc}"
+
+
+def _install_watchdog_http_script() -> tuple[bool, str]:
+    """Install scripts/watchdog.py (#383 HTTP /health probe) idempotently.
+
+    Source: scripts/watchdog.py (resolved via Path(__file__).parent).
+    Target: <HERMES_HOME>/plugins/daedalus/scripts/watchdog.py.
+
+    This watchdog complements gateway_watchdog.py — it probes the gateway's HTTP
+    /health endpoint on localhost, detects silent deaths (process alive but
+    goroutine stuck), and tracks restarts with rate limiting + cooldown. All
+    configuration is via DAEDALUS_GW_* env vars.
+    """
+    hermes_home = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+    source_dir = Path(__file__).resolve().parent
+    source = source_dir / "watchdog.py"
+
+    if not source.is_file():
+        return False, f"MISSING: HTTP watchdog script not found at {source}"
+
+    target = hermes_home / "plugins" / "daedalus" / "scripts"
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        target_file = target / "watchdog.py"
+        target_file.write_text(source.read_text())
+        target_file.chmod(0o755)
+        return True, f"OK: HTTP watchdog script installed at {target_file}"
+    except OSError as exc:
+        return False, f"FAIL: could not install HTTP watchdog script at {target}: {exc}"
 
 
 # ── provision ────────────────────────────────────────────────────────────────
@@ -213,9 +376,24 @@ def main(check_only: bool = False) -> int:
     print(msg)
     print()
     # Note: non-fatal — a wrapper failure is logged but doesn't block setup.
-
+    
     # Install the webhook handler script (idempotent, non-fatal)
     ok, msg = _install_webhook_handler()
+    print(msg)
+    print()
+
+    # Install the session-end advance hook (idempotent, non-fatal)
+    ok, msg = _install_advance_hook()
+    print(msg)
+    print()
+
+    # Install the enhanced gateway watchdog script (idempotent, non-fatal)
+    ok, msg = _install_watchdog_script()
+    print(msg)
+    print()
+
+    # Install the HTTP /health probe watchdog (idempotent, non-fatal)
+    ok, msg = _install_watchdog_http_script()
     print(msg)
     print()
 

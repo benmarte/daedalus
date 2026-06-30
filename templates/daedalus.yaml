@@ -93,17 +93,25 @@ cron:
   # A CATCH-ALL entry (no `events` filter, or `events: []`) receives
   # `comment-mirror` too, so active boards will see a higher message volume than
   # before. To exclude it, list the events you DO want and leave it out.
+  #
+  # Slack thread broadcast (default: true): thread replies are also broadcast to
+  # the channel feed so they're visible without clicking into the thread. Disable
+  # with `thread_broadcast: false` if you prefer thread-only delivery (less noise).
+  #
   # notifications:
   #   - platform: "Slack"
   #     target: "slack:C0CHANNEL1"
   #     events: ["doc-report", "pipeline-failure"]  # no comment-mirror → no threads
+  #     thread_broadcast: true  # Optional, defaults to true
   #   - platform: "Discord"
   #     target: "discord:1234567890123456789"  # numeric channel ID (not name)
   #     events: ["dispatch-summary", "pr-ready", "comment-mirror"]
 
 # ── Execution tunables ────────────────────────────────────────────────────────
 execution:
-  # How many issues the dispatcher spawns per tick (default: unlimited).
+  # How many issues the dispatcher spawns per tick (default: 5). Caps how many
+  # coding agents can be launched at once — keep it low (e.g. 2-4) on memory-
+  # constrained hosts to avoid OOM-killing parallel coding agents (issue #141).
   # max_dispatch: 5
 
   # Iterations per agent (how many back-and-forth steps each agent gets).
@@ -235,3 +243,12 @@ execution:
   # agent loops. Defaults to 10 for one-shot modes.
   #
   # coding_agent_max_turns: 10
+
+  # Wall-clock ceiling (seconds) the worker waits for a spawned coding agent to
+  # write its output before failing the card fast (issue #141). A dead agent is
+  # caught immediately via a PID liveness check; this is the backstop for an
+  # agent that is alive but hung. On exceed the card is blocked
+  # ('coding-agent-failed: CODING_AGENT_TIMEOUT') and retried per failure_limit.
+  # Defaults to 3600 (1 hour).
+  #
+  # coding_agent_max_wait: 3600

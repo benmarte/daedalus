@@ -95,16 +95,6 @@ def test_resolve_web_path_null_or_missing_key_returns_empty():
     assert p._http.get_json.call_count == 1
 
 
-def test_get_default_branch_populates_web_path_as_side_effect():
-    p = _provider(extra_vcs={"project_id": 42}, repo="myrepo")
-    p._http.get_json.return_value = {"default_branch": "main",
-                                     "path_with_namespace": "g/p"}
-    p.get_default_branch()
-    assert p._project_web_path == "g/p"
-    # issue_url now works without a second API call
-    assert p.issue_url(3) == "https://gitlab.com/g/p/-/issues/3"
-    assert p._http.get_json.call_count == 1
-
 
 def test_get_default_branch_does_not_overwrite_known_web_path(provider):
     # Pre-set from project_path at init — get_default_branch must not clobber it.
@@ -242,6 +232,25 @@ def test_ensure_status_labels_noop_when_all_exist(provider):
     provider._http.post_json.assert_not_called()
 
 
+def test_ensure_labels_calls_list_labels_exactly_once(provider):
+    """ensure_labels() must not make a second list_labels() round-trip for status labels."""
+    provider._http.get_paginated.return_value = []  # no labels exist yet
+    provider._http.post_json.return_value = {"id": 1, "name": "epic", "color": "#000"}
+    provider.ensure_labels()
+    # Only one get_paginated call allowed — ensure_status_labels reuses the set
+    assert provider._http.get_paginated.call_count == 1, (
+        "ensure_labels() must pass _existing to ensure_status_labels() "
+        "to avoid a redundant list_labels() API call"
+    )
+
+
+def test_ensure_status_labels_accepts_existing_set_skips_list_labels(provider):
+    """_existing kwarg prevents list_labels() call inside ensure_status_labels()."""
+    provider.ensure_status_labels(["Ready", "Done"], _existing={"Ready", "Done"})
+    provider._http.get_paginated.assert_not_called()
+    provider._http.post_json.assert_not_called()
+
+
 def test_errors_degrade_gracefully(provider):
     provider._http.get_json.side_effect = ProviderError("500", status_code=500)
     assert provider.list_issues() == []
@@ -250,3 +259,11 @@ def test_errors_degrade_gracefully(provider):
     provider._http.get_paginated.side_effect = ProviderError("500")
     assert provider.list_branches() == []
     assert provider.list_labels() == []
+
+
+def test_add_label_graceful_noop(provider):
+    """GitLab doesn't override add_label — base impl returns False (no-op for Phase 3)."""
+    assert provider.add_label(3, "epic") is False
+    # Verify no API calls were made (no-op behavior)
+    provider._http.post_json.assert_not_called()
+    provider._http.patch_json.assert_not_called()

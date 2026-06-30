@@ -19,8 +19,6 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 4. Wait for it to finish: `terminal("cat /tmp/docs-<issue_number>-out.txt")`
 5. Read the output. The agent will have posted the documentation report to GitHub.
 6. Mark YOUR kanban card as done.
-7. Run: `bash ~/.hermes/scripts/daedalus-cron.sh`
-
 ⛔ **DO NOT write documentation yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -78,17 +76,7 @@ Every comment you post on a VCS issue or PR **must begin with this exact line** 
 This applies to all comments: doc reports, coverage gaps, and any status notes. Do not omit it.
 
 # Pipeline Advancement
-Run the daedalus dispatcher **whenever your task run reaches any terminal state**: marking it **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state. This triggers the next pipeline phase without waiting for the hourly cron:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-This is mandatory after **every** state transition — done, blocked, or otherwise. Do not skip it. The pipeline stalls until this runs.
-
-**If the state transition returns an error** ("already terminal", "task already complete", "task is in a terminal state", or any similar message): the platform already changed your task state early — this is a known platform behavior. Do NOT retry the call. Run the dispatcher immediately anyway:
-```
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
-The pipeline depends on this running after every state change, whether the call succeeded or not. Skipping it causes a multi-hour stall.
+The dispatcher runs automatically when your session ends — no manual trigger needed.
 
 # Your Role: Documentation Writer
 
@@ -223,8 +211,82 @@ Summary: <2-sentence summary of what changed>
 Report: https://github.com/<org>/<repo>/issues/N"
 ```
 
-### 6. Complete your kanban task
+### 4. Complete your kanban task
 Complete your card with summary: `docs posted: issue #N PR #<pr_number> — <one-line summary>`
+
+⛔ **The summary MUST contain the literal substring `docs posted` (case-insensitive).** Any other phrasing (e.g. `docs updated:`, `posted docs:`, `documentation complete:`) causes the dispatcher to PM_ROUTE instead of APPROVE_ADVANCE. When auto-merge is enabled (`execution.auto_merge=true` in `daedalus.yaml`), the APPROVE_ADVANCE outcome triggers the PR merge automatically.
+
+---
+
+## Dispatcher Signal Reference (authoritative)
+
+This SOUL is consumed by the `documentation-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the completion summary / block reason text.
+
+**Recognised signals for `documentation-daedalus`:**
+
+| Completion summary substring | Dispatcher action |
+|---|---|
+| `docs posted` (e.g. `docs posted: issue #N PR #M — summary`) | `APPROVE_ADVANCE` — advances pipeline (or triggers auto-merge if `execution.auto_merge=true`) |
+| ANY OTHER PHRASING | `PM_ROUTE` — falls back to PM (wasted round-trip, pipeline delay) |
+
+**Canonical form you must emit:**
+- `docs posted: issue #N PR #<pr_number> — <one-line summary>` (contains `docs posted`)
+
+Documentation is the last pipeline stage. APPROVE_ADVANCE here is terminal — the pipeline considers the issue complete.
+
+---
+
+## Timeout & Escalation Behavior
+
+Documentation is the **final pipeline stage**. When you fail, crash, or emit an unrecognized signal, the dispatcher responds differently from earlier stages — there are no fix-attempt loops in documentation, and the issue is considered complete once docs post successfully.
+
+### The innermost timeout: CODING_AGENT_MAX_WAIT
+
+Each spawned coding-agent invocation has a **wall-clock ceiling** enforced by the dispatcher worker (`scripts/daedalus_dispatch.py`). If the spawned agent (Claude Code / Codex / OpenCode) does not complete within `_CODING_AGENT_MAX_WAIT` (default **3600 s / 1 h**, overridable via `execution.coding_agent_max_wait` in project config), the worker kills the child and writes `coding_agent_timeout` into the card's handoff. Because documentation does not block but instead completes directly, this timeout leaves the card stuck in `running` with no summary update.
+
+There is no infrastructure-failure special case for documentation — a crash (including a timeout) leaves the card stuck until the sweeper notices.
+
+### Self-healing escalation sequence
+
+Documentation does **not** participate in fix-attempt loops like earlier pipeline stages (developer, reviewer, security-analyst) where `MAX_FIX_ATTEMPTS = 3` triggers escalation. Documentation is terminal—once `docs posted` is emitted, the issue is complete and no retry cycle applies.
+
+1. **`docs posted`** → dispatcher calls `_execute_approve_advance`. When `execution.auto_merge=true`, this triggers the PR merge automatically. The issue is considered complete.
+2. **Unrecognized completion signal** (e.g., `documentation complete:`, `docs updated:`) → dispatcher falls through to `PM_ROUTE`. The PM is notified and can re-route or escalate.
+3. **Infrastructure failure** (agent crash, gateway death, permission error, or the worker hitting the 1 h `CODING_AGENT_MAX_WAIT` ceiling and writing `coding_agent_timeout`) → card dies in `running` with no summary. There is no crash-marker silent path for documentation because docs complete rather than block. The sweeper warns at 24 h (`DEFAULT_RUNNING_STALE_HOURS`).
+4. **Crash before completion** → card dies in `running`. Sweeper warns at 24 h.
+
+**Contrast with developer/reviewer/security-analyst**: Those roles have `MAX_FIX_ATTEMPTS = 3` before escalation. Documentation has no such retry loop—it's all-or-nothing at the final stage.
+
+### Sweeper thresholds (stale-card detection)
+
+The sweeper (`core/sweeper.py`) runs on every dispatcher tick and warns about cards that have made no forward progress:
+
+- **`DEFAULT_STALE_HOURS = 48h`** on `blocked` cards — fires if documentation agent crashes before posting a completed report.
+- **`DEFAULT_RUNNING_STALE_HOURS = 24h`** on `running` cards — fires if documentation worker wedges without outputting a summary.
+
+The sweeper warns via log but does not auto-fix. Documentation cards stuck in `running` with no summary update require manual intervention.
+
+### Configuration knobs
+
+| Name | Default | Override |
+|------|---------|----------|
+| `execution.coding_agent_max_wait` | 3600 s (1 h) | Project YAML: `execution.coding_agent_max_wait` |
+| `kanban.dispatch_stale_timeout_seconds` | 1800 s (30 min) | Project YAML: `kanban.dispatch_stale_timeout_seconds` |
+| `tracking.stale_running.hours` | 24 h | Project YAML: `tracking.stale_running.hours` |
+| `DEFAULT_STALE_HOURS` | 48 h | Hard-coded in `core/sweeper.py` |
+
+### What breaks self-healing
+
+- Using any completion summary other than `docs posted:`. The dispatcher does not recognize other phrasings and routes to PM_ROUTE instead of APPROVE_ADVANCE.
+- Blocking (instead of completing) when you finish. Documentation should always complete, never block.
+- Crashing before completion. The sweeper eventually notices (at 24 h for `running` cards) but the issue sits in a limbo state — the pipeline is blocked but no fix-attempt loop will rescue it.
+- Not advancing the sweep cursor in `.hermes/doc_sweep_state.json`. While this does not block the current issue, it causes the next documentation run to re-sweep a larger range of PRs, increasing the chance of missed staleness or wasted effort.
+
+### Epic Tier Promotion
+
+When a sub-issue belonging to an epic with dependency DAGs (``Depends on:`` headers) is completed, the dispatcher calls `promote_waiting_tiers()` in `core/tier_promotion.py`. This re-evaluates the epic's other sub-issues and labels the next tier (whose dependencies are all closed) as Ready. Only tier-0 (dependency-free) sub-issues are labelled Ready initially; each merged PR unlocks the next tier.
+
+This behavior is part of the dispatcher's automatic pipeline advancement. You do not need to document tier promotion in your reports unless it's directly relevant to the issue you're documenting, but be aware that epic dependencies are automatically managed by the dispatcher.
 
 ## Quality bar
 - Every changed file in the diff must appear in the "Files Changed" table

@@ -56,11 +56,32 @@ except ImportError:
             return -1, str(exc)
 
 try:
-    from core.util import board_slug as _board_slug, parse_env_file as _parse_env_file
+    from core.util import (
+        board_slug as _board_slug,
+        parse_env_file as _parse_env_file,
+        schedule_to_crontab as _schedule_to_crontab,
+    )
 except ImportError:
     def _board_slug(repo, name=""):  # type: ignore[misc]
         slug = repo.replace("/", "-") if repo else name
         return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
+
+    def _schedule_to_crontab(schedule):  # type: ignore[misc]
+        s = re.sub(r"^every\s+", "", schedule.strip().lower())
+        if re.match(r"^[\d*/,\-]+(\s+[\d*/,\-]+){4}$", s):
+            return schedule.strip()
+        m = re.match(r"^(\d+)m$", s)
+        if m:
+            minutes = int(m.group(1))
+            if minutes >= 60 and minutes % 60 == 0:
+                hours = minutes // 60
+                return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
+            return f"*/{minutes} * * * *"
+        m = re.match(r"^(\d+)h$", s)
+        if m:
+            hours = int(m.group(1))
+            return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
+        return schedule.strip()
 
     def _parse_env_file(path):  # type: ignore[misc]
         try:
@@ -726,7 +747,31 @@ def _cron_cli(args: list[str]) -> tuple[int, str]:
     return _hermes_cli(["cron"] + args, timeout=10)
 
 
-def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
+def _write_schedule_to_config(cfg_path: Path, crontab_schedule: str) -> None:
+    """Rewrite the ``cron.schedule`` value in a daedalus.yaml in place.
+
+    Used after ``_reconcile_cron`` normalises an interval schedule to crontab
+    syntax so the persisted YAML matches the live cron (mirrors the write-back
+    in ``_ensure_dispatch_crons``). Never raises — a write failure just leaves
+    the YAML on the interval value, which the plugin-load self-heal corrects.
+    """
+    try:
+        raw_cfg = cfg_path.read_text()
+        new_cfg = re.sub(
+            r"(schedule\s*:\s*).*",
+            lambda m: f'{m.group(1)}"{crontab_schedule}"',
+            raw_cfg,
+            count=1,
+        )
+        if new_cfg != raw_cfg:
+            cfg_path.write_text(new_cfg)
+    except OSError:
+        pass
+
+
+def _reconcile_cron(
+    project_name: str, cron_cfg: dict, cfg_path: Optional[Path] = None
+) -> dict:
     """Reconcile the real ``hermes cron`` job with the config on save.
 
     Cron job name = ``f"{project_name}-daedalus"``. Each project owns exactly
@@ -739,6 +784,13 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     - duplicates found  → keep none, remove all by hex ID, create fresh
     - empty schedule    → remove all matches
 
+    The schedule is normalised to crontab syntax via ``_schedule_to_crontab``
+    BEFORE it reaches hermes (issue #134). Hermes treats interval syntax like
+    ``60m`` as a *one-shot* job — it runs once, moves to ``[completed]`` and the
+    dispatcher silently stops. Crontab syntax (``0 * * * *``) repeats forever.
+    This mirrors what ``_ensure_dispatch_crons`` already does on plugin load, so
+    a dashboard Save can never produce a one-shot cron.
+
     A cron CLI failure is captured as an error string; this function NEVER
     raises, so a broken ``hermes`` binary cannot fail the config save.
 
@@ -748,6 +800,10 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
             Keys used: ``schedule`` (str), ``deliver`` (str, optional),
             ``notifications`` (list, optional — when set, the dispatcher
             self-delivers and the cron gets NO --deliver target).
+        cfg_path: Optional path to the project's ``daedalus.yaml``. When given
+            and the schedule was normalised (interval → crontab), the new
+            crontab schedule is written back so the YAML stays consistent with
+            the live cron (mirrors ``_ensure_dispatch_crons``).
 
     Returns:
         ``{"cron": "<created|updated|removed|skipped>", "name": "<cron_name>",
@@ -760,11 +816,22 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
         "error": None,
     }
 
-    schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
+    raw_schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
+    # Convert interval syntax ("60m", "every 2h") to crontab so the job repeats
+    # forever — otherwise hermes creates a one-shot job (issue #134).
+    schedule = _schedule_to_crontab(raw_schedule) if raw_schedule else ""
+    # Keep the YAML in step with the live cron when we normalised the schedule.
+    if cfg_path is not None and schedule and schedule != raw_schedule:
+        _write_schedule_to_config(cfg_path, schedule)
     # With notifications[] the dispatcher fans out itself — the cron job must
     # not double-deliver its stdout.
     has_notifications = bool(cron_cfg.get("notifications")) if cron_cfg else False
     deliver = "" if has_notifications else (cron_cfg.get("deliver", "").strip() if cron_cfg else "")
+
+    # Run the dispatcher from this repo's root so it auto-scopes to this project
+    # instead of sweeping every registered repo (issue #137). The repo root is the
+    # parent of the project's ``.hermes/`` dir, where daedalus.yaml lives.
+    workdir = str(cfg_path.parent.parent.resolve()) if cfg_path is not None else ""
 
     # 1. Find existing jobs by name.
     matching_ids: list[str] = []
@@ -782,6 +849,8 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
     # 3. Exactly one job → update it in place (native `hermes cron edit`).
     if len(matching_ids) == 1:
         edit_args = ["edit", matching_ids[0], "--schedule", schedule]
+        if workdir:
+            edit_args += ["--workdir", workdir]
         if deliver:
             edit_args += ["--deliver", deliver]
         rc, out = _cron_cli(edit_args)
@@ -801,6 +870,8 @@ def _reconcile_cron(project_name: str, cron_cfg: dict) -> dict:
         "--script", "daedalus-cron.sh",
         "--no-agent",
     ]
+    if workdir:
+        cmd += ["--workdir", workdir]
     if deliver:
         cmd += ["--deliver", deliver]
 
@@ -948,7 +1019,7 @@ async def create_project(request: Request) -> dict[str, Any]:
     board_ok = bool(ensure_board(board_slug)) if ensure_board is not None else False
 
     # …and its OWN cron job.
-    cron_result = _reconcile_cron(name, cron_cfg)
+    cron_result = _reconcile_cron(name, cron_cfg, cfg_path)
 
     return {
         "status": "adopted" if adopted else "created",
@@ -1051,7 +1122,7 @@ async def post_project_config(request: Request, name: str) -> dict[str, Any]:
 
     # Reconcile the cron job AFTER the YAML is safely on disk.
     cron_cfg = merged.get("cron") or {}
-    cron_result = _reconcile_cron(name, cron_cfg)
+    cron_result = _reconcile_cron(name, cron_cfg, cfg_path)
 
     return {"status": "saved", "path": str(cfg_path), "cron": cron_result}
 

@@ -107,5 +107,16 @@ that issue is sent as a reply via the target form
   on large boards with many open issues it adds VCS API calls per tick.
 - **Root-failure edge.** If the initial root post fails but a later reply
   succeeds, that reply becomes the thread anchor. This self-heals and is rare.
-- **Silent opt-in.** Catch-all targets receive `comment-mirror` with no explicit
-  opt-in (see above). A future opt-out config key is under consideration.
+- **Slack thread broadcast (default: true).** Each notification entry may set
+  `thread_broadcast: false` to disable Slack's `reply_broadcast` flag on
+  mirrored replies — thread replies stay thread-only instead of also appearing
+  in the channel feed. Defaults to `true`. Discord does not have an equivalent;
+  the key has no effect on non-Slack targets.
+
+```yaml
+notifications:
+  - platform: "Slack"
+    target: "slack:C0CHANNEL1"
+    thread_broadcast: false   # only in-thread, no channel feed noise
+```
+

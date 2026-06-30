@@ -29,11 +29,12 @@ def test_list_issues_filters_prs_and_dedupes(provider):
     issue = {"number": 7, "title": "Bug", "body": "b", "state": "open",
              "labels": [{"name": "ready"}], "html_url": "u"}
     pr_item = {"number": 8, "title": "PR", "pull_request": {"url": "x"}, "labels": []}
-    provider._http.get_json.return_value = [issue, pr_item, issue]
+    # list_issues now uses get_paginated (pagination support — issue #228)
+    provider._http.get_paginated.return_value = [issue, pr_item, issue]
     out = provider.list_issues(labels=["ready", "bug"])  # two label calls, same issue
     assert [i.number for i in out] == [7]
     assert out[0].labels == ["ready"]
-    assert provider._http.get_json.call_count == 2  # OR semantics: one call per label
+    assert provider._http.get_paginated.call_count == 2  # OR semantics: one call per label
 
 
 def test_close_issue_patches_state(provider):
@@ -46,6 +47,18 @@ def test_close_issue_patches_state(provider):
 def test_close_issue_false_on_error(provider):
     provider._http.patch_json.side_effect = ProviderError("403", status_code=403)
     assert provider.close_issue(7) is False
+
+
+def test_add_label_success(provider):
+    assert provider.add_label(42, "epic") is True
+    path, body = provider._http.post_json.call_args[0]
+    assert path == "/repos/octo/repo/issues/42/labels"
+    assert body == {"labels": ["epic"]}
+
+
+def test_add_label_failure_returns_false(provider):
+    provider._http.post_json.side_effect = ProviderError("404", status_code=404)
+    assert provider.add_label(42, "epic") is False
 
 
 # ── PRs ───────────────────────────────────────────────────────────────────────
@@ -379,3 +392,81 @@ def test_board_set_status_auto_enrolls_missing_item(provider):
     add_calls = [c for c in provider._http.post_json.call_args_list
                  if "addProjectV2ItemById" in (c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")]
     assert len(add_calls) == 1
+
+
+# ── enrollment retry / backoff (issue #236) ────────────────────────────────
+
+
+def _fail_node_id_n_times(provider, n):
+    """Wrap _gql_mock so the issue node-id query errors `n` times then succeeds.
+
+    Mimics GitHub returning "could not resolve to an Issue" for a freshly
+    created issue that hasn't propagated yet. Returns a dict tracking the call
+    count so tests can assert how many attempts ran.
+    """
+    base = provider._http.post_json.side_effect
+    calls = {"node_id": 0}
+
+    def side(path, payload, **kw):
+        q = payload.get("query", "")
+        if "issue(number" in q and "repository" in q and "items" not in q:
+            calls["node_id"] += 1
+            if calls["node_id"] <= n:
+                return {"errors": [{"message":
+                        "Could not resolve to an Issue with the number of 99."}]}
+        return base(path, payload, **kw)
+    provider._http.post_json.side_effect = side
+    return calls
+
+
+@mock.patch("core.providers.github.time.sleep")
+def test_resolve_node_id_retries_then_succeeds(sleep, provider):
+    """_resolve_issue_node_id retries with backoff and returns the id once it resolves."""
+    _gql_mock(provider)
+    calls = _fail_node_id_n_times(provider, 2)  # fail twice, succeed on the third
+    assert provider._resolve_issue_node_id(99) == "ISSUE_NODE_1"
+    assert calls["node_id"] == 3
+    # First attempt has no delay; backoff before attempts 2 and 3.
+    assert sleep.call_args_list == [mock.call(2), mock.call(4)]
+
+
+@mock.patch("core.providers.github.time.sleep")
+def test_resolve_node_id_succeeds_first_try_no_sleep(sleep, provider):
+    """Happy path resolves on the first attempt with no backoff delay."""
+    _gql_mock(provider)
+    assert provider._resolve_issue_node_id(99) == "ISSUE_NODE_1"
+    sleep.assert_not_called()
+
+
+@mock.patch("core.providers.github.time.sleep")
+def test_board_add_item_retries_then_enrolls(sleep, provider):
+    """_board_add_item recovers from a transient resolution failure and enrolls."""
+    _gql_mock(provider)
+    _fail_node_id_n_times(provider, 1)
+    assert provider._board_add_item(99) == "I_NEW"
+    assert provider.enrollment_failures == []
+    sleep.assert_called_once_with(2)
+
+
+@mock.patch("core.providers.github.time.sleep")
+def test_board_add_item_all_retries_fail_records_failure(sleep, provider):
+    """When every attempt fails, _board_add_item records the number for the summary."""
+    _gql_mock(provider)
+    _fail_node_id_n_times(provider, 99)  # always fails
+    assert provider._board_add_item(99) is None
+    assert provider.enrollment_failures == [99]
+    # 3 attempts → 2 backoff sleeps (0s, 2s, 4s).
+    assert sleep.call_args_list == [mock.call(2), mock.call(4)]
+
+
+@mock.patch("core.providers.github.time.sleep")
+def test_board_add_item_exhaustion_logs_error(sleep, provider, caplog):
+    """Exhausted retries escalate to ERROR (not WARNING) naming the issue number."""
+    import logging
+    _gql_mock(provider)
+    _fail_node_id_n_times(provider, 99)  # always fails
+    with caplog.at_level(logging.ERROR, logger="daedalus.providers"):
+        assert provider._board_add_item(99) is None
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("99" in r.getMessage() and "manually" in r.getMessage()
+               for r in errors), f"expected ERROR naming issue #99: {[r.getMessage() for r in errors]}"

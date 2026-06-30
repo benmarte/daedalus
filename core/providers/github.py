@@ -7,6 +7,7 @@ metadata:read, projects:write (boards only).
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 from .base import (BoardSummary, CIStatus, Comment, FieldDef, FieldOption,
@@ -16,6 +17,12 @@ from .http import HTTPClient, ProviderError
 
 API_URL = "https://api.github.com"
 GRAPHQL_PATH = "/graphql"
+
+# Backoff delays (seconds) before each issue node-id resolution attempt during
+# board enrollment. Newly-created issues sometimes haven't propagated through
+# GitHub's GraphQL layer yet, yielding transient "could not resolve to an
+# Issue" errors; retry a few times before giving up. 3 attempts: 0s, 2s, 4s.
+_ENROLLMENT_RETRY_DELAYS = (0, 2, 4)
 
 
 class GitHubProvider(VCSProvider):
@@ -46,19 +53,36 @@ class GitHubProvider(VCSProvider):
         self._board_number = (self._cfg.get("tracking") or {}).get("github_project_number")
         self._board_meta: Optional[Dict[str, Any]] = None   # project_id/status_field_id/options
         self._board_items: Optional[List[Dict[str, Any]]] = None
+        # Issue numbers whose board enrollment failed (node id never resolved).
+        # Surfaced in the dispatch summary under ``enrollment_failures``.
+        self.enrollment_failures: List[int] = []
 
     # ── issues ───────────────────────────────────────────────────────────────
     def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
                     limit: int = 50) -> List[IssueSummary]:
-        """ANY-label semantics: one call per label, deduped (gh-CLI parity)."""
+        """ANY-label semantics: one call per label, deduped (gh-CLI parity).
+
+        ``limit`` is the page size for each request; all pages are fetched until
+        GitHub returns fewer items than the page size (end-of-results signal).
+        This ensures boards with >100 open issues are never silently truncated
+        (#228). Use ``_fetch_issues(provider, filters)`` with ``filters.max_issues``
+        to apply a hard ceiling on the total result count.
+        """
+        per_page = min(limit, 100)
         label_sets = [[l] for l in (labels or []) if l] or [[]]
         seen: Dict[int, IssueSummary] = {}
         for ls in label_sets:
-            params: Dict[str, Any] = {"state": state, "per_page": min(limit, 100)}
+            params: Dict[str, Any] = {"state": state, "per_page": per_page}
             if ls:
                 params["labels"] = ",".join(ls)
             try:
-                data = self._http.get_json(f"/repos/{self.repo}/issues", params=params)
+                data = self._http.get_paginated(
+                    f"/repos/{self.repo}/issues",
+                    params=params,
+                    style="link_header",
+                    per_page=per_page,
+                    max_pages=50,
+                )
             except ProviderError as e:
                 self._log.warning("list_issues failed: %s", e)
                 continue
@@ -73,7 +97,7 @@ class GitHubProvider(VCSProvider):
                         labels=[l.get("name", "") for l in it.get("labels") or []],
                         state=(it.get("state") or "open").lower(),
                         url=it.get("html_url") or "")
-        return list(seen.values())[:limit]
+        return list(seen.values())
 
     def close_issue(self, issue_number: int) -> bool:
         try:
@@ -126,6 +150,41 @@ class GitHubProvider(VCSProvider):
             state=(data.get("state") or "open").lower(),
             url=data.get("html_url") or "",
         )
+
+    def blockers(self, issue_number: int) -> List[int]:
+        """Open blockers via native issue dependencies
+        (``GET …/issues/{n}/dependencies/blocked_by``, GA Aug 2025) merged with
+        the portable ``Depends on:`` body fallback.
+
+        Each returned item is a full issue object carrying ``state`` inline, so
+        open-filtering needs no extra request. Cross-repo blockers are ignored —
+        dispatch is scoped to a single repo and only local issue numbers are
+        dispatchable. Repos/accounts without the dependencies feature 404 here;
+        that degrades silently to the body fallback (logged only on other
+        errors, so the common no-feature case stays quiet).
+        """
+        out: List[int] = []
+        try:
+            deps = self._http.get_json(
+                f"/repos/{self.repo}/issues/{issue_number}/dependencies/blocked_by",
+                params={"per_page": 100})
+        except ProviderError as e:
+            if e.status_code != 404:
+                self._log.warning("blockers #%s blocked_by failed: %s", issue_number, e)
+            deps = []
+        for it in deps or []:
+            if "pull_request" in it:    # dependencies can include PRs — skip
+                continue
+            repo_full = ((it.get("repository") or {}).get("full_name") or "").strip()
+            if repo_full and repo_full != self.repo:
+                continue  # cross-repo blocker — its number isn't local, can't gate on it
+            num = it.get("number")
+            if isinstance(num, int) and (it.get("state") or "open").lower() == "open":
+                out.append(num)
+        for n in self._depends_on_blockers(issue_number):
+            if n not in out:
+                out.append(n)
+        return out
 
     def get_issue_comments(self, issue_number: int) -> List[Dict[str, Any]]:
         try:
@@ -250,6 +309,24 @@ class GitHubProvider(VCSProvider):
             self._log.info("merge_pr: merged PR #%s (%s)", pr_number, method)
             return True
         except ProviderError as e:
+            # GitHub returns 405/422 when the PR is already merged or cleanup
+            # fails after the merge (e.g. branch in a worktree). Verify actual
+            # state before reporting failure — if MERGED on GitHub, it's a win.
+            try:
+                pr_data = self._http.get_json(f"/repos/{self.repo}/pulls/{pr_number}")
+                if pr_data and pr_data.get("merged_at"):
+                    self._log.warning(
+                        "merge_pr PR #%s: API error (%s) but PR is already MERGED — "
+                        "treating as success",
+                        pr_number, e,
+                    )
+                    return True
+            except ProviderError as check_err:
+                self._log.warning(
+                    "merge_pr PR #%s: PUT failed (%s); fallback state-check GET also failed: %s",
+                    pr_number, e, check_err,
+                )
+                return False
             self._log.warning("merge_pr PR #%s failed: %s", pr_number, e)
             return False
 
@@ -277,6 +354,51 @@ class GitHubProvider(VCSProvider):
             self._log.warning("post_issue_comment #%s failed: %s", issue_number, e)
             return False
         return True
+
+    def add_label(self, issue_number: int, label_name: str) -> bool:
+        try:
+            self._http.post_json(
+                f"/repos/{self.repo}/issues/{issue_number}/labels",
+                {"labels": [label_name]},
+            )
+            return True
+        except ProviderError as e:
+            self._log.warning("add_label #%s %r failed: %s", issue_number, label_name, e)
+            return False
+
+    def has_label(self, issue_number: int, label_name: str) -> bool:
+        """Return True if ``issue_number`` has ``label_name`` applied.
+
+        Uses the ``labels`` field returned by ``get_issue`` so it piggybacks on
+        the existing ``GET /repos/{owner}/{repo}/issues/{n}`` call used
+        elsewhere. Never raises — returns False on any provider error (base
+        class contract at ``VCSProvider.has_label``).
+        """
+        issue = self.get_issue(issue_number)
+        if issue is None:
+            return False
+        target = label_name.strip().lower()
+        labels = getattr(issue, "labels", None) or []
+        return any((n or "").strip().lower() == target for n in labels)
+
+    def ensure_labels(self) -> List[str]:
+        """Create required Daedalus labels in this repo if they don't exist yet."""
+        from .base import REQUIRED_LABELS
+        created: List[str] = []
+        for ldef in REQUIRED_LABELS:
+            try:
+                self._http.post_json(
+                    f"/repos/{self.repo}/labels",
+                    {"name": ldef["name"], "color": ldef["color"],
+                     "description": ldef["description"]},
+                )
+                created.append(ldef["name"])
+                self._log.info("ensure_labels: created %r", ldef["name"])
+            except ProviderError as e:
+                if e.status_code == 422:
+                    continue  # label already exists — idempotent
+                self._log.warning("ensure_labels: create %r failed: %s", ldef["name"], e)
+        return created
 
     def append_changelog(self, base_branch: str, entry: str) -> bool:
         """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the Contents API.
@@ -479,6 +601,32 @@ class GitHubProvider(VCSProvider):
         self._board_meta = None  # clear cache so next call reloads with the new option
         return True
 
+    def _resolve_issue_node_id(self, issue_number: int) -> Optional[str]:
+        """Resolve an issue's GraphQL node id, retrying with exponential backoff.
+
+        Newly-created issues sometimes haven't propagated through GitHub's
+        GraphQL infrastructure yet, yielding transient "could not resolve to an
+        Issue" errors. Retry per ``_ENROLLMENT_RETRY_DELAYS`` before giving up.
+        Returns the node id, or None if every attempt fails.
+        """
+        repo_name = self.repo.split("/", 1)[1]
+        q = """query($owner:String!,$name:String!,$number:Int!){
+                 repository(owner:$owner,name:$name){
+                   issue(number:$number){ id } } }"""
+        attempts = len(_ENROLLMENT_RETRY_DELAYS)
+        for attempt, delay in enumerate(_ENROLLMENT_RETRY_DELAYS, start=1):
+            if delay:
+                time.sleep(delay)
+            data = self._graphql(
+                q, {"owner": self.owner, "name": repo_name, "number": issue_number})
+            issue_id = (((data or {}).get("repository") or {}).get("issue") or {}).get("id")
+            if issue_id:
+                return issue_id
+            self._log.warning(
+                "board: issue #%s node id unresolved (attempt %d/%d)",
+                issue_number, attempt, attempts)
+        return None
+
     def _board_add_item(self, issue_number: int) -> Optional[str]:
         """Enroll an issue into the project via addProjectV2ItemById.
 
@@ -492,15 +640,14 @@ class GitHubProvider(VCSProvider):
         if not meta:
             return None
         project_id = meta["project_id"]
-        # Resolve the issue's GraphQL node id.
-        repo_name = self.repo.split("/", 1)[1]
-        q = """query($owner:String!,$name:String!,$number:Int!){
-                 repository(owner:$owner,name:$name){
-                   issue(number:$number){ id } } }"""
-        data = self._graphql(q, {"owner": self.owner, "name": repo_name, "number": issue_number})
-        issue_id = (((data or {}).get("repository") or {}).get("issue") or {}).get("id")
+        # Resolve the issue's GraphQL node id (retries transient propagation lag).
+        issue_id = self._resolve_issue_node_id(issue_number)
         if not issue_id:
-            self._log.warning("board: cannot resolve issue #%s node id for enrollment", issue_number)
+            self._log.error(
+                "board: failed to resolve issue #%s node id after %d attempts — "
+                "enroll it manually on project #%s",
+                issue_number, len(_ENROLLMENT_RETRY_DELAYS), self._board_number)
+            self.enrollment_failures.append(issue_number)
             return None
         m = """mutation($project:ID!,$content:ID!){
                  addProjectV2ItemById(input:{projectId:$project,contentId:$content}){

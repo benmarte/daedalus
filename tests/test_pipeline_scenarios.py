@@ -23,6 +23,7 @@ from core.iterate import (
     PM_ROUTE,
     classify_blocked,
 )
+from core.providers.base import IssueSummary
 
 REPO = "benmarte/daedalus"
 SLUG = "proj"
@@ -85,7 +86,7 @@ def test_scenario_a_happy_path(pipeline, fake_issue, fake_provider):
     dev_tid = kanban.created_with_key(f"developer-{n}")["id"]
     kanban.block_task(SLUG, dev_tid, f"review-required: PR #501 opened for {REPO}#{n}")
     provider = fake_provider(ci_status="green")
-    counts, advance_prs, pending = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, advance_prs, pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[ADVANCE] == 1
     assert 501 in advance_prs
     assert kanban.tasks[dev_tid]["status"] == "done"
@@ -93,7 +94,7 @@ def test_scenario_a_happy_path(pipeline, fake_issue, fake_provider):
     # 4. Reviewer approves → terminal complete.
     rev_tid = kanban.created_with_key(f"reviewer-{n}")["id"]
     kanban.block_task(SLUG, rev_tid, "approved — LGTM, no findings. PR #501")
-    counts, _prs, _pending = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, _prs, _pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[APPROVE_ADVANCE] == 1
     assert kanban.tasks[rev_tid]["status"] == "done"
 
@@ -167,7 +168,7 @@ def test_scenario_c_human_review_escalation(pipeline, fake_blocked_card, fake_pr
 
     # Drive the route: run_iterate creates a PM routing card and blocks the reviewer.
     provider = fake_provider(ci_status="green")
-    counts, _prs, _pending = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, _prs, _pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[PM_ROUTE] == 1
     pm_route = next(
         (t for t in kanban.tasks.values() if t["assignee"] == PM and t["status"] == "running"),
@@ -184,10 +185,70 @@ def test_scenario_c_human_review_escalation(pipeline, fake_blocked_card, fake_pr
     assert classify_blocked(PM, "anything at all", False) == ESCALATE
 
     # Next tick: escalation fires (comment posted), no card is completed.
-    counts, _prs, _pending = iterate.run_iterate(SLUG, REPO, provider=provider)
+    counts, _prs, _pending, _qa_f, *_ = iterate.run_iterate(SLUG, REPO, provider=provider)
     assert counts[ESCALATE] == 1
     escalation_comments = [c for c in kanban.comments_on(pm_tid) if "ESCALATE" in c]
     assert escalation_comments, "expected an escalation comment on the PM card"
     # Escalation leaves the card blocked for a human — it is never auto-completed.
     assert kanban.tasks[pm_tid]["status"] == "blocked"
     assert pm_tid not in [tid for tid, _ in kanban.completed]
+
+
+# ── issues_map miss → fallback get_issue() with bounded retry (issue #185) ────
+
+
+def _seed_completed_pm_spec(kanban, n):
+    """Seed a PM card completed with a SPEC summary for issue ``n``."""
+    kanban.seed(
+        assignee=PM,
+        title=f"#{n} Add a tidy feature",
+        status="done",
+        summary="SPEC: acceptance criteria defined",
+    )
+
+
+def test_issues_map_miss_recovers_on_retry(pipeline, fake_provider, monkeypatch):
+    """A confirmed-spec issue absent from the list window whose first
+    ``get_issue`` calls fail transiently is still fetched on retry, so team
+    triage is created (issue #185)."""
+    disp, kanban = pipeline.disp, pipeline.kanban
+    monkeypatch.setattr(disp.time, "sleep", lambda _s: None)
+    n = 901
+
+    _seed_completed_pm_spec(kanban, n)
+    # Issue is NOT in the list window; provider serves it after 2 transient misses.
+    provider = fake_provider(
+        issues={n: IssueSummary(number=n, title="Add a tidy feature")},
+        get_issue_failures=2,
+    )
+
+    triggered = _check_pm(disp, kanban, {}, provider=provider)
+
+    assert triggered == [n]
+    # 1 initial call + 2 retries (both delays consumed before success).
+    assert provider.get_issue_calls == 3
+    for role in _TEAM_ROLES:
+        assert kanban.created_with_key(f"{role}-{n}") is not None, role
+
+
+def test_issues_map_miss_persistent_failure_skips(
+    pipeline, fake_provider, monkeypatch, caplog
+):
+    """When every ``get_issue`` attempt fails, behaviour is unchanged: retries
+    are bounded, a warning is logged, and no team triage is created."""
+    disp, kanban = pipeline.disp, pipeline.kanban
+    monkeypatch.setattr(disp.time, "sleep", lambda _s: None)
+    n = 902
+
+    _seed_completed_pm_spec(kanban, n)
+    # Provider never returns the issue (transient outage outlasts all retries).
+    provider = fake_provider(issues={}, get_issue_failures=99)
+
+    with caplog.at_level("WARNING"):
+        triggered = _check_pm(disp, kanban, {}, provider=provider)
+
+    assert triggered == []
+    # Bounded: 1 initial call + len(_GET_ISSUE_RETRY_DELAYS) retries, no more.
+    assert provider.get_issue_calls == 1 + len(disp._GET_ISSUE_RETRY_DELAYS)
+    assert kanban.created_with_key(f"developer-{n}") is None
+    assert any("skipping team triage creation" in r.message for r in caplog.records)

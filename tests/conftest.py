@@ -32,6 +32,11 @@ def _load_dispatch():
     p = ROOT / "scripts" / "daedalus_dispatch.py"
     spec = importlib.util.spec_from_file_location("disp", str(p))
     mod = importlib.util.module_from_spec(spec)
+    # Register before exec so the module can resolve itself via sys.modules
+    # (e.g. main()'s ``sys.modules[__name__]`` for the --self-test harness) — the
+    # idiomatic importlib pattern. Each call replaces the entry with a fresh
+    # module; callers keep their own reference, so isolation is unchanged.
+    sys.modules["disp"] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -81,6 +86,8 @@ class FakeKanban:
         self.unblocked_calls: List[tuple] = []
         self.created: List[Dict[str, Any]] = []
         self.comments: List[tuple] = []
+        self.archived: List[str] = []
+        self.decomposed: List[str] = []
 
     # ---- seeding (not counted as pipeline mutations) ----
 
@@ -217,6 +224,62 @@ class FakeKanban:
         self.comments.append((task_id, body))
         return True
 
+    def archive_task(self, slug: str, task_id: str) -> bool:
+        t = self.tasks.get(task_id)
+        if not t:
+            return False
+        t["status"] = "archived"
+        self.archived.append(task_id)
+        return True
+
+    def create_triage(
+        self,
+        slug: str,
+        issue_number: Optional[int],
+        title: str,
+        body: str = "",
+        idempotency_key: Optional[str] = None,
+        workspace: Optional[str] = None,
+        **_kwargs: Any,
+    ) -> Optional[str]:
+        """Create a TRIAGE card for a (sub-)issue and return its id (#891).
+
+        Honours ``idempotency_key`` like the real CLI so a re-issued decompose
+        returns the existing card rather than a duplicate.
+        """
+        if idempotency_key:
+            for t in self.tasks.values():
+                if t.get("idempotency_key") == idempotency_key:
+                    return t["id"]
+        self._counter += 1
+        tid = f"t{self._counter}"
+        rec = {
+            "id": tid,
+            "title": title,
+            "body": body,
+            "assignee": "",
+            "status": "triage",
+            "summary": "",
+            "latest_summary": "",
+            "idempotency_key": idempotency_key or "",
+            "workspace": workspace or "",
+            "issue_number": issue_number,
+            "reason": "",
+            "comments": [],
+        }
+        self.tasks[tid] = rec
+        self.created.append(dict(rec))
+        return tid
+
+    def decompose(self, slug: str, task_id: str) -> bool:
+        """Fan a triage card out into role sub-tasks. Records the call (#891)."""
+        t = self.tasks.get(task_id)
+        if not t:
+            return False
+        t["status"] = "decomposed"
+        self.decomposed.append(task_id)
+        return True
+
     # ---- assertion helpers ----
 
     def created_with_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
@@ -249,15 +312,43 @@ class FakeProvider:
         issues: Optional[Dict[int, Any]] = None,
         branch_prs: Optional[Dict[str, int]] = None,
         supports_ci_status: bool = True,
+        blockers: Optional[Dict[int, List[int]]] = None,
+        open_prs: Optional[set[int]] = None,
+        merged_prs: Optional[set[int]] = None,
+        get_issue_failures: int = 0,
+        closed_issues: Optional[set[int]] = None,
+        close_issue_fail_for: Optional[set[int]] = None,
+        post_issue_comment_fail_for: Optional[set[int]] = None,
     ) -> None:
         self.name = name
         self._ci = ci_status
         self._issues = issues or {}
         self._branch_prs = branch_prs or {}
         self.supports_ci_status = supports_ci_status
+        self._blockers = blockers or {}
+        # #953: set of open PR numbers for the pre-QA gate. None (default) means
+        # "assume any resolved PR is open" — preserves pre-#953 advance tests.
+        self._open_prs = open_prs
+        # #957: set of merged PR numbers. None (default) means "no PR is merged"
+        # so is_pr_merged returns False — preserves pre-#957 behaviour.
+        self._merged_prs = merged_prs
+        # Number of leading get_issue calls that return None before serving the
+        # issue — models a transient outage that recovers (issue #185).
+        self._get_issue_failures = get_issue_failures
+        self.get_issue_calls = 0
+        self.get_issue_comments_calls = 0
         self.posted_issue_comments: List[tuple] = []
         self.posted_pr_comments: List[tuple] = []
         self.merged: List[tuple] = []
+        self.close_calls: List[int] = []
+        self._closed_issues: set[int] = set(closed_issues or [])
+        self._close_issue_fail_for: set[int] = set(close_issue_fail_for or [])
+        self._post_comment_fail_for: set[int] = set(post_issue_comment_fail_for or [])
+        # Sub-issue decomposition (#891 / #902): create_issue registers a fresh
+        # issue into ``_issues`` (so get_issue/get_issue_comments see it) and
+        # records it here; add_label tracks labels per issue number.
+        self.created_issues: List[Dict[str, Any]] = []
+        self.labels: Dict[int, List[str]] = {}
 
     def get_pr_ci_status(self, pr_number: int) -> str:
         if isinstance(self._ci, dict):
@@ -270,18 +361,90 @@ class FakeProvider:
     def find_pr_for_branch(self, branch: str) -> Optional[int]:
         return self._branch_prs.get(branch)
 
+    def is_pr_open(self, pr_number: int) -> bool:
+        # Default (no open_prs configured): treat every PR as open so existing
+        # advance tests are unaffected. When configured, membership decides.
+        if self._open_prs is None:
+            return True
+        return pr_number in self._open_prs
+
+    def is_pr_merged(self, pr_number: int) -> bool:
+        # #957: only the explicitly-configured merged set counts. Default None
+        # → no PR is merged, so pre-#957 tests are unaffected.
+        if self._merged_prs is None:
+            return False
+        return pr_number in self._merged_prs
+
     def get_issue(self, issue_number: int) -> Any:
+        self.get_issue_calls += 1
+        if self._get_issue_failures > 0:
+            self._get_issue_failures -= 1
+            return None
         return self._issues.get(issue_number)
+
+    def blockers(self, issue_number: int) -> List[int]:
+        return list(self._blockers.get(issue_number, []))
 
     def list_issues(self, *args: Any, **kwargs: Any) -> List[Any]:
         return list(self._issues.values())
 
+    def create_issue(self, title: str, body: str = "", labels: Optional[List[str]] = None) -> int:
+        """Allocate the next issue number, register and record the new issue.
+
+        Mirrors the provider call ``_execute_planner_decompose_inner`` makes for
+        each sub-issue (#891). The new issue is added to ``_issues`` so a later
+        ``get_issue``/``get_issue_comments`` for the triage step resolves it, and
+        appended to ``created_issues`` so tests can assert how many were created.
+        """
+        n = (max(self._issues) if self._issues else 1000) + 1
+        rec = {"number": n, "title": title, "body": body, "labels": list(labels or [])}
+        self._issues[n] = rec
+        self.created_issues.append(rec)
+        if labels:
+            self.labels.setdefault(n, []).extend(labels)
+        return n
+
+    def add_label(self, issue_number: int, label: str) -> bool:
+        """Record a label applied to an issue (e.g. ``Ready`` / ``epic``, #891)."""
+        self.labels.setdefault(issue_number, []).append(label)
+        return True
+
+    def has_label(self, issue_number: int, label_name: str) -> bool:
+        """Return True if ``label_name`` is present for ``issue_number`` (#998)."""
+        return label_name in self.labels.get(issue_number, [])
+
+    def get_issue_comments(self, issue_number: int) -> List[Dict[str, str]]:
+        """Return comments previously posted to *issue_number* via this provider.
+
+        Decompose's second-pass idempotency check reads these to detect the
+        marker comment it posted on the first pass (#891).
+        """
+        self.get_issue_comments_calls += 1
+        return [{"body": body} for (n, body) in self.posted_issue_comments if n == issue_number]
+
     def post_issue_comment(self, issue_number: int, body: str) -> bool:
         self.posted_issue_comments.append((issue_number, body))
+        if issue_number in self._post_comment_fail_for:
+            return False
         return True
 
     def post_pr_comment(self, pr_number: int, body: str) -> bool:
         self.posted_pr_comments.append((pr_number, body))
+        return True
+
+    def get_issue_state(self, issue_number: int) -> str:
+        """Mock get_issue_state — return 'closed' if in _closed_issues, else 'open'."""
+        return "closed" if issue_number in self._closed_issues else "open"
+
+    def close_issue(self, issue_number: int) -> bool:
+        """Mock close_issue — record call, simulate failure if requested."""
+        # Already-closed → short-circuit (no API call, no recording)
+        if issue_number in self._closed_issues:
+            return True
+        self.close_calls.append(issue_number)
+        if issue_number in self._close_issue_fail_for:
+            return False
+        self._closed_issues.add(issue_number)
         return True
 
     def merge_pr(self, pr_number: int, merge_method: str = "squash") -> bool:
@@ -290,6 +453,176 @@ class FakeProvider:
 
     def board_configured(self) -> bool:
         return False
+
+
+# ── multi-tick pipeline harness (issue #901) ──────────────────────────────────
+# A reusable driver that runs N *real* dispatcher ticks over the shared in-memory
+# board, simulating each role's agent between ticks, and records the stage
+# progression so tests can assert the pipeline advances one stage per tick and
+# reaches a terminal ``done`` state without sticking or looping. Where
+# ``test_e2e_full_pipeline`` hand-drives every handoff in sequence, this harness
+# generalises that into an N-tick loop other suites (e.g. #902) can build on.
+
+# role name → assignee profile (mirrors the live ``*-daedalus`` roster).
+PIPELINE_ROLES = {
+    "validator": "validator-daedalus",
+    "pm": "project-manager-daedalus",
+    "developer": "developer-daedalus",
+    "qa": "qa-daedalus",
+    "reviewer": "reviewer-daedalus",
+    "security": "security-analyst-daedalus",
+    "accessibility": "accessibility-daedalus",
+    "docs": "documentation-daedalus",
+}
+
+# Dependency order the live pipeline advances in. The harness always drives the
+# earliest-in-order card still ``running`` (the frontier), so downstream roles
+# (qa, reviewer, …) never hand off before the developer's PR exists — even though
+# all five team cards are created ``running`` at PM-spec time.
+STAGE_ORDER = [
+    "validator", "pm", "developer", "qa",
+    "reviewer", "security", "accessibility", "docs",
+]
+
+# Reverse map: assignee profile → role name.
+_ASSIGNEE_ROLE = {profile: role for role, profile in PIPELINE_ROLES.items()}
+
+
+def _role_handoff(role: str, *, issue: int, repo: str, pr: int) -> tuple:
+    """Return ``(action, signal)`` for a role's simulated agent.
+
+    ``action`` is ``"complete"`` (validator/PM emit a done-card summary the
+    dispatcher reads) or ``"block"`` (team roles emit a ``review-required:``
+    handoff the dispatcher auto-advances). The signal strings mirror the live
+    handoffs exercised by ``test_e2e_full_pipeline``.
+    """
+    signals = {
+        "validator": ("complete", "CONFIRMED: reproduced on main; scope is clear"),
+        "pm": ("complete", "SPEC: acceptance criteria defined"),
+        "developer": ("block", f"review-required: PR #{pr} opened for {repo}#{issue}"),
+        "qa": ("block", f"review-required: qa-passed: PR #{pr} — suite green"),
+        "reviewer": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
+        "security": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
+        "accessibility": ("block", f"review-required: a11y-skipped: no UI changes. PR #{pr}"),
+        "docs": ("block", f"review-required: docs posted: issue #{issue} PR #{pr} — README updated"),
+    }
+    return signals[role]
+
+
+class MultiTickHarness:
+    """Drive a seeded issue through the pipeline by running real dispatcher ticks.
+
+    Each :meth:`tick` (1) simulates the *frontier* role's agent — completing the
+    validator/PM card or blocking a team card with its ``review-required:``
+    handoff — then (2) runs one real dispatcher pass (``run_iterate`` →
+    ``_check_confirmed_validators`` → ``_check_completed_pm``) over the shared
+    in-memory board, in the same order the live ``run()`` does. ``stage_log``
+    records the role processed each tick so callers can assert stage progression.
+    """
+
+    def __init__(
+        self,
+        pipeline: Any,
+        provider: Any,
+        *,
+        repo: str = "benmarte/daedalus",
+        slug: str = "proj",
+        issue: int = 901,
+        pr: int = 5901,
+    ) -> None:
+        self.disp = pipeline.disp
+        self.iterate = pipeline.iterate
+        self.kanban = pipeline.kanban
+        self.provider = provider
+        self.repo = repo
+        self.slug = slug
+        self.issue = issue
+        self.pr = pr
+        self.issues_map: Dict[int, Dict[str, Any]] = {}
+        self.stage_log: List[str] = []
+
+    # ---- setup ----
+
+    def seed(self, issue_card: Dict[str, Any]) -> None:
+        """Seed the issue's validator card (``running``) and register the issue."""
+        self.issues_map = {self.issue: issue_card}
+        self.kanban.seed(
+            assignee=PIPELINE_ROLES["validator"],
+            title=f"#{self.issue} {issue_card['title']}",
+            status="running",
+        )
+
+    # ---- one tick ----
+
+    def _frontier(self) -> tuple:
+        """Return ``(role, card)`` for the earliest-in-order ``running`` card."""
+        running: Dict[str, Dict[str, Any]] = {}
+        for t in self.kanban.tasks.values():
+            if (t.get("status") or "") != "running":
+                continue
+            role = _ASSIGNEE_ROLE.get(t.get("assignee"))
+            if role is not None:
+                running.setdefault(role, t)
+        for role in STAGE_ORDER:
+            if role in running:
+                return role, running[role]
+        return None, None
+
+    def _simulate_agent(self, role: str, card: Dict[str, Any]) -> None:
+        action, signal = _role_handoff(role, issue=self.issue, repo=self.repo, pr=self.pr)
+        if action == "complete":
+            self.kanban.complete(self.slug, card["id"], signal)
+        else:
+            self.kanban.block_task(self.slug, card["id"], signal)
+
+    def _dispatch_pass(self) -> None:
+        """Run one dispatcher pass over the board (iterate → validator → PM)."""
+        self.iterate.run_iterate(self.slug, self.repo, provider=self.provider)
+        self.disp._check_confirmed_validators(
+            self.slug, self.repo, self.issues_map, 3, "", "", "dev", "github",
+        )
+        self.disp._check_completed_pm(
+            self.slug, self.repo, self.issues_map, 3, "", "", "dev", "github",
+        )
+
+    def tick(self) -> Optional[str]:
+        """Simulate the frontier agent (if any) then run one dispatcher pass.
+
+        Returns the role processed this tick, or ``None`` when the board is idle
+        — terminal or idempotent, where the dispatcher pass is a pure no-op.
+        """
+        role, card = self._frontier()
+        if role is not None:
+            self._simulate_agent(role, card)
+            self.stage_log.append(role)
+        self._dispatch_pass()
+        return role
+
+    def run(self, max_ticks: int = 20) -> List[str]:
+        """Tick until the board is terminal or the budget runs out.
+
+        Returns ``stage_log``. Stops as soon as a tick finds no frontier (every
+        pipeline card is ``done``), so a clean run never burns the full budget.
+        """
+        for _ in range(max_ticks):
+            if self.tick() is None:
+                break
+        return self.stage_log
+
+    # ---- assertions ----
+
+    def pipeline_cards(self) -> List[Dict[str, Any]]:
+        """Every card assigned to a pipeline role (validator … docs)."""
+        return [t for t in self.kanban.tasks.values()
+                if _ASSIGNEE_ROLE.get(t.get("assignee")) is not None]
+
+    def all_done(self) -> bool:
+        """True when every pipeline card has reached ``done``."""
+        cards = self.pipeline_cards()
+        return bool(cards) and all((t.get("status") or "") == "done" for t in cards)
+
+    def created_count(self) -> int:
+        return len(self.kanban.created)
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -366,3 +699,20 @@ def pipeline(fake_kanban, monkeypatch):
     monkeypatch.setattr(disp, "kanban", fake_kanban)
     monkeypatch.setattr(iterate, "kanban", fake_kanban)
     return SimpleNamespace(disp=disp, iterate=iterate, kanban=fake_kanban)
+
+
+@pytest.fixture
+def multi_tick_harness(pipeline, fake_provider):
+    """Factory for a :class:`MultiTickHarness` wired to the shared board.
+
+    Builds a green-CI provider, constructs the harness, and seeds the issue's
+    validator card so the caller can start ticking immediately.
+    """
+
+    def _make(issue_card: Dict[str, Any], *, issue: int = 901, **kwargs: Any) -> MultiTickHarness:
+        provider = fake_provider(ci_status=kwargs.pop("ci_status", "green"))
+        h = MultiTickHarness(pipeline, provider, issue=issue, **kwargs)
+        h.seed(issue_card)
+        return h
+
+    return _make

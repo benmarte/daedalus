@@ -14,11 +14,13 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install deps
-        run: pip install --quiet pyyaml fastapi pytest httpx
+        run: pip install --quiet pyyaml fastapi pytest httpx pytest-xdist pytest-timeout filelock
+      # Plain-script smoke test (uses custom check() runner).
       - name: Plain-script suite (real assertions via custom runner)
         run: python3 tests/test_daedalus.py
-      - name: Pytest suites
-        run: pytest tests/ -q
+      # Parallel pytest with per-test timeout — runs under 10 min on CI.
+      - name: Pytest suites (parallel, with timeout)
+        run: pytest tests/ -n auto --timeout=60
 
   ci-complete:
     needs: [test]

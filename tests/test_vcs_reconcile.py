@@ -52,6 +52,23 @@ class FakeGitLab:
     def get_default_branch(self):
         return self.default
 
+    def ensure_labels(self):
+        """Simulate ensure_labels creating epic, subtask, plus status labels."""
+        # Simulate the behavior of the real GitLab ensure_labels:
+        # - Try to create epic and subtask (succeed if not in _existing)
+        # - Then call ensure_status_labels for board lanes
+        # - Return ALL labels created (in order: epic, subtask, status labels)
+        made = []
+        for n in ["epic", "subtask"]:
+            if n not in self._existing:
+                self._existing.add(n)
+                made.append(n)
+                self.created.append(n)
+        made.extend(self.ensure_status_labels([
+            "Ready", "In progress", "In review", "Done"
+        ]))
+        return made
+
     def ensure_status_labels(self, status_names):
         made = [n for n in status_names if n and n not in self._existing]
         self._existing.update(made)
@@ -81,7 +98,7 @@ def test_enables_board_creates_labels_and_fixes_branch(disp, monkeypatch):
 
     assert resolved["tracking"]["label_board"] is True
     assert resolved["vcs"]["target_branch"] == "master"  # main absent → fixed
-    assert rebuilt.created == ["In progress", "In review", "Done"]
+    assert rebuilt.created == ["epic", "subtask", "In progress", "In review", "Done"]
     assert any("board mode enabled" in n for n in notes)
     assert any("created labels" in n for n in notes)
     assert any("target_branch=master" in n for n in notes)

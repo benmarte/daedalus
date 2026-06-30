@@ -29,6 +29,10 @@ BUNDLED_SKILLS_SRC="$HERMES/hermes-agent/skills"
 # version always matches the cloned source (hermes plugins update only works for
 # git-cloned plugins; local-copy installs are never updated automatically).
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Absolute path to the session-end advance hook installed by postinstall.py.
+# Each profile must register THIS in hooks.on_session_end (see register_advance_hook.py).
+ADVANCE_HOOK="$HERMES/agent-hooks/daedalus-advance.sh"
 PLUGIN_DST="$HERMES/plugins/daedalus"
 if [ "$REPO_ROOT" != "$PLUGIN_DST" ]; then
   echo "Syncing daedalus plugin: $REPO_ROOT → $PLUGIN_DST"
@@ -323,6 +327,16 @@ term["env_passthrough"] = passthrough
 with open(path, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
+
+  # CRITICAL: register the session-end advance hook in THIS profile's config.yaml.
+  # Copying daedalus-advance.sh into ~/.hermes/agent-hooks/ is NOT enough — Hermes
+  # only runs a profile-agent's session-end hooks when they are listed in the
+  # profile's hooks.on_session_end. Without this, the role's worker finishes and the
+  # pipeline stalls until the next hourly cron tick (issue #962: planner-daedalus had
+  # no hooks block at all → 60-min stall). The mutation is idempotent and preserves
+  # any existing config (see scripts/register_advance_hook.py).
+  python3 "$SCRIPT_DIR/register_advance_hook.py" \
+    "$PROFILES/$name/config.yaml" "$ADVANCE_HOOK" 90
 
   # Install role-specific SOUL.md from config/souls/ — overrides the generic
   # SOUL.md copied from default by --clone. This is critical: without it, every

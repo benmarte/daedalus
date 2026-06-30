@@ -54,9 +54,12 @@ class HTTPClient:
 
     # ── core ─────────────────────────────────────────────────────────────────
     def _redact(self, text: str) -> str:
-        if self._token and self._token in (text or ""):
-            return text.replace(self._token, "<REDACTED>")
-        return text or ""
+        if not self._token or not text:
+            return text or ""
+        from urllib.parse import quote as _quote
+        for variant in (self._token, _quote(self._token, safe="")):
+            text = text.replace(variant, "<REDACTED>")
+        return text
 
     def request(self, method: str, path: str, *,
                 params: Optional[Dict[str, Any]] = None,
@@ -81,7 +84,14 @@ class HTTPClient:
                     time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
                     continue
                 raise last_exc
-            if resp.status_code in RETRY_STATUSES and attempt < MAX_RETRIES:
+            # GitHub secondary rate-limit returns 403 with a Retry-After header
+            # or a body containing "rate limit". Treat these as retryable.
+            _is_ratelimit_403 = (
+                resp.status_code == 403
+                and ("rate limit" in resp.text.lower()
+                     or "Retry-After" in resp.headers)
+            )
+            if (resp.status_code in RETRY_STATUSES or _is_ratelimit_403) and attempt < MAX_RETRIES:
                 time.sleep(self._retry_delay(resp, attempt))
                 continue
             if resp.status_code >= 400:

@@ -304,6 +304,77 @@ class TestMain:
         assert hasattr(postinstall, "_check_vcs_tokens")
 
 
+# ── advance hook install tests (#936) ────────────────────────────────────────
+
+
+class TestInstallAdvanceHook:
+    """_install_advance_hook copies both advance-hook files to ~/.hermes/agent-hooks/."""
+
+    def test_install_success(self, postinstall, tmp_path):
+        """Installs daedalus-advance.sh (+x) and daedalus_resolve_project.py to agent-hooks."""
+        sh_source = _repo_root / "scripts" / "daedalus-advance.sh"
+        py_source = _repo_root / "scripts" / "daedalus_resolve_project.py"
+        if not (sh_source.is_file() and py_source.is_file()):
+            pytest.skip("advance hook source scripts not present")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = postinstall._install_advance_hook()
+
+        assert ok is True
+        assert "OK:" in msg
+        hooks_dir = fake_home / ".hermes" / "agent-hooks"
+        sh_installed = hooks_dir / "daedalus-advance.sh"
+        py_installed = hooks_dir / "daedalus_resolve_project.py"
+        # Both files present.
+        assert sh_installed.is_file()
+        assert py_installed.is_file()
+        # Shell script is executable (Hermes execs it on session end).
+        assert sh_installed.stat().st_mode & 0o111
+        # Content copied verbatim from the repo source.
+        assert sh_installed.read_text() == sh_source.read_text()
+        assert py_installed.read_text() == py_source.read_text()
+
+    def test_install_idempotent(self, postinstall, tmp_path):
+        """Running twice leaves the same content (idempotent re-copy on update)."""
+        sh_source = _repo_root / "scripts" / "daedalus-advance.sh"
+        if not sh_source.is_file():
+            pytest.skip("scripts/daedalus-advance.sh not present")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok1, _ = postinstall._install_advance_hook()
+            ok2, _ = postinstall._install_advance_hook()
+        assert ok1 and ok2
+        installed = fake_home / ".hermes" / "agent-hooks" / "daedalus-advance.sh"
+        assert installed.read_text() == sh_source.read_text()
+
+    def test_install_source_missing(self, postinstall, tmp_path):
+        """Returns FAIL when a source script is missing."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        # Build a scripts dir that has postinstall.py but NOT the advance hook files.
+        fake_scripts = tmp_path / "scripts"
+        fake_scripts.mkdir()
+        fake_postinstall = fake_scripts / "postinstall.py"
+        fake_postinstall.write_text((_repo_root / "scripts" / "postinstall.py").read_text())
+
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("postinstall_adv_nomock", str(fake_postinstall))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = mod._install_advance_hook()
+
+        assert ok is False
+        assert "MISSING" in msg
+
+
 # ── webhook handler install tests ────────────────────────────────────────────
 
 
@@ -353,3 +424,321 @@ class TestInstallWebhookHandler:
 
         assert ok is False
         assert "MISSING" in msg
+
+
+# ── cron wrapper / gateway watchdog tests (#187) ─────────────────────────────
+
+
+class TestInstallCronWrapper:
+    """_install_cron_wrapper writes daedalus-cron.sh with the gateway watchdog."""
+
+    def test_wrapper_content(self, postinstall, tmp_path):
+        """Generated wrapper preserves existing behavior AND adds the watchdog block."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, msg = postinstall._install_cron_wrapper()
+
+        assert ok is True
+        assert "OK:" in msg
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+        assert wrapper.is_file()
+        assert wrapper.stat().st_mode & 0o111  # executable
+        text = wrapper.read_text()
+
+        # Existing behavior preserved.
+        assert ".hermes/.env" in text
+        assert "daedalus_dispatch.py" in text
+        assert "exec python3" in text
+
+        # Watchdog: Python-based detection with rate limiting and backoff (#799).
+        assert "gateway_watchdog.py" in text
+        assert "python3" in text
+        assert "--no-dispatch" in text
+        # Overlap protection via mkdir-based lock.
+        assert "mkdir" in text
+        # The watchdog must sit BEFORE the dispatcher exec.
+        assert text.index("gateway_watchdog.py") < text.index("exec python3")
+
+    def test_wrapper_documents_and_parses_plugin_dir(self, postinstall, tmp_path):
+        """Generated wrapper documents --plugin-dir and parses it before the exec (#233)."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            postinstall._install_cron_wrapper()
+        text = (fake_home / ".hermes" / "scripts" / "daedalus-cron.sh").read_text()
+
+        # Documented at the top of the script.
+        assert "--plugin-dir <path>" in text
+        # Parsed (both spaced and =form) and consumed into PLUGIN_DIR.
+        assert "--plugin-dir)" in text
+        assert "--plugin-dir=*)" in text
+        # Override prepends PYTHONPATH and redirects the dispatcher path.
+        assert 'export PYTHONPATH="$PLUGIN_DIR' in text
+        assert 'DISPATCH_HOME="$PLUGIN_DIR"' in text
+        # The exec resolves through DISPATCH_HOME, forwarding only the kept ARGS.
+        assert 'exec python3 "$DISPATCH_HOME/scripts/daedalus_dispatch.py" "${ARGS[@]}"' in text
+        # Parsing happens before the dispatcher is reached.
+        assert text.index("PLUGIN_DIR=") < text.index("exec python3")
+
+
+def _build_fake_bin(tmp_path, *, with_hermes: bool):
+    """Create a bin dir with stub `sleep`/`python3` (+ optional `hermes`).
+
+    The `hermes` stub logs each invocation and reports liveness from a flag
+    file so the post-restart status check can flip to 'running'. `sleep` is a
+    no-op so the wrapper's `sleep 5` doesn't slow the test.
+    """
+    import sys
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    # No-op sleep so the wrapper's `sleep 5` returns instantly.
+    sleep_stub = fake_bin / "sleep"
+    sleep_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+    sleep_stub.chmod(0o755)
+
+    # `python3` must resolve to the running interpreter.
+    py = fake_bin / "python3"
+    py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
+    py.chmod(0o755)
+
+    log = tmp_path / "hermes.log"
+    restart_flag = tmp_path / "restarted"
+
+    if with_hermes:
+        hermes = fake_bin / "hermes"
+        hermes.write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "$1 $2" >> "{log}"\n'
+            'if [ "$1" = "gateway" ] && [ "$2" = "status" ]; then\n'
+            f'  if [ "$GW_MODE" = "down" ] && [ ! -f "{restart_flag}" ]; then\n'
+            '    echo "✗ Gateway is not running"\n'
+            "  else\n"
+            '    echo "✓ Gateway is running — PID 4242"\n'
+            "  fi\n"
+            'elif [ "$1" = "gateway" ] && [ "$2" = "restart" ]; then\n'
+            f'  touch "{restart_flag}"\n'
+            "fi\n"
+            "exit 0\n"  # status always exits 0, just like the real CLI
+        )
+        hermes.chmod(0o755)
+
+    return fake_bin, log, restart_flag
+
+
+class TestCronWrapperIntegration:
+    """Run the generated wrapper end-to-end with a stubbed gateway_watchdog.py."""
+
+    def _install_stub_watchdog(self, dispatch_home: Path, exit_code: int = 0):
+        """Place a stub gateway_watchdog.py that logs its invocation and exit code."""
+        wd = dispatch_home / "scripts" / "gateway_watchdog.py"
+        wd.parent.mkdir(parents=True, exist_ok=True)
+        wd.write_text(
+            "import sys\n"
+            f"print('watchdog invoked', file=sys.stderr)\n"
+            f"sys.exit({exit_code})\n"
+        )
+        return wd
+
+    def _install_stub_dispatcher(self, fake_home: Path, marker):
+        """Place a stub daedalus_dispatch.py that touches `marker`."""
+        disp = fake_home / ".hermes" / "plugins" / "daedalus" / "scripts" / "daedalus_dispatch.py"
+        disp.parent.mkdir(parents=True, exist_ok=True)
+        disp.write_text(
+            "import os\n"
+            f'open(r"{marker}", "w").close()\n'
+        )
+        return disp
+
+    def _run(self, postinstall, tmp_path, *, with_watchdog: bool = True,
+             wd_exit_code: int = 0, extra_args: str = ""):
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, _ = postinstall._install_cron_wrapper()
+        assert ok is True
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+
+        marker = tmp_path / "dispatched"
+        self._install_stub_dispatcher(fake_home, marker)
+
+        if with_watchdog:
+            dispatch_home = fake_home / ".hermes" / "plugins" / "daedalus"
+            self._install_stub_watchdog(dispatch_home, exit_code=wd_exit_code)
+
+        env = {
+            "HOME": str(fake_home),
+            "PATH": f"/usr/bin:/bin",
+        }
+        cmd = ["bash", str(wrapper)] + (extra_args.split() if extra_args else [])
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
+        return marker, result
+
+    def test_watchdog_invoked_before_dispatcher(self, postinstall, tmp_path):
+        """The watchdog script runs before the dispatcher and dispatcher still runs."""
+        marker, result = self._run(postinstall, tmp_path)
+        assert marker.exists(), "dispatcher must be reached after the watchdog"
+        assert "watchdog invoked" in result.stderr
+
+    def test_watchdog_missing_still_dispatches(self, postinstall, tmp_path):
+        """If gateway_watchdog.py is missing, dispatcher still runs (best-effort)."""
+        marker, result = self._run(postinstall, tmp_path, with_watchdog=False)
+        assert marker.exists(), "dispatcher must run even without the watchdog script"
+        assert "watchdog invoked" not in result.stderr
+
+    def test_watchdog_failure_is_best_effort(self, postinstall, tmp_path):
+        """A non-zero watchdog exit does not block the dispatcher (best-effort)."""
+        marker, result = self._run(postinstall, tmp_path, wd_exit_code=1)
+        assert marker.exists(), "dispatcher must run even if the watchdog fails"
+
+    def test_flock_prevents_concurrent_watchdog(self, postinstall, tmp_path):
+        """Non-blocking flock: if lock is held, watchdog block exits silently."""
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            postinstall._install_cron_wrapper()
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+
+        # Pre-create the lock file and hold the lock for the duration of the run.
+        lock_path = fake_home / ".hermes" / "gateway-watchdog.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch()
+
+        marker = tmp_path / "dispatched"
+        self._install_stub_dispatcher(fake_home, marker)
+        dispatch_home = fake_home / ".hermes" / "plugins" / "daedalus"
+        self._install_stub_watchdog(dispatch_home)
+
+        # Hold the lock by exec-ing a background flock, then run the wrapper.
+        env = {"HOME": str(fake_home), "PATH": "/usr/bin:/bin"}
+        # Hold the lock via a subshell that sleeps with flock held
+        hold_lock_cmd = f"exec 9>{lock_path}; flock -n 9; sleep 30"
+        lock_holder = subprocess.Popen(
+            ["bash", "-c", hold_lock_cmd],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        import time; time.sleep(0.05)  # let flock settle
+
+        try:
+            result = subprocess.run(
+                ["bash", str(wrapper)], env=env,
+                capture_output=True, text=True, timeout=10,
+            )
+            # Watchdog must NOT have been invoked (lock held).
+            assert "watchdog invoked" not in result.stderr, (
+                "concurrent watchdog should be skipped under flock"
+            )
+            # Dispatcher must still run.
+            assert marker.exists(), "dispatcher must run even if watchdog is locked out"
+        finally:
+            lock_holder.terminate()
+            lock_holder.wait(timeout=5)
+
+
+def _install_recording_dispatcher(plugin_root, marker, record):
+    """Stub daedalus_dispatch.py that touches `marker` and records argv + PYTHONPATH.
+
+    `record` gets two lines: repr(sys.argv[1:]) then the PYTHONPATH env value,
+    so a test can assert which args were forwarded and whether the dev checkout
+    was prepended to the import path.
+    """
+    disp = plugin_root / "scripts" / "daedalus_dispatch.py"
+    disp.parent.mkdir(parents=True, exist_ok=True)
+    disp.write_text(
+        "import os, sys\n"
+        f'open(r"{marker}", "w").close()\n'
+        f'with open(r"{record}", "w") as f:\n'
+        '    f.write(repr(sys.argv[1:]) + "\\n")\n'
+        '    f.write((os.environ.get("PYTHONPATH") or "") + "\\n")\n'
+    )
+    return disp
+
+
+class TestPluginDirFlag:
+    """--plugin-dir redirects the dispatcher to a local dev checkout (#233)."""
+
+    def _run(self, postinstall, tmp_path, extra_args):
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        with mock.patch.dict("os.environ", {"HOME": str(fake_home)}):
+            ok, _ = postinstall._install_cron_wrapper()
+        assert ok is True
+        wrapper = fake_home / ".hermes" / "scripts" / "daedalus-cron.sh"
+
+        # Installed plugin location (the default source).
+        installed_marker = tmp_path / "installed_ran"
+        installed_rec = tmp_path / "installed_argv"
+        _install_recording_dispatcher(
+            fake_home / ".hermes" / "plugins" / "daedalus",
+            installed_marker, installed_rec)
+
+        # Local dev checkout (the override target).
+        local_dir = tmp_path / "localdev"
+        local_marker = tmp_path / "local_ran"
+        local_rec = tmp_path / "local_argv"
+        _install_recording_dispatcher(local_dir, local_marker, local_rec)
+
+        fake_bin, _, _ = _build_fake_bin(tmp_path, with_hermes=False)
+        env = {"HOME": str(fake_home), "PATH": f"{fake_bin}:/usr/bin:/bin"}
+        result = subprocess.run(
+            ["bash", str(wrapper), *extra_args],
+            env=env, capture_output=True, text=True, timeout=30)
+        return {
+            "stderr": result.stderr,
+            "local": (local_dir, local_marker, local_rec),
+            "installed": (installed_marker, installed_rec),
+        }
+
+    def test_plugin_dir_runs_local_checkout(self, postinstall, tmp_path):
+        """--plugin-dir runs the local dispatcher, warns, prepends PYTHONPATH, and
+        does NOT forward the flag while passing the remaining args through."""
+        local_dir = tmp_path / "localdev"
+        r = self._run(postinstall, tmp_path,
+                      ["--plugin-dir", str(local_dir), "--deliver", "slack"])
+
+        _, local_marker, local_rec = r["local"]
+        installed_marker, _ = r["installed"]
+        assert local_marker.exists(), "local dev dispatcher must run"
+        assert not installed_marker.exists(), "installed dispatcher must be bypassed"
+
+        assert "WARNING --plugin-dir active" in r["stderr"]
+
+        argv_line, pythonpath_line = local_rec.read_text().splitlines()[:2]
+        forwarded = eval(argv_line)
+        assert "--plugin-dir" not in forwarded, "flag must be consumed, not forwarded"
+        assert str(local_dir) not in forwarded
+        assert forwarded == ["--deliver", "slack"], "remaining args pass through verbatim"
+        assert pythonpath_line.split(":")[0] == str(local_dir), \
+            "local checkout must be prepended to PYTHONPATH"
+
+    def test_plugin_dir_accepts_equals_form(self, postinstall, tmp_path):
+        """--plugin-dir=<path> form is also honoured."""
+        local_dir = tmp_path / "localdev"
+        r = self._run(postinstall, tmp_path, [f"--plugin-dir={local_dir}"])
+        _, local_marker, _ = r["local"]
+        installed_marker, _ = r["installed"]
+        assert local_marker.exists()
+        assert not installed_marker.exists()
+
+    def test_plugin_dir_without_value_falls_back(self, postinstall, tmp_path):
+        """A trailing --plugin-dir with no path must not hang; falls back to installed."""
+        r = self._run(postinstall, tmp_path, ["--plugin-dir"])
+        _, local_marker, _ = r["local"]
+        installed_marker, _ = r["installed"]
+        assert installed_marker.exists(), "empty --plugin-dir must use the installed plugin"
+        assert not local_marker.exists()
+
+    def test_no_flag_uses_installed_plugin(self, postinstall, tmp_path):
+        """Without --plugin-dir, the installed plugin runs and nothing is warned."""
+        r = self._run(postinstall, tmp_path, ["--deliver", "slack"])
+        _, local_marker, _ = r["local"]
+        installed_marker, installed_rec = r["installed"]
+        assert installed_marker.exists(), "installed dispatcher must run by default"
+        assert not local_marker.exists()
+        assert "--plugin-dir active" not in r["stderr"]
+        forwarded = eval(installed_rec.read_text().splitlines()[0])
+        assert forwarded == ["--deliver", "slack"]

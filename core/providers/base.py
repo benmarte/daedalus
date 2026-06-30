@@ -48,6 +48,17 @@ def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
 # kept from the Slack-only era so previously-marked PRs are not re-delivered.
 DELIVERY_MARKER = "<!-- daedalus:slack-delivered -->"
 
+# Labels that Daedalus requires in every VCS repo it manages.
+# Providers create these on first dispatch via ensure_labels().
+REQUIRED_LABELS: List[Dict[str, str]] = [
+    {"name": "epic",    "color": "7057ff",
+     "description": "Large issue requiring decomposition into sub-issues"},
+    {"name": "subtask", "color": "0075ca",
+     "description": "Child issue created from an epic decomposition"},
+    {"name": "Ready",   "color": "a2eeef",
+     "description": "Issue ready for developer work — no outstanding dependencies blockers"},
+]
+
 # Canonical pipeline statuses → default provider-facing names. Overridable per
 # project via vcs.status_map (values are board columns / labels / WI states).
 DEFAULT_STATUS_MAP = {
@@ -78,6 +89,95 @@ class IssueSummary:
         """Dict shape the dispatcher's triage path consumes."""
         return {"number": self.number, "title": self.title, "body": self.body,
                 "labels": [{"name": n} for n in self.labels], "url": self.url}
+
+
+# ── Epic detection (Phase 1, issue #138) ────────────────────────────────────
+#
+# Heuristic: an issue is "epic-sized" if ANY of these hold:
+#   • body contains >= _EPIC_CHECKLIST_MIN markdown checklist items
+#     (``- [ ]`` / ``* [x]`` / ``+ [X]``, indented or not)
+#   • labels include an exact match for "epic" (case-insensitive)
+#   • body length >= _EPIC_BODY_SIZE_MIN chars
+#
+# Accepts a raw provider dict (``{"body": ..., "labels": [...]}``), an
+# :class:`IssueSummary`, or any object exposing ``.body`` / ``.labels``.
+# Never raises — missing/None fields default to False.
+
+_EPIC_CHECKLIST_MIN = 4
+_EPIC_BODY_SIZE_MIN = 2000
+_CHECKLIST_LINE_RE = re.compile(r"^\s*[-*+]\s+\[[\sxX]\]", re.MULTILINE)
+
+
+def _label_names(labels: Any) -> List[str]:
+    """Extract label names from either list-of-dicts or list-of-strings shape."""
+    if not labels:
+        return []
+    out: List[str] = []
+    for item in labels:
+        if isinstance(item, dict):
+            name = item.get("name")
+        else:
+            name = getattr(item, "name", None) if not isinstance(item, str) else item
+        if name:
+            out.append(str(name))
+    return out
+
+
+def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True if ``issue`` looks epic-sized per the heuristics above.
+    
+    When ``epic_config`` is provided (from execution.epic_detection), its values
+    override the defaults. Otherwise uses _EPIC_CHECKLIST_MIN and _EPIC_BODY_SIZE_MIN.
+    
+    The config can disable epic detection entirely by setting ``enabled=False``.
+    """
+    if issue is None:
+        return False
+    
+    # Resolve thresholds from config or use constants
+    if epic_config:
+        # Check if epic detection is enabled (defaults to True)
+        enabled = epic_config.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
+        if not enabled:
+            return False
+        
+        min_checklist = int(epic_config.get("min_deliverables", 4))
+        min_body_size = int(epic_config.get("size_threshold", 2000))
+        epic_label = str(epic_config.get("epic_label", "epic"))
+        child_label = str(epic_config.get("child_label", "subtask"))
+    else:
+        min_checklist = _EPIC_CHECKLIST_MIN
+        min_body_size = _EPIC_BODY_SIZE_MIN
+        epic_label = "epic"
+        child_label = "subtask"
+    
+    # Accept both IssueSummary / dataclass and raw provider dict.
+    if isinstance(issue, dict):
+        body = issue.get("body") or ""
+        labels = issue.get("labels") or []
+    else:
+        body = getattr(issue, "body", None) or ""
+        labels = getattr(issue, "labels", None) or []
+
+    # Sub-issues are never themselves epics — prevents infinite decomposition loops.
+    if child_label in {n.lower() for n in _label_names(labels)}:
+        return False
+
+    # Heuristic 1: checklist density
+    if len(_CHECKLIST_LINE_RE.findall(body)) >= min_checklist:
+        return True
+
+    # Heuristic 2: epic label (exact, case-insensitive)
+    if any(name.lower() == epic_label for name in _label_names(labels)):
+        return True
+
+    # Heuristic 3: body size
+    if len(body) >= min_body_size:
+        return True
+
+    return False
 
 
 @dataclass
@@ -130,6 +230,32 @@ class LabelDef:
 
 _CLOSING_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b")
 
+# Portable cross-issue dependency convention: a ``Depends on: #N, #M`` (or
+# ``Depends-on:`` / ``Blocked by:``) line anywhere in an issue body. Used as the
+# provider-agnostic fallback for dependency-aware ready-gating (issue #139) when
+# native issue links aren't present. Leading list/quote markers are tolerated so
+# it works inside markdown bullets.
+_DEPENDS_RE = re.compile(r"(?im)^[ \t>*\-]*(?:depends[ _-]on|blocked[ _-]by)\s*:?[ \t]*(.+)$")
+_ISSUE_REF_RE = re.compile(r"#(\d+)")
+
+
+def parse_depends_on(body: str) -> List[int]:
+    """Issue numbers referenced by a ``Depends on:``/``Blocked by:`` line.
+
+    Order-preserving and de-duplicated; returns ``[]`` when the convention is
+    absent. Numbers are returned as declared — the caller is responsible for
+    filtering to those that are still open.
+    """
+    out: List[int] = []
+    seen = set()
+    for line in _DEPENDS_RE.finditer(body or ""):
+        for ref in _ISSUE_REF_RE.findall(line.group(1)):
+            n = int(ref)
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+    return out
+
 
 def issue_linked_to_pr(pr: PRSummary, issue_number: int) -> bool:
     """Branch-name / closing-keyword heuristic shared by all providers.
@@ -172,6 +298,9 @@ class VCSProvider(abc.ABC):
         vcs = self._cfg.get("vcs") or {}
         self._status_map: Dict[str, str] = {**DEFAULT_STATUS_MAP, **(vcs.get("status_map") or {})}
         self._log = logging.getLogger(f"daedalus.providers.{self.name}")
+        # Populated by enroll_repo(); surfaced in dispatch summary under enrollment_failures.
+        # Defined here so getattr(provider, "enrollment_failures", []) is never needed.
+        self.enrollment_failures: List[int] = []
 
     # ── status mapping ───────────────────────────────────────────────────────
     def status_name(self, canonical: str) -> str:
@@ -206,6 +335,93 @@ class VCSProvider(abc.ABC):
         """
         return None
 
+    def add_label(self, issue_number: int, label_name: str) -> bool:
+        """Apply a label to an issue. Returns True on success. Default no-op."""
+        return False
+
+    def has_label(self, issue_number: int, label_name: str) -> bool:
+        """Return True if ``issue_number`` has ``label_name`` applied.
+
+        Base implementation returns False. Providers override to query the
+        VCS API. Never raises — returns False on any provider error.
+        """
+        return False
+
+    def sub_issues_of(self, epic_number: int) -> List[int]:
+        """Return issue numbers that are sub-issues of the given epic.
+
+        Base implementation scans all open issues for epic-reference conventions
+        in the body (portable fallback). Recognised formats (case-insensitive):
+        ``Epic: #N``, ``Epic #N``, ``Part of: #N``, ``Part of #N``,
+        ``Part of epic: #N``, ``Part of epic #N``, ``Part-of #N``,
+        ``Part-of-epic #N``. Providers with native sub-issue links override to
+        use the VCS API first.
+        Never raises — returns ``[]`` on any provider error.
+        """
+        import re as _re
+        # Aligned with EPIC_REF_RE in core/tier_promotion.py so both code paths
+        # agree on what counts as a parent-epic reference.
+        pattern = _re.compile(
+            rf"(?im)^(?:part[\s-]+of(?:[\s-]+epic)?|epic)\s*:?\s*#{epic_number}\b"
+        )
+        results: List[int] = []
+        try:
+            all_issues = self.list_issues(state="open")
+        except Exception:
+            return []
+        for issue in all_issues:
+            body = ""
+            if isinstance(issue, dict):
+                body = issue.get("body", "")
+            else:
+                body = getattr(issue, "body", "") or ""
+            if pattern.search(body):
+                n = issue.get("number") if isinstance(issue, dict) else getattr(issue, "number", None)
+                if n is not None:
+                    results.append(int(n))
+        return results
+
+    def ensure_labels(self) -> List[str]:
+        """Create required Daedalus labels if missing. Returns newly created names.
+
+        Called once per dispatch run so every managed repo always has the labels
+        Daedalus needs (epic, subtask, …). Provider-specific implementations also
+        create board-lane labels (e.g. GitLab's label-driven board columns).
+        Default is a no-op — safe for providers that don't need label pre-creation
+        (e.g. Azure DevOps where tags are free-text on work items).
+        """
+        return []
+
+    # ── cross-issue dependencies (ready-gating, issue #139) ──────────────────
+    def _depends_on_blockers(self, issue_number: int,
+                             *, body: Optional[str] = None) -> List[int]:
+        """Open blockers from the portable ``Depends on:`` body convention.
+
+        Fetches the issue body when not supplied, parses the convention, and
+        keeps only references that are still **open**. Providers with native
+        dependency links call this to merge the fallback with their link-derived
+        blockers. An unknown blocker state (provider returned ``None``) is
+        treated as not-blocking so a dependent is never permanently wedged on an
+        unresolvable reference.
+        """
+        if body is None:
+            issue = self.get_issue(issue_number)
+            body = issue.body if issue else ""
+        return [n for n in parse_depends_on(body)
+                if self.get_issue_state(n) == "open"]
+
+    def blockers(self, issue_number: int) -> List[int]:
+        """Open issue numbers that block ``issue_number`` (``[]`` when unblocked).
+
+        The dispatcher refuses to start new work on an issue while this is
+        non-empty, re-checking each tick so a dependent auto-unblocks once its
+        blockers close. The base implementation parses the portable
+        ``Depends on: #N, #M`` body convention; providers override to add native
+        dependency links (GitLab issue links, Azure predecessors, …) merged with
+        this fallback. Never raises — degrades to ``[]`` on any provider error.
+        """
+        return self._depends_on_blockers(issue_number)
+
     # ── pull/merge requests ──────────────────────────────────────────────────
     @abc.abstractmethod
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]: ...
@@ -218,6 +434,36 @@ class VCSProvider(abc.ABC):
             if pr.head_branch == branch:
                 return pr.number
         return None
+
+    def is_pr_open(self, pr_number: int) -> bool:
+        """True iff ``pr_number`` is a currently-open PR (#953).
+
+        Source of truth for the dispatcher's pre-QA gate: a developer card
+        must not advance (and release its QA child) on a "PR #N" string that
+        does not correspond to a real, open PR. Scans the open PR list so any
+        provider that implements ``list_prs`` gets it for free.
+        """
+        if not pr_number:
+            return False
+        return any(pr.number == pr_number for pr in self.list_prs(state="open"))
+
+    def is_pr_merged(self, pr_number: int) -> bool:
+        """True iff ``pr_number`` is a merged PR (#957).
+
+        Companion to ``is_pr_open``: a merged PR is also "not open", but it
+        means the developer's work has *landed* — the opposite of a phantom /
+        never-opened "PR #N" string. The dispatcher uses this to reconcile a
+        developer card (and its sibling pipeline cards) when a human merges the
+        review-required PR directly, instead of holding it forever in
+        PENDING_PR. Scans all PRs so any provider implementing ``list_prs``
+        gets it for free.
+        """
+        if not pr_number:
+            return False
+        return any(
+            pr.number == pr_number and pr.state == "merged"
+            for pr in self.list_prs(state="all")
+        )
 
     def _pr_for_issue(self, issue_number: int) -> Optional[PRSummary]:
         """Best PR referencing an issue — prefers merged over open."""

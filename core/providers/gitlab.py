@@ -12,20 +12,17 @@ sent as the PRIVATE-TOKEN header.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote
-
-# Allowlist for path_with_namespace values returned by the GitLab API.
-# GitLab constrains slugs to alphanumerics, dots, hyphens, and underscores,
-# separated by exactly one "/" per level.  Reject anything else before
-# interpolating into notification URLs.
-_WEB_PATH_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.\-]*)+$')
 
 from .base import (CIStatus, Comment, IssueSummary, LabelDef, PRSummary,
                    ProviderConfigError, VCSProvider, resolve_token)
 from .http import HTTPClient, ProviderError
 
 _MR_STATE = {"opened": "open", "merged": "merged", "closed": "closed", "locked": "open"}
+
+# Allowlist for path_with_namespace values returned by the GitLab API.
+_WEB_PATH_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.\-]*)+$')
 
 # Default color for auto-created board status labels (GitLab requires a color on
 # label creation). A neutral blue — users can recolor in the GitLab UI.
@@ -134,6 +131,45 @@ class GitLabProvider(VCSProvider):
             if e.status_code == 404:
                 return "closed"
             return None
+
+    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+        try:
+            it = self._http.get_json(f"{self._proj}/issues/{issue_number}")
+        except ProviderError as e:
+            self._log.warning("get_issue #%s failed: %s", issue_number, e)
+            return None
+        if not it:
+            return None
+        return IssueSummary(
+            number=it.get("iid", issue_number), title=it.get("title") or "",
+            body=it.get("description") or "",
+            labels=list(it.get("labels") or []),
+            state="open" if (it.get("state") == "opened") else (it.get("state") or ""),
+            url=it.get("web_url") or "")
+
+    def blockers(self, issue_number: int) -> List[int]:
+        """Open blockers via native issue links (``link_type: is_blocked_by``)
+        merged with the portable ``Depends on:`` body fallback.
+
+        The links endpoint returns each linked issue with its ``state`` inline,
+        so open-filtering needs no extra request.
+        """
+        out: List[int] = []
+        try:
+            links = self._http.get_json(f"{self._proj}/issues/{issue_number}/links")
+        except ProviderError as e:
+            self._log.warning("blockers #%s links failed: %s", issue_number, e)
+            links = []
+        for it in links or []:
+            if (it.get("link_type") or "") != "is_blocked_by":
+                continue
+            iid = it.get("iid")
+            if isinstance(iid, int) and (it.get("state") or "").lower() == "opened":
+                out.append(iid)
+        for n in self._depends_on_blockers(issue_number):
+            if n not in out:
+                out.append(n)
+        return out
 
     # ── merge requests ───────────────────────────────────────────────────────
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
@@ -247,7 +283,34 @@ class GitLabProvider(VCSProvider):
         self._log.info("board: #%s -> %s", issue_number, status_name)
         return True
 
-    def ensure_status_labels(self, status_names: List[str]) -> List[str]:
+    def ensure_labels(self) -> List[str]:
+        """Create required Daedalus labels (epic, subtask) plus all board lane labels."""
+        from .base import REQUIRED_LABELS
+        created: List[str] = []
+        existing = {lbl.name for lbl in self.list_labels()}
+        for ldef in REQUIRED_LABELS:
+            if ldef["name"] in existing:
+                continue
+            try:
+                self._http.post_json(
+                    f"{self._proj}/labels",
+                    {"name": ldef["name"], "color": f"#{ldef['color']}"},
+                )
+                created.append(ldef["name"])
+                existing.add(ldef["name"])
+                self._log.info("ensure_labels: created %r", ldef["name"])
+            except ProviderError as e:
+                if e.status_code == 409:
+                    continue  # already exists — idempotent
+                self._log.warning("ensure_labels: create %r failed: %s", ldef["name"], e)
+        # Reuse the already-fetched existing set — avoids a second list_labels() round-trip
+        status_names = [v for v in self._status_map.values() if v]
+        created.extend(self.ensure_status_labels(status_names, _existing=existing))
+        return created
+
+    def ensure_status_labels(
+        self, status_names: List[str], *, _existing: Optional[Set[str]] = None
+    ) -> List[str]:
         """Create any missing board status labels in the project (idempotent).
 
         Guarantees the Issue Board lists keyed to ``status_map`` exist so
@@ -256,7 +319,7 @@ class GitLabProvider(VCSProvider):
         success. Returns the names that were newly created.
         """
         created: List[str] = []
-        existing = {label.name for label in self.list_labels()}
+        existing = _existing if _existing is not None else {label.name for label in self.list_labels()}
         for name in status_names:
             if not name or name in existing:
                 continue
@@ -293,7 +356,10 @@ class GitLabProvider(VCSProvider):
                 self._project_web_path = raw
             else:
                 if raw:
-                    self._log.warning("_resolve_web_path: unexpected path_with_namespace %r", raw)
+                    # Sanitize before logging: API response may contain control
+                    # chars that could forge log entries in SIEM pipelines.
+                    safe = raw.encode("unicode_escape").decode("ascii")[:120]
+                    self._log.warning("_resolve_web_path: unexpected path_with_namespace %s", safe)
                 self._project_web_path = ""  # cache the failure — don't retry
         return self._project_web_path
 
@@ -321,10 +387,6 @@ class GitLabProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("get_default_branch failed: %s", e)
             return None
-        if self._project_web_path is None:
-            # Also caches path_with_namespace for URL builders — free side effect.
-            raw = (data or {}).get("path_with_namespace") or ""
-            self._project_web_path = raw if (raw and _WEB_PATH_RE.match(raw)) else ""
         return (data or {}).get("default_branch") or None
 
     def list_branches(self) -> List[str]:

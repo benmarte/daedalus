@@ -77,7 +77,7 @@ Verify the profiles by going to **Profiles** in Hermes:
 |---|---|
 | **validator** | **Runs alone in Phase 1.** No developer, reviewer, or other agent starts until this completes. Confirms the issue is real, reproducible, not already fixed. Detects security threats (prompt injection, social engineering, auth bypass, backdoor patterns, supply-chain attacks) and high-privilege requests lacking verifiable context. Six outcomes: **CONFIRMED** (Phase 2 begins on next tick), **ALREADY_FIXED** (closes issue), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, fires `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege action without identity/justification/approval — blocks, posts comment listing exactly what's missing, fires `security-escalation`). Posts a summary comment to the GitHub issue regardless of outcome. Blocking outcomes auto-move the VCS card to a **Blocked** column (created automatically if missing). |
 | **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines. Creates the conditional accessibility task when the issue references UI/frontend work. |
-| **planner** | Breaks an issue into a concrete plan with acceptance criteria. |
+| **planner** | **Handles epic-sized issues** (≥4 checklist items, an `epic` label, or body ≥2000 chars). Detects the issue type and orchestrates the full decomposition pipeline: creates sub-issues, injects source context from relevant files in the repository, computes tier levels based on dependencies, and applies the Ready label to tier-0 sub-issues. Also breaks normal issues into concrete plans with acceptance criteria. |
 | **developer** | Phase 2 only. Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR. Posts a summary comment to the GitHub issue on completion. |
 | **qa** | **Runs after developer, before reviewer and security-analyst.** Runs the full test suite, analyzes coverage gaps, reports a QA verdict (`qa-passed` or `qa-failed`). Posts a summary comment to the GitHub issue. |
 | **reviewer** | Reviews the PR for correctness, style, and logic. Runs after QA passes. Posts a summary comment to the GitHub issue on completion. |
@@ -149,7 +149,8 @@ Step 2 opens automatically after Step 1. This is where you set branches, boards,
 
 **Notifications:**
 - Configure one or more delivery targets (Slack, Discord, etc.) for dispatch summaries, documentation reports, and pipeline failure alerts.
-- Click **+ Add notification target** to add a channel. Each target can be filtered to specific event types (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`, `security-escalation`).
+- Click **+ Add notification target** to add a channel. Each target can be filtered to specific event types (`doc-report`, `dispatch-summary`, `pipeline-failure`, `pr-ready`, `security-escalation`, `retry-cap-exhausted`).
+- **`retry-cap-exhausted`** fires when a PM or validator agent exhausts its retry cap without reaching CONFIRMED status, indicating manual intervention is required.
 - **`security-escalation`** fires immediately when the validator flags an issue as a potential threat. It is recommended to route this event to a high-visibility channel (e.g. `#security-alerts`) so a human can review and re-classify the issue quickly.
 
 ![Step 2 notifications section — add notification targets and configure event filters](screenshots/guide/08-add-project-step2-notify.png)
@@ -221,6 +222,12 @@ Every time the cron job fires, Daedalus runs its dispatch loop:
 6. Auto-advances any pipeline stage that's unblocked (e.g. CI turned green).
 7. Closes issues and marks cards **Done** when their PRs are merged.
 8. Cleans up kanban tasks for any issue the validator closed as already-fixed or a duplicate.
+
+**Gateway self-healing:** before each dispatch loop, the cron wrapper (`~/.hermes/scripts/daedalus-cron.sh`) runs a two-layer watchdog. The dispatcher only nudges the kanban board — the Hermes gateway is what actually spawns the agent processes — so if the gateway has died silently the loop would otherwise run clean while no work ever starts. **Layer 1** (shell): the wrapper parses `hermes gateway status` (which always exits 0) for the `not running` marker and, if the gateway is down, attempts a single `hermes gateway restart` before dispatching. **Layer 2** (enhanced `gateway_watchdog.py`, invoked after the shell check if installed): adds safeguards against a flapping gateway — rate limiting (max 3 restarts per 3600 s window), exponential backoff (10 s → 300 s cap), a STOP marker (`~/.hermes/gateway-stop`) that inhibits restarts for manual maintenance, persistent state in `~/.hermes/gateway-watchdog-state.json`, and crash-log detection (scans `~/.hermes/logs/`). Both layers are best-effort: a missing `hermes` CLI or a failed restart only logs to stderr and never blocks the dispatch run. Each tick re-checks, so a gateway that crashes between ticks is recovered on the next one.
+
+**Stale blocked-card sweeper:** a blocked card that no agent can classify sits on the board forever, polluting the queue and confusing humans. The sweeper runs inside the tick (alongside `kanban.diagnostics`) and uses heartbeat timestamps, `started_at`, or `created_at` to detect cards stuck in `blocked` status for longer than a threshold (default: 48 hours). It logs a warning with the card ID and age, then — when enabled — archives the card off the active board via `hermes kanban archive`. It degrades gracefully: any failure logs and returns, never breaking the run.
+
+**Retry-cap exhaustion notifications:** validator and PM retry caps exist so a broken issue doesn't loop forever. But a cap with no notification means the operator only learns about it days later by scrolling the board. When a validator or PM agent exhausts its retry cap without reaching CONFIRMED status, the dispatcher posts a one-time `retry-cap-exhausted` notification (deduped per issue via a marker comment) and routes it to the same channels as `security-escalation`. This surfaces the wedge the moment it happens so a human can investigate. Configure the `retry-cap-exhausted` event in your notification targets to receive these alerts.
 
 View the cron job for your project in the Hermes **Cron** page:
 
@@ -426,23 +433,19 @@ The template applies to all dispatcher warnings (PR too large, forbidden files, 
 
 Daedalus advances the pipeline in two ways:
 
-**1. Terminal-state triggers (primary):** Every agent's system prompt includes an instruction to run the daedalus dispatcher script immediately after reaching any terminal state — whether that's marking a task **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state:
-
-```bash
-bash ~/.hermes/scripts/daedalus-cron.sh
-```
+**1. Session-end triggers (primary):** When each agent's session ends, the daedalus dispatcher runs automatically. This happens whenever an agent reaches any terminal state — whether that's marking a task **done**, blocking it with **review-required**, blocking it with **awaiting-fix**, or any other blocked/terminal state.
 
 This means each phase transition happens within seconds. For example:
-- Developer blocks with `review-required` → dispatcher fires → detects CI green → QA task starts (seconds, not 60 minutes)
-- QA blocks with `qa-passed` → dispatcher fires → reviewer + security + accessibility (conditional) tasks start
-- QA blocks with `qa-failed` → dispatcher fires → developer fix card created
-- Reviewer blocks with `awaiting-fix` → dispatcher fires → developer fix card created
-- Accessibility blocks with `changes requested` → dispatcher fires → PM routing card created
-- Any agent marks done → dispatcher fires → next phase begins
+- Developer blocks with `review-required` → session ends → dispatcher fires → detects CI green → QA task starts (seconds, not 60 minutes)
+- QA blocks with `qa-passed` → session ends → dispatcher fires → reviewer + security + accessibility (conditional) tasks start
+- QA blocks with `qa-failed` → session ends → dispatcher fires → developer fix card created
+- Reviewer blocks with `awaiting-fix` → session ends → dispatcher fires → developer fix card created
+- Accessibility blocks with `changes requested` → session ends → dispatcher fires → PM routing card created
+- Any agent marks done → session ends → dispatcher fires → next phase begins
 
-**Error recovery:** If the state-transition call returns "already terminal" (a known Hermes platform behavior where tasks are sometimes marked done prematurely), agents are instructed to run the dispatcher anyway. The pipeline recovers immediately instead of stalling.
+**Error recovery:** If the state-transition call returns "already terminal" (a known Hermes platform behavior where tasks are sometimes marked done prematurely), the dispatcher still runs at session end. The pipeline recovers immediately instead of stalling.
 
-**2. Cron job (last-resort safety net):** The scheduled cron job (configured per project) catches anything the terminal-state trigger misses — for example, if an agent crashed before its final step. When the dispatcher runs on a cron tick, it also detects PM tasks that completed without a `SPEC:` summary (premature completion) and re-creates them with a new retry key — up to 3 attempts.
+**2. Cron job (last-resort safety net):** The scheduled cron job (configured per project) catches anything the session-end trigger misses — for example, if an agent crashed before reaching its terminal state. When the dispatcher runs on a cron tick, it also detects PM tasks that completed without a `SPEC:` summary (premature completion) and re-creates them with a new retry key — up to 3 attempts.
 
 Together these make the pipeline fully autonomous: once an issue is marked Ready, the entire chain runs end-to-end without any manual intervention between phases.
 

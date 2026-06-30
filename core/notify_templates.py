@@ -234,9 +234,10 @@ def render_dispatch_summary(
     delivered = summary.get("slack_delivered") or []
     spec_created = summary.get("spec_created") or []
     blocked = summary.get("blocked") or []
+    blocked_deps = summary.get("blocked_deps") or {}
 
     if not (created or completed or advance_prs or routed or reconciled
-            or delivered or spec_created or blocked):
+            or delivered or spec_created or blocked or blocked_deps):
         return ""
 
     mode = summary.get("mode", "?")
@@ -258,6 +259,12 @@ def render_dispatch_summary(
         lines += ["", "### 🛑 Blocked (Security / Escalation)"]
         for n in blocked:
             lines.append(f"- {_issue_link(n, provider)} — requires human review")
+
+    if blocked_deps:
+        lines += ["", "### ⛓ Waiting on Dependencies"]
+        for n, deps in blocked_deps.items():
+            dep_links = ", ".join(_issue_link(d, provider) for d in deps)
+            lines.append(f"- {_issue_link(n, provider)} — blocked by {dep_links}")
 
     if created:
         lines += ["", "### 📋 Dispatched"]

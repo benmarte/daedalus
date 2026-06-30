@@ -77,6 +77,88 @@ def test_classify_blocked_dev_no_pr():
     check("dev no PR → pm_route", result == iterate.PM_ROUTE)
 
 
+def test_classify_blocked_dev_pr_not_open_holds():
+    """#953: review-required + green CI but provider says PR is NOT open → pending_pr.
+
+    The handoff's 'PR #N' is just a string the agent typed; if the provider
+    affirmatively reports no open PR, the dev card must NOT advance (which would
+    release the QA child against a phantom PR / mid-edit shared tree).
+    """
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped, all tests pass",
+        ci_green=True,
+        pr_is_open=False,
+    )
+    check("dev green CI but PR not open → pending_pr", result == iterate.PENDING_PR)
+
+
+def test_classify_blocked_dev_pr_open_advances():
+    """#953: verified-open PR still advances on green CI (no regression)."""
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped",
+        ci_green=True,
+        pr_is_open=True,
+    )
+    check("dev green CI + PR open → advance", result == iterate.ADVANCE)
+
+
+def test_classify_blocked_dev_pr_unverified_advances():
+    """#953: pr_is_open=None (unverified) preserves prior advance behaviour."""
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42 shipped",
+        ci_green=True,
+        pr_is_open=None,
+    )
+    check("dev green CI + PR unverified → advance", result == iterate.ADVANCE)
+
+
+def test_classify_blocked_dev_pr_merged_reconciles():
+    """#957: review-required dev card whose PR was merged → reconcile_merged.
+
+    A human merged the PR directly (bypassing the pipeline). The work landed,
+    so the card reconciles instead of looping forever in PENDING_PR.
+    """
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #954 shipped",
+        ci_green=False,
+        pr_is_open=False,
+        pr_is_merged=True,
+    )
+    check("dev PR merged → reconcile_merged", result == iterate.RECONCILE_MERGED)
+
+
+def test_classify_blocked_dev_pr_merged_precedes_not_open():
+    """#957: a merged PR is also 'not open', but merged wins → reconcile_merged.
+
+    Guards the ordering: the merged check must run before the #953 not-open gate
+    so a landed PR reconciles rather than being held in PENDING_PR.
+    """
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #954 shipped",
+        ci_green=True,
+        pr_is_open=False,
+        pr_is_merged=True,
+    )
+    check("merged precedes not-open gate", result == iterate.RECONCILE_MERGED)
+
+
+def test_classify_blocked_dev_pr_not_merged_still_holds():
+    """#957: not open and not merged (phantom PR) → still PENDING_PR (no regression)."""
+    result = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #954 shipped",
+        ci_green=True,
+        pr_is_open=False,
+        pr_is_merged=False,
+    )
+    check("not-merged phantom PR → pending_pr", result == iterate.PENDING_PR)
+
+
 def test_classify_blocked_reviewer_changes():
     """Reviewer + changes requested → pm_route."""
     result = iterate.classify_blocked(
@@ -169,6 +251,29 @@ def test_classify_blocked_variant_changes():
         check(f"changes phrase '{text[:40]}' → pm_route", result == iterate.PM_ROUTE)
 
 
+def test_classify_blocked_crash_markers():
+    """Crash/infrastructure markers → no action (empty string), not pm_route.
+
+    When the coding agent dies at startup or crashes, PM routing cannot fix it.
+    classify_blocked must return '' so the human is notified, not an infinite
+    pm_route loop that keeps spawning PM cards.
+    """
+    crash_texts = (
+        "coding-agent-failed: command exited with non-zero status",
+        "permission-error: API key invalid",
+        "agent died: coding_agent_died unexpectedly",
+        "agent crash: coding_agent_timeout after 300s",
+        "subprocess exited with code 137",
+        "agent crash during initialization",
+    )
+    for text in crash_texts:
+        result = iterate.classify_blocked("developer-daedalus", text, ci_green=False)
+        check(
+            f"crash marker '{text[:50]}' → no-op (not pm_route)",
+            result == "",
+        )
+
+
 # ── _parse_handoff ───────────────────────────────────────────────────────────
 
 
@@ -192,6 +297,78 @@ def test_parse_handoff_signals():
     h2 = iterate._parse_handoff("APPROVED — LGTM")
     check("approved detected", h2["is_approved"] is True)
     check("not changes", h2["is_changes_requested"] is False)
+
+
+def test_parse_handoff_pass_substring_no_false_positive():
+    """#956: 'pass' substring in arbitrary text must NOT trigger is_approved.
+
+    Previously, 'pass' was in approve_signals as a raw substring match, so text like
+    'changes-requested: tests pass but login flow needs fix' incorrectly set
+    is_approved=True, causing the dispatcher to fire APPROVE_ADVANCE when the
+    reviewer actually requested changes.
+    """
+    # Exact reproduction from bug report
+    h = iterate._parse_handoff("changes-requested: tests pass but login flow needs fix")
+    check("changes-requested still detected", h["is_changes_requested"] is True)
+    check("'tests pass' does NOT fire is_approved", h["is_approved"] is False)
+
+    # Another false-positive case: 'password' contains 'pass'
+    h2 = iterate._parse_handoff("the password field is missing validation")
+    check("'password' does NOT fire is_approved", h2["is_approved"] is False)
+
+    # 'passing' also should not trigger
+    h3 = iterate._parse_handoff("tests passing but logic needs review")
+    check("'passing' does NOT fire is_approved", h3["is_approved"] is False)
+
+    # Changes-requested + 'tests pass' — must NOT approve when reviewer requested changes
+    h4 = iterate._parse_handoff("review-changes-requested: tests pass but logic broken")
+    check("request changes not confused with approve", h4["is_changes_requested"] is True)
+    check("approved NOT set when changes requested", h4["is_approved"] is False)
+
+
+def test_parse_handoff_prefixed_approval_signals():
+    """#956: Role-prefixed approval signals are detected (backward compat)."""
+    prefixes = [
+        "qa-passed: regression suite green",
+        "a11y-passed: wcag 2.1 AA compliant",
+        "security-approved: no vulnerabilities found",
+        "security-passed: review complete",
+    ]
+    for text in prefixes:
+        h = iterate._parse_handoff(text)
+        check(f"prefixed approval detected: {text[:30]}", h["is_approved"] is True)
+        check("not changes-requested", h["is_changes_requested"] is False)
+
+
+def test_parse_handoff_existing_approvals_still_detected():
+    """Existing unambiguous approval signals MUST still work (backward compat)."""
+    approvals = [
+        "APPROVED — LGTM",
+        "approved: all tests green",
+        "changes: sign-off complete",
+        "signoff received",
+        "looks good to me",
+        "no findings from security review",
+        ":+1: ready to merge",
+    ]
+    for text in approvals:
+        h = iterate._parse_handoff(text)
+        check(f"existing approval detected: {text[:30]}", h["is_approved"] is True)
+
+
+def test_parse_handoff_pass_not_in_signals_list():
+    """#956: 'pass' is not a standalone signal in approve_signals list."""
+    import inspect
+    import re
+    src = inspect.getsource(iterate._parse_handoff)
+    m = re.search(r"approve_signals\s*=\s*\[(.*?)\]", src, re.DOTALL)
+    assert m is not None, "Could not locate approve_signals in _parse_handoff source"
+    signals_block = m.group(1)
+    # 'pass' must NOT appear as a standalone quoted entry
+    check(
+        "'pass' removed from approve_signals",
+        '"pass"' not in signals_block and "'pass'" not in signals_block,
+    )
 
 
 # ── _count_fix_attempts ─────────────────────────────────────────────────────
@@ -291,6 +468,46 @@ def test_execute_advance():
         ok = iterate._execute_advance("slug", card, "O/R", "review-required: PR #42")
     check("advance returns True", ok is True)
     mk.assert_called_once_with("slug", "t_abc")
+
+
+def test_execute_reconcile_merged():
+    """#957: _execute_reconcile_merged closes all pipeline cards for the issue."""
+    with mock.patch.object(
+        kanban, "close_issue_tasks", return_value=["t_dev", "t_qa", "t_rev"]
+    ) as mk:
+        card = {"id": "t_dev", "body": "Issue benmarte/daedalus#957: fix bug"}
+        ok = iterate._execute_reconcile_merged(
+            "slug", card, "O/R", "review-required: PR #954 merged",
+        )
+    check("reconcile_merged returns True", ok is True)
+    pos, kw = mk.call_args
+    check("close_issue_tasks called for issue 957", pos[0] == "slug" and pos[1] == 957)
+    check("summary mentions merged PR", "954" in kw["summary"] and "merged" in kw["summary"])
+
+
+def test_execute_reconcile_merged_no_issue_number():
+    """#957: with no issue number on the card, fall back to completing the card."""
+    with mock.patch.object(kanban, "complete", return_value=True) as mk:
+        card = {"id": "t_dev"}  # no body → no issue number
+        ok = iterate._execute_reconcile_merged(
+            "slug", card, "O/R", "review-required: PR #954 merged",
+        )
+    check("reconcile fallback returns True", ok is True)
+    mk.assert_called_once()
+    check("fallback completes the card", mk.call_args[0][1] == "t_dev")
+
+
+def test_execute_reconcile_merged_dry_run():
+    """#957: dry_run logs intent without mutating the board."""
+    with mock.patch.object(kanban, "close_issue_tasks") as mk_close:
+        with mock.patch.object(kanban, "complete") as mk_complete:
+            card = {"id": "t_dev", "body": "#957"}
+            ok = iterate._execute_reconcile_merged(
+                "slug", card, "O/R", "review-required: PR #954 merged", dry_run=True,
+            )
+    check("dry_run returns True", ok is True)
+    check("dry_run does not close tasks", mk_close.call_count == 0)
+    check("dry_run does not complete", mk_complete.call_count == 0)
 
 
 def test_execute_dev_fix_ci():
@@ -408,7 +625,7 @@ def test_execute_dev_fix_escalate_when_over_cap():
 def test_run_iterate_empty():
     """run_iterate with no blocked cards returns zero counts."""
     with mock.patch.object(kanban, "list_blocked", return_value=[]):
-        counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
+        counts, prs, _pending, _qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("empty board → all zeros", all(v == 0 for v in counts.values()))
     check("empty board → no prs", prs == [])
 
@@ -423,10 +640,53 @@ def test_run_iterate_dev_advance():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
+                counts, prs, _pending, _qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("dev green CI → advance count 1", counts[iterate.ADVANCE] == 1)
     check("no other actions", sum(v for v in counts.values() if v > 0) == 1)
     check("advance PR is 42", prs == [42])
+
+
+def test_run_iterate_dev_no_open_pr_holds_qa():
+    """#953: dev card with green CI but no real open PR → held (PENDING_PR), QA not released."""
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "runs": [{"reason": "review-required: PR #42 shipped"}],
+    }]
+    # Provider reports PR #42 is NOT among the open PRs.
+    prov = FakeProvider(ci_status="green", open_prs=set())
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(iterate, "_execute_pending_pr", return_value=True) as mpend:
+            counts, prs, _pending, _qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=prov)
+    check("no advance when PR not open", counts[iterate.ADVANCE] == 0)
+    check("held as pending_pr", counts[iterate.PENDING_PR] == 1)
+    check("pending-pr executor invoked", mpend.call_count == 1)
+    check("no PR advanced", prs == [])
+
+
+def test_run_iterate_dev_pr_merged_reconciles():
+    """#957: dev card whose PR was merged outside the pipeline → reconcile_merged.
+
+    The PR is not open (merged), so the #953 gate alone would loop it in
+    PENDING_PR forever. With is_pr_merged=True the dispatcher reconciles:
+    close_issue_tasks completes the dev card and its sibling pipeline cards.
+    """
+    cards = [{
+        "id": "t_dev",
+        "assignee": "developer-daedalus",
+        "body": "Issue benmarte/daedalus#957: fix orphaned cards",
+        "runs": [{"reason": "review-required: PR #954 shipped"}],
+    }]
+    # PR #954 is merged (not open).
+    prov = FakeProvider(ci_status="green", open_prs=set(), merged_prs={954})
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(
+            kanban, "close_issue_tasks", return_value=["t_dev", "t_qa"]
+        ) as mk_close:
+            counts, prs, _pending, _qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=prov)
+    check("reconcile_merged count 1", counts[iterate.RECONCILE_MERGED] == 1)
+    check("not held as pending_pr", counts[iterate.PENDING_PR] == 0)
+    check("close_issue_tasks invoked for issue 957", mk_close.call_args[0][1] == 957)
 
 
 def test_run_iterate_dev_fix_ci():
@@ -754,7 +1014,7 @@ def test_run_iterate_falls_back_to_show_card_for_handoff():
         with mock.patch.object(kanban, "show_card", return_value=full_card) as mk_show:
             with mock.patch.object(kanban, "complete", return_value=True):
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                    counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
+                    counts, prs, _pending, _qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("show_card was called for the blocked card", mk_show.call_count == 1)
     check("show_card called with slug and tid", mk_show.call_args == mock.call("slug", "t_dev"))
     check("dev green CI → advance count 1", counts[iterate.ADVANCE] == 1)
@@ -865,7 +1125,7 @@ def test_run_iterate_branch_pr_fallback():
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "find_pr_for_branch", return_value=42) as mk_branch:
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="green"):
-                    counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
+                    counts, prs, _pending, _qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("branch PR fallback → advance count 1", counts[iterate.ADVANCE] == 1)
     check("branch PR fallback → PR is 42", prs == [42])
     mk_branch.assert_called_once_with("feat/my-feature")
@@ -899,7 +1159,7 @@ def test_run_iterate_handoff_pr_still_works():
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(gp, "find_pr_for_branch") as mk_branch:
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="green") as mk_ci:
-                    counts, prs, _pending = iterate.run_iterate("slug", "O/R", provider=gp)
+                    counts, prs, _pending, _qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
     check("handoff PR still works → advance count 1", counts[iterate.ADVANCE] == 1)
     check("handoff PR still works → PR is 55", prs == [55])
     # open_pr_for_branch should NOT be called since handoff has a PR
@@ -1039,8 +1299,39 @@ def test_create_downstream_happy_path():
     workspaces = [call.kwargs["workspace"] for call in mk_create.call_args_list]
     check("workspace propagated", all(w == "dir:/work" for w in workspaces))
 
+    # Verify the QA gate parent chain (#955): only QA hangs off the dev card;
+    # every other role is gated behind QA so it cannot unblock before QA runs.
+    parents = [call.kwargs["parents"] for call in mk_create.call_args_list]
+    check("qa parented to dev card", parents[0] == ["t_dev"])
+    check("reviewer parented to qa", parents[1] == ["t_qa"])
+    check("security parented to qa", parents[2] == ["t_qa"])
+    check("accessibility parented to qa", parents[3] == ["t_qa"])
+    check("docs parented to reviewer/security/accessibility (not dev)",
+          parents[4] == ["t_rev", "t_sec", "t_acc"])
+    check("no review role parented to dev card except qa",
+          all("t_dev" not in (p or []) for p in parents[1:]))
+
     # Verify comment posted
     mk_comment.assert_called_once()
+
+
+def test_create_downstream_qa_gate_recovered_parent():
+    """#955 When QA already exists, a new reviewer is parented to the recovered
+    QA id — not the developer card — so the QA gate is preserved on re-runs."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # QA already on the board (any status) with a known id; reviewer is new.
+    existing = [{"idempotency_key": "qa-19", "id": "t_qa_existing", "status": "running"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_rev", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+    by_key = {call.kwargs["idempotency_key"]: call.kwargs["parents"] for call in mk_create.call_args_list}
+    check("qa skipped (already exists)", "qa-19" not in by_key)
+    check("reviewer parented to recovered qa id", by_key["reviewer-19"] == ["t_qa_existing"])
+    check("security parented to recovered qa id", by_key["security-19"] == ["t_qa_existing"])
+    check("accessibility parented to recovered qa id", by_key["accessibility-19"] == ["t_qa_existing"])
+    check("no recovered role parented to dev card",
+          all("t_dev" not in (p or []) for p in by_key.values()))
 
 
 def test_create_downstream_idempotency_guard():
@@ -1077,6 +1368,76 @@ def test_create_downstream_partial_idempotency():
     check("security key created", keys[0] == "security-19")
     check("accessibility key created", keys[1] == "accessibility-19")
     check("docs key created", keys[2] == "docs-19")
+
+
+def test_create_downstream_dedup_respects_status():
+    """#936 Dedup must detect tasks regardless of their status.
+
+    Idempotency scan must match on idempotency_key alone — a task in
+    ``running``/``ready``/``done``/``blocked`` with the same key must still
+    prevent creation. Regression guard for #936.
+    """
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+
+    # security exists in "running" status — must be detected and skipped
+    existing = [{"idempotency_key": "security-19", "status": "running"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_rev", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("security (running) skipped", "security-19" not in created_keys)
+    check("4 tasks created (qa, reviewer, accessibility, docs)", len(created_keys) == 4)
+    check("qa key created", "qa-19" in created_keys)
+    check("reviewer key created", "reviewer-19" in created_keys)
+    check("accessibility key created", "accessibility-19" in created_keys)
+    check("docs key created", "docs-19" in created_keys)
+
+
+def test_create_downstream_dedup_multiple_statuses():
+    """#936 Dedup must work across several status values at once.
+
+    qa / reviewer / security each exist in a different status — all must be
+    deduplicated; only accessibility and docs should be created.
+    """
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+
+    existing = [
+        {"idempotency_key": "qa-19", "status": "ready"},
+        {"idempotency_key": "reviewer-19", "status": "running"},
+        {"idempotency_key": "security-19", "status": "blocked"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("qa (ready) skipped", "qa-19" not in created_keys)
+    check("reviewer (running) skipped", "reviewer-19" not in created_keys)
+    check("security (blocked) skipped", "security-19" not in created_keys)
+    check("2 tasks created (accessibility, docs)", len(created_keys) == 2)
+    check("accessibility key created", "accessibility-19" in created_keys)
+    check("docs key created", "docs-19" in created_keys)
+
+
+def test_create_downstream_dedup_done_status():
+    """#936 A task in ``done`` status must still be deduplicated.
+
+    Regression: a terminal reviewer card from a previous run must prevent a
+    fresh reviewer creation on re-dispatch.
+    """
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    existing = [{"idempotency_key": "reviewer-19", "status": "done"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card)
+
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("reviewer (done) skipped", "reviewer-19" not in created_keys)
+    check("4 other tasks still created", len(created_keys) == 4)
 
 
 def test_create_downstream_dry_run():
@@ -1139,6 +1500,94 @@ def test_downstream_task_body_references_pr():
     check("body references developer card", "t_dev" in body)
 
 
+def test_create_downstream_idempotency_open_status():
+    """Dedup works when task exists in open (todo/ready) status, not just done."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # All 5 downstream task keys exist, each in a different non-terminal status.
+    # dedup must skip creation regardless of status.
+    existing = [
+        {"idempotency_key": "qa-19", "status": "todo"},
+        {"idempotency_key": "reviewer-19", "status": "ready"},
+        {"idempotency_key": "security-19", "status": "running"},
+        {"idempotency_key": "accessibility-19", "status": "blocked"},
+        {"idempotency_key": "docs-19", "status": "todo"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", return_value="t_unexpected") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("open/ready/running/blocked tasks → all skipped", created == [])
+    mk_create.assert_not_called()
+
+
+def test_create_downstream_idempotency_in_progress_status():
+    """Dedup works when task exists in in-progress (running) status."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # Task exists with idempotency key and is actively running
+    existing = [
+        {"idempotency_key": "docs-19", "status": "running", "id": "t_doc"},
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", return_value="t_other") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("running task → docs key skipped", len(created) == 4)
+    check("4 tasks created (qa, reviewer, security, accessibility)", mk_create.call_count == 4)
+    # Verify docs was NOT in the created keys
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("docs key not created", "docs-19" not in created_keys)
+    check("qa key created", "qa-19" in created_keys)
+
+
+def test_create_downstream_idempotency_mixed_statuses():
+    """Dedup works across all statuses: todo, ready, running, blocked, done."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # Each existing task has a different status
+    existing = [
+        {"idempotency_key": "qa-19", "status": "done", "id": "t_qa"},
+        {"idempotency_key": "reviewer-19", "status": "todo", "id": "t_rev"},
+        {"idempotency_key": "security-19", "status": "running", "id": "t_sec"},
+        {"idempotency_key": "accessibility-19", "status": "blocked", "id": "t_acc"},
+        # docs has no matching key, so it should be created
+    ]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", return_value="t_doc") as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("only docs created (4 others exist across all statuses)", len(created) == 1)
+    check("docs key created", mk_create.call_args[1]["idempotency_key"] == "docs-19")
+
+
+def test_create_downstream_independent_task_types():
+    """Each task type is checked independently — existence of one doesn't affect others."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    # Only reviewer-19 exists; qa, security, accessibility, docs should be created
+    existing = [{"idempotency_key": "reviewer-19", "status": "done", "id": "t_rev"}]
+    with mock.patch.object(kanban, "list_tasks", return_value=existing):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    check("4 tasks created (reviewer skipped)", len(created) == 4)
+    check("reviewer key not in created keys",
+          all(call.kwargs["idempotency_key"] != "reviewer-19" for call in mk_create.call_args_list))
+    created_keys = [call.kwargs["idempotency_key"] for call in mk_create.call_args_list]
+    check("qa key created", "qa-19" in created_keys)
+    check("security key created", "security-19" in created_keys)
+    check("accessibility key created", "accessibility-19" in created_keys)
+    check("docs key created", "docs-19" in created_keys)
+
+
+def test_create_downstream_no_preexisting_creates_all():
+    """When no tasks exist, all 5 downstream tasks are created."""
+    card = {"id": "t_dev", "body": "benmarte/daedalus#21", "workspace": "dir:/w"}
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+        with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"]) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                created = iterate._create_downstream_review_tasks("slug", 21, card, pr_number=25)
+    check("no preexisting → all 5 created", len(created) == 5)
+    check("create_task called 5 times", mk_create.call_count == 5)
+
+
 # ── Issue #24: robust CI polling ──────────────────────────────────────────────
 
 
@@ -1146,6 +1595,9 @@ class _NoCIProvider:
     """Provider that does NOT support CI status (supports_ci_status=False)."""
     name = "generic"
     supports_ci_status = False
+
+    def has_label(self, pr_number, label_name):
+        return False
 
     def get_pr_ci_status(self, pr_number):
         return "unknown"
@@ -1158,6 +1610,9 @@ class _PendingProvider:
     """Provider that supports CI but returns PENDING initially."""
     name = "github"
     supports_ci_status = True
+
+    def has_label(self, pr_number, label_name):
+        return False
 
     def __init__(self, ci_status="pending"):
         self._status = ci_status
@@ -1179,7 +1634,7 @@ def test_run_iterate_no_ci_provider_advances_immediately():
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
-            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=no_ci)
+            counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=no_ci)
     check("no-CI provider → advance count 1", counts[iterate.ADVANCE] == 1)
     check("no-CI provider → advance PR 42", prs == [42])
     check("no-CI provider → no pending", pending == [])
@@ -1195,7 +1650,7 @@ def test_run_iterate_pending_ci_returns_pending_cards():
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
-            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=pp)
+            counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=pp)
     check("pending CI → no advance", counts[iterate.ADVANCE] == 0)
     check("pending CI → no prs", prs == [])
     check("pending CI → one pending card", len(pending) == 1)
@@ -1213,7 +1668,7 @@ def test_run_iterate_green_ci_no_pending_cards():
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
-            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=gp_green)
+            counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_green)
     check("green CI → advance count 1", counts[iterate.ADVANCE] == 1)
     check("green CI → prs", prs == [42])
     check("green CI → no pending", pending == [])
@@ -1231,7 +1686,7 @@ def test_run_iterate_red_ci_no_pending_cards():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "create_task", return_value="t_fix"):
             with mock.patch.object(kanban, "comment", return_value=True):
-                counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=gp_red)
+                counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
     check("red CI → dev_fix_ci count 1", counts[iterate.DEV_FIX_CI] == 1)
     check("red CI → no pending", pending == [])
 
@@ -1253,7 +1708,7 @@ def test_run_iterate_pending_ci_multiple_cards():
     ]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
-            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=pp)
+            counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=pp)
     check("multi pending → 2 pending cards", len(pending) == 2)
     check("multi pending → tids captured", {p["tid"] for p in pending} == {"t_a", "t_b"})
     check("multi pending → prs captured", {p["pr"] for p in pending} == {1, 2})
@@ -1322,7 +1777,7 @@ def test_run_iterate_pending_ci_classified_correctly():
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
-            counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=pp)
+            counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=pp)
     check("pending CI → PENDING_CI count 1", counts[iterate.PENDING_CI] == 1)
     check("pending CI → DEV_FIX_CI count 0", counts[iterate.DEV_FIX_CI] == 0)
     check("pending CI → no fix task created", pending[0]["tid"] == "t_dev")
@@ -1435,6 +1890,8 @@ def test_run_iterate_qa_passed_advances():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_qa",
@@ -1447,7 +1904,7 @@ def test_run_iterate_qa_passed_advances():
             with mock.patch.object(kanban, "show_card", return_value=None):
                 with mock.patch.object(kanban, "list_tasks", return_value=[]):
                     with mock.patch.object(kanban, "create_task", return_value="t_x"):
-                        counts, prs, pending = iterate.run_iterate(
+                        counts, prs, pending, _qa_f, *_ = iterate.run_iterate(
                             "slug", "O/R", provider=_GreenProvider(),
                         )
     check("run_iterate qa-passed → ADVANCE 1", counts[iterate.ADVANCE] == 1)
@@ -1465,6 +1922,8 @@ def test_run_iterate_accessibility_approved_advances():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_a11y",
@@ -1475,7 +1934,7 @@ def test_run_iterate_accessibility_approved_advances():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
             with mock.patch.object(kanban, "show_card", return_value=None):
-                counts, prs, pending = iterate.run_iterate(
+                counts, prs, pending, _qa_f, *_ = iterate.run_iterate(
                     "slug", "O/R", provider=_GreenProvider2(),
                 )
     check("run_iterate accessibility-approved → ADVANCE 1", counts[iterate.ADVANCE] == 1)
@@ -1492,6 +1951,8 @@ def test_run_iterate_accessibility_changes_requested_routes_to_pm():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_a11y2",
@@ -1504,7 +1965,7 @@ def test_run_iterate_accessibility_changes_requested_routes_to_pm():
             with mock.patch.object(kanban, "comment", return_value=True):
                 with mock.patch.object(kanban, "block_task", return_value=True):
                     with mock.patch.object(kanban, "show_card", return_value=None):
-                        counts, prs, pending = iterate.run_iterate(
+                        counts, prs, pending, _qa_f, *_ = iterate.run_iterate(
                             "slug", "O/R", provider=_GreenProvider3(),
                         )
     check("run_iterate accessibility-changes → PM_ROUTE 1", counts[iterate.PM_ROUTE] == 1)
@@ -1520,6 +1981,8 @@ def test_run_iterate_qa_failed_creates_fix_card():
             return CIStatus.GREEN
         def find_pr_for_branch(self, branch):
             return None
+        def has_label(self, pr_number, label_name):
+            return False
 
     cards = [{
         "id": "t_qa_fail",
@@ -1532,7 +1995,7 @@ def test_run_iterate_qa_failed_creates_fix_card():
             with mock.patch.object(kanban, "comment", return_value=True):
                 with mock.patch.object(kanban, "show_card", return_value=None):
                     with mock.patch.object(kanban, "list_tasks", return_value=[]):
-                        counts, prs, pending = iterate.run_iterate(
+                        counts, prs, pending, _qa_f, *_ = iterate.run_iterate(
                             "slug", "O/R", provider=_GreenProvider4(),
                         )
     check("run_iterate qa-failed → DEV_FIX_CI 1", counts[iterate.DEV_FIX_CI] == 1)
@@ -1551,7 +2014,7 @@ def test_run_iterate_red_ci_classified_correctly():
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "create_task", return_value="t_fix"):
             with mock.patch.object(kanban, "comment", return_value=True):
-                counts, prs, pending = iterate.run_iterate("slug", "O/R", provider=gp_red)
+                counts, prs, pending, _qa_f, *_ = iterate.run_iterate("slug", "O/R", provider=gp_red)
     check("red CI → DEV_FIX_CI count 1", counts[iterate.DEV_FIX_CI] == 1)
     check("red CI → PENDING_CI count 0", counts[iterate.PENDING_CI] == 0)
     check("red CI → no pending cards", pending == [])
@@ -1781,6 +2244,13 @@ if __name__ == "__main__":
         test_classify_blocked_dev_red,
         test_classify_blocked_dev_escalate,
         test_classify_blocked_dev_no_pr,
+        test_classify_blocked_dev_pr_merged_reconciles,
+        test_classify_blocked_dev_pr_merged_precedes_not_open,
+        test_classify_blocked_dev_pr_not_merged_still_holds,
+        test_execute_reconcile_merged,
+        test_execute_reconcile_merged_no_issue_number,
+        test_execute_reconcile_merged_dry_run,
+        test_run_iterate_dev_pr_merged_reconciles,
         test_classify_blocked_reviewer_changes,
         test_classify_blocked_reviewer_approved,
         test_classify_blocked_reviewer_escalate,
@@ -1828,13 +2298,17 @@ if __name__ == "__main__":
         test_run_iterate_falls_back_to_show_card_for_handoff,
         test_run_iterate_show_card_fallback_skip_on_failure,
         test_run_iterate_show_card_no_latest_summary,
-        test_run_iterate_respects_router_profile_config,
-        test_run_iterate_default_router_profile,
-        test_classify_blocked_pr_number_fallback,
-        test_run_iterate_branch_pr_fallback,
-        test_run_iterate_branch_pr_fallback_no_match,
-        test_run_iterate_handoff_pr_still_works,
-        test_run_iterate_branch_pr_fallback_ci_red,
+        test_create_downstream_happy_path,
+        test_create_downstream_qa_gate_recovered_parent,
+        test_create_downstream_idempotency_guard,
+        test_create_downstream_partial_idempotency,
+        test_create_downstream_dedup_respects_status,
+        test_create_downstream_dedup_multiple_statuses,
+        test_create_downstream_dedup_done_status,
+        test_create_downstream_dry_run,
+        test_execute_advance_triggers_downstream,
+        test_execute_advance_skip_downstream_no_issue_number,
+        test_downstream_task_body_references_pr,
         test_classify_blocked_planner_returns_pm_route,
         test_classify_blocked_documentation_docs_posted_returns_approve_advance,
         test_classify_blocked_documentation_unknown_returns_pm_route,
@@ -1843,13 +2317,6 @@ if __name__ == "__main__":
         test_extract_issue_number_bare_hash,
         test_extract_issue_number_none,
         test_extract_issue_number_prefers_repo_qualified,
-        test_create_downstream_happy_path,
-        test_create_downstream_idempotency_guard,
-        test_create_downstream_partial_idempotency,
-        test_create_downstream_dry_run,
-        test_execute_advance_triggers_downstream,
-        test_execute_advance_skip_downstream_no_issue_number,
-        test_downstream_task_body_references_pr,
         test_run_iterate_no_ci_provider_advances_immediately,
         test_run_iterate_pending_ci_returns_pending_cards,
         test_run_iterate_green_ci_no_pending_cards,

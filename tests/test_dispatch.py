@@ -420,6 +420,199 @@ def test_repair_prefixes_title_from_parent():
           mk_rename.call_args == mock.call("slug", "t_child", "#420 Implement the feature"))
 
 
+# ── close_issue_tasks (core/kanban.py) ────────────────────────────────────────
+
+
+def test_close_issue_tasks_completes_non_done_and_skips_done():
+    """close_issue_tasks completes only non-done tasks matching #issue_number."""
+    from core.kanban import close_issue_tasks
+
+    tasks = [
+        {"id": "t1", "title": "#42 dev work", "status": "todo"},
+        {"id": "t2", "title": "#42 qa verify", "status": "running"},
+        {"id": "t3", "title": "#42 already done", "status": "done"},
+        {"id": "t4", "title": "#99 other issue", "status": "todo"},  # different issue
+    ]
+    with mock.patch("core.kanban.list_tasks", return_value=tasks), \
+         mock.patch("core.kanban.complete", return_value=True) as mk_complete:
+        result = close_issue_tasks("slug", 42)
+
+    check("only non-done #42 tasks completed", result == ["t1", "t2"])
+    check("complete called exactly twice (t1, t2)", mk_complete.call_count == 2)
+
+
+def test_close_issue_tasks_walks_children_with_review_required_summary():
+    """Second pass completes blocked review-required children when summary is given."""
+    from core.kanban import close_issue_tasks
+
+    tasks = [{"id": "t_parent", "title": "#42 parent task", "status": "running"}]
+    parent_card = {
+        "task": {"id": "t_parent", "status": "running"},
+        "children": ["t_child_a", "t_child_b"],
+    }
+    child_a = {
+        "task": {"id": "t_child_a", "status": "blocked"},
+        "latest_summary": "review-required: PR #99 — branch fix/issue-42",
+    }
+    child_b = {
+        "task": {"id": "t_child_b", "status": "blocked"},
+        "latest_summary": "blocked: dependency on t_other",  # not review-required
+    }
+
+    def _show(slug, tid):
+        if tid == "t_parent": return parent_card
+        if tid == "t_child_a": return child_a
+        if tid == "t_child_b": return child_b
+        return None
+
+    with mock.patch("core.kanban.list_tasks", return_value=tasks), \
+         mock.patch("core.kanban.complete", return_value=True) as mk_complete, \
+         mock.patch("core.kanban.show_card", side_effect=_show):
+        result = close_issue_tasks("slug", 42, summary="closed: parent issue #42 merged")
+
+    check("parent completed plus review-required child",
+          result == ["t_parent", "t_child_a"])
+    check("non-review-required child not completed", mk_complete.call_count == 2)
+
+
+def test_close_issue_tasks_dry_run_does_not_call_complete():
+    """dry_run returns ids without actually completing anything."""
+    from core.kanban import close_issue_tasks
+
+    tasks = [
+        {"id": "t1", "title": "#42 dev work", "status": "todo"},
+        {"id": "t2", "title": "#42 qa verify", "status": "running"},
+    ]
+    with mock.patch("core.kanban.list_tasks", return_value=tasks), \
+         mock.patch("core.kanban.complete") as mk_complete:
+        result = close_issue_tasks("slug", 42, dry_run=True)
+
+    check("dry_run returns ids of would-be-completed tasks", result == ["t1", "t2"])
+    check("complete never called in dry-run", not mk_complete.called)
+
+
+def test_close_issue_tasks_empty_board_returns_empty():
+    """No matching tasks → returns empty list, no side effects."""
+    from core.kanban import close_issue_tasks
+
+    with mock.patch("core.kanban.list_tasks", return_value=[]), \
+         mock.patch("core.kanban.complete") as mk_complete:
+        result = close_issue_tasks("slug", 42)
+
+    check("empty board returns empty list", result == [])
+    check("complete never called", not mk_complete.called)
+
+
+# ── _count_active_issue_tasks ─────────────────────────────────────────────────
+
+
+def test_count_active_issue_tasks_excludes_done_and_cancelled():
+    """Only todo/running/ready/blocked statuses count as active."""
+    tasks = [
+        {"id": "t1", "title": "#99 dev work", "status": "todo"},
+        {"id": "t2", "title": "#99 qa verify", "status": "running"},
+        {"id": "t3", "title": "#99 already done", "status": "done"},
+        {"id": "t4", "title": "#99 cancelled", "status": "cancelled"},
+        {"id": "t5", "title": "#100 unrelated", "status": "todo"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        active = disp._count_active_issue_tasks("slug", 99)
+    check("only 2 active (todo + running), not done/cancelled/unrelated", active == 2)
+
+
+def test_count_active_issue_tasks_zero_when_all_done():
+    tasks = [
+        {"id": "t1", "title": "#42 completed work", "status": "done"},
+        {"id": "t2", "title": "#42 also done", "status": "done"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        active = disp._count_active_issue_tasks("slug", 42)
+    check("all done → 0 active", active == 0)
+
+
+def test_count_active_issue_tasks_zero_for_unknown_issue():
+    """Issue with no kanban tasks at all → 0 active."""
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[]):
+        active = disp._count_active_issue_tasks("slug", 9999)
+    check("no tasks → 0 active", active == 0)
+
+
+# ── _repair_orphan_tasks: additional edge cases ──────────────────────────────
+
+
+def test_repair_skips_running_or_blocked_tasks():
+    """_repair_orphan_tasks only repairs todo/ready — running/blocked left alone."""
+    tasks = [
+        {"id": "t_run", "assignee": "developer", "title": "#50 running work", "status": "running"},
+        {"id": "t_block", "assignee": "developer", "title": "#50 blocked", "status": "blocked"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no repairs for running/blocked tasks", repaired == 0)
+    check("reassign never called", not mk_reassign.called)
+    check("rename never called", not mk_rename.called)
+
+
+def test_repair_unknown_assignee_skipped():
+    """Assignee that maps to no known generic role is logged and skipped."""
+    tasks = [{"id": "t_unknown", "assignee": "some-custom-agent",
+              "title": "Implement thing", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("unknown assignee skipped (no repair)", repaired == 0)
+    check("reassign not called for unknown assignee", not mk_reassign.called)
+
+
+def test_repair_idempotent_already_fixed_task():
+    """Re-running on a task already having #N in title and valid assignee → no-op."""
+    tasks = [{"id": "t_ok", "assignee": "developer-daedalus",
+              "title": "#42 fix the bug", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={}) as mk_show, \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("already-fixed task → 0 repairs", repaired == 0)
+    check("reassign never called", not mk_reassign.called)
+    check("show_card skipped (assignee valid)", not mk_show.called)
+    check("rename never called", not mk_rename.called)
+
+
+def test_repair_dry_run_does_not_mutate():
+    """dry_run=True counts repairs but never calls reassign/rename."""
+    tasks = [
+        {"id": "t1", "assignee": "developer", "title": "#42 fix bug", "status": "todo"},
+        {"id": "t2", "assignee": "developer-daedalus",
+         "title": "Implement feature", "status": "ready"},
+    ]
+    card_with_body = {"body": "Fix for issue #42"}
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value=card_with_body), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES, dry_run=True)
+    check("dry_run counts 2 repairs", repaired == 2)
+    check("reassign never called in dry_run", not mk_reassign.called)
+    check("rename never called in dry_run", not mk_rename.called)
+
+
+def test_repair_noop_when_no_issue_number_discoverable():
+    """Title has no #N, body has no #N, parents have no #N → repair skipped."""
+    tasks = [{"id": "t_orphan", "assignee": "developer-daedalus",
+              "title": "Implement something vague", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "no issue number here"}), \
+         mock.patch.object(disp, "_find_issue_n_from_parents", return_value=None), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no issue number discoverable → 0 repairs", repaired == 0)
+    check("rename never called", not mk_rename.called)
+
+
 def test_repair_noop_for_task_already_with_issue_number():
     """_repair_orphan_tasks leaves tasks with #N in title untouched."""
     tasks = [{"id": "t_ok", "assignee": "developer-daedalus",
@@ -459,6 +652,240 @@ def test_repair_respects_custom_profiles():
         disp._repair_orphan_tasks("slug", custom)
     check("remapped to custom profile",
           mk_reassign.call_args == mock.call("slug", "t_custom", "my-senior-dev"))
+
+
+# ── New orphan repair edge case tests ───────────────────────────────────────
+
+
+def test_repair_dry_run_does_not_mutate():
+    """_repair_orphan_tasks dry_run=True counts repairs but does not call reassign/rename."""
+    tasks = [{"id": "t_dry", "assignee": "developer", "title": "No prefix here", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #42"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES, dry_run=True)
+    check("dry run counts repairs", repaired > 0)
+    check("dry run does not call reassign", not mk_reassign.called)
+    check("dry run does not call rename", not mk_rename.called)
+
+
+def test_repair_both_bugs_on_single_task():
+    """A task with both generic assignee AND wrong title gets both repairs."""
+    tasks = [{"id": "t_both", "assignee": "developer", "title": "missing prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #55"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("both repairs applied", repaired == 2)
+    check("reassign called", mk_reassign.called)
+    check("rename called", mk_rename.called)
+
+
+def test_repair_skips_non_todo_ready_statuses():
+    """_repair_orphan_tasks only processes todo/ready tasks."""
+    tasks = [
+        {"id": "t_running", "assignee": "developer", "title": "no prefix", "status": "running"},
+        {"id": "t_blocked", "assignee": "developer", "title": "no prefix", "status": "blocked"},
+        {"id": "t_done", "assignee": "developer", "title": "no prefix", "status": "done"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("no repairs for non-todo/ready", repaired == 0)
+    check("reassign not called", not mk_reassign.called)
+
+
+def test_repair_unknown_assignee_skips_reassign_but_still_renames():
+    """Unknown assignees are skipped for reassign but title fix still applies."""
+    tasks = [{"id": "t_unk", "assignee": "custom-dev", "title": "no prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #77"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("title fix still applied", repaired == 1)
+    check("reassign not called for unknown", not mk_reassign.called)
+    check("rename called", mk_rename.called)
+
+
+def test_repair_empty_task_id_skipped():
+    """Tasks with empty id are skipped."""
+    tasks = [{"id": "", "assignee": "developer", "title": "#42 fix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("empty id skipped", repaired == 0)
+    check("reassign not called", not mk_reassign.called)
+
+
+def test_repair_reassign_failure_not_counted():
+    """If reassign_task returns False, repair is not counted."""
+    tasks = [{"id": "t_fail", "assignee": "developer", "title": "#42 fix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=False):
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("reassign failure not counted", repaired == 0)
+
+
+def test_repair_valid_profile_assignee_skips_show_card():
+    """Valid profile assignees skip show_card call (optimization)."""
+    tasks = [{"id": "t_valid", "assignee": "developer-daedalus", "title": "no prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "show_card", return_value={}) as mk_show, \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("valid profile skips show_card", not mk_show.called)
+
+
+def test_repair_rename_failure_not_counted():
+    """If rename_task returns False, repair is not counted."""
+    tasks = [{"id": "t_rnfl", "assignee": "developer-daedalus", "title": "no prefix", "status": "todo"}]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #99"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=False), \
+         mock.patch.object(disp, "_find_issue_n_from_parents", return_value=None):
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("rename failure not counted", repaired == 0)
+
+
+def test_repair_multiple_tasks_all_fixed():
+    """Multiple orphan tasks all get repaired."""
+    tasks = [
+        {"id": "t1", "assignee": "developer", "title": "no prefix1", "status": "todo"},
+        {"id": "t2", "assignee": "qa", "title": "no prefix2", "status": "ready"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks), \
+         mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk_reassign, \
+         mock.patch.object(disp.kanban, "show_card", return_value={"body": "for issue #11"}), \
+         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename:
+        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+    check("all tasks repaired", repaired == 4)
+    check("reassign called twice", mk_reassign.call_count == 2)
+    check("rename called twice", mk_rename.call_count == 2)
+
+
+# ── _find_issue_n_from_parents tests ───────────────────────────────────────
+
+
+def test_find_issue_n_from_parents_no_db_returns_none(tmp_path):
+    """Missing DB returns None."""
+    result = disp._find_issue_n_from_parents(tmp_path / "missing.db", "t_child")
+    check("missing db returns None", result is None)
+
+
+def test_find_issue_n_from_parents_finds_issue_in_parent_title(tmp_path):
+    """Finds issue number in parent task title."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")  # Create empty file
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_parent', 'Fix #112', 'body')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_parent')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("found issue in parent title", result == 112)
+
+
+def test_find_issue_n_from_parents_finds_issue_in_parent_body(tmp_path):
+    """Falls back to parent body when title has no issue."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_parent', 'Some task', 'fix for #205')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_parent')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("found issue in parent body", result == 205)
+
+
+def test_find_issue_n_from_parents_no_parents_returns_none(tmp_path):
+    """Task with no parents returns None."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_child', 'Orphan', 'no parents')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("no parents returns None", result is None)
+
+
+def test_find_issue_n_from_parents_parent_without_issue_number_returns_none(tmp_path):
+    """Parent exists but has no issue number → returns None."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_parent', 'Parent task', 'no issue here')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_parent')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("parent without issue returns None", result is None)
+
+
+def test_find_issue_n_from_parents_multiple_parents_returns_first(tmp_path):
+    """Multiple parents → returns first issue number found."""
+    db_path = tmp_path / "kanban.db"
+    db_path.write_text("")
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE task_links (child_id TEXT, parent_id TEXT)")
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t_p1', 'Fix #201', 'first parent')")
+    conn.execute("INSERT INTO tasks VALUES ('t_p2', 'Fix #202', 'second parent')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_p1')")
+    conn.execute("INSERT INTO task_links VALUES ('t_child', 't_p2')")
+    conn.commit()
+    conn.close()
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("found first parent issue", result == 201)
+
+
+def test_find_issue_n_from_parents_db_error_returns_none(tmp_path):
+    """Invalid DB → returns None."""
+    db_path = tmp_path / "bad.db"
+    db_path.write_text("not a sqlite db")
+    
+    result = disp._find_issue_n_from_parents(db_path, "t_child")
+    check("db error returns None", result is None)
+
+
+def test_count_active_issue_tasks_empty_board_returns_zero():
+    """Empty board returns zero active tasks."""
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=[]):
+        count = disp._count_active_issue_tasks("slug", 42)
+    check("empty board returns zero", count == 0)
+
+
+def test_count_active_issue_tasks_cancelled_not_counted():
+    """Cancelled tasks are not counted as active."""
+    tasks = [
+        {"id": "t1", "title": "Fix #42 bug", "status": "cancelled"},
+        {"id": "t2", "title": "Fix #42 bug", "status": "done"},
+    ]
+    with mock.patch.object(disp.kanban, "list_tasks", return_value=tasks):
+        count = disp._count_active_issue_tasks("slug", 42)
+    check("cancelled tasks not counted", count == 0)
 
 
 # ── _downstream_body rules section (Fix 4) ───────────────────────────────────
@@ -743,6 +1170,163 @@ def test_build_delegation_instructions_none_returns_empty():
     assert disp._build_delegation_instructions("none") == ""
 
 
+# ── issue #141: dead/hung coding agent must fail fast, not hang forever ───────
+
+
+def test_wait_for_agent_cmd_has_pid_liveness_and_timeout():
+    """_wait_for_agent_cmd polls output AND checks PID liveness + a wall-clock cap."""
+    cmd = disp._wait_for_agent_cmd("dev", 141, 1800)
+    # liveness check on the captured PID
+    assert "kill -0" in cmd, f"expected a PID liveness check, got:\n{cmd}"
+    assert "dev-141-pid.txt" in cmd, "wait must read the spawned PID file"
+    # wall-clock ceiling
+    assert "1800" in cmd, "wait must honor the max_wait ceiling"
+    assert "$((SECONDS-S))" in cmd, "wait must track elapsed wall-clock time"
+    # clear failure markers + stderr surfaced
+    assert "CODING_AGENT_DIED" in cmd
+    assert "CODING_AGENT_TIMEOUT" in cmd
+    assert "dev-141-err.txt" in cmd, "wait must surface the agent stderr log"
+
+
+def test_wait_for_agent_cmd_has_no_double_quotes():
+    """The wait command is embedded in terminal(\"...\"); a literal \" would break it."""
+    cmd = disp._wait_for_agent_cmd("dev", 141, 3600)
+    assert '"' not in cmd, f"double quotes would terminate the terminal() string:\n{cmd}"
+
+
+def test_wait_for_agent_cmd_no_infinite_until_loop():
+    """The old unbounded `until [ -s out ]; do sleep 30; done` must be gone."""
+    cmd = disp._wait_for_agent_cmd("dev", 141, 3600)
+    assert "until [ -s" not in cmd, (
+        "the infinite poll loop that hung on dead agents must not return"
+    )
+
+
+def test_wait_for_agent_cmd_developer_detects_open_pr():
+    """detect_pr wires the provider-side PR handshake into the poll loop (#146).
+
+    When the agent opens a PR but doesn't exit/emit the handshake line, the
+    detector populates out.txt and the loop breaks instead of waiting out the
+    full timeout (then retrying into a duplicate PR).
+    """
+    cmd = disp._wait_for_agent_cmd("dev", 146, 3600, detect_pr=True)
+    assert "daedalus-detect-pr.sh" in cmd, (
+        f"developer wait must invoke the PR detector, got:\n{cmd}"
+    )
+    # detector is passed the out + pid files and the loop breaks once out fills
+    assert "dev-146-out.txt" in cmd and "dev-146-pid.txt" in cmd
+    assert "[ -s /tmp/dev-146-out.txt ] && break" in cmd, (
+        "loop must break immediately when the detector writes the PR line"
+    )
+    # still embeddable in terminal("...") — no literal double quotes
+    assert '"' not in cmd, f"double quotes would break the terminal() string:\n{cmd}"
+    # backstops remain
+    assert "kill -0" in cmd and "CODING_AGENT_TIMEOUT" in cmd
+
+
+def test_wait_for_agent_cmd_no_pr_detection_by_default():
+    """Non-developer roles (default detect_pr=False) must NOT poll for a PR.
+
+    They run on an existing PR branch, where detection would fire instantly and
+    kill their agent before it posts its report.
+    """
+    cmd = disp._wait_for_agent_cmd("qa", 146, 3600)
+    assert "daedalus-detect-pr.sh" not in cmd, (
+        f"only the developer role should detect PRs, got:\n{cmd}"
+    )
+
+
+def test_delegation_pr_detection_is_developer_only():
+    """Through the public builder: developer gets PR detection, others don't."""
+    dev = disp._build_delegation_instructions(
+        "claude-code", cmd="", role="developer", issue_number=146)
+    assert "daedalus-detect-pr.sh" in dev, "developer delegation must detect the PR"
+    for role in ("validator", "pm", "qa", "reviewer", "security", "documentation"):
+        body = disp._build_delegation_instructions(
+            "claude-code", cmd="", role=role, issue_number=146)
+        assert "daedalus-detect-pr.sh" not in body, (
+            f"{role}: must not run PR detection (would kill its agent early)"
+        )
+
+
+def test_delegation_spawn_captures_pid_and_separate_stderr():
+    """Spawn line must record the agent PID and route stderr to its own log."""
+    for agent in ("claude-code", "codex", "opencode"):
+        body = disp._build_delegation_instructions(agent, cmd="", issue_number=141)
+        assert "echo $$ > /tmp/dev-141-pid.txt" in body, (
+            f"{agent}: spawn must capture the PID for the liveness check, got:\n{body}"
+        )
+        # The current Hermes terminal tool rejects nohup/&/disown/setsid in a
+        # foreground call, so the agent must spawn via terminal(background=True);
+        # otherwise the coding agent never launches and the card hangs (#141).
+        assert "background=True" in body, (
+            f"{agent}: spawn must use terminal(background=True); nohup/& is rejected by Hermes"
+        )
+        assert "nohup" not in body and "background=False" not in body, (
+            f"{agent}: must not use the Hermes-rejected nohup/& foreground spawn"
+        )
+        assert "2> /tmp/dev-141-err.txt" in body, (
+            f"{agent}: stderr must go to its own log, not merged into out.txt"
+        )
+        # stderr must NOT be merged into out.txt anymore
+        assert f"out.txt 2>&1' >" not in body, (
+            f"{agent}: stderr must not be merged into out.txt"
+        )
+
+
+def test_delegation_instructions_fail_fast_on_dead_agent():
+    """Every delegating role is told to block (not complete) when the agent dies."""
+    for role in ("developer", "validator", "pm", "qa", "reviewer", "security",
+                 "documentation"):
+        body = disp._build_delegation_instructions(
+            "claude-code", cmd="", role=role, issue_number=141)
+        assert "kill -0" in body, f"{role}: wait must include a liveness check"
+        assert "CODING_AGENT_DIED" in body, f"{role}: must surface the death marker"
+        assert "coding-agent-failed:" in body, (
+            f"{role}: must block the card with a clear error on agent failure"
+        )
+        assert "until [ -s" not in body, f"{role}: no infinite poll loop"
+
+
+def test_delegation_wait_uses_configured_max_wait():
+    """The configured coding_agent_max_wait is baked into the generated wait."""
+    with mock.patch.object(disp, "_CODING_AGENT_MAX_WAIT", 600):
+        body = disp._build_delegation_instructions(
+            "claude-code", cmd="", role="developer", issue_number=141)
+    assert "600s" in body, f"expected configured 600s ceiling in wait, got:\n{body}"
+
+
+def test_resolve_coding_agent_max_wait_default():
+    """Unset / invalid / non-positive max_wait falls back to the default."""
+    d = disp._DEFAULT_CODING_AGENT_MAX_WAIT
+    assert disp._resolve_coding_agent_max_wait({}) == d
+    assert disp._resolve_coding_agent_max_wait(None) == d
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": "nope"}) == d
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": 0}) == d
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": -5}) == d
+
+
+def test_resolve_coding_agent_max_wait_override():
+    """A positive max_wait (int or numeric string) is honored."""
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": 900}) == 900
+    assert disp._resolve_coding_agent_max_wait({"coding_agent_max_wait": "120"}) == 120
+
+
+def test_resolve_max_dispatch_default():
+    """Unset / invalid / non-positive max_dispatch falls back to 5."""
+    assert disp._resolve_max_dispatch({}) == 5
+    assert disp._resolve_max_dispatch(None) == 5
+    assert disp._resolve_max_dispatch({"max_dispatch": "x"}) == 5
+    assert disp._resolve_max_dispatch({"max_dispatch": 0}) == 5
+    assert disp._resolve_max_dispatch({}, default=3) == 3
+
+
+def test_resolve_max_dispatch_override():
+    """A positive max_dispatch is honored (caps concurrent coding agents)."""
+    assert disp._resolve_max_dispatch({"max_dispatch": 2}) == 2
+    assert disp._resolve_max_dispatch({"max_dispatch": "4"}) == 4
+
+
 def test_resolve_coding_agent_cmd_empty_when_not_set():
     """_resolve_coding_agent_cmd returns '' when field absent or blank."""
     assert disp._resolve_coding_agent_cmd({}) == ""
@@ -802,6 +1386,33 @@ def test_dev_task_body_has_delegation_when_claude_code():
     assert body.index("AGENT DELEGATION") < body.index("You are the DEVELOPER")
 
 
+def test_coding_agent_max_turns_default_for_claude():
+    """A fresh project (no override) gets a sane --max-turns, not claude's 25 default (#143)."""
+    cmd = disp._apply_coding_agent_max_turns("claude-code", "", {})
+    assert "--max-turns 100" in cmd, cmd
+    assert "claude" in cmd  # the default claude-code cmd was applied
+
+
+def test_coding_agent_max_turns_configurable():
+    """execution.coding_agent_max_turns overrides the default budget."""
+    cmd = disp._apply_coding_agent_max_turns("claude-code", "", {"coding_agent_max_turns": 250})
+    assert "--max-turns 250" in cmd, cmd
+
+
+def test_coding_agent_max_turns_respects_explicit():
+    """An explicit --max-turns in the cmd is never doubled."""
+    base = "claude --dangerously-skip-permissions -p --max-turns 50"
+    cmd = disp._apply_coding_agent_max_turns("claude-code", base, {})
+    assert cmd == base
+    assert cmd.count("--max-turns") == 1
+
+
+def test_coding_agent_max_turns_skips_non_claude():
+    """codex/opencode use different turn flags — leave them untouched."""
+    assert disp._apply_coding_agent_max_turns("codex", "codex exec --full-auto", {}) == "codex exec --full-auto"
+    assert disp._apply_coding_agent_max_turns("opencode", "opencode run", {}) == "opencode run"
+
+
 def test_dev_task_body_no_delegation_when_none():
     """_dev_task_body has no delegation block when coding_agent=none."""
     body = disp._dev_task_body("org/repo", _ISSUE, 3, "/tmp", "main", "github",
@@ -857,6 +1468,20 @@ def test_security_task_body_has_role_instructions():
     assert "#55" in body
     assert "security" in body.lower()
     assert "security: cleared" in body or "security:" in body
+
+
+def test_qa_task_body_isolates_pr_in_worktree():
+    """QA tests the PR in an isolated worktree, never the shared tree (#953)."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/work/shared", "github")
+    # Instructs an isolated worktree pinned to the PR head.
+    assert "worktree add" in body
+    assert "pull/<P>/head" in body
+    assert "worktree remove" in body  # always cleans up
+    # Explicitly forbids mutating / testing the shared tree.
+    assert "MUST NOT run tests in it directly" in body
+    assert "stash" in body.lower()  # warns against stash/checkout in shared tree
+    # No PR ⇒ block qa-failed, do not validate the shared tree.
+    assert "qa-failed: no PR" in body
 
 
 def test_qa_task_body_comment_targets_pr_not_issue():
@@ -1081,18 +1706,24 @@ def test_role_tmp_prefix_has_explicit_accessibility_and_planner():
 
 
 def test_role_delegation_wait_command_is_issue_scoped():
-    """The _ROLE_AFTER_SPAWN wait command also embeds the issue number (issue #114)."""
+    """The _ROLE_AFTER_SPAWN wait command embeds the issue number (issue #114).
+
+    The wait is now a bounded, liveness-guarded loop (issue #141) rather than the
+    old `until [ -s ... ]`, but every /tmp ref must still be issue-scoped.
+    """
     issue = {"number": 42, "title": "T", "body": "B"}
-    # developer uses an `until [ -s ... ]` poll loop; assert both refs are scoped.
     dev_body = disp._dev_task_body("o/r", issue, 1, "/tmp", "main", "github",
                                    coding_agent="claude-code")
-    assert "until [ -s /tmp/dev-42-out.txt ]" in dev_body
-    assert "cat /tmp/dev-42-out.txt" in dev_body
+    assert "/tmp/dev-42-out.txt" in dev_body
+    assert "/tmp/dev-42-pid.txt" in dev_body
+    assert "/tmp/dev-42-err.txt" in dev_body
+    assert "until [ -s" not in dev_body  # the hang-forever loop is gone (#141)
     assert "/tmp/dev-out.txt" not in dev_body
-    # validator uses a plain `cat` wait; confirm it is scoped too.
+    # validator wait must be scoped too.
     val_body = disp._validator_body("o/r", issue, "/tmp", "main", "github",
                                     coding_agent="claude-code")
-    assert "cat /tmp/validator-42-out.txt" in val_body
+    assert "/tmp/validator-42-out.txt" in val_body
+    assert "/tmp/validator-42-pid.txt" in val_body
     assert "/tmp/validator-out.txt" not in val_body
 
 
@@ -1268,7 +1899,11 @@ def test_unpack_issue_defaults():
 def test_resolve_howtos_keys_and_github_default():
     h = disp._resolve_howtos("github", "org/repo", 5)
     assert set(h) == {"comment", "pr_create", "close_completed", "close_wontfix"}
-    assert "org/repo" in h["comment"]
+    # #894: the comment how-to no longer tells agents to POST via GITHUB_TOKEN;
+    # it redirects them to the dispatcher (which posts on their behalf).
+    assert "GITHUB_TOKEN" not in h["comment"]
+    assert "urllib" not in h["comment"]
+    assert "dispatcher" in h["comment"]
     assert "org/repo/issues/5" in h["close_completed"]
     assert "completed" in h["close_completed"]
     assert "not_planned" in h["close_wontfix"]
@@ -1332,6 +1967,243 @@ def test_get_task_summary_falls_back_to_show_card():
 
 def test_get_task_summary_no_id_no_fallback():
     assert disp._get_task_summary({}, "slug") == ""
+
+
+# ── _check_confirmed_validators: STOP handler reachability (issue #115) ─────────
+
+
+def _make_done_validator_card(tid, summary, issue_number):
+    """Build a done validator card dict for testing."""
+    return {
+        "id": tid,
+        "assignee": "validator-daedalus",
+        "title": f"#validate: #{issue_number} Some issue",
+        "status": "done",
+        "summary": summary,
+        "latest_summary": summary,
+        "idempotency_key": "",
+    }
+
+
+def test_check_confirmed_validators_stop_reaches_dedicated_handler():
+    """stop: summaries must reach the dedicated handler (line 2101), auto-close the
+    issue, and NOT create a PM consultation card (that was the dead-code symptom).
+    """
+    done_card = _make_done_validator_card("t_val1", "STOP: duplicate issue", 501)
+    issue = {"number": 501, "title": "Test issue", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.return_value = [done_card]       # status="done" call
+    # second call: all-tasks scan for idempotency — none already handled
+    fake_kanban.list_tasks.side_effect = [[done_card], []]
+    fake_kanban.create_task.return_value = "t_stop_marker"  # idempotency marker task
+
+    provider = mock.Mock()
+    provider.close_issue.return_value = True
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {501: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=provider,
+        )
+
+    # Stop handler must actually call close_issue
+    provider.close_issue.assert_called_once_with(501)
+    # Issue number is in the triggered list
+    assert 501 in triggered, f"expected 501 in triggered, got {triggered}"
+    # Idempotency marker task was created (so future ticks don't re-close)
+    assert fake_kanban.create_task.call_count >= 1
+    # The marker task's idempotency key must start with the correct prefix
+    created_args = fake_kanban.create_task.call_args_list[0]
+    assert created_args.kwargs["idempotency_key"].startswith("validator-stop-closed-")
+
+
+def test_check_confirmed_validators_stop_idempotent_already_closed():
+    """A stop: whose idempotency marker already exists must NOT re-call close_issue,
+    but must still appear in triggered (so iteration bookkeeping stays consistent).
+    """
+    done_card = _make_done_validator_card("t_val2", "STOP: already fixed", 502)
+    marker = {
+        "id": "t_old_mark",
+        "idempotency_key": "validator-stop-closed-502",
+    }
+    issue = {"number": 502, "title": "Dup issue", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = [[done_card], [marker]]
+
+    provider = mock.Mock()
+    provider.close_issue.return_value = True  # would succeed but must not be called
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {502: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=provider,
+        )
+
+    provider.close_issue.assert_not_called()
+    assert 502 in triggered
+
+
+def test_check_confirmed_validators_blocked_still_creates_pm_consultation():
+    """Guard against regressing back: a blocked: summary must still create a PM
+    consultation task (regression safety net for the original handler).
+    """
+    done_card = _make_done_validator_card("t_val3", "BLOCKED: cannot reproduce", 503)
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.return_value = [done_card]
+    fake_kanban.create_task.return_value = "t_pm_consult"
+
+    # No provider — blocked handler doesn't need one
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    # Must create a PM consultation task
+    fake_kanban.create_task.assert_called_once()
+    call = fake_kanban.create_task.call_args
+    assert "consult:" in call.args[1] or "consult:" in call.kwargs.get("title", "")
+    # First block uses the base key (no -rN suffix).
+    assert call.kwargs.get("idempotency_key") == "validator-blocked-503"
+    assert 503 in triggered
+
+
+# ── _check_confirmed_validators: incrementing validator-blocked key (#994) ──────
+
+
+def _make_done_consult_card(tid, issue_number, ikey, status="done"):
+    """Build a PM consultation card dict for testing."""
+    return {
+        "id": tid,
+        "assignee": "project-manager-daedalus",
+        "title": f"consult: #{issue_number} Unstable repro",
+        "status": status,
+        "summary": "CLARIFIED: use the new API",
+        "latest_summary": "CLARIFIED: use the new API",
+        "idempotency_key": ikey,
+    }
+
+
+def test_check_confirmed_validators_second_block_creates_new_consultation():
+    """#994: a second validator block must create a NEW PM consultation with an
+    incrementing key, even though a *done* consultation exists with the base key.
+    """
+    done_val = _make_done_validator_card("t_val", "BLOCKED: still cannot reproduce", 503)
+    done_consult = _make_done_consult_card("t_consult1", 503, "validator-blocked-503")
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    def _list_tasks(*args, **kwargs):
+        if kwargs.get("status") == "done":
+            return [done_val]
+        return [done_val, done_consult]
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = _list_tasks
+    fake_kanban.create_task.return_value = "t_consult2"
+
+    with mock.patch.object(disp, "kanban", fake_kanban), \
+            mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as send:
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+            resolved={"cron": {"notifications": [
+                {"target": "slack:C1", "events": ["validator-blocked"]}]}},
+        )
+
+    # A second consultation IS created with the incremented key.
+    fake_kanban.create_task.assert_called_once()
+    assert fake_kanban.create_task.call_args.kwargs.get("idempotency_key") == "validator-blocked-503-r1"
+    assert 503 in triggered
+    # Slack/Discord notification fired for the second block.
+    send.assert_called_once()
+    assert send.call_args.args[0] == "slack:C1"
+
+
+def test_check_confirmed_validators_third_block_increments_again():
+    """#994: key increments per cycle — base, -r1, -r2 …"""
+    done_val = _make_done_validator_card("t_val", "BLOCKED: nope", 503)
+    consult0 = _make_done_consult_card("c0", 503, "validator-blocked-503")
+    consult1 = _make_done_consult_card("c1", 503, "validator-blocked-503-r1")
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    def _list_tasks(*args, **kwargs):
+        if kwargs.get("status") == "done":
+            return [done_val]
+        return [done_val, consult0, consult1]
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = _list_tasks
+    fake_kanban.create_task.return_value = "c2"
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    assert fake_kanban.create_task.call_args.kwargs.get("idempotency_key") == "validator-blocked-503-r2"
+
+
+def test_check_confirmed_validators_block_skips_when_consultation_active():
+    """#994 guard: while a consultation is still in flight, do NOT mint another
+    one each tick. The incrementing key must not fire until the prior consult
+    reaches a terminal state.
+    """
+    done_val = _make_done_validator_card("t_val", "BLOCKED: nope", 503)
+    active_consult = _make_done_consult_card(
+        "c0", 503, "validator-blocked-503", status="running")
+    issue = {"number": 503, "title": "Unstable repro", "body": ""}
+
+    def _list_tasks(*args, **kwargs):
+        if kwargs.get("status") == "done":
+            return [done_val]
+        return [done_val, active_consult]
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = _list_tasks
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {503: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    fake_kanban.create_task.assert_not_called()
+    assert 503 not in triggered
+
+
+def test_check_confirmed_validators_stop_no_provider_skips_close():
+    """When provider is None, the stop: handler must log but not crash, skip
+    the close_issue call, and continue. The issue is NOT added to triggered
+    (graceful no-op when the dispatcher can't actually act).
+    """
+    done_card = _make_done_validator_card("t_val4", "STOP: cannot reproduce", 504)
+    issue = {"number": 504, "title": "Flaky issue", "body": ""}
+
+    fake_kanban = mock.Mock()
+    fake_kanban.list_tasks.side_effect = [[done_card], []]
+
+    with mock.patch.object(disp, "kanban", fake_kanban):
+        triggered = disp._check_confirmed_validators(
+            "slug", "org/repo", {504: issue},
+            1, "/w", "slack://foo", "dev", "github",
+            provider=None,
+        )
+
+    # No crash, no close_issue, no marker task
+    assert not fake_kanban.create_task.called
+    # The no-provider path is a graceful no-op (issue NOT in triggered)
+    assert 504 not in triggered
 
 
 if __name__ == "__main__":

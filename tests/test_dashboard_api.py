@@ -851,7 +851,9 @@ class TestReconcileCron:
         assert edit_args[0] == "edit"
         assert edit_args[1] == "99f7d116a95b"  # hex id from list output
         assert "--schedule" in edit_args
-        assert "60m" in edit_args
+        # Interval "60m" must be normalised to crontab so the cron repeats (#134).
+        assert "0 * * * *" in edit_args
+        assert "60m" not in edit_args
 
     def test_updates_cron_with_deliver(self):
         from dashboard.plugin_api import _reconcile_cron
@@ -914,6 +916,34 @@ class TestReconcileCron:
         assert result["cron"] == "created"
         create_args = mock_run.call_args_list[1][0][0]
         assert "--deliver" not in create_args
+
+    def test_workdir_passed_when_cfg_path_given(self):
+        """Issue #137: _reconcile_cron passes --workdir <repo root> on create + edit
+        so the dispatcher self-scopes to that project instead of sweeping all repos."""
+        from pathlib import Path
+        from dashboard.plugin_api import _reconcile_cron
+
+        cfg_path = Path("/repos/myproj/.hermes/daedalus.yaml")
+        expected = str(cfg_path.parent.parent.resolve())  # /repos/myproj
+
+        # create path (no existing job). Use a crontab schedule so the function
+        # never tries to write the schedule back to the (fake) cfg_path.
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
+            _reconcile_cron("myproj", {"schedule": "0 * * * *"}, cfg_path)
+        create_args = mock_run.call_args_list[-1][0][0]
+        assert create_args[0] == "create"
+        assert "--workdir" in create_args
+        assert expected in create_args
+
+        # edit path (one existing "test-project-daedalus" job → edited in place).
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
+            _reconcile_cron("test-project", {"schedule": "0 * * * *"}, cfg_path)
+        edit_args = mock_run.call_args_list[1][0][0]
+        assert edit_args[0] == "edit"
+        assert "--workdir" in edit_args
+        assert expected in edit_args
 
     # ── sweep duplicates: two same-name jobs → both removed by id ────────
 
@@ -1033,7 +1063,7 @@ class TestReconcileCron:
         assert result["error"] == "hermes CLI not found"
 
     def test_creates_cron_schedule_with_whitespace(self):
-        """Schedule with leading/trailing whitespace is stripped."""
+        """Schedule with leading/trailing whitespace is stripped, then converted."""
         from dashboard.plugin_api import _reconcile_cron
 
         with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
@@ -1043,8 +1073,86 @@ class TestReconcileCron:
         assert result["cron"] == "updated"
         edit_call = mock_run.call_args_list[1]
         args = edit_call[0][0]
-        assert "60m" in args  # trimmed
+        assert "0 * * * *" in args  # trimmed and normalised to crontab (#134)
         assert "  60m  " not in args
+        assert "60m" not in args
+
+    # ── schedule conversion: interval → crontab (issue #134) ─────────────
+
+    def test_edit_path_converts_interval_to_crontab(self):
+        """Edit path: interval schedule reaches hermes as crontab, never one-shot."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
+            _reconcile_cron("test-project", {"schedule": "every 2h"})
+
+        edit_args = mock_run.call_args_list[1][0][0]
+        assert edit_args[0] == "edit"
+        assert "0 */2 * * *" in edit_args
+        assert "every 2h" not in edit_args
+
+    def test_create_path_converts_interval_to_crontab(self):
+        """Create path: interval schedule reaches hermes as crontab, never one-shot."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
+            result = _reconcile_cron("test-project", {"schedule": "30m"})
+
+        assert result["cron"] == "created"
+        create_args = mock_run.call_args_list[1][0][0]
+        assert create_args[0] == "create"
+        # `hermes cron create <schedule> ...` — schedule is the first positional.
+        assert create_args[1] == "*/30 * * * *"
+        assert "30m" not in create_args
+
+    def test_crontab_schedule_passes_through_unchanged(self):
+        """An already-crontab schedule is sent verbatim (no double conversion)."""
+        from dashboard.plugin_api import _reconcile_cron
+
+        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
+            _reconcile_cron("test-project", {"schedule": "0 9 * * *"})
+
+        edit_args = mock_run.call_args_list[1][0][0]
+        assert "0 9 * * *" in edit_args
+
+    def test_normalised_schedule_written_back_to_config(self):
+        """When the schedule is normalised, the YAML is rewritten to crontab so
+        it stays consistent with the live cron and never reverts on next save."""
+        import tempfile
+        from pathlib import Path as _Path
+        from dashboard.plugin_api import _reconcile_cron
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = _Path(td) / "daedalus.yaml"
+            cfg_path.write_text("cron:\n  schedule: 60m\n  deliver: slack:#eng\n")
+            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+                mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
+                _reconcile_cron("test-project", {"schedule": "60m"}, cfg_path)
+
+            text = cfg_path.read_text()
+            assert '"0 * * * *"' in text
+            assert "60m" not in text
+            # Unrelated keys are preserved.
+            assert "deliver: slack:#eng" in text
+
+    def test_crontab_schedule_not_written_back(self):
+        """A schedule already in crontab format is left untouched in the YAML."""
+        import tempfile
+        from pathlib import Path as _Path
+        from dashboard.plugin_api import _reconcile_cron
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = _Path(td) / "daedalus.yaml"
+            original = "cron:\n  schedule: 0 9 * * *\n"
+            cfg_path.write_text(original)
+            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+                mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
+                _reconcile_cron("test-project", {"schedule": "0 9 * * *"}, cfg_path)
+
+            assert cfg_path.read_text() == original
 
     def test_repeated_saves_never_stack_jobs(self):
         """Regression: saving twice (schedule change) must never produce a

@@ -21,6 +21,45 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _registry_file() -> "os.PathLike[str]":
+    """Path to the daedalus project registry (mirrors core.registry / _ensure_dispatch_crons).
+
+    Read directly rather than importing ``core.registry`` so the plugin process
+    never puts the plugin dir on ``sys.path`` (see module docstring).
+    """
+    from pathlib import Path
+    hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return Path(
+        os.environ.get("HERMES_ORCH_REGISTRY")
+        or os.path.join(hermes_home, "daedalus", "projects")
+    )
+
+
+def _resolve_project_for_task() -> Optional[str]:
+    """Return the registered repo path containing the worker's cwd, or ``None``.
+
+    A kanban worker runs in its project's workdir, so scoping the post-session
+    dispatch to that path stops a single worker from sweeping every registered
+    project (issues #137 / #133).
+    """
+    try:
+        from pathlib import Path
+        reg = _registry_file()
+        if not os.path.exists(reg):
+            return None
+        cwd = Path.cwd().resolve()
+        for raw in Path(reg).read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            rpath = Path(line).expanduser().resolve()
+            if cwd == rpath or rpath in cwd.parents:
+                return str(rpath)
+    except Exception:
+        return None
+    return None
+
+
 def _on_session_end(session_id, completed, interrupted, model, platform, **kwargs):
     """Fire the daedalus dispatcher immediately after any worker session ends.
 
@@ -37,10 +76,18 @@ def _on_session_end(session_id, completed, interrupted, model, platform, **kwarg
         logger.debug("daedalus on_session_end: cron script missing or not executable: %s", cron_script)
         return
 
+    # Scope the dispatch to the worker's own project so one session-end doesn't
+    # sweep (and re-notify) every registered repo (issues #137 / #133). Falls
+    # back to a global sweep when cwd isn't a registered project.
+    cmd = ["bash", cron_script]
+    repo = _resolve_project_for_task()
+    if repo:
+        cmd += ["--repo", repo]
+
     def _run():
         try:
             subprocess.run(
-                ["bash", cron_script],
+                cmd,
                 env=os.environ.copy(),
                 timeout=120,
                 check=False,
@@ -128,7 +175,7 @@ def _read_env_value(env_path: str, key: str) -> Optional[str]:
 
 
 def _sync_github_token() -> None:
-    """Copy GITHUB_TOKEN from ~/.hermes/.env into every *-daedalus profile .env.
+    """Sync GITHUB_TOKEN from ~/.hermes/.env into every *-daedalus profile .env.
 
     provision_roster.sh only writes GITHUB_TOKEN into each profile's .env when a
     token is resolvable at provision time. On a fresh install where the token is
@@ -136,10 +183,9 @@ def _sync_github_token() -> None:
     the profiles are left permanently missing the token and agents fail with
     GitHub auth errors until someone re-provisions (issue #78).
 
-    This runs on every plugin load and, for each ``~/.hermes/profiles/*-daedalus``
-    profile whose .env lacks a ``GITHUB_TOKEN=`` line, appends the token from
-    ~/.hermes/.env. Idempotent — profiles that already have the key are skipped,
-    so the value is never duplicated or overwritten. Never raises.
+    This runs on every plugin load. For each ``~/.hermes/profiles/*-daedalus``
+    profile, it adds or updates the GITHUB_TOKEN to match ~/.hermes/.env so that
+    token rotations are picked up automatically. Never raises.
     """
     try:
         hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
@@ -159,12 +205,12 @@ def _sync_github_token() -> None:
                 continue
             env_file = os.path.join(profile_dir, ".env")
 
-            # Idempotent: skip if a GITHUB_TOKEN line already exists.
-            if _read_env_value(env_file, "GITHUB_TOKEN") is not None:
-                continue
+            existing = _read_env_value(env_file, "GITHUB_TOKEN")
+            if existing is not None:
+                continue  # profile already has a token — leave it alone
 
             try:
-                # Match a trailing-newline-safe append, mirroring provision_roster.sh.
+                # Key absent — append it.
                 with open(env_file, "a") as f:
                     f.write(f"\nGITHUB_TOKEN={token}\n")
                 os.chmod(env_file, 0o600)
@@ -210,25 +256,13 @@ def _ensure_cron_wrapper() -> None:
 def _schedule_to_crontab(schedule: str) -> str:
     """Convert interval schedules to crontab syntax so recreated crons run forever (Repeat: ∞).
 
-    Hermes treats interval syntax like '60m' or 'every 2h' as one-shot jobs.
-    Crontab syntax ('0 * * * *') is inherently infinite. If the schedule is
-    already in crontab format it is returned unchanged.
+    Thin back-compat wrapper around ``core.util.schedule_to_crontab`` — the single
+    source of truth now shared with ``dashboard.plugin_api._reconcile_cron`` (issue
+    #134). Imported lazily so the plugin entry point stays import-safe even if
+    ``core`` is not yet on ``sys.path`` at load time.
     """
-    s = re.sub(r"^every\s+", "", schedule.strip().lower())
-    if re.match(r"^[\d*/,\-]+(\s+[\d*/,\-]+){4}$", s):
-        return schedule.strip()
-    m = re.match(r"^(\d+)m$", s)
-    if m:
-        minutes = int(m.group(1))
-        if minutes >= 60 and minutes % 60 == 0:
-            hours = minutes // 60
-            return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
-        return f"*/{minutes} * * * *"
-    m = re.match(r"^(\d+)h$", s)
-    if m:
-        hours = int(m.group(1))
-        return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
-    return schedule.strip()
+    from core.util import schedule_to_crontab
+    return schedule_to_crontab(schedule)
 
 
 def _ensure_dispatch_crons() -> None:
@@ -421,6 +455,9 @@ def _ensure_dispatch_crons() -> None:
                     "--name", cron_name,
                     "--script", "daedalus-cron.sh",
                     "--no-agent",
+                    # Run the dispatcher from this repo's root so it auto-scopes
+                    # to this project instead of sweeping every repo (issue #137).
+                    "--workdir", repo_path,
                 ]
                 deliver = (cron_cfg.get("deliver") or "").strip()
                 if deliver and not cron_cfg.get("notifications"):

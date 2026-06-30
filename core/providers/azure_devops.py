@@ -161,6 +161,54 @@ class AzureDevOpsProvider(VCSProvider):
         except ProviderError:
             return None
 
+    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+        items = self._work_items([issue_number])
+        if not items:
+            return None
+        wi = items[0]
+        fields = wi.get("fields") or {}
+        return IssueSummary(
+            number=wi.get("id", issue_number), title=fields.get("System.Title") or "",
+            body=fields.get("System.Description") or "",
+            labels=self._tags(fields),
+            state=(fields.get("System.State") or "").lower(),
+            url=(wi.get("_links") or {}).get("html", {}).get("href") or "")
+
+    @staticmethod
+    def _id_from_url(url: str) -> Optional[int]:
+        """Trailing work-item id from a relation URL (…/workItems/123)."""
+        tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
+        return int(tail) if tail.isdigit() else None
+
+    def blockers(self, issue_number: int) -> List[int]:
+        """Open blockers via work-item Predecessor links
+        (``System.LinkTypes.Dependency-Reverse``) merged with the portable
+        ``Depends on:`` body fallback.
+
+        A Predecessor must complete before this item, so an open predecessor is a
+        blocker. Expanding relations also returns the description, so the body
+        fallback reuses it without a second fetch.
+        """
+        out: List[int] = []
+        try:
+            data = self._http.get_json(
+                f"{self._pproj}/_apis/wit/workitems/{issue_number}",
+                params={"$expand": "relations", **_API})
+        except ProviderError as e:
+            self._log.warning("blockers #%s relations failed: %s", issue_number, e)
+            data = {}
+        body = (data.get("fields") or {}).get("System.Description") or ""
+        for rel in (data or {}).get("relations") or []:
+            if (rel.get("rel") or "") != "System.LinkTypes.Dependency-Reverse":
+                continue
+            pid = self._id_from_url(rel.get("url") or "")
+            if pid and self.get_issue_state(pid) == "open":
+                out.append(pid)
+        for n in self._depends_on_blockers(issue_number, body=body):
+            if n not in out:
+                out.append(n)
+        return out
+
     # ── pull requests ────────────────────────────────────────────────────────
     def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
         status = {"open": "active", "merged": "completed", "closed": "abandoned"}.get(state, "all")

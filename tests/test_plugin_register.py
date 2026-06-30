@@ -355,6 +355,22 @@ def test_ensure_dispatch_crons_recreates_missing(isolate_home):
     assert "--no-agent" in cmd
 
 
+def test_ensure_dispatch_crons_scopes_workdir(isolate_home):
+    """Issue #137: each project's cron runs with --workdir <repo> so it self-scopes."""
+    mod = _load_package()
+    repo = _register_repo(isolate_home, "scoped",
+                          {"name": "scoped", "cron": {"schedule": "every 30m"}})
+    fake = _FakeCron(existing_names=())
+
+    with mock.patch.object(mod.subprocess, "run", fake):
+        mod._ensure_dispatch_crons()
+
+    assert len(fake.creates) == 1
+    cmd = fake.creates[0]
+    assert "--workdir" in cmd
+    assert str(repo) in cmd
+
+
 def test_ensure_dispatch_crons_idempotent_when_present(isolate_home):
     """An existing ``<name>-daedalus`` job is left untouched (no duplicate)."""
     mod = _load_package()

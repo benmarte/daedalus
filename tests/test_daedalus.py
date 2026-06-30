@@ -373,7 +373,7 @@ def test_main_registry_sweep():
 
     run_calls = []
 
-    def fake_run(resolved, *, dry_run=False):
+    def fake_run(resolved, *, dry_run=False, max_dispatch=5):
         run_calls.append(resolved)
         return {"board": resolved.get("name", "?"), "mode": "kanban",
                 "created": [], "reconciled": [], "completed": [], "advanced": [],
@@ -410,7 +410,7 @@ def test_main_single_repo():
 
         called = []
 
-        def fake_run(resolved, *, dry_run=False):
+        def fake_run(resolved, *, dry_run=False, max_dispatch=5):
             called.append(resolved)
             return {"board": "solo", "mode": "kanban",
                     "created": [], "reconciled": [], "completed": [], "advanced": [],
@@ -557,8 +557,8 @@ def test_mirror_issue_threads_root_then_comment_reply(tmp_path):
     issue = {"number": 121, "title": "Slack threads"}
     sends = []
 
-    def fake_hermes(target, body, *, thread_id=None):
-        sends.append((target, body, thread_id))
+    def fake_hermes(target, body, *, thread_id=None, broadcast=False):
+        sends.append((target, body, thread_id, broadcast))
         return (True, "ts-root") if thread_id is None else (True, None)
 
     with mock.patch.object(disp, "_hermes_send", fake_hermes):
@@ -758,14 +758,144 @@ def test_task_body_no_slack():
           "hermes send" not in body)
     check("_task_body mentions dispatcher handles messaging-platform delivery",
           "dispatcher" in body and "messaging-platform" in body)
-    check("_task_body instructs the API comment path (no CLI)",
-          "api.github.com/repos/O/R/issues" in body and "GITHUB_TOKEN" in body)
+    # #894: agents no longer post their own issue comments (GITHUB_TOKEN absent
+    # in cron env). The dispatcher mirrors each role's kanban summary to the
+    # issue, so the body must NOT carry the urllib/GITHUB_TOKEN comment snippet.
+    check("_task_body does NOT instruct agents to POST issue comments themselves",
+          "issues/<number>/comments" not in body and "issues/7/comments" not in body)
+    check("_task_body tells agents progress comments are posted automatically",
+          "PROGRESS COMMENTS ARE AUTOMATIC" in body
+          and "do NOT post GitHub comments yourself" in body)
     check("_task_body instructs the API PR-create path",
           "api.github.com/repos/O/R/pulls" in body)
     check("_task_body never mentions the gh CLI",
           "gh pr" not in body and "gh issue" not in body and "gh auth" not in body)
     check("_task_body mentions Agent: documentation prefix",
           "**Agent: documentation**" in body)
+
+
+def test_format_completion_comment_has_role_title_summary():
+    """_format_completion_comment leads with the agent role and includes the
+    task title and the kanban summary (issue #894)."""
+    disp = _load_dispatch()
+    body = disp._format_completion_comment("developer", "#7 Fix bug", "Opened PR #12")
+    check("comment leads with Agent: <role>", body.startswith("**Agent: developer**"))
+    check("comment includes task title", "#7 Fix bug" in body)
+    check("comment includes the summary", "Opened PR #12" in body)
+
+
+def test_format_completion_comment_handles_empty_summary():
+    """A role that completes with no recorded summary still yields a comment."""
+    disp = _load_dispatch()
+    body = disp._format_completion_comment("qa", "#7 Fix bug", "")
+    check("empty-summary comment still attributes the role", "**Agent: qa**" in body)
+    check("empty-summary comment notes the missing summary",
+          "no summary" in body.lower())
+
+
+def test_post_completion_comments_posts_once_per_role():
+    """The dispatcher posts each completed role's kanban summary to the issue
+    via provider.post_issue_comment — replacing agent self-posting (#894)."""
+    import tempfile
+    disp = _load_dispatch()
+    profiles = dict(disp._DEFAULT_PROFILES)
+    cards = [
+        {"id": "t1", "assignee": "developer-daedalus",
+         "title": "#7 Fix bug", "summary": "Opened PR #12"},
+        {"id": "t2", "assignee": "qa-daedalus",
+         "title": "#7 Fix bug", "summary": "qa-passed: PR #12"},
+        {"id": "t3", "assignee": "someone-else",  # not a pipeline role → skipped
+         "title": "#7 noise", "summary": "ignore me"},
+    ]
+    _orig = disp.kanban.list_tasks
+    disp.kanban.list_tasks = lambda *a, **k: cards
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            prov = FakeProvider(issues={7: object()})
+            posted = disp._post_completion_comments("proj", prov, profiles, tmp)
+            check("posted to issue #7 for both pipeline roles", posted == [7, 7])
+            check("two issue comments posted", len(prov.posted_issue_comments) == 2)
+            roles_in = " ".join(b for _, b in prov.posted_issue_comments)
+            check("developer comment posted", "**Agent: developer**" in roles_in)
+            check("qa comment posted", "**Agent: qa**" in roles_in)
+            check("non-role card was skipped", "ignore me" not in roles_in)
+    finally:
+        disp.kanban.list_tasks = _orig
+
+
+def test_post_completion_comments_idempotent_across_ticks():
+    """Re-running on the same DONE cards does not re-post (dispatch_state flag)."""
+    import tempfile
+    disp = _load_dispatch()
+    profiles = dict(disp._DEFAULT_PROFILES)
+    cards = [{"id": "t1", "assignee": "developer-daedalus",
+              "title": "#7 Fix bug", "summary": "Opened PR #12"}]
+    _orig = disp.kanban.list_tasks
+    disp.kanban.list_tasks = lambda *a, **k: cards
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            prov = FakeProvider(issues={7: object()})
+            disp._post_completion_comments("proj", prov, profiles, tmp)
+            disp._post_completion_comments("proj", prov, profiles, tmp)  # second tick
+            check("comment posted exactly once across two ticks",
+                  len(prov.posted_issue_comments) == 1)
+    finally:
+        disp.kanban.list_tasks = _orig
+
+
+def test_post_completion_comments_skips_closed_issues():
+    """Closed issues are skipped so a backlog of historical DONE cards can't
+    spam old/closed issues on first run (issue #894)."""
+    import tempfile
+    disp = _load_dispatch()
+    profiles = dict(disp._DEFAULT_PROFILES)
+    cards = [{"id": "t1", "assignee": "developer-daedalus",
+              "title": "#7 Old bug", "summary": "done long ago"}]
+    _orig = disp.kanban.list_tasks
+    disp.kanban.list_tasks = lambda *a, **k: cards
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            prov = FakeProvider(issues={7: object()}, closed_issues={7})
+            posted = disp._post_completion_comments("proj", prov, profiles, tmp)
+            check("no comment posted on a closed issue", posted == [])
+            check("closed issue received no comment", prov.posted_issue_comments == [])
+    finally:
+        disp.kanban.list_tasks = _orig
+
+
+def test_post_completion_comments_none_provider_is_noop():
+    """No provider → no-op (no crash)."""
+    disp = _load_dispatch()
+    check("None provider returns empty list",
+          disp._post_completion_comments("proj", None, {}, "/tmp") == [])
+
+
+class _LimitRecordingProvider:
+    """Records the ``limit`` kwarg passed to ``list_issues`` (issue #203)."""
+
+    def __init__(self):
+        self.seen_limit = None
+
+    def list_issues(self, state="open", labels=None, limit=50):
+        self.seen_limit = limit
+        return []
+
+
+def test_fetch_issues_default_limit_is_100():
+    """_fetch_issues defaults to limit=100 so boards with >20 open issues are
+    not silently truncated (issue #203)."""
+    disp = _load_dispatch()
+    prov = _LimitRecordingProvider()
+    disp._fetch_issues(prov, {})
+    check("_fetch_issues default limit is 100", prov.seen_limit == 100)
+
+
+def test_fetch_issues_respects_configured_limit():
+    """An explicit issues.filters.limit still overrides the default."""
+    disp = _load_dispatch()
+    prov = _LimitRecordingProvider()
+    disp._fetch_issues(prov, {"limit": 250})
+    check("_fetch_issues honors configured limit", prov.seen_limit == 250)
 
 
 def test_dispatch_summary_has_slack_delivered():
@@ -806,6 +936,48 @@ def test_dispatch_summary_has_slack_delivered():
 
     disp.kanban.create_task = _orig_create_task
     disp.kanban.list_tasks = _orig_list_tasks
+
+    # kanban-only mode enrollment_failures key
+    check("kanban summary has enrollment_failures", "enrollment_failures" in s1)
+
+
+def test_dispatch_summary_enrollment_failures_contents():
+    """kanban-only summary includes enrollment_failures from provider."""
+    disp = _load_dispatch()
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_issue_numbers = lambda s: set()
+    disp.kanban.decompose_all_triage = lambda s: True
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+
+    class _ProviderWithFailures(_FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.enrollment_failures = [5, 99]
+
+    with mock.patch.object(disp, "_deliver_doc_reports", return_value=[]):
+        s = disp.run({"repo": "O/R", "workdir": "/tmp", "name": "x",
+                      "issues": {"filters": {}}, "execution": {},
+                      "tracking": {}}, provider=_ProviderWithFailures())
+    check("enrollment_failures populated from provider",
+          s.get("enrollment_failures") == [5, 99])
+
+
+def test_dispatch_summary_enrollment_failures_empty_when_no_attr():
+    """kanban-only summary returns [] when provider lacks enrollment_failures."""
+    disp = _load_dispatch()
+    disp.kanban.ensure_board = lambda s: None
+    disp.kanban.list_blocked = lambda s: []
+    disp.kanban.list_issue_numbers = lambda s: set()
+    disp.kanban.decompose_all_triage = lambda s: True
+    disp.kanban.dispatch = lambda s, max_spawns=5: True
+
+    with mock.patch.object(disp, "_deliver_doc_reports", return_value=[]):
+        s = disp.run({"repo": "O/R", "workdir": "/tmp", "name": "x",
+                      "issues": {"filters": {}}, "execution": {},
+                      "tracking": {}}, provider=_FakeProvider())
+    check("enrollment_failures defaults to []",
+          s.get("enrollment_failures") == [])
 
 
 def test_notify_targets():
@@ -876,6 +1048,148 @@ def test_notify_project_summary_fans_out():
         handled2 = disp._notify_project_summary("proj", summary, legacy)
     check("legacy project flows through cron stdout (not self-sent)",
           handled2 is False and sent == [])
+
+
+def test_notify_project_summary_threads_and_dedupes():
+    """Issue #137: summaries thread under a per-project anchor and dedupe by content."""
+    import tempfile
+
+    disp = _load_dispatch()
+    summary = {"board": "b", "mode": "github", "created": [1], "reconciled": [],
+               "completed": [], "advance_prs": [], "routed_actions": {},
+               "issues_seen": 1, "spec_created": [], "slack_delivered": [],
+               "blocked": []}
+
+    with tempfile.TemporaryDirectory() as workdir:
+        resolved = {"workdir": workdir, "cron": {"notifications": [
+            {"platform": "Slack", "target": "slack:C1", "events": ["dispatch-summary"]},
+        ]}}
+        sends = []  # (target, thread_id)
+
+        def fake_send(target, body, *, thread_id=None):
+            sends.append((target, thread_id))
+            return (True, "anchor-1")
+
+        with mock.patch.object(disp, "_hermes_send", fake_send):
+            disp._notify_project_summary("proj", summary, resolved)
+            # identical summary on a later tick → recognised by content hash, skipped
+            disp._notify_project_summary("proj", dict(summary), resolved)
+        check("first summary posts a root (no thread id); repeat is deduped",
+              sends == [("slack:C1", None)])
+
+        # a CHANGED summary posts as a reply under the stored per-project anchor
+        sends.clear()
+        changed = dict(summary, created=[], completed=[1])
+        with mock.patch.object(disp, "_hermes_send", fake_send):
+            disp._notify_project_summary("proj", changed, resolved)
+        check("changed summary threads as a reply under the anchor",
+              sends == [("slack:C1", "anchor-1")])
+
+
+def test_notify_project_summary_silent_tick_sends_nothing():
+    """Issue #137: a no-op tick (empty summary) delivers nothing but is handled."""
+    import tempfile
+
+    disp = _load_dispatch()
+    empty = {"board": "b", "mode": "github", "created": [], "reconciled": [],
+             "completed": [], "advance_prs": [], "routed_actions": {},
+             "issues_seen": 1, "spec_created": [], "slack_delivered": [], "blocked": []}
+    with tempfile.TemporaryDirectory() as workdir:
+        resolved = {"workdir": workdir, "cron": {"notifications": [
+            {"platform": "Slack", "target": "slack:C1", "events": ["dispatch-summary"]},
+        ]}}
+        sends = []
+        with mock.patch.object(disp, "_hermes_send",
+                               lambda *a, **k: sends.append(a) or (True, "x")):
+            handled = disp._notify_project_summary("proj", empty, resolved)
+    check("silent tick is handled (excluded from stdout)", handled is True)
+    check("silent tick sends nothing", sends == [])
+
+
+def test_resolve_repo_arg_path_and_slug():
+    """Issue #137: --repo accepts a filesystem path OR a registered owner/repo slug."""
+    import tempfile
+    import yaml
+
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        hermes_dir = repo / ".hermes"
+        hermes_dir.mkdir()
+        (hermes_dir / "daedalus.yaml").write_text(
+            yaml.safe_dump({"name": "solo", "repo": "org/solo"}))
+
+        check("an existing path resolves to itself",
+              disp._resolve_repo_arg(str(repo)) == str(repo.resolve()))
+
+        with mock.patch.object(disp.registry, "list_projects",
+                               return_value=[str(repo.resolve())]):
+            check("a registered VCS slug resolves to its repo path",
+                  disp._resolve_repo_arg("org/solo") == str(repo.resolve()))
+            check("an unknown slug resolves to None",
+                  disp._resolve_repo_arg("org/unknown") is None)
+
+
+def test_resolve_repo_from_cwd():
+    """Issue #137: cwd inside a registered repo auto-scopes to that repo."""
+    import os
+    import tempfile
+
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp).resolve()
+        sub = repo / "src"
+        sub.mkdir()
+        orig = os.getcwd()
+        try:
+            with mock.patch.object(disp.registry, "list_projects",
+                                   return_value=[str(repo)]):
+                os.chdir(sub)
+                check("a child dir of a registered repo resolves to the repo",
+                      disp._resolve_repo_from_cwd() == str(repo))
+                os.chdir(orig)
+            with mock.patch.object(disp.registry, "list_projects", return_value=[]):
+                check("cwd outside every registered repo resolves to None",
+                      disp._resolve_repo_from_cwd() is None)
+        finally:
+            os.chdir(orig)
+
+
+def test_main_scopes_to_cwd_project():
+    """Issue #137: main() with no --repo scopes to the registered project at cwd."""
+    import os
+    import tempfile
+    import yaml
+
+    disp = _load_dispatch()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp).resolve()
+        hermes_dir = repo / ".hermes"
+        hermes_dir.mkdir()
+        (hermes_dir / "daedalus.yaml").write_text(
+            yaml.safe_dump({"name": "scoped", "repo": "org/scoped"}))
+
+        called = []
+
+        def fake_run(resolved, *, dry_run=False, max_dispatch=5):
+            called.append(resolved)
+            return {"board": "scoped", "mode": "kanban", "created": [],
+                    "reconciled": [], "completed": [], "advanced": [], "issues_seen": 0}
+
+        orig = os.getcwd()
+        try:
+            os.chdir(repo)
+            with mock.patch.object(disp.registry, "list_projects",
+                                   return_value=[str(repo)]):
+                with mock.patch.object(disp, "run", fake_run):
+                    with mock.patch("sys.argv", ["daedalus_dispatch.py"]):
+                        disp.main()
+        finally:
+            os.chdir(orig)
+
+    check("cwd-scoped main() calls run() exactly once", len(called) == 1)
+    check("cwd-scoped main() runs the project at cwd",
+          called[0].get("name") == "scoped")
 
 
 def test_deliver_doc_reports_multi_target():
@@ -2288,6 +2602,17 @@ def test_schedule_to_crontab_passthrough_crontab():
     check("0 9 * * * passthrough", init._schedule_to_crontab("0 9 * * *") == "0 9 * * *")
 
 
+def test_core_util_schedule_to_crontab_is_source_of_truth():
+    """core.util.schedule_to_crontab is the shared helper (issue #134) that both
+    _ensure_dispatch_crons and dashboard _reconcile_cron normalise schedules with."""
+    from core.util import schedule_to_crontab
+    check("60m → '0 * * * *'", schedule_to_crontab("60m") == "0 * * * *")
+    check("every 2h → '0 */2 * * *'", schedule_to_crontab("every 2h") == "0 */2 * * *")
+    check("15m → '*/15 * * * *'", schedule_to_crontab("15m") == "*/15 * * * *")
+    check("crontab passthrough", schedule_to_crontab("0 9 * * *") == "0 9 * * *")
+    check("empty stays empty", schedule_to_crontab("") == "")
+
+
 # ── _FakeProvider base class additions (used by size gate / forbidden tests) ──
 # (Patch _FakeProvider at module level to avoid test-isolation issues)
 
@@ -2320,10 +2645,23 @@ if __name__ == "__main__":
                test_resolve_pr_from_parents,
                test_human_summary_slack_delivered,
                test_task_body_no_slack,
+               test_format_completion_comment_has_role_title_summary,
+               test_format_completion_comment_handles_empty_summary,
+               test_post_completion_comments_posts_once_per_role,
+               test_post_completion_comments_idempotent_across_ticks,
+               test_post_completion_comments_skips_closed_issues,
+               test_post_completion_comments_none_provider_is_noop,
+               test_fetch_issues_default_limit_is_100,
+               test_fetch_issues_respects_configured_limit,
                test_dispatch_summary_has_slack_delivered,
                test_notify_targets,
                test_summary_events,
                test_notify_project_summary_fans_out,
+               test_notify_project_summary_threads_and_dedupes,
+               test_notify_project_summary_silent_tick_sends_nothing,
+               test_resolve_repo_arg_path_and_slug,
+               test_resolve_repo_from_cwd,
+               test_main_scopes_to_cwd_project,
                test_deliver_doc_reports_multi_target,
                test_ensure_board_creates, test_ensure_board_already_exists,
                test_ensure_board_failure,

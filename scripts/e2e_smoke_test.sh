@@ -86,6 +86,13 @@ if [ -f "$CRON_WRAPPER" ]; then
   else
     fail "daedalus-cron.sh does not reference daedalus_dispatch.py"
   fi
+  # Gateway watchdog (#799): wrapper invokes Python watchdog script.
+  if grep -q "gateway_watchdog.py" "$CRON_WRAPPER" && \
+     grep -q "mkdir" "$CRON_WRAPPER"; then
+    pass "daedalus-cron.sh includes the gateway watchdog (#799)"
+  else
+    fail "daedalus-cron.sh missing gateway watchdog"
+  fi
 else
   fail "daedalus-cron.sh not found at $CRON_WRAPPER"
 fi
