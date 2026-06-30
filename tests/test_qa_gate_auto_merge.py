@@ -286,3 +286,79 @@ class TestAutoMergeQAGateIntegration:
 
         # Should have called merge_pr
         assert len(provider.merged) > 0, "Auto-merge should be called when QA has passed"
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_disabled_does_not_merge_even_when_qa_passed(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """When auto_merge=False, PR must NOT be merged even if QA has passed."""
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        docs_card = {
+            'id': 'docs-card-1',
+            'title': 'Documentation: Issue #42',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'latest_summary': 'docs posted: PR #42',
+            'body': 'Issue #42\nPR #42',
+        }
+
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+        mock_qa_passed.return_value = True  # QA passed — but auto_merge is off
+
+        provider = FakeProvider()
+        provider._ci = 'green'
+        provider._open_prs = {42}
+
+        run_iterate(
+            'test-board',
+            'test/repo',
+            resolved={'execution': {'auto_merge': False}},
+            provider=provider,
+        )
+
+        assert len(provider.merged) == 0, (
+            "merge_pr must NOT be called when auto_merge=False, even if QA passed"
+        )
+
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
+    def test_auto_merge_absent_defaults_to_disabled(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed
+    ):
+        """When auto_merge key is absent from config, PR must NOT be merged."""
+        from core.iterate import run_iterate
+        from tests.conftest import FakeProvider
+
+        docs_card = {
+            'id': 'docs-card-2',
+            'title': 'Documentation: Issue #7',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'latest_summary': 'docs posted: PR #7',
+            'body': 'Issue #7\nPR #7',
+        }
+
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+        mock_qa_passed.return_value = True
+
+        provider = FakeProvider()
+        provider._ci = 'green'
+        provider._open_prs = {7}
+
+        # No auto_merge key at all — should default to False
+        run_iterate('test-board', 'test/repo', resolved={}, provider=provider)
+
+        assert len(provider.merged) == 0, (
+            "merge_pr must NOT be called when auto_merge key is absent (defaults to disabled)"
+        )
