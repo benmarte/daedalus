@@ -1,5 +1,7 @@
 ## [feat: dev_mode YAML flag to redirect dispatcher to local dev checkout](https://github.com/benmarte/daedalus/issues/1071) — [PR #1089](https://github.com/benmarte/daedalus/pull/1089)
 
+## [feat: dev_mode YAML flag to redirect dispatcher to local dev checkout](https://github.com/benmarte/daedalus/issues/1071) — [PR #1089](https://github.com/benmarte/daedalus/pull/1089)
+
 ## [fix: _check_completed_planner silently drops done planner tasks with non-PLANNING-COMPLETE summary](https://github.com/benmarte/daedalus/issues/1072) — [PR #1073](https://github.com/benmarte/daedalus/pull/1073)
 
 # Changelog
