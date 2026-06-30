@@ -64,7 +64,12 @@ from core.notification_sender import (
     NotificationPayload,
     send as send_webhook_notification,
 )  # noqa: E402
-from core.providers.base import ensure_closing_keyword, is_epic  # noqa: E402
+from core.providers.base import (  # noqa: E402
+    _DECOMP_LANGUAGE_RE,
+    _SUB_ISSUE_CHECKLIST_RE,
+    ensure_closing_keyword,
+    is_epic,
+)
 from core import tier_promotion  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
 from core.util import extract_issue_number  # noqa: E402
@@ -1368,6 +1373,13 @@ def _planner_body(
         epic_label = "epic"
 
     reasons = []
+    # Semantic: decomposition language (e.g. "Phase 1", "decompose into", "split into")
+    if _DECOMP_LANGUAGE_RE.search(body):
+        reasons.append("semantic: decomposition language")
+    # Semantic: sub-issue checklist (items referencing issue numbers like #NNN)
+    sub_issue_count = len(_SUB_ISSUE_CHECKLIST_RE.findall(body))
+    if sub_issue_count >= 2:
+        reasons.append(f"semantic: sub-issue checklist ({sub_issue_count} refs)")
     if len(body) > size_threshold:
         reasons.append(f"body size ({len(body)} chars)")
     checklist_count = len(re.findall(r"^\s*[-*+]\s*\[[ xX]\]", body, re.MULTILINE))
