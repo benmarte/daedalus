@@ -8,6 +8,14 @@ All notable changes to Daedalus are documented here. The format loosely follows
 
 ---
 
+## [1.0.0-beta.34] — 2026-06-30
+
+### Tests
+
+- Add explicit tests confirming `auto_merge=False` and absent `auto_merge` config do not trigger a merge even when QA has passed (closes test coverage gap identified post-beta.33)
+
+---
+
 ## [1.0.0-beta.33] — 2026-06-30
 
 ### Bug Fixes
