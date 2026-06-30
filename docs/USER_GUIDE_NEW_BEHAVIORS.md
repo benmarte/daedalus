@@ -87,7 +87,7 @@ No user-facing configuration. Detection thresholds are hardcoded in the source.
 ### 1.2 Epic Sub-issue Creation (Phase 3)
 
 **What it does:**  
-When the planner agent completes its kanban card with `PLANNING COMPLETE:`, the dispatcher automatically decomposes the parent epic into sub-issues using one of two strategies:
+When the planner agent completes its kanban card with `PLANNING COMPLETE:` (or the synonym `PLAN:`), the dispatcher automatically decomposes the parent epic into sub-issues using one of two strategies:
 
 - **Case A:** One sub-issue per checklist item in the epic body (capped at 10 sub-issues)
 - **Case B:** Three default sub-issues:
@@ -101,7 +101,7 @@ Sub-issues inherit parent labels (minus `epic`) and add the `subtask` label. An 
 Epics are automatically broken into actionable sub-issues that enter the pipeline without manual intervention. You don't need to manually create sub-issues or track which checklist items map to which sub-tasks — the system handles decomposition after the planner finishes.
 
 **Prerequisites:**  
-- The epic must pass through Phase 2 (planner agent) and complete with `PLANNING COMPLETE:` in the card result.
+- The epic must pass through Phase 2 (planner agent) and complete with `PLANNING COMPLETE:` or `PLAN:` in the card result.
 
 **Configuration:**  
 No user-facing configuration. Strategy selection (Case A vs Case B) is automatic based on checklist presence.
@@ -201,7 +201,7 @@ No user-facing configuration. Idempotency is enforced automatically.
 ### 1.7 Planner Not-Suitable Fallback
 
 **What it does:**  
-When the planner agent completes its kanban card but concludes the parent issue is not suitable for decomposition (e.g., the issue is already small, blocked on a dependency, or already simple enough for direct implementation), it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The dispatcher detects this via a case-insensitive regex match, skips the planner's normal decomposition path, looks up the parent issue, and creates a validator task for it — routing the issue through the standard validator → PM → developer flow rather than leaving it stuck in In Progress with no active child task.
+When the planner agent completes its kanban card but concludes the parent issue is not suitable for decomposition (e.g., the issue is already small, blocked on a dependency, or already simple enough for direct implementation), it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The dispatcher detects this via a case-insensitive regex match, skips the planner's normal decomposition path, looks up the parent issue, and creates a validator task for it — routing the issue through the standard validator → PM → developer flow rather than leaving it stuck In Progress with no active child task. If the planner summary contains neither `PLANNING COMPLETE:`, `PLAN:`, nor `NOT SUITABLE FOR DECOMPOSITION`, the dispatcher emits a `WARNING`-level log instead of silently dropping the task (fix for #1072).
 
 **Defense-in-depth extension (fix for issue #969).** The previous implementation (`_check_planner_not_suitable()`) only scanned cards with `status="done"`. If the planner blocked its card — emitting the signal as a block reason instead of a completion summary — the handler was blind to it, and the issue stayed stuck In Progress forever. The handler now iterates **both `done` and `blocked` planner cards**, matching the signal on either status. Duplicate routing is prevented by the `planner-fallback-validator-{n}` idempotency key (only one validator per issue across both scans). The handler also emits diagnostic `info`/`debug` logs at every skip point (empty summary, non-matching pattern, missing issue, out-of-scope issue number) so silent failure modes from issue #969 no longer recur.
 

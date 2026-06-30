@@ -214,7 +214,7 @@ deterministic — never dependent on an agent remembering to update anything.
 When an issue is flagged as epic-sized (≥4 checklist items, an `epic` label, or body ≥2000
 chars), the dispatcher routes it to the planner agent for scoping instead of splitting it
 across the team directly. The planner confirms readiness by completing its kanban card with
-`PLANNING COMPLETE:` — the dispatcher records a decomposed-mark
+`PLANNING COMPLETE:` (or the synonym `PLAN:`) — the dispatcher records a decomposed-mark
 (`<!-- daedalus:decomposed -->`, tolerant of an optional suffix like
 `<!-- daedalus:decomposed:1719630000 -->`) on the parent so subsequent ticks never
 re-trigger decomposition even if the planner's summary is replayed. The dispatcher then decomposes the
@@ -232,7 +232,7 @@ re-creation on subsequent dispatcher ticks. The `epic` label is applied to the p
 issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
 
 **Source file context injection.** When the dispatcher detects a planner task completion
-with the `PLANNING COMPLETE:` prefix (which triggers the decompose), the dispatcher reads
+with the `PLANNING COMPLETE:` (or `PLAN:`) prefix (which triggers the decompose), the dispatcher reads
 up to 10 source files from the codebase (hardcoded limits: max 10 files, max 50KB per file)
 and analyzes their contents to derive per-sub-issue context (file paths and symbols). This
 gives the planner concrete context about existing implementations when scoping sub-issues.
@@ -261,7 +261,10 @@ it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The
 dispatcher detects this via a case-insensitive regex, skips the planner's normal
 `PLANNING COMPLETE:` handler, looks up the parent issue, and creates a validator task
 for it — routing the issue through the standard validator → PM → developer flow rather
-than leaving it stuck In Progress with no active child task. Idempotency is enforced
+than leaving it stuck In Progress with no active child task. If the planner summary
+contains neither `PLANNING COMPLETE:`, `PLAN:`, nor `NOT SUITABLE FOR DECOMPOSITION`,
+the dispatcher now emits a `WARNING`-level log instead of silently dropping the task
+(fix for #1072). Idempotency is enforced
 via a `planner-fallback-validator-{n}` idempotency key so re-runs on subsequent ticks
 return the existing task instead of creating duplicates. The handler scans **both
 `done` and `blocked` planner cards** for the signal (defense in depth — the planner
@@ -288,6 +291,19 @@ Sub-issues are linked to their parent epic via a body-reference convention. The 
 A single issue reference matches regardless of which format the author chose. Providers with native sub-issue links (GitHub's dependency API) override `sub_issues_of` to prefer the API, then fall back to the regex scan for portability.
 
 Promotion is **idempotent**: `promote_waiting_tiers` queries `provider.has_label(n, "Ready")` before adding the label, so each promotable issue is labeled and commented exactly once. `VCSProvider.has_label()` defaults to returning `False`; the GitHub provider implements it via the issue's `labels` field (never raises).
+
+**Overlap-based blocking chains.** When the planner decomposes an epic, sub-issues that
+reference overlapping source files are linked with `depends_on` edges so they execute
+serially rather than in parallel — preventing merge conflicts and inconsistent file
+states. The dispatcher extracts file references from each sub-issue's body and uses
+`core/file_overlap.py` to detect overlaps; overlapping sub-issues are chained so that
+one must close before the next is promoted to Ready (PR #1067).
+
+**Profile resync.** The dispatcher computes a config fingerprint on each tick. When the
+fingerprint changes (e.g., `coding_agent` or the global Hermes model is updated), all
+`*-daedalus` profiles are automatically resynced to match the new configuration — no
+manual restart required. The first tick seeds the baseline; subsequent ticks with a
+changed fingerprint trigger the resync (PR #1066, #1063).
 
 **Three tiers of gating** combine to scope what dispatches when:
 
@@ -374,7 +390,7 @@ a different perspective.
 |---|---|---|
 | `validator-daedalus` | **Phase 1 — runs alone before any other agent.** Validates the issue: reproduces the bug, checks git history, detects duplicates. Scans for security threats (prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks). Six possible outcomes: **CONFIRMED** (proceeds; summary prefix `CONFIRMED:` triggers Phase 2), **ALREADY_FIXED** (closes issue, pipeline ends), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, sends `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege request lacks verifiable context — blocks, posts comment listing missing details, sends `security-escalation` notification). Posts a summary comment to the GitHub issue regardless of outcome. | No |
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. Creates the conditional accessibility task when the issue references UI/frontend work. | No |
-| `planner-daedalus` | Task graph, interface contracts, architecture decisions. **Phase 3:** reviews epic-sized issues and signals readiness with `PLANNING COMPLETE:`, triggering automated sub-issue decomposition. | No |
+| `planner-daedalus` | Task graph, interface contracts, architecture decisions. **Phase 3:** reviews epic-sized issues and signals readiness with `PLANNING COMPLETE:` or `PLAN:`, triggering automated sub-issue decomposition. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
 | `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Runs the test suite, analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). | No |
 | `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. Runs after QA passes. | No |
