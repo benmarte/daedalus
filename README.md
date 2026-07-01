@@ -1002,7 +1002,7 @@ high-visibility channel in the Notifications editor alongside
 `security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
 is unchanged: it posts a per-card comment and stops escalating, but does not
 fire a chat notification. See
-[`design-retry-cap-notification.md`](design-retry-cap-notification.md) for the
+[`design-retry-cap-notification.md`](docs/design-retry-cap-notification.md) for the
 design rationale.
 
 **Validator-blocked notifications.** When a validator blocks with `BLOCKED:`,
@@ -1396,8 +1396,7 @@ conventions:
 
 | Document | Purpose |
 |----------|---------|
-| [`SPEC.md`](SPEC.md) | Detailed specification of the pipeline's behavior — what each phase does, how agents interact, what the quality gates are. The README is an overview; SPEC.md is the reference. |
-| [`design-retry-cap-notification.md`](design-retry-cap-notification.md) | Design rationale for retry-cap exhaustion and intermediate retry-attempt notifications. |
+| [`design-retry-cap-notification.md`](docs/design-retry-cap-notification.md) | Design rationale for retry-cap exhaustion and intermediate retry-attempt notifications. |
 | [`qa-gate-design.md`](docs/qa-gate-design.md) | Full QA gate design specification — how the auto-merge gate validates the QA signal, edge cases, and the `skip-qa` label bypass. |
 | [`ci-plugin-lifecycle.md`](docs/ci-plugin-lifecycle.md) | CI integration patterns and plugin lifecycle hooks for pipeline automation. |
 | [`e2e-smoke-test.md`](docs/e2e-smoke-test.md) | End-to-end smoke testing procedures and regression test suites. |
