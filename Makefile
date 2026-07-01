@@ -36,7 +36,7 @@ help: ## Show this help
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install runtime + test dependencies
-	$(PIP) install --quiet pyyaml fastapi pytest httpx ruff
+	$(PIP) install --quiet pyyaml fastapi pytest httpx ruff filelock
 
 test: ## Run the full unit/integration suite
 	$(PYTHON) tests/test_daedalus.py
