@@ -1,3 +1,5 @@
+## [chore: repo hygiene — .gitignore gaps, untrack kanban.db, remove stray artifacts, archive closed specs](https://github.com/benmarte/daedalus/issues/1128) — [PR #1157](https://github.com/benmarte/daedalus/pull/1157)
+
 ## [fix: _resolve_repo_arg() swallows config-load failures with no diagnostic — wrong-project dispatch possible](https://github.com/benmarte/daedalus/issues/1110) — [PR #1122](https://github.com/benmarte/daedalus/pull/1122)
 
 ## [fix: developer task body does too much — strip /review, /code-simplify; add clean fallback on inner-agent failure](https://github.com/benmarte/daedalus/issues/1123) — [PR #1127](https://github.com/benmarte/daedalus/pull/1127)
