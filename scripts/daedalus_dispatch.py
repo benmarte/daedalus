@@ -1430,7 +1430,10 @@ def _check_epic_qa_ready(
             continue
         # Check for review-required: PR # signal in the card summary
         summary = _get_task_summary(task, slug)
-        if "review-required:" in (summary or "").lower() and "pr #" in (summary or "").lower():
+        if (
+            "review-required:" in (summary or "").lower()
+            and "pr #" in (summary or "").lower()
+        ):
             return True  # at least one sub-issue has a PR
 
     return False
@@ -1498,7 +1501,8 @@ def _gate_epic_qa_tasks(
         if dry_run:
             logger.info(
                 "[dry-run] would block QA card %s for #%s — no sub-issue PRs yet",
-                tid, n,
+                tid,
+                n,
             )
         else:
             if kanban_mod.block_task(slug, tid, reason):
@@ -4010,10 +4014,11 @@ def _check_confirmed_validators(
                             max_pm_retries = _resolve_max_pm_retries(
                                 (resolved or {}).get("execution") or {}
                             )
-                            absolute_max = max(
-                                max_pm_retries * 3, max_pm_retries + 3
-                            )
-                            if stale_count >= max_pm_retries or stale_count >= absolute_max:
+                            absolute_max = max(max_pm_retries * 3, max_pm_retries + 3)
+                            if (
+                                stale_count >= max_pm_retries
+                                or stale_count >= absolute_max
+                            ):
                                 logger.error(
                                     "dispatch: PM for #%s has %d stale completions "
                                     "(github-fallback) — manual intervention required",
@@ -4054,7 +4059,9 @@ def _check_confirmed_validators(
                                                 f"Recovery: `hermes kanban edit <task-id>` and add `SPEC:` "
                                                 f"summary, or manually requeue with fresh context."
                                             )
-                                            if not provider.post_issue_comment(n_nr, cap_comment):
+                                            if not provider.post_issue_comment(
+                                                n_nr, cap_comment
+                                            ):
                                                 logger.warning(
                                                     "dispatch: failed to post retry-cap "
                                                     "comment on #%s (github-fallback)",
@@ -4221,7 +4228,9 @@ def _check_confirmed_validators(
                         n_nr,
                     )
                     if resolved is not None and not _has_notified_block(
-                        slug, n_nr, validator_profile=p["validator"],
+                        slug,
+                        n_nr,
+                        validator_profile=p["validator"],
                         marker=_RETRY_CAP_MARKER,
                     ):
                         _send_retry_cap_notification(
@@ -4234,7 +4243,8 @@ def _check_confirmed_validators(
                         )
                         if not dry_run:
                             _mark_notified_block(
-                                slug, n_nr,
+                                slug,
+                                n_nr,
                                 validator_profile=p["validator"],
                                 marker=_RETRY_CAP_MARKER,
                             )
@@ -5047,7 +5057,9 @@ def _check_completed_developer(
     ra = role_agents or {}
     triggered: List[int] = []
     for task in kanban.list_tasks(slug, status="done"):
-        if (task.get("assignee") or "").strip() != p.get("developer", _DEFAULT_PROFILES["developer"]):
+        if (task.get("assignee") or "").strip() != p.get(
+            "developer", _DEFAULT_PROFILES["developer"]
+        ):
             continue
         summary_raw = _get_task_summary(task, slug)
         # A developer task with a PR number in its summary is well-formed — skip.
@@ -5058,7 +5070,9 @@ def _check_completed_developer(
             continue
         # Check if there's already a running developer task for this issue
         # (a retry may have been created on a previous tick).
-        dev_state, stale_count = _developer_task_state(slug, n, p.get("developer", _DEFAULT_PROFILES["developer"]))
+        dev_state, stale_count = _developer_task_state(
+            slug, n, p.get("developer", _DEFAULT_PROFILES["developer"])
+        )
         if dev_state in ("running", "complete"):
             continue
         # Only process stale developer tasks (done with no PR).
@@ -5093,7 +5107,9 @@ def _check_completed_developer(
                     _mark_notified_block(
                         slug,
                         n,
-                        validator_profile=p.get("validator", _DEFAULT_PROFILES["validator"]),
+                        validator_profile=p.get(
+                            "validator", _DEFAULT_PROFILES["validator"]
+                        ),
                         marker=_RETRY_CAP_MARKER,
                     )
                 if provider is not None and not dry_run:
@@ -5770,14 +5786,18 @@ def run(
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-running sweep failed: %s", exc)
 
-    iterate_counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards = (
-        iterate.run_iterate(
-            slug,
-            repo,
-            resolved=resolved,
-            provider=provider,
-            dry_run=dry_run,
-        )
+    (
+        iterate_counts,
+        advance_prs,
+        pending_signal_cards,
+        qa_failed_cards,
+        escalated_cards,
+    ) = iterate.run_iterate(
+        slug,
+        repo,
+        resolved=resolved,
+        provider=provider,
+        dry_run=dry_run,
     )
     for _qf in qa_failed_cards:
         _notify_qa_failed(
@@ -5916,9 +5936,7 @@ def run(
     # sub-issue PR yet.  This prevents the dispatcher from spawning a QA agent
     # for an epic before any developer has opened a PR.
     if not dry_run:
-        _maybe_undefer_epic_qa_tasks(
-            slug, issues_map, kanban, epic_config=epic_config
-        )
+        _maybe_undefer_epic_qa_tasks(slug, issues_map, kanban, epic_config=epic_config)
         _gate_epic_qa_tasks(
             slug, issues_map, kanban, epic_config=epic_config, dry_run=dry_run
         )
@@ -6696,9 +6714,9 @@ def _hermes_send(
                     text=True,
                     timeout=30,
                 )
-            except Exception:
-                # Broadcast failure is non-fatal, just log it
-                pass
+            except Exception as exc:
+                # Broadcast failure is non-fatal
+                logger.warning("dispatch: broadcast to channel feed failed: %s", exc)
             finally:
                 if broadcast_tmp:
                     try:
