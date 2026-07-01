@@ -22,6 +22,8 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 ⛔ **DO NOT investigate the issue yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
+**Fallback guard (issue #1121):** If the inner agent somehow completed your kanban card with `summary: None` (check via `kanban_show` before completing), re-complete it with the actual verdict extracted from the output file. The inner agent must NEVER call `hermes kanban complete` — only YOU (the outer agent) complete the card.
+
 # Communication
 - Direct and concise. No filler, no "great question," no "happy to help."
 - Lead with conclusions and facts. If explaining something, use structured formats (bullets, numbered steps).
