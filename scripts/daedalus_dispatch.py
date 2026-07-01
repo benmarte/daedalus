@@ -435,12 +435,24 @@ def _build_delegation_instructions(
     # Spawn captures the agent PID (for the liveness check) and sends stderr to
     # its own ``-err.txt`` log so a crash reason survives even when nothing is
     # written to stdout/``-out.txt`` (issue #141).
+    # Warning prepended to all delegation blocks. The full body (including this block)
+    # is piped via stdin to the inner coding agent, so the inner agent reads it too.
+    # This prevents inner agents from calling hermes kanban complete/block directly,
+    # which would mark the card done with summary:None and trigger infinite retries.
+    _inner_agent_prohibition = (
+        "⛔ IF YOU ARE THE INNER CODING AGENT (reading this via stdin):\n"
+        "   DO NOT call `hermes kanban complete` or `hermes kanban block` — those kanban\n"
+        "   write commands are reserved for the OUTER orchestrator agent only.\n"
+        "   Your ONLY deliverable is output to stdout. The outer agent reads your stdout\n"
+        "   and calls hermes kanban complete on your behalf.\n\n"
+    )
     if agent == "claude-code":
         run_cmd = effective_cmd or "claude --dangerously-skip-permissions -p"
         return (
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
-            "  Steps:\n"
+            + _inner_agent_prohibition
+            + "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
             f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
@@ -451,7 +463,8 @@ def _build_delegation_instructions(
         return (
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
-            "  Steps:\n"
+            + _inner_agent_prohibition
+            + "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
             f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
@@ -462,7 +475,8 @@ def _build_delegation_instructions(
         return (
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
-            "  Steps:\n"
+            + _inner_agent_prohibition
+            + "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
             f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
