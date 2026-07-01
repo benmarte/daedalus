@@ -2319,6 +2319,124 @@ _ACTION_EXECUTORS = {
 }
 
 
+# ── block-loop rescue (issue #1119) ──────────────────────────────────────────
+
+# Gate profiles whose block reason can carry a terminal passing verdict, and
+# the verdict prefixes that mean "the gate passed — complete, don't re-run".
+# Matched with startswith on the lowercased reason so prose that merely
+# contains the word ("tests pass") can't false-positive (same rationale as
+# the removed "pass" signal in _parse_handoff).
+_BLOCK_LOOP_PASS_PREFIXES: Dict[str, tuple] = {
+    "qa-daedalus": ("qa-passed",),
+    "reviewer-daedalus": ("review-approved", "approved", "lgtm"),
+    "security-analyst-daedalus": ("security-approved", "security-passed"),
+}
+
+# Statuses the rescue scan never touches: terminal states, plus 'blocked'
+# (a card still in the blocked column is owned by the main blocked scan).
+_RESCUE_SKIP_STATUSES = ("done", "complete", "completed", "archived",
+                         "cancelled", "blocked")
+
+
+def _latest_block_loop_reason(detail: dict) -> Optional[str]:
+    """Reason of the most recent ``block_loop_detected`` event, or None.
+
+    ``detail`` is a ``kanban.show_card`` dict; its ``events`` list carries the
+    framework's loop-detection events with ``payload.reason`` set to the block
+    reason that kept recurring. Returns None when the task never hit a block
+    loop (the empty string when the event has no reason).
+    """
+    for ev in reversed(detail.get("events") or []):
+        if (ev.get("kind") or "") != "block_loop_detected":
+            continue
+        payload = ev.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return str(payload.get("reason") or "")
+    return None
+
+
+def _rescue_block_loop_gate_cards(
+    slug: str,
+    repo: str,
+    *,
+    exclude_ids: Optional[Set[str]] = None,
+    dry_run: bool = False,
+) -> List[Dict[str, Any]]:
+    """Complete gate cards the framework re-promoted despite a passing verdict.
+
+    When ``kanban.complete()`` fails transiently (rate limit) on a gate card
+    blocked with a passing verdict (``qa-passed:`` / ``review-approved:`` /
+    ``security-approved:``), the Hermes framework's loop detection fires
+    ``block_loop_detected`` and auto-resolves by posting ``specified`` +
+    ``promoted`` — putting the task back into running and re-running the whole
+    gate (#1119). Those cards leave the blocked column, so the main blocked
+    scan in ``run_iterate`` never sees them.
+
+    This scan finds active gate-profile tasks whose most recent
+    ``block_loop_detected`` event carries a passing verdict and routes them to
+    the same executors the blocked-card path uses: QA cards to
+    ``_execute_advance`` (complete + downstream review tasks) and
+    reviewer/security cards to ``_execute_approve_advance`` (complete). If
+    ``complete()`` fails again the card stays active and the next tick
+    retries — degrade gracefully, never crash the tick.
+
+    Returns a list of ``{tid, action, pr, ok}`` dicts for attempted rescues.
+    """
+    exclude = exclude_ids or set()
+    try:
+        tasks = kanban.list_tasks(slug)
+    except Exception as e:
+        logger.error("iterate: block-loop rescue — list_tasks failed for %s: %s", slug, e)
+        return []
+
+    entries: List[Dict[str, Any]] = []
+    for t in tasks or []:
+        tid = str(t.get("id") or "")
+        assignee = (t.get("assignee") or "").lower().strip()
+        status = (t.get("status") or "").lower().strip()
+        if not tid or tid in exclude or status in _RESCUE_SKIP_STATUSES:
+            continue
+        prefixes = _BLOCK_LOOP_PASS_PREFIXES.get(assignee)
+        if not prefixes:
+            continue
+        detail = kanban.show_card(slug, tid)
+        if not detail:
+            continue
+        reason = _latest_block_loop_reason(detail)
+        if reason is None:
+            continue  # never hit a block loop — the blocked-card path owns it
+        verdict = (reason or detail.get("latest_summary") or "").strip()
+        if not verdict.lower().startswith(prefixes):
+            continue
+        card = dict(detail.get("task") or {})
+        card.setdefault("id", tid)
+        pr = _parse_pr_number(verdict)
+        try:
+            if assignee == "qa-daedalus":
+                action = ADVANCE
+                ok = _execute_advance(slug, card, repo, verdict,
+                                      dry_run=dry_run, pr_number=pr)
+            else:
+                action = APPROVE_ADVANCE
+                ok = _execute_approve_advance(slug, card, repo, verdict,
+                                              dry_run=dry_run)
+        except Exception as e:
+            logger.error("iterate: block-loop rescue executor failed for %s: %s", tid, e)
+            continue
+        logger.info(
+            "iterate: block-loop rescue — %s %s (%s), verdict %r → %s",
+            action, tid, assignee, verdict[:80],
+            "ok" if ok else "failed (retry next tick)")
+        entries.append({"tid": tid, "action": action, "pr": pr, "ok": bool(ok)})
+    return entries
+
+
 # ── main loop ───────────────────────────────────────────────────────────────
 
 
@@ -2377,6 +2495,22 @@ def run_iterate(
     merge_method = str(execution.get("merge_method", "squash")).lower()
 
     blocked_cards = kanban.list_blocked(slug)
+
+    # ── block-loop rescue (issue #1119) ──────────────────────────────────
+    # Gate cards whose complete() failed transiently get auto-promoted out
+    # of the blocked column by the framework's loop detection, so the
+    # blocked scan below never sees them. Rescue them here — this must run
+    # even when the blocked column is empty (the re-promoted card is the
+    # only sign anything is wrong).
+    blocked_ids = {str(c.get("id")) for c in blocked_cards if c.get("id")}
+    for entry in _rescue_block_loop_gate_cards(
+            slug, repo, exclude_ids=blocked_ids, dry_run=dry_run):
+        if not entry.get("ok"):
+            continue
+        counts[entry["action"]] = counts.get(entry["action"], 0) + 1
+        if entry["action"] == ADVANCE and entry.get("pr") is not None:
+            advance_prs.append(entry["pr"])
+
     if not blocked_cards:
         return counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards
 
