@@ -770,7 +770,12 @@ The label picker calls your VCS provider's API. If it shows empty:
 
 ### Pipeline stalled — validator task completed with `summary: None`
 
-When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery, all downstream agents hit a HARD STOP and ghost-complete instantly with no code written.
+A validator kanban summary of `None` can occur for two reasons:
+
+1. **Context window overflow** — the validator's context fills before `kanban_complete(summary=...)` runs.
+2. **Inner-agent kanban write (delegated mode, fixed in #1121)** — when `coding_agent` is set to `claude-code` or similar, the inner subprocess used to call `hermes kanban complete <id>` without a summary argument. The `_validator_body()` task now instructs the inner agent to print its verdict to stdout only; the outer `validator-daedalus` agent is the sole caller of `kanban complete`.
+
+Without recovery, all downstream agents hit a HARD STOP and ghost-complete instantly with no code written.
 
 The dispatcher handles this automatically in two stages:
 

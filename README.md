@@ -863,7 +863,7 @@ dispatcher is already running, the new tick exits immediately (no-op) rather tha
 The lock auto-releases after 300 seconds (5 minutes) even on crash, preventing stale locks
 from wedging future ticks.
 
-**Validator None-summary recovery.** When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
+**Validator None-summary recovery.** A validator kanban summary of `None` can result from two causes: (1) context window overflow before `kanban_complete(summary=...)` runs, or (2) the inner subprocess calling `hermes kanban complete <id>` with no summary in delegated mode (fixed in [#1121](https://github.com/benmarte/daedalus/issues/1121) — `_validator_body()` now emits print-to-stdout instructions instead). Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
 
 1. **GitHub-comment fallback** — scans the issue for a comment with the mandatory `**Agent: validator**` attribution header and looks for `CONFIRMED` in the body. If found, advances directly to PM without re-running the validator.
 2. **Validator retry** — if no confirming comment exists, re-queues the validator with a per-run idempotency key (`validator-retry-N-r1`, `validator-retry-N-r2`), capped at 2 retries before human escalation.

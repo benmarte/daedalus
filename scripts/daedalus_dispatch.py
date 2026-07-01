@@ -353,8 +353,8 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
         "  4b. {failed_note}\n"
         "  5. On success the agent will have posted the validation report to GitHub and output its verdict.\n"
-        "  6. Complete your card with the exact verdict line: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
-        "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block unless the agent failed. Output CONFIRMED/BLOCKED as plain text only.\n"
+        "  6. Print your verdict as the LAST LINE of stdout: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'. DO NOT call kanban_complete or kanban_block.\n"
+        "  STOP — do NOT investigate the issue yourself. Do NOT call any kanban command. The outer agent reads your stdout and calls kanban complete for you.\n"
     ),
     "pm": (
         '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
@@ -2037,6 +2037,76 @@ def _validator_body(
     security_notify_cmds = _build_security_notify_cmds(
         repo, n, title, security_notify_targets or []
     )
+    # When a coding agent (e.g. claude-code) is configured, the task body is piped to
+    # an inner subprocess. That inner agent must NOT call hermes kanban complete/block —
+    # only the outer validator-daedalus agent calls those after reading inner stdout.
+    # (Issue #1121: inner agent called kanban complete with no summary → infinite retry.)
+    _is_delegated = coding_agent not in ("none", "hermes")
+    if _is_delegated:
+        _kanban_constraint = (
+            "DO NOT call hermes kanban complete or hermes kanban block — "
+            "kanban writes are FORBIDDEN for inner agents. "
+            "Your ONLY deliverable is printing the verdict to stdout "
+            "(the outer agent reads your stdout and calls kanban complete for you)."
+        )
+        _progress_note = (
+            "📋 POST A GITHUB COMMENT as described below for each verdict outcome. "
+            "Then print your verdict to stdout on the LAST LINE of your output "
+            "(e.g. 'CONFIRMED: <reason>'). "
+            "The outer agent reads your stdout and calls kanban complete for you."
+        )
+        _action_security = (
+            "→ Print to stdout: 'ESCALATE: security threat — <one-line desc>'"
+        )
+        _action_block_review = (
+            "→ Print to stdout: 'BLOCKED: needs human verification — "
+            "<one-line description of what is missing>'"
+        )
+        _action_confirmed = (
+            "→ Print to stdout: 'CONFIRMED: <one-line reproduction note>' "
+            "(e.g., 'CONFIRMED: reproduced on main at commit abc1234'). "
+            "This EXACT prefix is what the outer agent uses as the kanban summary to trigger the PM phase."
+        )
+        _action_cannot_repro = (
+            "→ Print to stdout: 'STOP: cannot reproduce — <one-line description>'"
+        )
+        _action_already_fixed = (
+            "→ Print to stdout: 'STOP: already fixed — <commit/PR reference>'"
+        )
+        _action_duplicate = "→ Print to stdout: 'STOP: duplicate of #<N>'"
+        _action_needs_info = (
+            "→ Print to stdout: 'BLOCKED: needs more info — <what is missing>'"
+        )
+    else:
+        _kanban_constraint = (
+            "The only kanban write allowed is completing or blocking YOUR OWN card. "
+            "Your ONLY deliverable is a classification decision written as your kanban card summary."
+        )
+        _progress_note = (
+            f"📋 PROGRESS COMMENTS ARE AUTOMATIC: Do NOT post GitHub comments yourself. "
+            f"When you complete (or block) your kanban card, the dispatcher mirrors your "
+            f"completion summary to GitHub issue #{n} automatically. "
+            f"Make that summary clear: role (VALIDATOR), findings/decision, and next steps."
+        )
+        _action_security = (
+            "→ Block your card with summary starting 'ESCALATE: security threat — ' + one-line desc."
+        )
+        _action_block_review = (
+            "→ Block your card with summary starting 'BLOCKED: needs human verification — ' "
+            "followed by a one-line description of what is missing."
+        )
+        _action_confirmed = (
+            "→ Complete your card with summary starting 'CONFIRMED: ' followed by a 1–2 sentence "
+            "reproduction note (e.g., 'CONFIRMED: reproduced on main at commit abc1234, test_login fails'). "
+            "The dispatcher detects this EXACT prefix to trigger the PM phase."
+        )
+        _action_cannot_repro = (
+            "→ Complete your card with summary starting 'STOP: cannot reproduce — ' + one-line description."
+        )
+        _action_already_fixed = "→ Complete your card with summary starting 'STOP: already fixed — '."
+        _action_duplicate = "→ Complete your card with summary starting 'STOP: duplicate of #<N>'."
+        _action_needs_info = "→ Block your card with summary starting 'BLOCKED: needs more info'."
+
     _vbody = (
         f"Validate issue {repo}#{n}: {title}\n"
         f"Repo at {workdir} (read only — cd there for git/grep). Base branch: {base_branch}.\n\n"
@@ -2044,12 +2114,9 @@ def _validator_body(
         f"modify, or commit any code. DO NOT create or modify files. DO NOT run `git commit`, "
         f"`git add`, or any git write command. DO NOT open pull requests. "
         f"NEVER call hermes kanban create or any kanban write command — "
-        f"you are read-only. The only kanban write allowed is completing or blocking YOUR OWN card. "
-        f"Your ONLY deliverable is a classification decision written as your kanban card summary. "
+        f"you are read-only. {_kanban_constraint} "
         f"The developer agent will implement the fix AFTER you confirm the issue is valid and safe.\n\n"
-        f"📋 PROGRESS COMMENTS ARE AUTOMATIC: Do NOT post GitHub comments yourself. When you complete "
-        f"(or block) your kanban card, the dispatcher mirrors your completion summary to GitHub issue "
-        f"#{n} automatically. Make that summary clear: role (VALIDATOR), findings/decision, and next steps.\n\n"
+        f"{_progress_note}\n\n"
         f"You are the VALIDATOR for issue #{n}. Your task is to evaluate this issue BEFORE any code "
         f"is written. No developer, reviewer, or other agent starts until you complete your decision.\n\n"
         f"Steps (READ ONLY — no file writes):\n"
@@ -2084,7 +2151,7 @@ def _validator_body(
         f"     → Post a comment on issue #{n} via {comment_howto} describing the concern.\n"
         f"     → Send a security escalation notification:\n"
         f"{security_notify_cmds}\n"
-        f"     → Block your card with summary starting 'ESCALATE: security threat — ' + one-line desc.\n\n"
+        f"     {_action_security}\n\n"
         f"BLOCK_FOR_REVIEW — the request involves high-privilege actions (e.g., creating admins, "
         f"modifying auth flows, altering RBAC/permissions, accessing sensitive data) but lacks "
         f"explicit, verifiable context (requestor identity, target details, business justification, "
@@ -2094,30 +2161,27 @@ def _validator_body(
         f"verification details required.\n"
         f"     → Send a notification:\n"
         f"{security_notify_cmds}\n"
-        f"     → Block your card with summary starting 'BLOCKED: needs human verification — ' "
-        f"followed by a one-line description of what is missing.\n\n"
+        f"     {_action_block_review}\n\n"
         f"CONFIRMED — issue is real, unaddressed, and safe to proceed with normal development.\n"
-        f"     → Complete your card with summary starting 'CONFIRMED: ' followed by a 1–2 sentence "
-        f"reproduction note (e.g., 'CONFIRMED: reproduced on main at commit abc1234, test_login fails'). "
-        f"The dispatcher detects this EXACT prefix to trigger the PM phase.\n\n"
+        f"     {_action_confirmed}\n\n"
         f"CANNOT_REPRODUCE — the bug or issue cannot be verified from the current codebase "
         f"(tests pass, no evidence of the problem, or insufficient reproduction steps).\n"
         f"   When CANNOT_REPRODUCE:\n"
         f"     → Post a comment on issue #{n} via {comment_howto} explaining what was tested "
         f"and why it could not be reproduced.\n"
         f"     → Close the issue: {close_howto_wontfix}\n"
-        f"     → Complete your card with summary starting 'STOP: cannot reproduce — ' + one-line description.\n\n"
+        f"     {_action_cannot_repro}\n\n"
         f"ALREADY_FIXED — git history or code shows the problem is gone.\n"
         f"     → Post a comment on issue #{n} via {comment_howto} naming the commit/PR that fixed it.\n"
         f"     → Close the issue: {close_howto_completed}\n"
-        f"     → Complete your card with summary starting 'STOP: already fixed — '.\n\n"
+        f"     {_action_already_fixed}\n\n"
         f"DUPLICATE — another open issue or merged PR covers the same root cause.\n"
         f"     → Post a comment on issue #{n} linking to the original.\n"
         f"     → Close as duplicate: {close_howto_wontfix}\n"
-        f"     → Complete your card with summary starting 'STOP: duplicate of #<N>'.\n\n"
+        f"     {_action_duplicate}\n\n"
         f"NEEDS_MORE_INFO — the issue lacks enough detail to reproduce or implement.\n"
         f"     → Post a comment on issue #{n} listing exactly what info is needed.\n"
-        f"     → Block your card with summary starting 'BLOCKED: needs more info'.\n\n"
+        f"     {_action_needs_info}\n\n"
         f"--- Issue #{n} ---\n{body}\n"
     )
     return _prepend_delegation(
