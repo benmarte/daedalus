@@ -66,9 +66,13 @@ GitHub issue after completing their step.
 ## Provision the roster
 ```bash
 git clone <this-repo> && cd daedalus
+uv sync                                 # supported install path — resolves from the committed uv.lock
 bash scripts/provision_roster.sh        # idempotent — re-run any time to reset to spec
 hermes profile list                     # expect the 9 roles
 ```
+
+> **Python dependencies:** `uv sync` is the supported install path. `uv.lock`
+> is committed so every checkout resolves the exact same dependency versions.
 What it does: creates the 9 profiles (cloning config/keys from `default`), seeds each with **only**
 its matrix agent-skills, writes a **per-profile git credential store** (`~/.git-credentials`,
 0600, keychain-free) so `git push` works inside each isolated HOME, and drops the provider
