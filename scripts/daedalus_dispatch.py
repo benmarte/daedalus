@@ -358,9 +358,9 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
     "validator": (
         '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
         "  4b. {failed_note}\n"
-        "  5. On success the agent will have posted the validation report to GitHub and output its verdict.\n"
-        "  6. Print your verdict as the LAST LINE of stdout: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'. DO NOT call kanban_complete or kanban_block.\n"
-        "  STOP — do NOT investigate the issue yourself. Do NOT call any kanban command. The outer agent reads your stdout and calls kanban complete for you.\n"
+        "  5. On success the inner agent will have printed its verdict as the last line of stdout.\n"
+        "  6. Complete YOUR kanban card with the exact verdict line from the output: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
+        "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block unless the inner agent failed.\n"
     ),
     "pm": (
         '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
