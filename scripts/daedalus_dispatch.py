@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -78,6 +79,11 @@ from core.util import extract_pr_number_from_summary  # noqa: E402
 logger = logging.getLogger("daedalus.dispatch")
 
 _MUTEX_LOCK_PATH = str(Path(__file__).resolve().parent / ".daedalus_dispatch.lock")
+
+# Maximum seconds the dispatcher may hold the process-level FileLock before the
+# watchdog force-exits. Prevents a stuck tick from starving queued advance-hook
+# invocations for hours (issue #1115).
+_LOCK_WATCHDOG_SECS = 30 * 60  # 30 minutes
 
 # Environment variable that signals we are already running the dev-mode
 # redirect copy of the dispatcher (infinite-loop guard for dev re-exec).
@@ -3765,6 +3771,7 @@ def _check_confirmed_validators(
     dry_run: bool = False,
     provider=None,
     resolved: Optional[Dict[str, Any]] = None,
+    closed_issue_cache: Optional[Dict[int, bool]] = None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
     create a PM task to write the spec + acceptance criteria.
@@ -3784,6 +3791,10 @@ def _check_confirmed_validators(
     # call, so cross-tick freshness is unchanged.
     _issue_fetch_cache: Dict[int, Any] = {}
     _gh_outcome_cache: Dict[int, str] = {}
+    # Shared across all advancement functions in one tick when passed from run() (#1115).
+    _closed_issue_cache: Dict[int, bool] = (
+        closed_issue_cache if closed_issue_cache is not None else {}
+    )
 
     def _fetch_issue_cached(num: int):
         if num not in _issue_fetch_cache:
@@ -3811,6 +3822,12 @@ def _check_confirmed_validators(
             # Non-CONFIRMED validator done cards: re-triage instead of silent drop.
             n_nr = extract_issue_number(task.get("title") or "")
             if n_nr is None:
+                continue
+            # Skip stale tasks for already-closed issues (issue #1115).
+            if _is_issue_closed_cached(provider, n_nr, _closed_issue_cache):
+                logger.debug(
+                    "dispatch: skipping done validator task for closed issue #%s", n_nr
+                )
                 continue
             if summary.startswith("escalate:"):
                 # Security/harm escalation — existing human escalation path, skip silently.
@@ -3915,24 +3932,9 @@ def _check_confirmed_validators(
                     )
                     triggered.append(n_nr)
                     continue
-                # Check if issue is already closed before attempting to close
-                issue_state = (
-                    provider.get_issue_state(n_nr)
-                    if hasattr(provider, "get_issue_state")
-                    else "open"
-                )
-                if issue_state == "closed":
-                    # Already closed — record idempotency marker so future ticks skip it
-                    kanban.create_task(
-                        slug,
-                        f"validator-stop #{n_nr}",
-                        body=f"Issue #{n_nr} was already closed (validator STOP directive)",
-                        assignee=p["validator"],
-                        idempotency_key=ikey,
-                        workspace=f"dir:{workdir}" if workdir else "",
-                    )
-                    triggered.append(n_nr)
-                    continue
+                # The closed-issue filter at the top of the loop (#1115) ensures
+                # we only reach here when the issue is currently open, so
+                # close_issue() will not race against an already-closed state.
                 if provider.close_issue(n_nr):
                     stop_reason = summary_raw[5:].strip()
                     logger.info(
@@ -4304,6 +4306,12 @@ def _check_confirmed_validators(
         n = extract_issue_number(task.get("title") or "")
         if n is None:
             continue
+        # Skip CONFIRMED cards for already-closed issues (issue #1115).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
+            logger.debug(
+                "dispatch: skipping CONFIRMED validator task for closed issue #%s", n
+            )
+            continue
         pm_state, stale_count = _pm_task_state(slug, n, p["pm"])
         if pm_state in ("running", "complete"):
             continue  # PM task active or properly done
@@ -4438,6 +4446,7 @@ def _check_completed_planner(
     *,
     dry_run: bool = False,
     provider=None,
+    closed_issue_cache: Optional[Dict[int, bool]] = None,
 ) -> List[int]:
     """Phase-3 epic trigger: planner PLANNING COMPLETE → create sub-issues + triage cards.
 
@@ -4448,6 +4457,9 @@ def _check_completed_planner(
 
     p = profiles or _DEFAULT_PROFILES
     triggered: List[int] = []
+    _closed_issue_cache: Dict[int, bool] = (
+        closed_issue_cache if closed_issue_cache is not None else {}
+    )
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p["planner"]:
             continue
@@ -4469,6 +4481,10 @@ def _check_completed_planner(
                 continue
         n = extract_issue_number(task.get("title") or "")
         if n is None:
+            continue
+        # Skip done planner tasks for already-closed issues (issue #1115).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
+            logger.debug("dispatch: skipping done planner task for closed issue #%s", n)
             continue
         logger.info("dispatch: planner PLANNING COMPLETE #%s — triggering decompose", n)
         # Use a minimal body with ONLY the bare issue number so that
@@ -4772,6 +4788,23 @@ def _fetch_issue_with_retry(provider, n: int):
     return None
 
 
+def _is_issue_closed_cached(
+    provider, issue_number: int, cache: Dict[int, bool]
+) -> bool:
+    """Return True if the GitHub issue is closed. Memoizes per-tick to avoid redundant API calls.
+
+    Uses ``provider.get_issue_state`` when available; fails open (returns False)
+    if the provider does not support the method so tests without a full provider
+    are not affected.
+    """
+    if issue_number not in cache:
+        if provider is not None and hasattr(provider, "get_issue_state"):
+            cache[issue_number] = provider.get_issue_state(issue_number) == "closed"
+        else:
+            cache[issue_number] = False
+    return cache[issue_number]
+
+
 def _check_completed_pm(
     slug: str,
     repo: str,
@@ -4791,6 +4824,7 @@ def _check_completed_pm(
     *,
     dry_run: bool = False,
     provider=None,
+    closed_issue_cache: Optional[Dict[int, bool]] = None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
     create the downstream triage (Developer + Reviewer + Security + Docs).
@@ -4802,6 +4836,9 @@ def _check_completed_pm(
     rs = role_skills or {}
     ra = role_agents or {}
     triggered: List[int] = []
+    _closed_issue_cache: Dict[int, bool] = (
+        closed_issue_cache if closed_issue_cache is not None else {}
+    )
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p["pm"]:
             continue
@@ -4837,6 +4874,10 @@ def _check_completed_pm(
             continue
         n = extract_issue_number(task.get("title") or "")
         if n is None:
+            continue
+        # Skip done PM tasks for already-closed issues (issue #1115).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
+            logger.debug("dispatch: skipping done PM task for closed issue #%s", n)
             continue
         if _has_downstream_tasks(
             slug, n, validator_profile=p["validator"], pm_profile=p["pm"]
@@ -5040,6 +5081,7 @@ def _check_completed_developer(
     dry_run: bool = False,
     provider=None,
     resolved: Optional[Dict[str, Any]] = None,
+    closed_issue_cache: Optional[Dict[int, bool]] = None,
 ) -> List[int]:
     """Phase-4 retry: when a developer task completes with no PR in its summary,
     retry up to ``max_developer_retries`` times before surfacing a cap-exhausted
@@ -5056,6 +5098,9 @@ def _check_completed_developer(
     rs = role_skills or {}
     ra = role_agents or {}
     triggered: List[int] = []
+    _closed_issue_cache: Dict[int, bool] = (
+        closed_issue_cache if closed_issue_cache is not None else {}
+    )
     for task in kanban.list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p.get(
             "developer", _DEFAULT_PROFILES["developer"]
@@ -5067,6 +5112,12 @@ def _check_completed_developer(
             continue
         n = extract_issue_number(task.get("title") or "")
         if n is None:
+            continue
+        # Skip done developer tasks for already-closed issues (issue #1115).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
+            logger.debug(
+                "dispatch: skipping done developer task for closed issue #%s", n
+            )
             continue
         # Check if there's already a running developer task for this issue
         # (a retry may have been created on a previous tick).
@@ -5941,6 +5992,10 @@ def run(
             slug, issues_map, kanban, epic_config=epic_config, dry_run=dry_run
         )
 
+    # Single per-tick closed-issue cache shared across all advancement functions
+    # so each unique issue number requires at most one get_issue_state() call (#1115).
+    _tick_closed_cache: Dict[int, bool] = {}
+
     confirmed_triggered = _check_confirmed_validators(
         slug,
         repo,
@@ -5960,6 +6015,7 @@ def run(
         dry_run=dry_run,
         provider=provider,
         resolved=resolved,
+        closed_issue_cache=_tick_closed_cache,
     )
     if confirmed_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -5970,6 +6026,7 @@ def run(
         profiles=profiles,
         dry_run=dry_run,
         provider=provider,
+        closed_issue_cache=_tick_closed_cache,
     )
     if planner_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -6010,6 +6067,7 @@ def run(
         role_agents=role_agents,
         dry_run=dry_run,
         provider=provider,
+        closed_issue_cache=_tick_closed_cache,
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -6035,6 +6093,7 @@ def run(
         dry_run=dry_run,
         provider=provider,
         resolved=resolved,
+        closed_issue_cache=_tick_closed_cache,
     )
     if dev_retry_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -7403,6 +7462,9 @@ def main() -> int:
     the lock, logs a warning and exits cleanly (rc=0) to prevent concurrent
     dispatchers on the same host. Otherwise calls _main_inner() for the actual
     dispatch logic.
+
+    A SIGALRM watchdog (Unix only) force-exits after _LOCK_WATCHDOG_SECS so a
+    stuck tick cannot starve queued advance-hook invocations for hours (#1115).
     """
     lock = FileLock(_MUTEX_LOCK_PATH)
     try:
@@ -7414,11 +7476,43 @@ def main() -> int:
             _MUTEX_LOCK_PATH,
         )
         return 0
+
+    _t0 = time.monotonic()
+
+    # SIGALRM watchdog — only supported on Unix and only settable from the main
+    # thread. Tests that call main() from worker threads must not set signal handlers.
+    _watchdog_armed = (
+        hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if _watchdog_armed:
+
+        def _watchdog(signum, frame):
+            elapsed_min = (time.monotonic() - _t0) / 60
+            logger.warning(
+                "dispatch: WATCHDOG — lock held %.0f of %d minutes — "
+                "force-exiting so queued advance hooks can proceed (issue #1115)",
+                elapsed_min,
+                _LOCK_WATCHDOG_SECS // 60,
+            )
+            try:
+                lock.release()  # idempotent: finally block will attempt again safely
+            except Exception:
+                pass
+            sys.exit(
+                1
+            )  # non-zero: watchdog trip is an operational event, not clean exit
+
+        signal.signal(signal.SIGALRM, _watchdog)
+        signal.alarm(_LOCK_WATCHDOG_SECS)
+
     try:
         return _main_inner()
     finally:
+        if _watchdog_armed:
+            signal.alarm(0)  # cancel watchdog before releasing lock
         try:
-            lock.release()
+            lock.release()  # idempotent: watchdog may have already released above
         except Exception:
             pass  # best-effort cleanup on shutdown
 
