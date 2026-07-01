@@ -1586,6 +1586,31 @@ def test_resolve_repo_arg_path_and_slug():
             )
 
 
+def test_resolve_repo_arg_broken_config_warns():
+    """Issue #1110: broken project config emits a warning instead of silently skipping."""
+    disp = _load_dispatch()
+    with (
+        mock.patch.object(disp.registry, "list_projects", return_value=["bad/project"]),
+        mock.patch.object(
+            disp.ConfigLoader,
+            "resolve_repo_config",
+            side_effect=ValueError("YAML parse error"),
+        ),
+        mock.patch.object(disp.logger, "warning") as mock_warn,
+    ):
+        result = disp._resolve_repo_arg("org/missing")
+
+    check("returns None when all configs are broken", result is None)
+    check(
+        "warning names the project path",
+        mock_warn.called and "bad/project" in str(mock_warn.call_args_list),
+    )
+    check(
+        "warning includes the exception message",
+        mock_warn.called and "YAML parse error" in str(mock_warn.call_args_list),
+    )
+
+
 def test_resolve_repo_from_cwd():
     """Issue #137: cwd inside a registered repo auto-scopes to that repo."""
     import os
@@ -4505,6 +4530,7 @@ if __name__ == "__main__":
         test_notify_project_summary_threads_and_dedupes,
         test_notify_project_summary_silent_tick_sends_nothing,
         test_resolve_repo_arg_path_and_slug,
+        test_resolve_repo_arg_broken_config_warns,
         test_resolve_repo_from_cwd,
         test_main_scopes_to_cwd_project,
         test_deliver_doc_reports_multi_target,

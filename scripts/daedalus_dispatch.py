@@ -7269,7 +7269,12 @@ def _resolve_repo_arg(arg: str) -> Optional[str]:
     for rp in registry.list_projects():
         try:
             resolved = loader.resolve_repo_config(rp)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "_resolve_repo_arg: skipping project %r — config unreadable: %s",
+                rp,
+                exc,
+            )
             continue
         if (resolved.get("repo") or "").strip() == arg.strip():
             workdir = (resolved.get("workdir") or "").strip() or rp
