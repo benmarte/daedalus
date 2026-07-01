@@ -278,9 +278,10 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
 # kanban.failure_limit instead of leaving a zombie ``running`` card (issue #141).
 _AGENT_FAILED_NOTE = (
     "If that output contains 'CODING_AGENT_DIED' or 'CODING_AGENT_TIMEOUT', the coding agent "
-    "failed to produce a result — do NOT proceed and do NOT complete your card. Block it with "
-    'kanban_block("coding-agent-failed: <CODING_AGENT_DIED|CODING_AGENT_TIMEOUT> — see stderr above") '
-    "The dispatcher will retry automatically on your next session end."
+    "failed to produce a result — do NOT proceed, do NOT attempt to implement or investigate "
+    "the issue yourself, and do NOT complete your card. "
+    'Block it with kanban_block("coding-agent-failed: <CODING_AGENT_DIED|CODING_AGENT_TIMEOUT> — see stderr above") '
+    "and STOP. The dispatcher will retry automatically on your next session end."
 )
 
 
@@ -346,8 +347,13 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
         '  4. Wait for the coding agent to finish: terminal("{wait_cmd}")\n'
         "  4b. {failed_note}\n"
         "  5. On success the agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
+        "  5b. If the output does NOT contain 'PR URL:', the inner agent ran but failed to open a PR — "
+        'block the card with kanban_block("coding-agent-failed: inner agent produced no PR URL") and STOP. '
+        "Do NOT attempt to implement or fix the issue yourself.\n"
         '  6. Block your card: kanban_block("review-required: PR #<n> — <branch>")\n'
-        "  STOP — do NOT open the PR yourself. Wait for coding agent output then block with the real PR number.\n"
+        "  STOP — do NOT open the PR yourself and do NOT attempt the implementation yourself. "
+        "Wait for coding agent output, then block with the real PR number. "
+        "The task body below is for the INNER coding agent only.\n"
     ),
     "validator": (
         '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
@@ -2403,12 +2409,10 @@ def _dev_task_body(
             f"  /plan          → break implementation into ordered, verifiable tasks\n"
             f"  /build         → implement one thin slice at a time, verify before expanding\n"
             f"  /test          → write the failing test first, then make it pass\n"
-            f"  /review        → five-axis quality gate (correctness, readability, arch, security, perf)\n"
-            f"  /code-simplify → reduce complexity with no behavior change\n"
             f"⛔ Do NOT run /ship — the dispatcher owns the merge step.\n"
             f"Branch: `git checkout {base_branch} && git pull && git checkout -b fix/issue-{n}-<slug>`\n"
             f"Always branch off `{base_branch}`, never off main or any other branch.\n"
-            f"Iterate up to {iterations}x if review fails.\n\n"
+            f"Iterate up to {iterations}x if tests fail.\n\n"
             f"### 2. Lint before pushing\n"
             f"Run whichever is configured, skip gracefully if absent:\n"
             f"  .pre-commit-config.yaml → `pre-commit run --all-files`\n"
