@@ -46,3 +46,10 @@ dashboard/dist/*.map
 
 # ── Local runtime state ──────────────────────────────────────────────────────
 kanban.db
+
+# ── Runtime artifacts (dispatcher/QA pipeline byproducts — issue #1128) ──────
+qa-*.log
+worktree-*/
+.worktrees/
+*.db
+*.sqlite
