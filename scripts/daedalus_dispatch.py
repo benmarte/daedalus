@@ -715,6 +715,25 @@ def _resolve_max_pm_retries(execution: Dict[str, Any], default: int = 3) -> int:
     return val if val > 0 else default
 
 
+def _resolve_max_developer_retries(execution: Dict[str, Any], default: int = 2) -> int:
+    """Return developer retry cap from ``execution.max_developer_retries``.
+
+    The developer role is higher-cost than PM/validator — a failed developer
+    run that produces no PR wastes a full agent session. A cap of 2 keeps the
+    loop tight while giving one retry on transient failures (context overflow,
+    tool flakiness) before surfacing a manual-intervention signal via the
+    retry-cap notification.
+    """
+    raw = (execution or {}).get("max_developer_retries")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
 _HISTORY_MAX_LINES: int = 1000
 
 
@@ -2687,6 +2706,48 @@ def _has_pm_tasks(
     return state in ("running", "complete")
 
 
+def _developer_task_state(
+    slug: str, issue_number: int, developer_profile: str = "developer-daedalus"
+) -> tuple:
+    """Return (state, stale_count) for developer tasks for issue_number.
+
+    state values:
+      'none'     — no developer task found
+      'running'  — at least one developer task is not yet done
+      'complete' — a done developer task has a PR number in its summary
+      'stale'    — all done developer tasks lack a PR number (empty summary,
+                   agent crash, context-limit dropout)
+
+    stale_count is the number of done developer tasks without a PR number,
+    used to generate unique retry idempotency keys (developer-{n}-r{stale_count}).
+    """
+    pattern = f"#{issue_number}"
+    has_running = False
+    has_complete = False
+    stale_count = 0
+    for t in kanban.list_tasks(slug):
+        if pattern not in (t.get("title") or ""):
+            continue
+        if (t.get("assignee") or "").strip() != developer_profile:
+            continue
+        status = (t.get("status") or "").lower()
+        if status not in ("done", "complete", "completed"):
+            has_running = True
+            continue
+        summary_raw = _get_task_summary(t, slug)
+        if extract_pr_number_from_summary(summary_raw) is not None:
+            has_complete = True
+        else:
+            stale_count += 1
+    if has_running:
+        return ("running", stale_count)
+    if has_complete:
+        return ("complete", stale_count)
+    if stale_count:
+        return ("stale", stale_count)
+    return ("none", 0)
+
+
 def _has_active_pm_consultation(
     slug: str, issue_number: int, pm_profile: str = "project-manager-daedalus"
 ) -> bool:
@@ -3325,6 +3386,13 @@ def _send_retry_cap_notification(
             "**Recovery**: `hermes kanban edit <task-id>` and add `SPEC:` "
             "summary, or manually requeue with fresh context."
         )
+    elif role == "developer":
+        body += (
+            "**Likely cause**: Developer agent completed without opening a PR "
+            "(context window overflow, agent crash, or silent failure).\n"
+            "**Recovery**: Check agent logs, verify issue context, then manually "
+            "requeue developer or escalate to human review."
+        )
     else:  # validator
         body += (
             "**Likely cause**: Validator agent completed without `CONFIRMED` "
@@ -3380,6 +3448,9 @@ def _fire_webhook_notification(
             if role == "validator":
                 diagnosis = "validator completed without CONFIRMED summary"
                 recovery = "check agent logs, verify issue context, then manually requeue validator or escalate to human review"
+            elif role == "developer":
+                diagnosis = "developer completed without opening a PR"
+                recovery = "check agent logs, verify issue context, then manually requeue developer or escalate to human review"
             else:  # pm
                 diagnosis = "PM completed without SPEC: summary"
                 recovery = "manually requeue with fresh context or add SPEC: summary via comment"
@@ -3444,6 +3515,12 @@ def _send_retry_attempt_notification(
         body += (
             "**Context**: PM agent completed without `SPEC:` summary. "
             "Retrying with a fresh PM task to generate proper specification."
+        )
+    elif role == "developer":
+        body += (
+            "**Context**: Developer agent completed without opening a PR "
+            "(context window overflow, agent timeout, or silent failure). "
+            "Retrying with a fresh developer task to produce a PR."
         )
     else:  # validator
         body += (
@@ -3925,6 +4002,89 @@ def _check_confirmed_validators(
                 if not dry_run:
                     pm_state, stale_count = _pm_task_state(slug, n_nr, p["pm"])
                     if pm_state not in ("running", "complete"):
+                        # Enforce the same retry cap as the primary PM path (#1104).
+                        # Without this guard the github-fallback branch created
+                        # unbounded PM tasks — observed: 6 consecutive empty-summary
+                        # PM runs for one issue with no cap enforcement.
+                        if pm_state == "stale":
+                            max_pm_retries = _resolve_max_pm_retries(
+                                (resolved or {}).get("execution") or {}
+                            )
+                            absolute_max = max(
+                                max_pm_retries * 3, max_pm_retries + 3
+                            )
+                            if stale_count >= max_pm_retries or stale_count >= absolute_max:
+                                logger.error(
+                                    "dispatch: PM for #%s has %d stale completions "
+                                    "(github-fallback) — manual intervention required",
+                                    n_nr,
+                                    stale_count,
+                                )
+                                if resolved is not None and not _has_notified_block(
+                                    slug,
+                                    n_nr,
+                                    validator_profile=p["validator"],
+                                    marker=_RETRY_CAP_MARKER,
+                                ):
+                                    _send_retry_cap_notification(
+                                        role="pm",
+                                        issue_number=n_nr,
+                                        retry_count=stale_count,
+                                        max_retries=max_pm_retries,
+                                        resolved=resolved,
+                                        dry_run=dry_run,
+                                    )
+                                    if not dry_run:
+                                        _mark_notified_block(
+                                            slug,
+                                            n_nr,
+                                            validator_profile=p["validator"],
+                                            marker=_RETRY_CAP_MARKER,
+                                        )
+                                    if provider is not None and not dry_run:
+                                        try:
+                                            cap_comment = (
+                                                f"⚠️ **Project Manager retry cap exhausted** "
+                                                f"for issue #{n_nr}\n\n"
+                                                f"The PM has completed {stale_count} times "
+                                                f"(max: {max_pm_retries}) without a SPEC: outcome.\n\n"
+                                                f"**Manual intervention required.**\n\n"
+                                                f"Likely cause: PM agent completed without SPEC: summary "
+                                                f"(context window overflow, agent crash, or silent failure).\n\n"
+                                                f"Recovery: `hermes kanban edit <task-id>` and add `SPEC:` "
+                                                f"summary, or manually requeue with fresh context."
+                                            )
+                                            if not provider.post_issue_comment(n_nr, cap_comment):
+                                                logger.warning(
+                                                    "dispatch: failed to post retry-cap "
+                                                    "comment on #%s (github-fallback)",
+                                                    n_nr,
+                                                )
+                                        except Exception as exc:
+                                            logger.warning(
+                                                "dispatch: post_issue_comment #%s raised %s "
+                                                "— retry-cap comment failed (github-fallback)",
+                                                n_nr,
+                                                exc,
+                                            )
+                                continue
+                            # Under cap — send retry-attempt notification (#287).
+                            if resolved is not None:
+                                _send_retry_attempt_notification(
+                                    role="pm",
+                                    issue_number=n_nr,
+                                    retry_count=stale_count,
+                                    max_retries=max_pm_retries,
+                                    resolved=resolved,
+                                    dry_run=dry_run,
+                                )
+                            logger.warning(
+                                "dispatch: PM for #%s completed with no summary "
+                                "(github-fallback) — scheduling retry (run %d/%d)",
+                                n_nr,
+                                stale_count,
+                                max_pm_retries,
+                            )
                         ikey = (
                             f"pm-{n_nr}"
                             if pm_state == "none"
@@ -4650,6 +4810,16 @@ def _check_completed_pm(
                 )
             continue
         if not summary.startswith("spec:"):
+            # Empty/None summary — PM agent crashed or context-limit dropout.
+            # Log a warning so operators get visibility instead of a silent drop (#1104).
+            if not summary:
+                n_warn = extract_issue_number(task.get("title") or "")
+                if n_warn is not None:
+                    logger.warning(
+                        "dispatch: PM for #%s completed with no summary — "
+                        "retry handled by validator confirmed path",
+                        n_warn,
+                    )
             continue
         # Skip consultation tasks (title starts with "consult:") — only spec tasks trigger team
         title = (task.get("title") or "").lower()
@@ -4839,6 +5009,188 @@ def _check_completed_pm(
             {k: v for k, v in created_ids.items() if v},
         )
         triggered.append(n)
+    return triggered
+
+
+def _check_completed_developer(
+    slug: str,
+    repo: str,
+    issues_map: Dict[int, Dict[str, Any]],
+    iterations: int,
+    workdir: str,
+    base_branch: str,
+    provider_name: str,
+    profiles: Optional[Dict[str, str]] = None,
+    role_skills: Optional[Dict[str, List[str]]] = None,
+    coding_agent: str = "none",
+    coding_agent_cmd: str = "",
+    role_agents: Optional[Dict[str, str]] = None,
+    label_overrides: Optional[Dict[str, Any]] = None,
+    *,
+    dry_run: bool = False,
+    provider=None,
+    resolved: Optional[Dict[str, Any]] = None,
+) -> List[int]:
+    """Phase-4 retry: when a developer task completes with no PR in its summary,
+    retry up to ``max_developer_retries`` times before surfacing a cap-exhausted
+    notification.
+
+    Developer tasks are normally linked to QA via ``parents=[dev_id]`` — when
+    the developer reaches "done", QA auto-promotes regardless of summary
+    content.  When the developer completes with an empty/None summary (no PR
+    opened), QA runs, finds no PR, and blocks with ``qa-failed: no PR``.
+    This function detects the empty-summary case and creates a retry developer
+    task before QA can run, mirroring the validator/PM retry pattern (#1104).
+    """
+    p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
+    ra = role_agents or {}
+    triggered: List[int] = []
+    for task in kanban.list_tasks(slug, status="done"):
+        if (task.get("assignee") or "").strip() != p.get("developer", _DEFAULT_PROFILES["developer"]):
+            continue
+        summary_raw = _get_task_summary(task, slug)
+        # A developer task with a PR number in its summary is well-formed — skip.
+        if extract_pr_number_from_summary(summary_raw) is not None:
+            continue
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            continue
+        # Check if there's already a running developer task for this issue
+        # (a retry may have been created on a previous tick).
+        dev_state, stale_count = _developer_task_state(slug, n, p.get("developer", _DEFAULT_PROFILES["developer"]))
+        if dev_state in ("running", "complete"):
+            continue
+        # Only process stale developer tasks (done with no PR).
+        if dev_state != "stale":
+            continue
+        max_dev_retries = _resolve_max_developer_retries(
+            (resolved or {}).get("execution") or {}
+        )
+        absolute_max = max(max_dev_retries * 3, max_dev_retries + 3)
+        if stale_count >= max_dev_retries or stale_count >= absolute_max:
+            logger.error(
+                "dispatch: developer for #%s has %d stale completions (no PR) — "
+                "manual intervention required",
+                n,
+                stale_count,
+            )
+            if resolved is not None and not _has_notified_block(
+                slug,
+                n,
+                validator_profile=p.get("validator", _DEFAULT_PROFILES["validator"]),
+                marker=_RETRY_CAP_MARKER,
+            ):
+                _send_retry_cap_notification(
+                    role="developer",
+                    issue_number=n,
+                    retry_count=stale_count,
+                    max_retries=max_dev_retries,
+                    resolved=resolved,
+                    dry_run=dry_run,
+                )
+                if not dry_run:
+                    _mark_notified_block(
+                        slug,
+                        n,
+                        validator_profile=p.get("validator", _DEFAULT_PROFILES["validator"]),
+                        marker=_RETRY_CAP_MARKER,
+                    )
+                if provider is not None and not dry_run:
+                    try:
+                        cap_comment = (
+                            f"⚠️ **Developer retry cap exhausted** for issue #{n}\n\n"
+                            f"The developer has completed {stale_count} times "
+                            f"(max: {max_dev_retries}) without opening a PR.\n\n"
+                            f"**Manual intervention required.**\n\n"
+                            f"Likely cause: Developer agent completed without opening a PR "
+                            f"(context window overflow, agent crash, or silent failure).\n\n"
+                            f"Recovery: Check agent logs, verify issue context, then manually "
+                            f"requeue developer or escalate to human review."
+                        )
+                        if not provider.post_issue_comment(n, cap_comment):
+                            logger.warning(
+                                "dispatch: failed to post retry-cap comment on #%s (developer)",
+                                n,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "dispatch: post_issue_comment #%s raised %s "
+                            "— retry-cap comment failed (developer)",
+                            n,
+                            exc,
+                        )
+            continue
+        # Under cap — send retry-attempt notification and create retry task.
+        if resolved is not None:
+            _send_retry_attempt_notification(
+                role="developer",
+                issue_number=n,
+                retry_count=stale_count,
+                max_retries=max_dev_retries,
+                resolved=resolved,
+                dry_run=dry_run,
+            )
+        logger.warning(
+            "dispatch: developer for #%s completed with no summary — "
+            "scheduling retry (run %d/%d)",
+            n,
+            stale_count,
+            max_dev_retries,
+        )
+        retry_key = f"developer-{n}-r{stale_count}"
+        if dry_run:
+            logger.info(
+                "[dry-run] developer empty summary #%s — would retry (run %d/%d)",
+                n,
+                stale_count,
+                max_dev_retries,
+            )
+            triggered.append(n)
+            continue
+        issue = issues_map.get(n)
+        if not issue and provider is not None:
+            fetched = _fetch_issue_with_retry(provider, n)
+            if fetched:
+                issue = fetched.as_dict()
+        if not issue:
+            logger.warning(
+                "dispatch: developer stale #%s but issue not in scope — cannot retry",
+                n,
+            )
+            continue
+        workspace_arg = f"dir:{workdir}" if workdir else None
+        issue_title = issue.get("title", "")[:60]
+        dev_id = kanban.create_task(
+            slug,
+            f"#{n} Developer: {issue_title}",
+            body=_dev_task_body(
+                repo,
+                issue,
+                iterations,
+                workdir,
+                base_branch,
+                provider_name,
+                ra.get("developer", coding_agent),
+                coding_agent_cmd,
+                profiles=p,
+                label_overrides=label_overrides,
+            ),
+            assignee=p.get("developer", _DEFAULT_PROFILES["developer"]),
+            idempotency_key=retry_key,
+            workspace=workspace_arg,
+            skills=rs.get("developer") or None,
+        )
+        if dev_id:
+            logger.warning(
+                "dispatch: developer for #%s completed with no summary — "
+                "scheduling retry (run %d/%d, key=%s)",
+                n,
+                stale_count,
+                max_dev_retries,
+                retry_key,
+            )
+            triggered.append(n)
     return triggered
 
 
@@ -5642,6 +5994,31 @@ def run(
         provider=provider,
     )
     if pm_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    # ── developer empty-summary retry (issue #1104) ────────────────────────
+    # When a developer task completes with no PR in its summary (agent crash,
+    # context overflow), create a retry task before QA can auto-promote and
+    # fail with "qa-failed: no PR". Mirrors the validator/PM retry pattern.
+    dev_retry_triggered = _check_completed_developer(
+        slug,
+        repo,
+        issues_map,
+        iterations,
+        workdir,
+        base_branch,
+        provider.name,
+        profiles=profiles,
+        role_skills=role_skills,
+        coding_agent=coding_agent,
+        coding_agent_cmd=coding_agent_cmd,
+        role_agents=role_agents,
+        label_overrides=_label_ovr,
+        dry_run=dry_run,
+        provider=provider,
+        resolved=resolved,
+    )
+    if dev_retry_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     # Mirror each completed role's kanban summary to its GitHub issue (#894).
