@@ -143,12 +143,12 @@ def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
 
         # Strip "messaging" from toolsets arrays — Hermes emits "Unknown toolsets: messaging"
         # at startup because this toolset is not registered. Daedalus agents don't need it.
-        for ts_list in (profile_cfg.get("toolsets") or [], profile_cfg.get("disabled_toolsets") or []):
-            if "messaging" in ts_list:
-                ts_list.remove("messaging")
-                changed = True
-        platform_toolsets = profile_cfg.get("platform_toolsets") or {}
-        for _platform, ts_list in platform_toolsets.items():
+        toolset_candidates = [
+            profile_cfg.get("toolsets"),
+            profile_cfg.get("disabled_toolsets"),
+            *(profile_cfg.get("platform_toolsets") or {}).values(),
+        ]
+        for ts_list in toolset_candidates:
             if isinstance(ts_list, list) and "messaging" in ts_list:
                 ts_list.remove("messaging")
                 changed = True
