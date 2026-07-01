@@ -10,6 +10,7 @@ Verifies the dispatcher's STOP-handler in _check_confirmed_validators:
 - dry_run -> triggered but no mutation
 - CONFIRMED/BLOCKED/ESCALATE -> never touch close_issue
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -61,8 +62,14 @@ def _seed_tasks(kanban: FakeKanban, rows):
 def _call(disp, kanban, issues_map, *, provider, dry_run=False):
     """Wrap the real _check_confirmed_validators (positional args) and return triggered."""
     return disp._check_confirmed_validators(
-        SLUG, REPO, issues_map,
-        3, "", "", "dev", "github",  # iterations..provider_name
+        SLUG,
+        REPO,
+        issues_map,
+        3,
+        "",
+        "",
+        "dev",
+        "github",  # iterations..provider_name
         provider=provider,
         dry_run=dry_run,
     )
@@ -70,8 +77,11 @@ def _call(disp, kanban, issues_map, *, provider, dry_run=False):
 
 def _issue(number: int, title: str = "x") -> Dict[str, Any]:
     return {
-        "number": number, "title": title, "body": "",
-        "labels": [], "url": "https://x",
+        "number": number,
+        "title": title,
+        "body": "",
+        "labels": [],
+        "url": "https://x",
     }
 
 
@@ -80,10 +90,17 @@ def _issue(number: int, title: str = "x") -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 class TestStopAutoClose:
     def test_stop_duplicate_closes_issue(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#42 duplicate bug", "summary": "STOP: duplicate of #9"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#42 duplicate bug",
+                    "summary": "STOP: duplicate of #9",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -94,10 +111,17 @@ class TestStopAutoClose:
         assert fake_kanban.created_with_key("validator-stop-closed-42") is not None
 
     def test_stop_already_fixed_closes_issue(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#43 already fixed", "summary": "STOP: already fixed in abc"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#43 already fixed",
+                    "summary": "STOP: already fixed in abc",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -108,10 +132,17 @@ class TestStopAutoClose:
         assert fake_kanban.created_with_key("validator-stop-closed-43") is not None
 
     def test_stop_cannot_reproduce_closes_issue(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#44 cannot reproduce", "summary": "STOP: cannot reproduce"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#44 cannot reproduce",
+                    "summary": "STOP: cannot reproduce",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -122,10 +153,17 @@ class TestStopAutoClose:
         assert fake_kanban.created_with_key("validator-stop-closed-44") is not None
 
     def test_stop_idempotent_no_double_close(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#45 duplicate", "summary": "STOP: duplicate of #9"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#45 duplicate",
+                    "summary": "STOP: duplicate of #9",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -138,26 +176,50 @@ class TestStopAutoClose:
         assert provider.close_calls == [45]
 
     def test_stop_already_closed_no_api_call(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#46 already closed", "summary": "STOP: duplicate of #9"},
-        ])
+        # Issue #1115: the closed-issue filter now fires before the STOP handler,
+        # so a STOP card for an already-closed issue is skipped entirely.
+        # The idempotency marker is unnecessary because future ticks will also
+        # filter on issue state rather than relying on the marker.
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#46 already closed",
+                    "summary": "STOP: duplicate of #9",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider(closed_issues={46})
 
         triggered = _call(disp, fake_kanban, {46: _issue(46)}, provider=provider)
 
-        assert 46 in triggered
-        assert provider.close_calls == []  # short-circuited by state guard
-        assert fake_kanban.created_with_key("validator-stop-closed-46") is not None
+        # Card is skipped entirely by the closed-issue filter — no side effects.
+        assert triggered == []
+        assert provider.close_calls == []  # still not called — correct
+        # Marker no longer written; state-based filter is authoritative.
+        assert fake_kanban.created_with_key("validator-stop-closed-46") is None
 
     def test_stop_provider_failure_logs_warning(
-        self, disp, fake_kanban, monkeypatch, caplog,
+        self,
+        disp,
+        fake_kanban,
+        monkeypatch,
+        caplog,
     ):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#47 flaky", "summary": "STOP: duplicate of #9"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#47 flaky",
+                    "summary": "STOP: duplicate of #9",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider(close_issue_fail_for={47})
 
@@ -168,38 +230,67 @@ class TestStopAutoClose:
         assert provider.close_calls == [47]
         # Failure path must NOT write the marker (next tick retries)
         assert fake_kanban.created_with_key("validator-stop-closed-47") is None
-        assert any("failed" in r.getMessage().lower() and "#47" in r.getMessage()
-                   for r in caplog.records)
+        assert any(
+            "failed" in r.getMessage().lower() and "#47" in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_stop_without_provider_warns(
-        self, disp, fake_kanban, monkeypatch, caplog,
+        self,
+        disp,
+        fake_kanban,
+        monkeypatch,
+        caplog,
     ):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#48 no provider", "summary": "STOP: duplicate of #9"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#48 no provider",
+                    "summary": "STOP: duplicate of #9",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
 
         with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
             triggered = _call(
-                disp, fake_kanban, {48: _issue(48)}, provider=None,
+                disp,
+                fake_kanban,
+                {48: _issue(48)},
+                provider=None,
             )
 
         assert 48 not in triggered
         assert fake_kanban.created_with_key("validator-stop-closed-48") is None
-        assert any("no provider" in r.getMessage().lower() and "#48" in r.getMessage()
-                   for r in caplog.records)
+        assert any(
+            "no provider" in r.getMessage().lower() and "#48" in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_stop_dry_run_no_mutation(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#49 dry run", "summary": "STOP: duplicate of #9"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#49 dry run",
+                    "summary": "STOP: duplicate of #9",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
         triggered = _call(
-            disp, fake_kanban, {49: _issue(49)}, provider=provider, dry_run=True,
+            disp,
+            fake_kanban,
+            {49: _issue(49)},
+            provider=provider,
+            dry_run=True,
         )
 
         assert 49 in triggered
@@ -209,10 +300,17 @@ class TestStopAutoClose:
 
 class TestNonStopDoesNotCloseIssue:
     def test_confirmed_does_not_close_issue(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#50 valid bug", "summary": "CONFIRMED: reproduced"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#50 valid bug",
+                    "summary": "CONFIRMED: reproduced",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -225,12 +323,22 @@ class TestNonStopDoesNotCloseIssue:
         assert fake_kanban.created_with_key("pm-50") is not None
 
     def test_blocked_creates_pm_consultation_no_close(
-        self, disp, fake_kanban, monkeypatch,
+        self,
+        disp,
+        fake_kanban,
+        monkeypatch,
     ):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#51 blocked", "summary": "BLOCKED: needs input"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#51 blocked",
+                    "summary": "BLOCKED: needs input",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -243,10 +351,17 @@ class TestNonStopDoesNotCloseIssue:
         assert fake_kanban.created_with_key("validator-blocked-51") is not None
 
     def test_escalate_does_not_close_issue(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#52 security", "summary": "ESCALATE: security threat"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#52 security",
+                    "summary": "ESCALATE: security threat",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -262,10 +377,17 @@ class TestStopAutoCloseComment:
     """Verify that STOP: validator posts an explanatory comment when auto-closing."""
 
     def test_stop_post_issue_comment_success(self, disp, fake_kanban, monkeypatch):
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#72 already fixed", "summary": "STOP: already fixed in abc123"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#72 already fixed",
+                    "summary": "STOP: already fixed in abc123",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -276,9 +398,10 @@ class TestStopAutoCloseComment:
         assert len(comments) == 1, f"Expected 1 comment, got {len(comments)}"
         assert comments[0][0] == 72
         body = comments[0][1]
-        assert "Auto-closed by STOP:" in body, f"Comment missing auto-close marker: {body[:80]}"
+        assert "Auto-closed by STOP:" in body, (
+            f"Comment missing auto-close marker: {body[:80]}"
+        )
         assert "already fixed" in body.lower(), f"Comment missing reason: {body[:80]}"
-
 
     def test_stop_reason_has_no_leading_colon(self, disp, fake_kanban, monkeypatch):
         """Regression: summary_raw slice must match the 'STOP:' prefix length (5).
@@ -287,10 +410,17 @@ class TestStopAutoCloseComment:
         reason and produced malformed comment text like
         ``STOP: validator — : duplicate of #9``.
         """
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#76 duplicate", "summary": "STOP: duplicate of #9"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#76 duplicate",
+                    "summary": "STOP: duplicate of #9",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
@@ -304,16 +434,26 @@ class TestStopAutoCloseComment:
         assert marker in body, f"Comment missing STOP marker: {body[:120]}"
         reason = body.split(marker, 1)[1].splitlines()[0].strip()
         assert not reason.startswith(":"), f"Leading colon in reason: {reason!r}"
-        assert reason.lower().startswith("duplicate of #9"), f"Unexpected reason: {reason!r}"
+        assert reason.lower().startswith("duplicate of #9"), (
+            f"Unexpected reason: {reason!r}"
+        )
 
-
-    def test_stop_post_issue_comment_failure(self, disp, fake_kanban, monkeypatch, caplog):
+    def test_stop_post_issue_comment_failure(
+        self, disp, fake_kanban, monkeypatch, caplog
+    ):
         """If post_issue_comment returns False, close_issue still succeeds and
         the marker task is still created (no crash)."""
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#73 duplicate", "summary": "STOP: duplicate of #71"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#73 duplicate",
+                    "summary": "STOP: duplicate of #71",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider(post_issue_comment_fail_for={73})
 
@@ -326,43 +466,59 @@ class TestStopAutoCloseComment:
         assert len(provider.posted_issue_comments) == 1
         # Warning should be logged about the comment failure
         assert any(
-            r.levelname == "WARNING" and "comment" in r.getMessage().lower() and "73" in r.getMessage()
+            r.levelname == "WARNING"
+            and "comment" in r.getMessage().lower()
+            and "73" in r.getMessage()
             for r in caplog.records
         ), "Should log warning when post_issue_comment fails"
         # Marker task still created despite comment failure
         assert fake_kanban.created_with_key("validator-stop-closed-73") is not None
 
-
     def test_stop_no_comment_when_already_closed(self, disp, fake_kanban, monkeypatch):
-        """If issue is already closed, skip both close_issue and comment."""
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#74 already closed", "summary": "STOP: cannot reproduce"},
-        ])
+        """Issue #1115: the closed-issue filter fires before the STOP handler,
+        so an already-closed issue's STOP card is skipped entirely — no close
+        call, no comment, no marker, not in triggered."""
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#74 already closed",
+                    "summary": "STOP: cannot reproduce",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider(closed_issues={74})
 
         triggered = _call(disp, fake_kanban, {74: _issue(74)}, provider=provider)
 
-        # close_issue short-circuits (already closed) — no actual API call
+        # Closed-issue filter skips the card entirely.
         assert 74 not in provider.close_calls
-        # No comment posted either — the already-closed branch continues before reaching it
         assert len(provider.posted_issue_comments) == 0
-        # Still in triggered, marker written
-        assert 74 in triggered
-        assert fake_kanban.created_with_key("validator-stop-closed-74") is not None
-
+        assert triggered == []
+        assert fake_kanban.created_with_key("validator-stop-closed-74") is None
 
     def test_stop_dry_run_no_close_or_comment(self, disp, fake_kanban, monkeypatch):
         """Dry-run mode should not close issue or post comments."""
-        _seed_tasks(fake_kanban, [
-            {"assignee": VALIDATOR, "status": "done",
-             "title": "#75 duplicate", "summary": "STOP: duplicate of #70"},
-        ])
+        _seed_tasks(
+            fake_kanban,
+            [
+                {
+                    "assignee": VALIDATOR,
+                    "status": "done",
+                    "title": "#75 duplicate",
+                    "summary": "STOP: duplicate of #70",
+                },
+            ],
+        )
         monkeypatch.setattr(disp, "kanban", fake_kanban)
         provider = FakeProvider()
 
-        triggered = _call(disp, fake_kanban, {75: _issue(75)}, provider=provider, dry_run=True)
+        triggered = _call(
+            disp, fake_kanban, {75: _issue(75)}, provider=provider, dry_run=True
+        )
 
         assert 75 in triggered
         assert 75 not in provider.close_calls
