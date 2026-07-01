@@ -694,6 +694,42 @@ def test_hermes_send_returns_anchor_and_threads():
     check("json error → not ok", ok2 is False and anchor2 is None)
 
 
+def test_hermes_send_broadcast_failure_is_logged():
+    """When broadcast subprocess.run raises, a warning is logged (not silently swallowed)."""
+
+    disp = _load_dispatch()
+
+    call_count = [0]
+
+    def fake_run(args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # First call: primary send succeeds.
+            return type(
+                "R",
+                (),
+                {
+                    "returncode": 0,
+                    "stderr": "",
+                    "stdout": '{"success": true, "message_id": "ts-abc"}',
+                },
+            )()
+        # Second call: broadcast send raises.
+        raise OSError("network unreachable")
+
+    with mock.patch.object(disp.subprocess, "run", fake_run):
+        with mock.patch.object(disp.logger, "warning") as mock_warn:
+            ok, anchor = disp._hermes_send(
+                "slack:C1", "body", thread_id="ts-abc", broadcast=True
+            )
+
+    check("primary send succeeds despite broadcast failure", ok is True)
+    check("anchor still returned", anchor == "ts-abc")
+    # Ensure warning was called at least once with the broadcast failure message.
+    broadcast_warns = [c for c in mock_warn.call_args_list if "broadcast" in str(c)]
+    check("broadcast failure logged as warning", len(broadcast_warns) >= 1)
+
+
 def test_mirror_issue_threads_root_then_comment_reply(tmp_path):
     """_mirror_issue_threads posts a root, then mirrors agent comments as replies."""
     disp = _load_dispatch()
@@ -4318,7 +4354,10 @@ def test_check_completed_developer_retries_empty_summary():
     # Under cap (1 stale, max=2): retry task created with developer-10-r1 key
     dev_keys = [k for k in created_keys if k.startswith("developer-")]
     check("developer empty summary: retry task created", len(dev_keys) == 1)
-    check("developer empty summary: retry key is developer-10-r1", dev_keys[0] == "developer-10-r1")
+    check(
+        "developer empty summary: retry key is developer-10-r1",
+        dev_keys[0] == "developer-10-r1",
+    )
 
 
 def test_check_completed_developer_cap_exhausted():
@@ -4388,9 +4427,7 @@ def test_check_completed_developer_well_formed_summary_no_retry():
             return _completed_developer_tasks(
                 11, summary="review-required: PR #99 -> dev"
             )
-        return _completed_developer_tasks(
-            11, summary="review-required: PR #99 -> dev"
-        )
+        return _completed_developer_tasks(11, summary="review-required: PR #99 -> dev")
 
     _orig_create = disp.kanban.create_task
     _orig_show = disp.kanban.show_card
@@ -4442,6 +4479,7 @@ if __name__ == "__main__":
         test_find_doc_comment,
         test_send_via_hermes,
         test_hermes_send_returns_anchor_and_threads,
+        test_hermes_send_broadcast_failure_is_logged,
         test_deliver_doc_reports_idempotent,
         test_deliver_doc_reports_no_target,
         test_deliver_doc_reports_send_failure,
