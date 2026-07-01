@@ -1,7 +1,5 @@
 ## [fix: validator inner agent completes kanban card without summary → infinite retry loop](https://github.com/benmarte/daedalus/issues/1121) — [PR #1124](https://github.com/benmarte/daedalus/pull/1124)
 
-## [fix: validator inner agent uses print-to-stdout instead of kanban complete](https://github.com/benmarte/daedalus/issues/1121) — [PR #1124](https://github.com/benmarte/daedalus/pull/1124)
-
 When `coding_agent` is set to `claude-code` (or any non-hermes value), `_validator_body()` now emits "Print to stdout: 'CONFIRMED: ...'" instructions instead of "Complete your card..." for every outcome block, and explicitly prohibits `hermes kanban complete` calls from the inner subprocess. The `_ROLE_AFTER_SPAWN["validator"]` delegation block received the same fix. The outer `validator-daedalus` agent (SOUL.md step 6) remains the sole caller of `kanban complete`. A fallback guard in `validator-daedalus.md` covers the edge case where the inner agent somehow still marks the card done with `summary: None`.
 
 ## [fix: gate epic-level QA dispatch until at least one sub-issue PR is open](https://github.com/benmarte/daedalus/issues/1098) — [PR #1106](https://github.com/benmarte/daedalus/pull/1106)
