@@ -1665,7 +1665,8 @@ def test_validator_body_delegation_appended_for_cloud_agent():
     assert "AGENT DELEGATION" in body
     assert "terminal(" in body
     # validator uses append mode: delegation comes AFTER the issue body
-    assert body.index("--- Issue #55 ---") < body.index("AGENT DELEGATION")
+    # (now fenced in <issue_body> delimiters per #1131)
+    assert body.index("<issue_body>") < body.index("AGENT DELEGATION")
 
 
 def test_validator_body_hermes_leaves_body_unchanged():
