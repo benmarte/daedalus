@@ -672,3 +672,27 @@ def test_board_ensure_backlog_direct_lookup_skips_reenroll(provider):
     queries = [(c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")
                for c in provider._http.post_json.call_args_list]
     assert not any("addProjectV2ItemById" in q for q in queries)
+
+
+def test_resolve_board_item_prefers_cached_listing(provider):
+    """_resolve_board_item returns the listing hit without a direct lookup.
+
+    The dedup helper (issue #1171) must try the cached listing FIRST and skip
+    the per-issue projectItems edge entirely when the listing already holds the
+    item — otherwise the consolidation would add a redundant GraphQL round-trip.
+    """
+    listed = {"id": "I_LISTED", "number": 42, "status": "Ready"}
+    with mock.patch.object(provider, "_items", return_value=[listed]), \
+         mock.patch.object(provider, "_board_item_for_issue") as direct:
+        assert provider._resolve_board_item(42) == listed
+        direct.assert_not_called()
+
+
+def test_resolve_board_item_falls_back_to_direct_lookup(provider):
+    """When the listing misses the issue, the helper falls back to the edge."""
+    resolved = {"id": "I_DIRECT", "number": 42, "status": ""}
+    with mock.patch.object(provider, "_items", return_value=[]), \
+         mock.patch.object(provider, "_board_item_for_issue",
+                           return_value=resolved) as direct:
+        assert provider._resolve_board_item(42) == resolved
+        direct.assert_called_once_with(42)
