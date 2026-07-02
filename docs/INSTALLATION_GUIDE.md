@@ -501,6 +501,8 @@ hermes gateway restart
 
 > **Why `~/.hermes/.env`?** Hermes loads this file at startup and injects its variables into the gateway process. Both the dashboard and the dispatcher cron job can see your tokens without you re-exporting them each session.
 
+> **Dashboard API authentication (#1130):** The daedalus dashboard plugin API is fail-closed by default. If the Hermes host provisions `HERMES_DASHBOARD_SESSION_TOKEN`, the SPA authenticates automatically. For manual API access or standalone deployments, set `DAEDALUS_DASHBOARD_TOKEN` in `~/.hermes/.env`. For local dev only, set `DAEDALUS_DASHBOARD_AUTH_DISABLED=1` (never use in production). See [README → Dashboard REST API → Authentication](../README.md#authentication-1130) for the full behavior matrix.
+
 ### Token Permissions Required
 
 **GitHub — Fine-grained PAT** (Settings → Developer settings → Fine-grained tokens):
