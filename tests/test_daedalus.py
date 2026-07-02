@@ -1683,8 +1683,34 @@ def test_main_scopes_to_cwd_project():
             os.chdir(orig)
 
     check("cwd-scoped main() calls run() exactly once", len(called) == 1)
+    # Defensive read (issue #1198): if run() was never invoked — e.g. main()
+    # returned early on FileLock contention — surface a clear FAIL instead of a
+    # bare ``called[0]`` IndexError. The lock is isolated per xdist worker (see
+    # conftest), so under normal runs ``called`` always holds exactly one entry.
+    scoped_name = called[0].get("name") if called else None
+    check("cwd-scoped main() runs the project at cwd", scoped_name == "scoped")
+
+
+def test_dispatch_lock_isolated_per_worker():
+    """Issue #1198: the dispatch process-mutex FileLock is env-overridable and
+    isolated away from the host-global lock during tests, so concurrent xdist
+    workers calling main() never contend (the flake behind
+    test_main_scopes_to_cwd_project)."""
+    import os
+
+    # conftest sets DAEDALUS_DISPATCH_LOCK at import for every worker.
+    override = os.environ.get("DAEDALUS_DISPATCH_LOCK")
+    check("DAEDALUS_DISPATCH_LOCK is set during tests", bool(override))
+
+    disp = _load_dispatch()
+    real_default = str(Path(disp.__file__).resolve().parent / ".daedalus_dispatch.lock")
     check(
-        "cwd-scoped main() runs the project at cwd", called[0].get("name") == "scoped"
+        "freshly loaded disp honors the env override",
+        disp._MUTEX_LOCK_PATH == override,
+    )
+    check(
+        "test lock is isolated from the real host-global lock",
+        disp._MUTEX_LOCK_PATH != real_default,
     )
 
 
@@ -4533,6 +4559,7 @@ if __name__ == "__main__":
         test_resolve_repo_arg_broken_config_warns,
         test_resolve_repo_from_cwd,
         test_main_scopes_to_cwd_project,
+        test_dispatch_lock_isolated_per_worker,
         test_deliver_doc_reports_multi_target,
         test_ensure_board_creates,
         test_ensure_board_already_exists,

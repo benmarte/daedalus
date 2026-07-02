@@ -79,7 +79,16 @@ from core.util import extract_pr_number_from_summary  # noqa: E402
 
 logger = logging.getLogger("daedalus.dispatch")
 
-_MUTEX_LOCK_PATH = str(Path(__file__).resolve().parent / ".daedalus_dispatch.lock")
+# Host-global process mutex for the dispatcher (issue #1011). Honors the
+# ``DAEDALUS_DISPATCH_LOCK`` env override so the test suite can point each
+# pytest-xdist worker at a unique lock file — otherwise concurrent workers
+# calling main() contend on this one host-global lock and the loser returns
+# early without dispatching, flaking any test that asserts on dispatch side
+# effects (issue #1198). Unset in production → the stable default below.
+_MUTEX_LOCK_PATH = os.environ.get(
+    "DAEDALUS_DISPATCH_LOCK",
+    str(Path(__file__).resolve().parent / ".daedalus_dispatch.lock"),
+)
 
 # Maximum seconds the dispatcher may hold the process-level FileLock before the
 # watchdog force-exits. Prevents a stuck tick from starving queued advance-hook
