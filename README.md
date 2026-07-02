@@ -256,7 +256,11 @@ This ensures sub-issues are visible on the board immediately after decomposition
 after they pick up the `Ready` label via tier promotion. Board item lookup is resilient to
 pagination truncation and partial page failures: if the cached board listing misses an
 enrolled item (e.g., null Status or beyond the old 500-item cap), a direct per-issue
-`projectItems` GraphQL lookup resolves it as a fallback (#1158).
+`projectItems` GraphQL lookup resolves it as a fallback (#1158). The direct lookup itself
+now paginates `projectItems(first:100, after:$cursor)` with a `hasNextPage` loop and a
+50-page safety cap, so issues enrolled in many GitHub Projects are still found, and a
+shared `_resolve_board_item()` helper consolidates the listing→fallback path used by both
+`board_ensure_backlog` and `board_set_status` (#1171).
 
 **Not-suitable fallback.** When the planner completes its card but concludes the parent
 issue is not suitable for decomposition (e.g., already small, blocked on a dependency),
@@ -640,6 +644,11 @@ execution:
    the spawned agent survives the Hermes session exit).
 4. The coding agent does the work (writes code, opens the PR), and its output is **relayed
    back as the role's completion signal** so the pipeline advances to the next phase.
+5. Review, QA, security, and documentation agents work **inline** — their inner coding-agent
+   sessions do NOT invoke slash-command skills (`/review`, `/code-simplify`, `/test`) or
+   spawn nested subagents. The triple-nesting (outer profile → inner agent → skill subagent)
+   broke completion detection and caused polling churn; the inner agent now reads the diff
+   and writes its verdict directly (#1192).
 
 **Per-role override.** Each role can choose its own agent via
 `execution.profiles.<role>.agent`, which takes precedence over the global
