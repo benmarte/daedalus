@@ -122,7 +122,7 @@ _RESOLVED = {"execution": {"auto_merge": True, "merge_method": "squash"}}
 
 def test_sweep_merges_done_docs_card_pr():
     p = _provider(pr=99)
-    tasks = [{"title": "#42 Docs: fix the thing", "status": "done"}]
+    tasks = [{"assignee": "documentation-daedalus", "title": "#42 Docs: fix the thing", "status": "done"}]
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks), _all_gates_pass() as m:
         for k in m:
             m[k].return_value = True
@@ -142,7 +142,7 @@ def test_sweep_noop_when_auto_merge_disabled():
 
 def test_sweep_ignores_non_done_docs_cards():
     p = _provider()
-    tasks = [{"title": "#42 Docs: fix the thing", "status": "running"}]
+    tasks = [{"assignee": "documentation-daedalus", "title": "#42 Docs: fix the thing", "status": "running"}]
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks):
         merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
     assert merged == []
@@ -152,7 +152,7 @@ def test_sweep_ignores_non_done_docs_cards():
 def test_sweep_skips_when_no_pr_for_branch():
     p = _provider()
     p.find_pr_for_branch.return_value = None
-    tasks = [{"title": "#42 Docs: fix the thing", "status": "done"}]
+    tasks = [{"assignee": "documentation-daedalus", "title": "#42 Docs: fix the thing", "status": "done"}]
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks):
         merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
     assert merged == []
@@ -161,7 +161,7 @@ def test_sweep_skips_when_no_pr_for_branch():
 
 def test_sweep_uses_deterministic_branch_name():
     p = _provider(pr=99)
-    tasks = [{"title": "#1234 Docs: fix the thing", "status": "done"}]
+    tasks = [{"assignee": "documentation-daedalus", "title": "#1234 Docs: fix the thing", "status": "done"}]
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks), _all_gates_pass() as m:
         for k in m:
             m[k].return_value = True
