@@ -1,3 +1,7 @@
+## [fix(security): use timing-safe comparison for GitLab webhook token](https://github.com/benmarte/daedalus/issues/1129) — [PR #1174](https://github.com/benmarte/daedalus/pull/1174)
+
+The GitLab webhook handler in `core/webhook_normalizer.py` verified the inbound `X-Gitlab-Token` header against the configured secret with a plain `!=` string comparison, which short-circuits on the first mismatching byte and leaks token length/prefix information through response timing. The fix replaces the comparison with `hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8"))`, giving a constant-time check that closes the timing side-channel. Behavior is otherwise unchanged — valid tokens still pass, invalid tokens still return `False`. A regression test spies on `hmac.compare_digest` to assert the timing-safe path is taken.
+
 ## [fix: board_set_status fails for items already on board with null Status — _items() lookup gap](https://github.com/benmarte/daedalus/issues/1158) — [PR #1169](https://github.com/benmarte/daedalus/pull/1169)
 
 `board_set_status` failed with "issue still not found after enrollment" for issues already on the project board with null Status, because `_items()` had a hard 500-item pagination cap and silently cached partial results on page-fetch errors. The fix adds a direct per-issue `projectItems` GraphQL lookup as a fallback when the listing misses, fully paginates `_items()` via `hasNextPage` with a 50-page safety cap, and returns partial results uncached on error so the next call re-fetches.
