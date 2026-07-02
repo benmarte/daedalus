@@ -1,3 +1,7 @@
+## [fix: paginate _board_item_for_issue projectItems + deduplicate board item fallback logic](https://github.com/benmarte/daedalus/issues/1171) — [PR #1196](https://github.com/benmarte/daedalus/pull/1196)
+
+`_board_item_for_issue()` queried an issue's `projectItems` edge with `first:20` and no `hasNextPage` pagination, so an issue enrolled in more than 20 GitHub Projects would miss the configured board's item and trigger a spurious (idempotent) re-enroll — the same silent-truncation class that #1158 had already hardened `_items()` against. The fix paginates `projectItems(first:100, after:$cursor)` with a cursor loop and a 50-page (~5000-item) safety cap mirroring `_items()`, returns on the first matching board item, and logs a truncation warning if the cap is hit. A new `_resolve_board_item(issue_number)` helper consolidates the verbatim listing-then-direct-lookup fallback blocks that were duplicated in `board_ensure_backlog` and `board_set_status`; it tries the cached listing first (no extra round-trip) and falls back to the edge only on a miss. Status extraction is deduplicated via a single `_status_of()` static helper reused by both `_items()` and `_board_item_for_issue()`.
+
 ## [fix: silent exception swallowing hides failures — add logging to bare except blocks](https://github.com/benmarte/daedalus/issues/1133) — [PR #1195](https://github.com/benmarte/daedalus/pull/1195)
 
 ## [fix: enable SQLite WAL mode at all direct connection sites](https://github.com/benmarte/daedalus/issues/1134) — [PR #1193](https://github.com/benmarte/daedalus/pull/1193)

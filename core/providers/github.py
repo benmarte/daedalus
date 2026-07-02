@@ -521,6 +521,15 @@ class GitHubProvider(VCSProvider):
                             "status_field_id": status_field_id, "options": options}
         return self._board_meta
 
+    @staticmethod
+    def _status_of(node: Dict[str, Any]) -> str:
+        """Extract the Status single-select value name from a project item node.
+
+        Defined once and reused by both the listing scan (``_items``) and the
+        direct per-issue lookup (``_board_item_for_issue``).
+        """
+        return ((node or {}).get("fieldValueByName") or {}).get("name") or ""
+
     def _items(self) -> List[Dict[str, Any]]:
         if self._board_items is not None:
             return self._board_items
@@ -551,7 +560,7 @@ class GitHubProvider(VCSProvider):
                 items.append({
                     "id": n.get("id"),
                     "number": ((n.get("content") or {}).get("number")),
-                    "status": ((n.get("fieldValueByName") or {}).get("name") or "")})
+                    "status": self._status_of(n)})
             page = block.get("pageInfo") or {}
             if not page.get("hasNextPage"):
                 break
@@ -571,27 +580,53 @@ class GitHubProvider(VCSProvider):
         same shape as ``_items()`` entries, or None if the issue has no item on
         the configured project.
         """
-        q = """query($owner:String!,$name:String!,$number:Int!){
+        q = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){
                  repository(owner:$owner,name:$name){
                    issue(number:$number){
-                     projectItems(first:20){
+                     projectItems(first:100, after:$cursor){
+                       pageInfo{ hasNextPage endCursor }
                        nodes{ id
                          project{ number }
                          fieldValueByName(name:"Status"){
                            ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }"""
-        data = self._graphql(q, {"owner": self.owner,
-                                 "name": self.repo.split("/", 1)[1],
-                                 "number": issue_number})
-        nodes = (((((data or {}).get("repository") or {}).get("issue") or {})
-                  .get("projectItems") or {}).get("nodes") or [])
-        for n in nodes:
-            if not n or not n.get("id"):
-                continue
-            if ((n.get("project") or {}).get("number")) != int(self._board_number or 0):
-                continue
-            return {"id": n["id"], "number": issue_number,
-                    "status": ((n.get("fieldValueByName") or {}).get("name") or "")}
+        cursor = None
+        max_pages = 50  # safety cap — mirrors _items(); nobody enrols in 5000 projects
+        for page_num in range(1, max_pages + 1):
+            data = self._graphql(q, {"owner": self.owner,
+                                     "name": self.repo.split("/", 1)[1],
+                                     "number": issue_number, "cursor": cursor})
+            block = ((((data or {}).get("repository") or {}).get("issue") or {})
+                     .get("projectItems") or {})
+            for n in block.get("nodes") or []:
+                if not n or not n.get("id"):
+                    continue
+                if ((n.get("project") or {}).get("number")) != int(self._board_number or 0):
+                    continue
+                return {"id": n["id"], "number": issue_number,
+                        "status": self._status_of(n)}
+            page = block.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            cursor = page.get("endCursor")
+        else:
+            self._log.warning("board: issue #%s projectItems hit the %d-page "
+                              "safety cap — direct lookup may be incomplete",
+                              issue_number, max_pages)
         return None
+
+    def _resolve_board_item(self, issue_number: int) -> Optional[Dict[str, Any]]:
+        """Resolve an issue's project item, preferring the cached listing.
+
+        Scans the (possibly-cached) board listing first, then falls back to the
+        direct per-issue projectItems lookup — the listing can miss enrolled
+        items under page-error truncation or the pagination safety cap (issue
+        #1158). Returns the item dict, or None if the issue is not on the board.
+        """
+        item = next((it for it in self._items()
+                     if it.get("number") == issue_number), None)
+        if item is None:
+            item = self._board_item_for_issue(issue_number)
+        return item
 
     def invalidate_board_cache(self) -> None:
         self._board_items = None
@@ -719,10 +754,7 @@ class GitHubProvider(VCSProvider):
             return False
         # Check if already on the board — the listing can miss enrolled items
         # (issue #1158), so fall back to the direct per-issue lookup.
-        current_item = next((it for it in self._items()
-                             if it.get("number") == issue_number), None)
-        if not current_item:
-            current_item = self._board_item_for_issue(issue_number)
+        current_item = self._resolve_board_item(issue_number)
         if not current_item:
             added = self._board_add_item(issue_number)
             if not added:
@@ -745,12 +777,9 @@ class GitHubProvider(VCSProvider):
             self._log.warning("board: status '%s' not an option on #%s",
                               status_name, self._board_number)
             return False
-        current_item = next((it for it in self._items()
-                             if it.get("number") == issue_number), None)
-        if not current_item:
-            # The listing can miss enrolled items (issue #1158) — resolve via
-            # the issue's projectItems edge before assuming it needs enrolling.
-            current_item = self._board_item_for_issue(issue_number)
+        # The listing can miss enrolled items (issue #1158) — resolve via the
+        # issue's projectItems edge before assuming it needs enrolling.
+        current_item = self._resolve_board_item(issue_number)
         if not current_item:
             # Auto-enroll: item not on project yet — add it first, then retry status.
             self._log.info("board: #%s not on project #%s — auto-enrolling",
