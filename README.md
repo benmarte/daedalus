@@ -876,6 +876,26 @@ before the agent finishes (a known platform-level bug), the task is left with no
 re-creates the PM task with a new idempotency key (`pm-{n}-r1`, `pm-{n}-r2`),
 capped at 3 retries. Previously this stalled the pipeline indefinitely.
 
+**Developer stale-task recovery & PR adoption.** The same premature-completion
+bug can strike a developer card: the Hermes platform marks it done with an empty
+summary, but the agent's session had already opened a PR. Without a guard, the
+dispatcher classified the card as `stale` and blindly minted a retry developer
+card — producing **duplicate PRs** for the same issue (observed live: #1160 →
+duplicate PR #1163; #1161 → three developer cards and duplicate PR #1165). The
+fix ([#1164](https://github.com/benmarte/daedalus/issues/1164),
+PR [#1168](https://github.com/benmarte/daedalus/pull/1168)) adds
+`_try_adopt_developer_pr()` in `daedalus_dispatch.py`. Before re-dispatching, it
+queries the provider for an existing open or merged PR (`pr_number_for_issue`).
+When one exists, the stale card's summary is rewritten to the canonical
+`review-required: PR #N (adopted from provider state — …)` format so
+`_developer_task_state` reports `complete` on the next tick and the normal
+reviewer/QA flow proceeds against the existing PR — no retry card is created.
+This mirrors the PM spec-comment adoption pattern from #1161. Provider errors
+fail open to the existing retry path. Fork-headed or wrong-base-branch PRs are
+rejected by review hardening so they are never adopted. A pushed branch without
+a PR is deliberately NOT adopted — it isn't a completion, and the retry
+developer can reuse the branch.
+
 ```
 blocked card detected
         │
