@@ -1850,6 +1850,104 @@ def test_check_team_blockers_skips_when_active_consultation_exists():
     check("triggered list is empty when consult already open", triggered == [])
 
 
+# ── #1182: passing gate verdicts must not spawn a racing PM consultation ──────
+
+
+def test_check_team_blockers_skips_review_approved():
+    """reviewer card with review-approved verdict → no PM consult (APPROVE_ADVANCE owns it)."""
+    card = _make_blocked_card(
+        "t_rev1", "reviewer-daedalus",
+        "review-approved: PR #1181",
+        title="#1140 Reviewer: review PR",
+    )
+    issue = {"number": 1140, "title": "reject webhook", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {1140: issue}, "/w", "dev", "github",
+        )
+    check("review-approved skipped — no PM consultation", mk_create.call_count == 0)
+    check("triggered list is empty for review-approved", triggered == [])
+
+
+def test_check_team_blockers_skips_qa_passed():
+    """qa card with qa-passed verdict → no PM consult (ADVANCE owns it)."""
+    card = _make_blocked_card(
+        "t_qa1", "qa-daedalus",
+        "qa-passed: PR #1181",
+        title="#1140 QA: verify PR",
+    )
+    issue = {"number": 1140, "title": "reject webhook", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {1140: issue}, "/w", "dev", "github",
+        )
+    check("qa-passed skipped — no PM consultation", mk_create.call_count == 0)
+    check("triggered list is empty for qa-passed", triggered == [])
+
+
+def test_check_team_blockers_skips_security_cleared():
+    """security card with 'security: cleared' verdict → no PM consult (APPROVE_ADVANCE owns it)."""
+    card = _make_blocked_card(
+        "t_sec1", "security-analyst-daedalus",
+        "security: cleared — no vulnerabilities found in PR #1181",
+        title="#1140 Security: audit PR",
+    )
+    issue = {"number": 1140, "title": "reject webhook", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {1140: issue}, "/w", "dev", "github",
+        )
+    check("security cleared skipped — no PM consultation", mk_create.call_count == 0)
+    check("triggered list is empty for security cleared", triggered == [])
+
+
+def test_check_team_blockers_creates_consult_for_qa_failed():
+    """qa-failed is a genuine blocker → PM consultation still created (no regression)."""
+    card = _make_blocked_card(
+        "t_qa2", "qa-daedalus",
+        "qa-failed: 3 tests broken in PR #1181",
+        title="#1141 QA: verify PR",
+    )
+    issue = {"number": 1141, "title": "broken thing", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task", return_value="t_consult") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {1141: issue}, "/w", "dev", "github",
+        )
+    check("qa-failed still creates PM consultation", mk_create.call_count == 1)
+    check("issue number in triggered list for qa-failed", 1141 in triggered)
+
+
+def test_check_team_blockers_creates_consult_for_changes_requested():
+    """changes-requested reviewer card is a genuine blocker → PM consultation still created."""
+    card = _make_blocked_card(
+        "t_rev2", "reviewer-daedalus",
+        "changes-requested: PR #1181 needs error handling",
+        title="#1142 Reviewer: review PR",
+    )
+    issue = {"number": 1142, "title": "needs work", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task", return_value="t_consult") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {1142: issue}, "/w", "dev", "github",
+        )
+    check("changes-requested still creates PM consultation", mk_create.call_count == 1)
+    check("issue number in triggered list for changes-requested", 1142 in triggered)
+
+
 # ── _count_active_issue_tasks (issue #109: accidental-close guard) ────────────
 
 
@@ -2290,6 +2388,11 @@ if __name__ == "__main__":
         test_check_team_blockers_creates_consult_for_genuine_blocker,
         test_check_team_blockers_skips_escalate,
         test_check_team_blockers_skips_when_active_consultation_exists,
+        test_check_team_blockers_skips_review_approved,
+        test_check_team_blockers_skips_qa_passed,
+        test_check_team_blockers_skips_security_cleared,
+        test_check_team_blockers_creates_consult_for_qa_failed,
+        test_check_team_blockers_creates_consult_for_changes_requested,
     ):
         fn()
     print()
