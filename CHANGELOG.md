@@ -1,3 +1,19 @@
+## [fix: adopt in-flight developer PR before re-dispatching a retry developer card](https://github.com/benmarte/daedalus/issues/1164) — [PR #1168](https://github.com/benmarte/daedalus/pull/1168)
+
+When a developer card completed with an empty summary (Hermes premature-completion bug) but the crashed session had already opened a PR, the dispatcher blindly minted a retry developer card, producing duplicate PRs for the same issue. The fix adds `_try_adopt_developer_pr()` which queries the provider for an existing open/merged PR before re-dispatching. When one exists, the stale card's summary is rewritten to `review-required: PR #N (adopted from provider state — …)` so the normal reviewer/QA flow proceeds against the existing PR. Includes fork/base-branch validation hardening and a substring fix for `issue_linked_to_pr` (negative-digit lookahead so `issue-42` no longer matches inside `issue-420`).
+
+## [fix: auto-adopt PM spec comment when card completes without SPEC: summary](https://github.com/benmarte/daedalus/issues/1161) — [PR #1166](https://github.com/benmarte/daedalus/pull/1166)
+
+When a PM card completed without the expected `SPEC:` prefix in its summary, the spec was lost. The fix adds `_try_adopt_pm_spec_comment()` which scans the issue for a PM spec comment and adopts it by rewriting the card's summary via `kanban.edit_summary`, enabling the normal downstream flow to proceed.
+
+## [fix: rerun dispatch dropped on FileLock contention instead of silently discarding it](https://github.com/benmarte/daedalus/issues/1160) — [PR #1162](https://github.com/benmarte/daedalus/pull/1162)
+
+When the dispatcher's FileLock was contended (another tick already running), the rerun marker was drained but the dispatch was silently discarded, causing the tick's work to be lost. The fix drains the rerun marker and logs the hook output so the next tick picks up the work.
+
+## [fix: rescue gate cards re-promoted by block-loop detection when their verdict already passed](https://github.com/benmarte/daedalus/issues/1119) — [PR #1159](https://github.com/benmarte/daedalus/pull/1159)
+
+Gate cards (qa-passed/review-approved/security-approved) re-promoted by block-loop detection were re-running the gate forever instead of being recognized as already passed. The fix adds a block-loop rescue scan that completes gate cards with passing verdicts instead of re-queuing them.
+
 ## [chore: repo hygiene — .gitignore gaps, untrack kanban.db, remove stray artifacts, archive closed specs](https://github.com/benmarte/daedalus/issues/1128) — [PR #1157](https://github.com/benmarte/daedalus/pull/1157)
 
 ## [fix: _resolve_repo_arg() swallows config-load failures with no diagnostic — wrong-project dispatch possible](https://github.com/benmarte/daedalus/issues/1110) — [PR #1122](https://github.com/benmarte/daedalus/pull/1122)

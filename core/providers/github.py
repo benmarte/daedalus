@@ -214,13 +214,16 @@ class GitHubProvider(VCSProvider):
                 continue
             head = pr.get("head") or {}
             base = pr.get("base") or {}
+            head_repo = head.get("repo") or {}
             out.append(PRSummary(number=pr.get("number"), state=st,
                                  head_branch=head.get("ref") or "",
                                  base_branch=base.get("ref") or "",
                                  title=pr.get("title") or "",
                                  body=pr.get("body") or "",
                                  url=pr.get("html_url") or "",
-                                 head_sha=head.get("sha") or ""))
+                                 head_sha=head.get("sha") or "",
+                                 author=((pr.get("user") or {}).get("login") or ""),
+                                 is_fork=bool(head_repo.get("fork"))))
         return out[:limit]
 
     # ── CI status ────────────────────────────────────────────────────────────
