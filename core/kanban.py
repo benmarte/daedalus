@@ -15,9 +15,10 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import subprocess
 from typing import List, Optional, Set
+
+from core.db import connect_wal
 
 logger = logging.getLogger("daedalus.kanban")
 
@@ -372,7 +373,7 @@ def rename_task(slug: str, task_id: str, new_title: str) -> bool:
         logger.warning("kanban: rename: DB not found for board %r", slug)
         return False
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_wal(db_path)
         conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (new_title, task_id))
         conn.commit()
         conn.close()

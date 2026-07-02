@@ -25,11 +25,11 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import time
 from typing import Dict, List, Optional, Tuple
 
 from core import kanban
+from core.db import connect_wal
 
 logger = logging.getLogger("daedalus.sweeper")
 
@@ -135,7 +135,7 @@ def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
     if not os.path.exists(path):
         return {}
     try:
-        conn = sqlite3.connect(path)
+        conn = connect_wal(path)
         placeholders = ",".join("?" for _ in task_ids)
         rows = conn.execute(
             f"SELECT id, last_heartbeat_at FROM tasks WHERE id IN ({placeholders})",

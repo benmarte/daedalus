@@ -22,7 +22,6 @@ import os
 import re
 import shlex
 import signal
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -57,6 +56,7 @@ from core import dispatch_state  # noqa: E402
 from core import iterate  # noqa: E402
 from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
+from core.db import connect_wal  # noqa: E402
 from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
 from core import sweeper  # noqa: E402
@@ -3727,7 +3727,7 @@ def _find_issue_n_from_parents(slug: str, task_id: str) -> Optional[str]:
     if not os.path.exists(db_path):
         return None
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_wal(db_path)
         rows = conn.execute(
             "SELECT t.title, t.body FROM task_links l JOIN tasks t ON t.id = l.parent_id WHERE l.child_id = ?",
             (task_id,),
