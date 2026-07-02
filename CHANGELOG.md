@@ -6,6 +6,10 @@ Role-scoped markers (`<!-- daedalus:retry-cap-notified:<role> -->`) replace the 
 
 The daedalus dashboard plugin API exposed all 21 backend routes with no authentication, allowing any local process to read project data and trigger install/uninstall/notification actions. The fix adds a fail-closed shared-secret gate (`require_dashboard_auth`) applied to every sub-router at include time. When no secret is configured and the explicit opt-in is unset, requests are rejected with HTTP 403. When a secret is configured (`DAEDALUS_DASHBOARD_TOKEN` or `HERMES_DASHBOARD_SESSION_TOKEN`), missing/mismatched credentials return HTTP 401, compared in constant time via `hmac.compare_digest`. `DAEDALUS_DASHBOARD_AUTH_DISABLED=1` provides a local-dev escape hatch with a loud once-per-process warning.
 
+## [fix(security): use timing-safe comparison for GitLab webhook token](https://github.com/benmarte/daedalus/issues/1129) — [PR #1174](https://github.com/benmarte/daedalus/pull/1174)
+
+The GitLab webhook handler in `core/webhook_normalizer.py` verified the inbound `X-Gitlab-Token` header against the configured secret with a plain `!=` string comparison, which short-circuits on the first mismatching byte and leaks token length/prefix information through response timing. The fix replaces the comparison with `hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8"))`, giving a constant-time check that closes the timing side-channel. Behavior is otherwise unchanged — valid tokens still pass, invalid tokens still return `False`. A regression test spies on `hmac.compare_digest` to assert the timing-safe path is taken.
+
 ## [fix(security): delimit untrusted issue content in agent prompts; escape title in security-notify command](https://github.com/benmarte/daedalus/issues/1131) — [PR #1175](https://github.com/benmarte/daedalus/pull/1175)
 
 ## [fix(security): delimit untrusted issue content in agent prompts; escape title in security-notify command](https://github.com/benmarte/daedalus/issues/1131)
