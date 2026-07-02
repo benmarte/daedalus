@@ -2998,6 +2998,28 @@ def _mark_notified_block(
     return False
 
 
+def _downstream_tasks_running_or_done(
+    slug: str,
+    issue_number: int,
+    downstream_profiles: tuple[str, ...],
+) -> bool:
+    """Return True if any downstream role card for *issue_number* is running or done.
+
+    Shared helper used by _retry_cap_stage_recovered to avoid 3× duplicated loops.
+    """
+    pattern = f"#{issue_number}"
+    for t in kanban.list_tasks(slug):
+        if pattern not in (t.get("title") or ""):
+            continue
+        assignee = (t.get("assignee") or "").strip()
+        if assignee not in downstream_profiles:
+            continue
+        status = (t.get("status") or "").lower()
+        if status in ("running", "done", "complete", "completed"):
+            return True
+    return False
+
+
 def _retry_cap_stage_recovered(
     slug: str,
     issue_number: int,
@@ -3005,7 +3027,6 @@ def _retry_cap_stage_recovered(
     *,
     profiles: Dict[str, str] | None = None,
     provider=None,
-    base_branch: str = "",
 ) -> bool:
     """Return True when the stage has recovered and should NOT be notified (#1167).
 
@@ -3027,18 +3048,11 @@ def _retry_cap_stage_recovered(
         if dev_state in ("running", "complete"):
             return True
         # Check for downstream role cards (QA, reviewer) that are running or done.
-        for downstream_profile in (
-            p.get("qa", "qa-daedalus"),
-            p.get("reviewer", "reviewer-daedalus"),
+        if _downstream_tasks_running_or_done(
+            slug, issue_number,
+            (p.get("qa", "qa-daedalus"), p.get("reviewer", "reviewer-daedalus")),
         ):
-            for t in kanban.list_tasks(slug):
-                if pattern not in (t.get("title") or ""):
-                    continue
-                if (t.get("assignee") or "").strip() != downstream_profile:
-                    continue
-                status = (t.get("status") or "").lower()
-                if status in ("running", "done", "complete", "completed"):
-                    return True
+            return True
         # Check for an open PR for the issue (provider lookup).
         if provider is not None:
             try:
@@ -3063,15 +3077,11 @@ def _retry_cap_stage_recovered(
         if pm_state in ("running", "complete"):
             return True
         # Check for downstream role cards (developer) that are running or done.
-        dev_profile = p.get("developer", "developer-daedalus")
-        for t in kanban.list_tasks(slug):
-            if pattern not in (t.get("title") or ""):
-                continue
-            if (t.get("assignee") or "").strip() != dev_profile:
-                continue
-            status = (t.get("status") or "").lower()
-            if status in ("running", "done", "complete", "completed"):
-                return True
+        if _downstream_tasks_running_or_done(
+            slug, issue_number,
+            (p.get("developer", "developer-daedalus"),),
+        ):
+            return True
 
     elif role == "validator":
         val_profile = p.get("validator", "validator-daedalus")
@@ -3089,18 +3099,12 @@ def _retry_cap_stage_recovered(
                 if summary.startswith("confirmed"):
                     return True
         # Check for downstream role cards (PM, developer) that are running or done.
-        for downstream_profile in (
-            p.get("pm", "project-manager-daedalus"),
-            p.get("developer", "developer-daedalus"),
+        if _downstream_tasks_running_or_done(
+            slug, issue_number,
+            (p.get("pm", "project-manager-daedalus"),
+             p.get("developer", "developer-daedalus")),
         ):
-            for t in kanban.list_tasks(slug):
-                if pattern not in (t.get("title") or ""):
-                    continue
-                if (t.get("assignee") or "").strip() != downstream_profile:
-                    continue
-                status = (t.get("status") or "").lower()
-                if status in ("running", "done", "complete", "completed"):
-                    return True
+            return True
 
     return False
 
@@ -4547,34 +4551,36 @@ def _check_confirmed_validators(
                                                 marker=_RETRY_CAP_MARKER,
                                                 role="pm",
                                             )
-                                    if provider is not None and not dry_run:
-                                        try:
-                                            cap_comment = (
-                                                f"⚠️ **Project Manager retry cap exhausted** "
-                                                f"for issue #{n_nr}\n\n"
-                                                f"The PM has completed {stale_count} times "
-                                                f"(max: {max_pm_retries}) without a SPEC: outcome.\n\n"
-                                                f"**Manual intervention required.**\n\n"
-                                                f"Likely cause: PM agent completed without SPEC: summary "
-                                                f"(context window overflow, agent crash, or silent failure).\n\n"
-                                                f"Recovery: `hermes kanban edit <task-id>` and add `SPEC:` "
-                                                f"summary, or manually requeue with fresh context."
-                                            )
-                                            if not provider.post_issue_comment(
-                                                n_nr, cap_comment
-                                            ):
-                                                logger.warning(
-                                                    "dispatch: failed to post retry-cap "
-                                                    "comment on #%s (github-fallback)",
-                                                    n_nr,
+                                        # Post a GitHub comment only when not suppressed
+                                        # by stage recovery (#1167).
+                                        if provider is not None and not dry_run:
+                                            try:
+                                                cap_comment = (
+                                                    f"⚠️ **Project Manager retry cap exhausted** "
+                                                    f"for issue #{n_nr}\n\n"
+                                                    f"The PM has completed {stale_count} times "
+                                                    f"(max: {max_pm_retries}) without a SPEC: outcome.\n\n"
+                                                    f"**Manual intervention required.**\n\n"
+                                                    f"Likely cause: PM agent completed without SPEC: summary "
+                                                    f"(context window overflow, agent crash, or silent failure).\n\n"
+                                                    f"Recovery: `hermes kanban edit <task-id>` and add `SPEC:` "
+                                                    f"summary, or manually requeue with fresh context."
                                                 )
-                                        except Exception as exc:
-                                            logger.warning(
-                                                "dispatch: post_issue_comment #%s raised %s "
-                                                "— retry-cap comment failed (github-fallback)",
-                                                n_nr,
-                                                exc,
-                                            )
+                                                if not provider.post_issue_comment(
+                                                    n_nr, cap_comment
+                                                ):
+                                                    logger.warning(
+                                                        "dispatch: failed to post retry-cap "
+                                                        "comment on #%s (github-fallback)",
+                                                        n_nr,
+                                                    )
+                                            except Exception as exc:
+                                                logger.warning(
+                                                    "dispatch: post_issue_comment #%s raised %s "
+                                                    "— retry-cap comment failed (github-fallback)",
+                                                    n_nr,
+                                                    exc,
+                                                )
                                 continue
                             # Under cap — send retry-attempt notification (#287).
                             if resolved is not None:
@@ -4703,33 +4709,33 @@ def _check_confirmed_validators(
                                 marker=_RETRY_CAP_MARKER,
                                 role="validator",
                             )
-                    # Post a GitHub comment so humans see the failure on the issue (t_dee62e1a).
-                    # Matches the pattern used in all other validator completion paths
-                    # (STOP/BLOCKED/ESCALATE) which post comments via provider.post_issue_comment.
-                    if provider is not None and not dry_run:
-                        try:
-                            cap_comment = (
-                                f"⚠️ **Validator retry cap exhausted** for issue #{n_nr}\n\n"
-                                f"The validator has completed {retry_count} times "
-                                f"(max: {max_validator_retries}) without a CONFIRMED outcome.\n\n"
-                                f"**Manual intervention required.**\n\n"
-                                f"Likely cause: Validator agent completed without CONFIRMED summary "
-                                f"(context window overflow, agent crash, or silent failure).\n\n"
-                                f"Recovery: Check agent logs, verify issue context, then manually "
-                                f"requeue validator or escalate to human review."
-                            )
-                            if not provider.post_issue_comment(n_nr, cap_comment):
-                                logger.warning(
-                                    "dispatch: failed to post retry-cap comment on #%s",
-                                    n_nr,
+                        # Post a GitHub comment only when not suppressed by stage
+                        # recovery (#1167).  Matches the pattern used in all other
+                        # validator completion paths (STOP/BLOCKED/ESCALATE).
+                        if provider is not None and not dry_run:
+                            try:
+                                cap_comment = (
+                                    f"⚠️ **Validator retry cap exhausted** for issue #{n_nr}\n\n"
+                                    f"The validator has completed {retry_count} times "
+                                    f"(max: {max_validator_retries}) without a CONFIRMED outcome.\n\n"
+                                    f"**Manual intervention required.**\n\n"
+                                    f"Likely cause: Validator agent completed without CONFIRMED summary "
+                                    f"(context window overflow, agent crash, or silent failure).\n\n"
+                                    f"Recovery: Check agent logs, verify issue context, then manually "
+                                    f"requeue validator or escalate to human review."
                                 )
-                        except Exception as exc:
-                            logger.warning(
-                                "dispatch: post_issue_comment #%s raised %s — "
-                                "retry-cap comment failed",
-                                n_nr,
-                                exc,
-                            )
+                                if not provider.post_issue_comment(n_nr, cap_comment):
+                                    logger.warning(
+                                        "dispatch: failed to post retry-cap comment on #%s",
+                                        n_nr,
+                                    )
+                            except Exception as exc:
+                                logger.warning(
+                                    "dispatch: post_issue_comment #%s raised %s — "
+                                    "retry-cap comment failed",
+                                    n_nr,
+                                    exc,
+                                )
                 continue
             if not issue_nr:
                 # Unresolvable issue: warn + notify instead of silent drop (#1099).
@@ -4887,33 +4893,33 @@ def _check_confirmed_validators(
                                 marker=_RETRY_CAP_MARKER,
                                 role="pm",
                             )
-                    # Post a GitHub comment so humans see the failure on the issue (t_dee62e1a).
-                    # Matches the pattern used in all other validator/PM completion paths
-                    # which post comments via provider.post_issue_comment.
-                    if provider is not None and not dry_run:
-                        try:
-                            cap_comment = (
-                                f"⚠️ **Project Manager retry cap exhausted** for issue #{n}\n\n"
-                                f"The PM has completed {stale_count} times "
-                                f"(max: {max_pm_retries}) without a SPEC: outcome.\n\n"
-                                f"**Manual intervention required.**\n\n"
-                                f"Likely cause: PM agent completed without SPEC: summary "
-                                f"(context window overflow, agent crash, or silent failure).\n\n"
-                                f"Recovery: `hermes kanban edit <task-id>` and add `SPEC:` "
-                                f"summary, or manually requeue with fresh context."
-                            )
-                            if not provider.post_issue_comment(n, cap_comment):
-                                logger.warning(
-                                    "dispatch: failed to post retry-cap comment on #%s",
-                                    n,
+                        # Post a GitHub comment only when not suppressed by stage
+                        # recovery (#1167).  Matches the pattern used in all other
+                        # validator/PM completion paths.
+                        if provider is not None and not dry_run:
+                            try:
+                                cap_comment = (
+                                    f"⚠️ **Project Manager retry cap exhausted** for issue #{n}\n\n"
+                                    f"The PM has completed {stale_count} times "
+                                    f"(max: {max_pm_retries}) without a SPEC: outcome.\n\n"
+                                    f"**Manual intervention required.**\n\n"
+                                    f"Likely cause: PM agent completed without SPEC: summary "
+                                    f"(context window overflow, agent crash, or silent failure).\n\n"
+                                    f"Recovery: `hermes kanban edit <task-id>` and add `SPEC:` "
+                                    f"summary, or manually requeue with fresh context."
                                 )
-                        except Exception as exc:
-                            logger.warning(
-                                "dispatch: post_issue_comment #%s raised %s — "
-                                "retry-cap comment failed",
-                                n,
-                                exc,
-                            )
+                                if not provider.post_issue_comment(n, cap_comment):
+                                    logger.warning(
+                                        "dispatch: failed to post retry-cap comment on #%s",
+                                        n,
+                                    )
+                            except Exception as exc:
+                                logger.warning(
+                                    "dispatch: post_issue_comment #%s raised %s — "
+                                    "retry-cap comment failed",
+                                    n,
+                                    exc,
+                                )
                 continue
             # Intermediate PM retry — send a distinct "retry-attempt" notification before retrying (#287).
             if resolved is not None:
@@ -5733,30 +5739,32 @@ def _check_completed_developer(
                                 task.get("id") or task.get("task_id") or ""
                             ),
                         )
-                if provider is not None and not dry_run:
-                    try:
-                        cap_comment = (
-                            f"⚠️ **Developer retry cap exhausted** for issue #{n}\n\n"
-                            f"The developer has completed {stale_count} times "
-                            f"(max: {max_dev_retries}) without opening a PR.\n\n"
-                            f"**Manual intervention required.**\n\n"
-                            f"Likely cause: Developer agent completed without opening a PR "
-                            f"(context window overflow, agent crash, or silent failure).\n\n"
-                            f"Recovery: Check agent logs, verify issue context, then manually "
-                            f"requeue developer or escalate to human review."
-                        )
-                        if not provider.post_issue_comment(n, cap_comment):
-                            logger.warning(
-                                "dispatch: failed to post retry-cap comment on #%s (developer)",
-                                n,
+                    # Post a GitHub comment only when not suppressed by stage
+                    # recovery (#1167).
+                    if provider is not None and not dry_run:
+                        try:
+                            cap_comment = (
+                                f"⚠️ **Developer retry cap exhausted** for issue #{n}\n\n"
+                                f"The developer has completed {stale_count} times "
+                                f"(max: {max_dev_retries}) without opening a PR.\n\n"
+                                f"**Manual intervention required.**\n\n"
+                                f"Likely cause: Developer agent completed without opening a PR "
+                                f"(context window overflow, agent crash, or silent failure).\n\n"
+                                f"Recovery: Check agent logs, verify issue context, then manually "
+                                f"requeue developer or escalate to human review."
                             )
-                    except Exception as exc:
-                        logger.warning(
-                            "dispatch: post_issue_comment #%s raised %s "
-                            "— retry-cap comment failed (developer)",
-                            n,
-                            exc,
-                        )
+                            if not provider.post_issue_comment(n, cap_comment):
+                                logger.warning(
+                                    "dispatch: failed to post retry-cap comment on #%s (developer)",
+                                    n,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "dispatch: post_issue_comment #%s raised %s "
+                                "— retry-cap comment failed (developer)",
+                                n,
+                                exc,
+                            )
             continue
         # Under cap — send retry-attempt notification and create retry task.
         if resolved is not None:
