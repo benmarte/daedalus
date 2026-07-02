@@ -2766,6 +2766,88 @@ def _try_adopt_pm_spec_comment(
     return True
 
 
+def _try_adopt_developer_pr(
+    slug: str,
+    issue_number: int,
+    developer_profile: str,
+    provider,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Self-heal a stale developer card by adopting its in-flight PR (#1164).
+
+    A developer session can open a PR and then die before writing its card
+    summary (hermes premature completion). ``_check_completed_developer`` saw
+    only the empty summary and minted a retry developer, which opened a
+    duplicate PR (#1160 → #1163, #1161 → #1165). Instead, when the provider
+    already reports an open/merged PR for the issue, rewrite the newest stale
+    developer card's summary to ``review-required: PR #N`` so the normal
+    reviewer/QA flow proceeds against the existing PR.
+
+    A pushed branch without a PR is deliberately NOT adopted — it is not a
+    completion, and the retry developer can reuse the branch.
+
+    Returns True when adopted (caller must skip retry and cap notification).
+    Provider errors are treated as "no PR" so the tick never crashes and the
+    existing retry behavior remains the fallback.
+    """
+    if provider is None:
+        return False
+    try:
+        pr_num = provider.pr_number_for_issue(issue_number)
+    except Exception as exc:
+        logger.warning(
+            "dispatch: pr_number_for_issue(#%s) raised %s — "
+            "falling back to developer retry",
+            issue_number,
+            exc,
+        )
+        return False
+    if not pr_num:
+        return False
+    if dry_run:
+        logger.info(
+            "[dry-run] developer stale #%s but PR #%s exists — would adopt it "
+            "as the card summary instead of retrying",
+            issue_number,
+            pr_num,
+        )
+        return True
+    # Newest done developer card without a PR reference (same filter as
+    # _developer_task_state).
+    pattern = f"#{issue_number}"
+    target_tid = ""
+    for t in kanban.list_tasks(slug):
+        if pattern not in (t.get("title") or ""):
+            continue
+        if (t.get("assignee") or "").strip() != developer_profile:
+            continue
+        if (t.get("status") or "").lower() not in ("done", "complete", "completed"):
+            continue
+        if extract_pr_number_from_summary(_get_task_summary(t, slug)) is not None:
+            continue
+        tid = str(t.get("id") or t.get("task_id") or "")
+        if tid:
+            target_tid = tid  # list order is creation order — keep the newest
+    if not target_tid:
+        return False
+    if not kanban.edit_summary(
+        slug,
+        target_tid,
+        f"review-required: PR #{pr_num} (adopted from provider state — "
+        f"developer completed with empty summary, #1164)",
+    ):
+        return False
+    logger.warning(
+        "dispatch: developer card %s for #%s completed with no PR in summary "
+        "but provider shows PR #%s — auto-adopted it as the card summary (#1164)",
+        target_tid,
+        issue_number,
+        pr_num,
+    )
+    return True
+
+
 def _has_notified_block(
     slug: str,
     issue_number: int,
@@ -5333,6 +5415,18 @@ def _check_completed_developer(
             continue
         # Only process stale developer tasks (done with no PR).
         if dev_state != "stale":
+            continue
+        # Before minting a retry, adopt an in-flight PR left by the crashed
+        # session (#1164) — a fresh developer would open a duplicate PR
+        # (#1160 → #1163). Mirrors the intake "already has a PR — skipping"
+        # guard for the re-dispatch-after-stale-completion path.
+        if _try_adopt_developer_pr(
+            slug,
+            n,
+            p.get("developer", _DEFAULT_PROFILES["developer"]),
+            provider,
+            dry_run=dry_run,
+        ):
             continue
         max_dev_retries = _resolve_max_developer_retries(
             (resolved or {}).get("execution") or {}
