@@ -1,3 +1,5 @@
+## [fix: silent exception swallowing hides failures — add logging to bare except blocks](https://github.com/benmarte/daedalus/issues/1133) — [PR #1195](https://github.com/benmarte/daedalus/pull/1195)
+
 ## [fix: enable SQLite WAL mode at all direct connection sites](https://github.com/benmarte/daedalus/issues/1134) — [PR #1193](https://github.com/benmarte/daedalus/pull/1193)
 
 ## [fix(security): refuse verify_ssl:false outside dev mode](https://github.com/benmarte/daedalus/issues/1132) — [PR #1189](https://github.com/benmarte/daedalus/pull/1189)
