@@ -137,6 +137,11 @@ _auth_log = logging.getLogger("daedalus.dashboard.auth")
 #     header validates against the same secret with no frontend change.
 _AUTH_TOKEN_ENV_KEYS = ("DAEDALUS_DASHBOARD_TOKEN", "HERMES_DASHBOARD_SESSION_TOKEN")
 
+# Explicit opt-in env var that disables auth for local dev. When set to "1",
+# requests are allowed without a token and a loud warning is logged. This is
+# the ONLY way to get unauthenticated access — the default is fail-closed.
+_AUTH_DISABLED_ENV_KEY = "DAEDALUS_DASHBOARD_AUTH_DISABLED"
+
 # Emit the "auth disabled" warning at most once per process so a polling
 # dashboard doesn't spam the log. Reset in tests to assert the warning fires.
 _auth_warning_emitted = False
@@ -174,28 +179,39 @@ def _presented_token(request: Request) -> str:
 async def require_dashboard_auth(request: Request) -> None:
     """FastAPI dependency gating every daedalus plugin API route.
 
-    Fail-closed: when a secret IS configured, a missing, malformed, or
-    mismatched credential raises ``HTTPException(401)``. The comparison is
-    constant-time via ``hmac.compare_digest``.
+    Fail-closed by default: when no secret is configured and the explicit
+    ``DAEDALUS_DASHBOARD_AUTH_DISABLED`` opt-in is NOT set, requests are
+    rejected with ``HTTPException(403)``.
 
-    Compatibility bridge: when NO secret is configured, requests are allowed and
-    a single loud warning is logged, so existing local deployments where the
-    host does not yet inject a token keep working. Production / non-loopback
-    deployments MUST set ``DAEDALUS_DASHBOARD_TOKEN`` or
-    ``HERMES_DASHBOARD_SESSION_TOKEN``.
+    Opt-in no-auth: set ``DAEDALUS_DASHBOARD_AUTH_DISABLED=1`` to allow
+    unauthenticated requests (local dev only). A loud warning is logged.
+
+    When a secret IS configured, a missing, malformed, or mismatched
+    credential raises ``HTTPException(401)``. The comparison is constant-time
+    via ``hmac.compare_digest``.
     """
     expected = _configured_dashboard_token()
     if not expected:
         global _auth_warning_emitted
-        if not _auth_warning_emitted:
-            _auth_warning_emitted = True
-            _auth_log.warning(
-                "dashboard auth disabled — no DAEDALUS_DASHBOARD_TOKEN or "
-                "HERMES_DASHBOARD_SESSION_TOKEN configured; all daedalus plugin "
-                "API routes are UNAUTHENTICATED. Set a token for any "
-                "non-loopback deployment."
-            )
-        return
+        # Check explicit opt-in for no-auth mode (local dev).
+        auth_disabled = (os.environ.get(_AUTH_DISABLED_ENV_KEY) or "").strip()
+        if auth_disabled == "1":
+            if not _auth_warning_emitted:
+                _auth_warning_emitted = True
+                _auth_log.warning(
+                    "dashboard auth EXPLICITLY DISABLED via "
+                    "DAEDALUS_DASHBOARD_AUTH_DISABLED=1; all daedalus plugin "
+                    "API routes are UNAUTHENTICATED. This is an explicit opt-in "
+                    "for local dev — NEVER use in production."
+                )
+            return
+        # Fail-closed: no token configured and no explicit opt-in.
+        raise HTTPException(
+            status_code=403,
+            detail="dashboard auth not configured — set "
+                   "DAEDALUS_DASHBOARD_TOKEN or HERMES_DASHBOARD_SESSION_TOKEN, "
+                   "or set DAEDALUS_DASHBOARD_AUTH_DISABLED=1 for local dev.",
+        )
     presented = _presented_token(request)
     if not presented or not hmac.compare_digest(presented, expected):
         raise HTTPException(status_code=401, detail="unauthorized")

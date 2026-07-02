@@ -55,8 +55,13 @@ def registry_repo(tmp_path):
 
 
 @pytest.fixture
-def client(registry_repo):
-    """FastAPI TestClient with the full daedalus router mounted."""
+def client(registry_repo, monkeypatch):
+    """FastAPI TestClient with the full daedalus router mounted.
+
+    Auth bypass is enabled so functional tests (not testing auth) can reach
+    the endpoints. Auth tests explicitly control the env vars themselves.
+    """
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/daedalus")
     return TestClient(app)
@@ -319,8 +324,9 @@ def test_get_projects_graceful_degradation_when_sources_return_nothing(client):
     assert proj["tracking_mode"] in ("github", "kanban")
 
 
-def test_get_projects_empty_registry(registry_repo):
+def test_get_projects_empty_registry(registry_repo, monkeypatch):
     """An empty registry returns an empty list (no global config fallback)."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/daedalus")
     c = TestClient(app)
@@ -382,8 +388,12 @@ def project_repo_dir():
 
 
 @pytest.fixture
-def project_client(project_repo_dir):
-    """Create a FastAPI TestClient with the project config router mounted."""
+def project_client(project_repo_dir, monkeypatch):
+    """Create a FastAPI TestClient with the project config router mounted.
+
+    Auth bypass is enabled so functional tests can reach the endpoints.
+    """
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     # Mount the project config router from plugin_api
     from dashboard.plugin_api import project_config_router
 
@@ -1771,7 +1781,7 @@ class TestMetaTestDeliverEndpoint:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
+def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir, monkeypatch):
     """Build a FastAPI app, mount the unified router, and assert every endpoint
     group (/projects, /project/{name}/config, /meta/notifications) is reachable.
 
@@ -1780,6 +1790,7 @@ def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
     """
     from dashboard.plugin_api import router as unified_router
 
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     app = FastAPI()
     app.include_router(unified_router, prefix="/api/plugins/daedalus")
     client = TestClient(app)
@@ -1834,7 +1845,7 @@ def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
     ]
 
 
-def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
+def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir, monkeypatch):
     """Build a FastAPI app, mount only plugin_api.router, introspect the module
     for all APIRouter instances (config, projects, project_config, meta),
     and assert each one's routes resolve to non-404 responses.
@@ -1845,6 +1856,8 @@ def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
     discovers all router instances by name and verifies their routes work.
     """
     import dashboard.plugin_api as papi
+
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
 
     # ── Discover all APIRouter instances in the module ──────────────────
     sub_routers: dict[str, APIRouter] = {}
@@ -2224,9 +2237,10 @@ _DELETE_URL = "/api/plugins/daedalus/project/test-project"
 
 @pytest.fixture(autouse=True)
 def _clear_auth_env(monkeypatch):
-    """Ensure no stray gating secret leaks between tests in this module."""
+    """Ensure no stray gating secret or auth-disabled flag leaks between tests."""
     monkeypatch.delenv("DAEDALUS_DASHBOARD_TOKEN", raising=False)
     monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", raising=False)
 
 
 def _bearer(token: str) -> dict:
@@ -2313,17 +2327,38 @@ def test_delete_mutation_401_without_token(client, monkeypatch):
     assert resp.status_code == 401, resp.text
 
 
-def test_no_token_configured_allows_request_and_warns(client, caplog):
-    """Compatibility bridge: no secret configured → request allowed + warning."""
+def test_no_token_configured_rejects_with_403(client, monkeypatch, caplog):
+    """Fail-closed: no secret configured and no explicit opt-in → 403."""
     import logging as _logging
 
     import dashboard.plugin_api as plugin_api
 
-    # Reset the once-per-process guard so the warning fires for this assertion.
+    # The `client` fixture sets AUTH_DISABLED=1 for functional tests; remove it
+    # so we test the true fail-closed default.
+    monkeypatch.delenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", raising=False)
+    plugin_api._auth_warning_emitted = False
+    with caplog.at_level(_logging.WARNING, logger="daedalus.dashboard.auth"):
+        with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+            mock_list.return_value = []
+            resp = client.get(_PROJECTS_URL)
+    assert resp.status_code == 403, resp.text
+    assert "auth not configured" in resp.json()["detail"]
+    # No "auth disabled" warning should be logged in fail-closed mode.
+    assert not any("auth" in r.message.lower() and "disabled" in r.message.lower()
+                   for r in caplog.records)
+
+
+def test_auth_disabled_opt_in_allows_request_and_warns(client, monkeypatch, caplog):
+    """DAEDALUS_DASHBOARD_AUTH_DISABLED=1 → request allowed + loud warning."""
+    import logging as _logging
+
+    import dashboard.plugin_api as plugin_api
+
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     plugin_api._auth_warning_emitted = False
     with caplog.at_level(_logging.WARNING, logger="daedalus.dashboard.auth"):
         with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
             mock_list.return_value = []
             resp = client.get(_PROJECTS_URL)
     assert resp.status_code == 200, resp.text
-    assert any("dashboard auth disabled" in r.message for r in caplog.records)
+    assert any("EXPLICITLY DISABLED" in r.message for r in caplog.records)
