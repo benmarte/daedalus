@@ -336,7 +336,9 @@ def test_validator_body_delegation_template_outside_issue_section():
         coding_agent_cmd="",
     )
 
-    separator = f"--- Issue #{issue_n} ---"
+    # Issue body is now fenced in <issue_body> delimiters (#1131); the
+    # delegation block is still appended AFTER the fenced body.
+    separator = "<issue_body>"
     check("body contains the issue section separator", separator in body)
 
     # The issue section ends at the end of the issue body; delegation block
