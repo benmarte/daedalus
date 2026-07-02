@@ -39,6 +39,13 @@ vcs:
   # token_env: "GITHUB_TOKEN"           # Override the env var holding the API token.
   #                                     # Defaults: GITHUB_TOKEN/GH_TOKEN (github),
   #                                     # GITLAB_TOKEN (gitlab), AZURE_DEVOPS_PAT (azuredevops)
+  # webhook_secret_env: "DAEDALUS_WEBHOOK_SECRET"
+  #                                     # Env var holding the shared HMAC secret used to
+  #                                     # verify inbound webhook signatures BEFORE dispatch
+  #                                     # (issue #1141). Applies to reverse-proxied receivers
+  #                                     # that forward HTTP_* headers. When unset, signature
+  #                                     # verification is DISABLED (a one-time warning is
+  #                                     # logged). Never put the raw secret in YAML.
   # verify_ssl: true                    # Set to false to disable SSL certificate verification.
   #                                     # Useful for self-hosted instances with self-signed certs.
   #                                     # Defaults to true.

@@ -86,6 +86,15 @@ def validate_vcs(resolved: dict) -> list[str]:
                           "(expected ready/in_progress/in_review/done)")
         elif not isinstance(val, str) or not val.strip():
             errors.append(f"vcs.status_map.{key} must be a non-empty string")
+    # webhook_secret_env names the env var holding the HMAC secret (like
+    # token_env — never a raw secret in YAML). Absence is valid (verification
+    # off); when present it must be a non-empty string.
+    if "webhook_secret_env" in vcs:
+        wse = vcs.get("webhook_secret_env")
+        if not isinstance(wse, str) or not wse.strip():
+            errors.append("vcs.webhook_secret_env must be a non-empty string "
+                          "naming the environment variable that holds the "
+                          "webhook HMAC secret")
     return errors
 
 
