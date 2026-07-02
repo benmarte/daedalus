@@ -500,9 +500,8 @@ def test_hermes_custom_status_map_negative():
 # ── HMAC signature verification ──────────────────────────────────────────────
 
 
-import hmac
-import hashlib
-import os  # noqa: E402
+import hmac  # noqa: E402
+import hashlib  # noqa: E402
 
 
 def _hmac_sha256(payload_bytes: bytes, secret: str) -> str:
