@@ -48,7 +48,7 @@ flowchart TD
     
     CI -->|red| Fix
     Fix --> Dev
-    Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Rev -->|approved| Doc["📝 Documentation\nADRs · README\nReport → PR + chat channels"]
     Sec -->|cleared| Doc
     A11y -->|cleared| Doc
     Doc --> AutoMerge{{"🚦 QA auto-merge gate\nqa-passed signal present\nOR skip-qa label?\nAND CI green?"}}
@@ -399,7 +399,7 @@ a different perspective.
 | `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. Runs after QA passes. | No |
 | `security-analyst-daedalus` | Security audit — OWASP, injection, secrets, authn/z. Blocks on risk with severity-rated findings. Runs after QA passes, parallel to reviewer. | No |
 | `accessibility-daedalus` | **Runs after QA passes, parallel to reviewer/security. Conditional — only created for UI/frontend issues.** Audits the PR against WCAG 2.1 AA and posts a findings table. Blocks with `approved` or `changes requested`. | No |
-| `documentation-daedalus` | READMEs, ADRs, changelogs, completion report posted to the PR and chat channels. Waits for reviewer, security-analyst, and accessibility (when assigned) to clear. | No |
+| `documentation-daedalus` | READMEs, ADRs, completion report posted to the PR and chat channels. `CHANGELOG.md` is **not** edited by the docs agent — the dispatcher writes it post-merge via `append_changelog` (#1179). Waits for reviewer, security-analyst, and accessibility (when assigned) to clear. | No |
 
 ### Skills per profile
 
@@ -497,7 +497,7 @@ makes the pipeline repeatable rather than demo-quality.
 
 | Skill | What it governs |
 |---|---|
-| `documentation-and-adrs` | READMEs, Architecture Decision Records, changelogs |
+| `documentation-and-adrs` | READMEs, Architecture Decision Records |
 | `source-driven-development` | Verifies documentation accuracy against the actual code |
 | `context-engineering` | Loads only the relevant merged changes into context |
 | `using-agent-skills` | Meta-skill |
