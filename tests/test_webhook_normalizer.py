@@ -569,6 +569,28 @@ def test_verify_gitlab_missing_token():
     assert verify_signature("gitlab", payload_bytes, headers, "secret") is False
 
 
+def test_verify_gitlab_token_uses_constant_time_comparison(monkeypatch):
+    """GitLab token check must use hmac.compare_digest (timing-safe), not ==."""
+    import core.webhook_normalizer as wn
+
+    calls = []
+    real_compare = hmac.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real_compare(a, b)
+
+    monkeypatch.setattr(wn.hmac, "compare_digest", spy)
+
+    secret = "gitlab-secret"
+    payload_bytes = b'{"object_kind":"issue"}'
+    headers = {"X-Gitlab-Token": secret}
+    assert verify_signature("gitlab", payload_bytes, headers, secret) is True
+
+    # compare_digest was invoked with the encoded token and secret (constant-time path)
+    assert (secret.encode("utf-8"), secret.encode("utf-8")) in calls
+
+
 # -- Edge cases --
 
 

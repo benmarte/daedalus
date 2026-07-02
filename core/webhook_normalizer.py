@@ -434,7 +434,7 @@ def _verify_gitlab_token(headers: Dict[str, str], secret: str) -> bool:
         logger.warning("webhook: gitlab missing X-Gitlab-Token header")
         return False
 
-    if token != secret:
+    if not hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8")):
         logger.warning("webhook: gitlab X-Gitlab-Token mismatch")
         return False
 
