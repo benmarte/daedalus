@@ -88,6 +88,7 @@ def test_dedup_marker_stamped_when_issue_nr_missing():
 
     def fake_comment(slug, tid, body):
         comments_store.append({"body": body})
+        return True
 
     def run_tick():
         disp._check_confirmed_validators(
@@ -110,8 +111,9 @@ def test_dedup_marker_stamped_when_issue_nr_missing():
 
         # Notification fired
         assert mock_notify.call_count == 1
-        # Dedicated marker stamped
-        assert any(disp._RETRY_CAP_MARKER in c["body"] for c in comments_store)
+        # Dedicated marker stamped (role-scoped: <!-- daedalus:retry-cap-notified:validator -->)
+        val_marker = disp._retry_cap_marker_for_role("validator")
+        assert any(val_marker in c["body"] for c in comments_store)
 
     # Second tick - with marker present
     with mock.patch.object(disp.kanban, "list_tasks", return_value=fake_tasks), \
@@ -141,6 +143,7 @@ def test_no_duplicate_notifications_with_concurrent_retries():
 
     def fake_comment(slug, tid, body):
         comments_store.append({"body": body})
+        return True
 
     with mock.patch.object(disp.kanban, "list_tasks", return_value=fake_tasks), \
          mock.patch.object(disp.kanban, "show_card", return_value={"comments": comments_store}), \
@@ -162,7 +165,8 @@ def test_no_duplicate_notifications_with_concurrent_retries():
         assert mock_notify.call_count == 1
 
         # Marker stamped (prevents future ticks from re-firing)
-        assert any(disp._RETRY_CAP_MARKER in c["body"] for c in comments_store)
+        val_marker = disp._retry_cap_marker_for_role("validator")
+        assert any(val_marker in c["body"] for c in comments_store)
 
 
 if __name__ == "__main__":
