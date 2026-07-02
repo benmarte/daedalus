@@ -1265,8 +1265,16 @@ def test_delegation_spawn_captures_pid_and_separate_stderr():
         assert "nohup" not in body and "background=False" not in body, (
             f"{agent}: must not use the Hermes-rejected nohup/& foreground spawn"
         )
-        assert "2> /tmp/dev-141-err.txt" in body, (
-            f"{agent}: stderr must go to its own log, not merged into out.txt"
+        # Developer spawns now run inside a per-issue worktree via
+        # daedalus-worktree-spawn.sh, which is passed the err-log path as an
+        # argument and writes the agent's stderr there (`2>> "$err"`). The
+        # separate-stderr guarantee is preserved; the redirection just moved into
+        # the wrapper (worktree isolation fix).
+        assert "/tmp/dev-141-err.txt" in body, (
+            f"{agent}: stderr log must still be wired to its own file, got:\n{body}"
+        )
+        assert "daedalus-worktree-spawn.sh" in body, (
+            f"{agent}: developer must spawn inside an isolated per-issue worktree"
         )
         # stderr must NOT be merged into out.txt anymore
         assert f"out.txt 2>&1' >" not in body, (
@@ -1657,7 +1665,8 @@ def test_validator_body_delegation_appended_for_cloud_agent():
     assert "AGENT DELEGATION" in body
     assert "terminal(" in body
     # validator uses append mode: delegation comes AFTER the issue body
-    assert body.index("--- Issue #55 ---") < body.index("AGENT DELEGATION")
+    # (now fenced in <issue_body> delimiters per #1131)
+    assert body.index("<issue_body>") < body.index("AGENT DELEGATION")
 
 
 def test_validator_body_hermes_leaves_body_unchanged():
