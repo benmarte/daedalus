@@ -344,8 +344,9 @@ def _ensure_dispatch_crons() -> None:
                 tpl = yaml.safe_load(template_path.read_text()) or {}
                 tpl = tpl.get("defaults", tpl)
                 default_schedule = ((tpl.get("cron") or {}).get("schedule") or "").strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("daedalus: failed to read default cron schedule from template %s: %s",
+                               template_path, exc)
 
             # List existing cron job NAMES once (a single subprocess for all projects).
             # Without the list we can't tell what's missing, so bail rather than risk
@@ -413,7 +414,9 @@ def _ensure_dispatch_crons() -> None:
                     continue
                 try:
                     cfg = yaml.safe_load(cfg_file.read_text()) or {}
-                except Exception:
+                except Exception as exc:
+                    logger.warning("daedalus: failed to parse config %s during cron self-heal: %s",
+                                   cfg_file, exc)
                     continue
 
                 name = (cfg.get("name") or "").strip()
@@ -512,8 +515,8 @@ def _ensure_dispatch_crons() -> None:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 lock_fd.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("daedalus: failed to release cron-heal lock: %s", exc)
     except Exception:
         logger.debug("daedalus: _ensure_dispatch_crons failed", exc_info=True)
 
