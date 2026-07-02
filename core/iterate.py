@@ -566,8 +566,16 @@ def _reviewer_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
 
 
 def _security_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
-    """Check if the security analyst has cleared the PR for an issue."""
+    """Check if the security analyst has cleared the PR for an issue.
+
+    The security agent's documented pass signal is ``security: cleared`` (its
+    fail signal is ``security: flagged: <finding>``), so ``cleared`` must be an
+    accepted approval token — without it the gate rejected every real clearance
+    and auto-merge never fired. ``flagged`` does not contain ``cleared``, so this
+    stays a clean pass/fail split.
+    """
     return _role_gate_passed(slug, issue_number, "security", [
+        "security: cleared", "security cleared", "cleared",
         "security-approved", "security approved",
         "security-passed", "security passed",
         "no findings", "approved",

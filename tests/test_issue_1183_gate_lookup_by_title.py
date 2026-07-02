@@ -103,6 +103,27 @@ def test_reviewer_gate_false_on_changes_requested():
         assert iterate._reviewer_passed_for_issue("slug", 1140) is False
 
 
+def test_security_gate_accepts_bare_cleared_verdict():
+    # The security agent emits "security: cleared" (no "no findings" text) — must pass.
+    tasks = [{"id": "ts", "title": f"#1140 Security: {_TITLE}", "status": "done"}]
+    with mock.patch.multiple(
+        iterate.kanban,
+        list_tasks=mock.MagicMock(return_value=tasks),
+        show_card=mock.MagicMock(return_value={"latest_summary": "security: cleared — PR #1181 (fix/issue-1140)"}),
+    ):
+        assert iterate._security_passed_for_issue("slug", 1140) is True
+
+
+def test_security_gate_rejects_flagged_verdict():
+    tasks = [{"id": "ts", "title": f"#1140 Security: {_TITLE}", "status": "done"}]
+    with mock.patch.multiple(
+        iterate.kanban,
+        list_tasks=mock.MagicMock(return_value=tasks),
+        show_card=mock.MagicMock(return_value={"latest_summary": "security: flagged: hardcoded secret in config"}),
+    ):
+        assert iterate._security_passed_for_issue("slug", 1140) is False
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
