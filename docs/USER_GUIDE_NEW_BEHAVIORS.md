@@ -596,10 +596,10 @@ No user-facing configuration. Intermediate retry notifications are automatic.
 ### 4.4 Dedup Guard on PM Retry-Cap Notifications
 
 **What it does:**  
-Prevents duplicate PM (project manager) retry-cap notifications. If a PM agent exhausts retries and the dispatcher sends a notification, subsequent retry-cap notifications for the same issue are suppressed until the PM agent is re-dispatched. This prevents notification spam when the PM agent repeatedly fails.
+Prevents duplicate PM (project manager) retry-cap notifications. If a PM agent exhausts retries and the dispatcher sends a notification, subsequent retry-cap notifications for the same issue+role are suppressed via a role-scoped marker comment (`<!-- daedalus:retry-cap-notified:<role> -->`). Stage-recovery suppression (#1167) also checks whether the stage has recovered (newer card running/done, downstream role active, or open PR for developer) before sending — if recovered, no notification or GitHub comment is posted. This prevents notification spam when the PM agent repeatedly fails or when the stage has already recovered.
 
 **How you interact with it:**  
-You'll see one PM retry-cap notification per issue per dispatch cycle. If the PM agent is re-dispatched and exhausts retries again, you'll see another notification. No configuration needed — dedup is automatic.
+You'll see one PM retry-cap notification per issue+role per stall episode. If the PM agent is re-dispatched and exhausts retries again, you'll see another notification. No configuration needed — dedup is automatic.
 
 **Prerequisites:**  
 - The PM agent must be configured to retry.
@@ -609,7 +609,7 @@ You'll see one PM retry-cap notification per issue per dispatch cycle. If the PM
 No user-facing configuration. Dedup is automatic.
 
 **Source implementation:**  
-`core/iterate.py` (PM retry-cap dedup logic)
+`scripts/daedalus_dispatch.py` (PM retry-cap dedup logic, `_has_notified_block` / `_mark_notified_block` / `_retry_cap_stage_recovered`)
 
 ---
 

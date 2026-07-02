@@ -1018,9 +1018,16 @@ python -m core.sweeper_cli <board_slug> [--threshold-hours 48] [--archive] [--dr
 (`validator-retry-N-r*`) and PM stale-task recovery (`pm-{n}-r*`) each cap at a
 maximum (2 for validator, 3 for PM). When an attempt counter exhausts the cap,
 the dispatcher fires a one-time `retry-cap-exhausted` notification — idempotently
-deduped on the issue via an `<!-- daedalus:retry-cap-notified -->` marker comment
-so the same cap-exhaustion is never messaged twice per issue — and posts a
-comment on the card instructing a human to investigate. Route this event to a
+deduped per issue+role via a role-scoped `<!-- daedalus:retry-cap-notified:<role> -->`
+marker comment (with backward-compatible fallback to the legacy bare
+`<!-- daedalus:retry-cap-notified -->` marker) so the same cap-exhaustion is never
+messaged twice per issue+role stall episode — and posts a
+comment on the card instructing a human to investigate. Before sending, the
+dispatcher calls `_retry_cap_stage_recovered()` to verify the role's stage is
+still actually stalled: if a newer card for the same issue+role is running or
+done, or an open PR exists (developer), or a downstream role card (QA/reviewer)
+is running or done, the notification and GitHub comment are both suppressed
+(#1167). Route this event to a
 high-visibility channel in the Notifications editor alongside
 `security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
 is unchanged: it posts a per-card comment and stops escalating, but does not
@@ -1293,8 +1300,11 @@ Each piece exists because the obvious approach failed:
 - **Retry-cap notifications** — validator and PM retry caps exist so a broken issue
   doesn't loop forever. But a cap with no notification means the operator only
   learns about it days later by scrolling the board. A one-time `retry-cap-exhausted`
-  notification (deduped per issue via a marker comment) surfaces the wedge the
+  notification (deduped per issue+role via a role-scoped marker comment) surfaces the wedge the
   moment it happens, routed to the same channels as `security-escalation`.
+  Stage-recovery suppression (#1167) ensures recovered stages send nothing: if a
+  newer card is running/done, an open PR exists, or a downstream role is active,
+  the notification and GitHub comment are both suppressed.
 - **Fetch limit raised to 100** — the original page limit of 20 silently truncated
   boards with more than 20 open issues: validator sweep missed work, merged-PR
   archival missed completions, and the board looked healthy while issues rotted in
