@@ -2440,6 +2440,153 @@ def _rescue_block_loop_gate_cards(
 # ── main loop ───────────────────────────────────────────────────────────────
 
 
+def _try_merge_if_gates_pass(
+    slug: str,
+    issue_n: Optional[int],
+    pr: Optional[int],
+    provider: Any,
+    *,
+    merge_method: str,
+    skip_qa: bool,
+    ci_status: str,
+    dry_run: bool = False,
+) -> bool:
+    """Merge ``pr`` iff every pipeline gate passes. Returns True only on an actual
+    merge; idempotent and safe to call repeatedly.
+
+    Called from two places: the docs-card-completion path (below) AND the per-tick
+    deferred-merge sweep (``sweep_deferred_merges``). A failed ``merge_pr`` — e.g.
+    the PR is momentarily un-mergeable due to a conflict, or CI hadn't gone green
+    at docs-completion — returns False instead of consuming the only merge attempt,
+    so a later tick retries. This is what makes auto-merge no longer one-shot (#1178).
+
+    Gates (all bypassed by the ``skip-qa`` label, per #1074): QA passed, reviewer
+    approved, security cleared, CI green, and the PR not already merged.
+    """
+    if pr is None or provider is None:
+        return False
+    if not skip_qa and not _qa_passed_for_issue(slug, issue_n):
+        logger.warning(
+            "iterate: Skipping merge: QA has not passed for PR #%s (issue #%s).", pr, issue_n)
+        return False
+    if skip_qa:
+        logger.info(
+            "iterate: skip-qa label present on PR #%s — bypassing QA/reviewer/security gates", pr)
+    if not skip_qa and not _reviewer_passed_for_issue(slug, issue_n):
+        logger.warning(
+            "iterate: Skipping merge: reviewer has not approved PR #%s (issue #%s).", pr, issue_n)
+        return False
+    if not skip_qa and not _security_passed_for_issue(slug, issue_n):
+        logger.warning(
+            "iterate: Skipping merge: security has not cleared PR #%s (issue #%s).", pr, issue_n)
+        return False
+    # CI gate: green required when the provider supports CI checks; UNKNOWN (no CI
+    # configured) is treated as green so CI-less repos aren't blocked.
+    provider_supports_ci = getattr(provider, "supports_ci_status", False)
+    if provider_supports_ci and ci_status != CIStatus.GREEN:
+        logger.warning(
+            "iterate: Skipping merge: CI not green for PR #%s (status: %s).", pr, ci_status)
+        return False
+    # Idempotency: never double-merge.
+    if hasattr(provider, "is_pr_merged"):
+        try:
+            if provider.is_pr_merged(pr):
+                logger.info(
+                    "iterate: Skipping merge: PR #%s already merged (idempotent skip)", pr)
+                return False
+        except Exception as e:
+            logger.warning(
+                "iterate: is_pr_merged check failed for PR #%s: %s — proceeding", pr, e)
+    logger.info(
+        "iterate: all gates passed for PR #%s (QA/reviewer/security: %s, CI: %s) — merging",
+        pr, "skip-qa" if skip_qa else "passed",
+        ci_status if provider_supports_ci else "n/a",
+    )
+    if dry_run:
+        logger.info("[dry-run] auto_merge=true: would merge PR #%s (%s)", pr, merge_method)
+        return False
+    merged = provider.merge_pr(pr, merge_method=merge_method)
+    if merged:
+        logger.info("iterate: auto-merged PR #%s (%s)", pr, merge_method)
+        return True
+    logger.warning(
+        "iterate: auto_merge failed for PR #%s — leaving open; a later tick will retry", pr)
+    return False
+
+
+def sweep_deferred_merges(
+    slug: str,
+    repo: str,
+    provider: Any,
+    resolved: Optional[Dict[str, Any]],
+    *,
+    dry_run: bool = False,
+) -> List[int]:
+    """Retry auto-merge for PRs whose pipeline finished but that weren't merged at
+    docs-card completion (#1178).
+
+    The docs-completion merge is one-shot: if the PR was momentarily un-mergeable
+    (e.g. a CHANGELOG conflict) or CI hadn't gone green yet, the docs card still
+    completes and drops out of ``list_blocked``, so the merge never retries. This
+    sweep runs every tick: for each DONE ``docs-<n>`` card whose issue is still open
+    with an open PR, it re-checks the gates and merges. Idempotent. Returns the PR
+    numbers merged this tick.
+    """
+    execution = (resolved or {}).get("execution") or {}
+    if not bool(execution.get("auto_merge", False)) or provider is None:
+        return []
+    merge_method = str(execution.get("merge_method", "squash")).lower()
+    try:
+        tasks = kanban.list_tasks(slug) or []
+    except Exception as e:
+        logger.error("iterate: deferred-merge sweep failed to list tasks: %s", e)
+        return []
+    merged: List[int] = []
+    ci_cache: Dict[int, str] = {}
+    for task in tasks:
+        key = task.get("idempotency_key") or ""
+        if not key.startswith("docs-") or (task.get("status") or "").lower() != "done":
+            continue
+        try:
+            issue_n = int(key.split("docs-", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        # A closed issue already landed; only still-open issues need merging.
+        if hasattr(provider, "is_issue_open"):
+            try:
+                if not provider.is_issue_open(issue_n):
+                    continue
+            except Exception:
+                pass
+        # Deterministic branch from worktree isolation (#1176): fix/issue-<n>.
+        try:
+            pr = provider.find_pr_for_branch(f"fix/issue-{issue_n}")
+        except Exception:
+            pr = None
+        if pr is None:
+            continue
+        if pr not in ci_cache:
+            try:
+                ci_cache[pr] = provider.get_pr_ci_status(pr)
+            except Exception:
+                ci_cache[pr] = CIStatus.UNKNOWN
+        skip_qa = False
+        if hasattr(provider, "has_label"):
+            try:
+                skip_qa = bool(provider.has_label(pr, "skip-qa"))
+            except Exception:
+                skip_qa = False
+        if _try_merge_if_gates_pass(
+            slug, issue_n, pr, provider,
+            merge_method=merge_method, skip_qa=skip_qa,
+            ci_status=ci_cache[pr], dry_run=dry_run,
+        ):
+            merged.append(pr)
+    if merged:
+        logger.info("iterate: deferred-merge sweep merged PR(s): %s", merged)
+    return merged
+
+
 def run_iterate(
     slug: str,
     repo: str,
@@ -2510,6 +2657,17 @@ def run_iterate(
         counts[entry["action"]] = counts.get(entry["action"], 0) + 1
         if entry["action"] == ADVANCE and entry.get("pr") is not None:
             advance_prs.append(entry["pr"])
+
+    # Deferred auto-merge sweep (#1178): retry merges the one-shot docs-completion
+    # path missed (PR became mergeable / CI-green only after the docs card completed).
+    # Runs every tick — including when nothing is blocked — since a merge-ready PR
+    # leaves no blocked card behind to re-trigger the merge.
+    try:
+        advance_prs.extend(
+            sweep_deferred_merges(slug, repo, provider, resolved, dry_run=dry_run)
+        )
+    except Exception as e:  # never let the merge sweep break a dispatch tick
+        logger.error("iterate: deferred-merge sweep error: %s", e)
 
     if not blocked_cards:
         return counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards
@@ -2733,106 +2891,16 @@ def run_iterate(
                     and pr is not None
                     and provider is not None
                 ):
-                    # Check QA gate before merging
+                    # Merge now if every gate passes. If not (CI still pending, PR
+                    # momentarily un-mergeable), the docs card is already done — but
+                    # sweep_deferred_merges() retries on later ticks, so the merge is
+                    # no longer one-shot (#1178).
                     issue_n = _extract_issue_number_from_card(card)
-                    # Bypass QA gate when PR has the skip-qa label
-                    if not skip_qa and not _qa_passed_for_issue(slug, issue_n):
-                        logger.warning(
-                            "iterate: Skipping merge: QA has not passed for PR #%s (issue #%s). "
-                            "Wait for QA card to report 'qa-passed'.",
-                            pr, issue_n
-                        )
-                        continue
-                    if skip_qa:
-                        logger.info(
-                            "iterate: skip-qa label present on PR #%s — bypassing QA gate for auto-merge",
-                            pr,
-                        )
-
-                    # Reviewer gate: reviewer must have approved the PR before
-                    # merge (per issue #1085 — all gates must pass before merge).
-                    # skip-qa bypasses this gate: pre-epic #1074, skip-qa PRs
-                    # merged without any review gate. The epic added reviewer/
-                    # security gates but skip-qa must still bypass them to
-                    # preserve the pre-existing behaviour (#1074 non-regression).
-                    if not skip_qa and not _reviewer_passed_for_issue(slug, issue_n):
-                        logger.warning(
-                            "iterate: Skipping merge: reviewer has not approved PR #%s (issue #%s). "
-                            "Wait for reviewer card to report approval.",
-                            pr, issue_n
-                        )
-                        continue
-
-                    # Security gate: security analyst must have approved the PR.
-                    # Also bypassed by skip-qa (same rationale as reviewer gate).
-                    if not skip_qa and not _security_passed_for_issue(slug, issue_n):
-                        logger.warning(
-                            "iterate: Skipping merge: security has not approved PR #%s (issue #%s). "
-                            "Wait for security card to report approval.",
-                            pr, issue_n
-                        )
-                        continue
-
-                    # CI gate: CI must be green before merging (per epic #1074 —
-                    # CI gating moved from ADVANCE-time to merge-time). The CI
-                    # status was fetched earlier in this tick and cached in
-                    # ci_cache. If the provider doesn't support CI status checks
-                    # (UNKNOWN), treat as green to avoid blocking repos with no CI.
-                    ci_status_for_merge = ci_cache.get(pr, CIStatus.UNKNOWN)
-                    provider_supports_ci = getattr(provider, "supports_ci_status", False)
-                    if provider_supports_ci and ci_status_for_merge != CIStatus.GREEN:
-                        logger.warning(
-                            "iterate: Skipping merge: CI not green for PR #%s (status: %s). "
-                            "CI is enforced at merge-time per epic #1074.",
-                            pr, ci_status_for_merge,
-                        )
-                        continue
-
-                    # Idempotency: skip if the PR has already been merged (by a
-                    # previous cron tick or a human). This prevents double-merge
-                    # attempts and errors on already-merged PRs.
-                    if hasattr(provider, "is_pr_merged"):
-                        try:
-                            if provider.is_pr_merged(pr):
-                                logger.info(
-                                    "iterate: Skipping merge: PR #%s is already merged — "
-                                    "no action needed (idempotent skip)",
-                                    pr,
-                                )
-                                continue
-                        except Exception as e:
-                            logger.warning(
-                                "iterate: is_pr_merged check failed for PR #%s: %s — "
-                                "proceeding with merge attempt",
-                                pr, e,
-                            )
-
-                    # All gates passed — log the merge attempt for auditability.
-                    # This records the cron-tick-to-merge transition, including
-                    # the deferred case where CI passed after docs completion.
-                    logger.info(
-                        "iterate: all gates passed for PR #%s (QA: %s, reviewer: %s, "
-                        "security: %s, CI: %s) — triggering merge on cron tick",
-                        pr,
-                        "skip-qa" if skip_qa else "passed",
-                        "skip-qa" if skip_qa else "passed",
-                        "skip-qa" if skip_qa else "passed",
-                        ci_status_for_merge if provider_supports_ci else "n/a",
+                    _try_merge_if_gates_pass(
+                        slug, issue_n, pr, provider,
+                        merge_method=merge_method, skip_qa=skip_qa,
+                        ci_status=ci_cache.get(pr, CIStatus.UNKNOWN), dry_run=dry_run,
                     )
-
-                    if dry_run:
-                        logger.info(
-                            "[dry-run] auto_merge=true: would merge PR #%s (%s)", pr, merge_method)
-                    else:
-                        merged = provider.merge_pr(pr, merge_method=merge_method)
-                        if merged:
-                            logger.info(
-                                "iterate: auto-merged PR #%s (%s) after docs complete",
-                                pr, merge_method)
-                        else:
-                            logger.warning(
-                                "iterate: auto_merge failed for PR #%s — leaving open for human",
-                                pr)
         except Exception as e:
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
 
