@@ -12,11 +12,19 @@ the dispatcher asks the provider for an open/merged PR linked to the issue and,
 if one exists, rewrites the stale card's summary to ``review-required: PR #N``
 so the normal reviewer/QA flow proceeds against the existing PR. The retry path
 only runs when no observable work product exists.
+
+Issue #1168 — security hardening:
+  * Reject PRs from forks so an outsider cannot inject a PR into the pipeline.
+  * Validate the PR targets the expected base branch.
+  * Fix substring issue-number matching: ``#42`` must not match ``#420``.
+  * Fix ``issue_linked_to_pr`` branch-name check: ``issue-42`` must not match
+    inside ``issue-420``.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -32,6 +40,17 @@ def _load_dispatch():
     return mod
 
 
+_disp = _load_dispatch()
+# PRSummary and issue_linked_to_pr are available via the provider base module
+# that daedalus_dispatch imports at load time. Access through sys.modules
+# to avoid standalone import issues with dataclass.
+_base_mod = sys.modules.get("core.providers.base")
+if _base_mod is None:
+    from core.providers import base as _base_mod  # noqa: E402
+PRSummary = _base_mod.PRSummary
+issue_linked_to_pr = _base_mod.issue_linked_to_pr
+
+
 def _minimal_resolved():
     return {
         "platform": "github",
@@ -42,18 +61,32 @@ def _minimal_resolved():
     }
 
 
+def _pr(number=101, state="open", head_branch="fix/issue-42-x",
+        base_branch="dev", is_fork=False, body=""):
+    return PRSummary(
+        number=number, state=state, head_branch=head_branch,
+        base_branch=base_branch, title="test", body=body,
+        url="", head_sha="", author="dev-bot", is_fork=is_fork,
+    )
+
+
 class FakeProvider:
     """Provider stub with a configurable PR-for-issue answer."""
 
-    def __init__(self, pr_number=None, raise_on_pr_lookup=False):
-        self._pr_number = pr_number
+    def __init__(self, pr=None, raise_on_pr_lookup=False):
+        self._pr = pr
         self._raise = raise_on_pr_lookup
         self.comments: list[tuple[int, str]] = []
 
-    def pr_number_for_issue(self, issue_number: int):
+    def _pr_for_issue(self, issue_number: int):
         if self._raise:
             raise RuntimeError("provider exploded")
-        return self._pr_number
+        return self._pr
+
+    # Keep for backward compat with tests that check pr_number_for_issue.
+    def pr_number_for_issue(self, issue_number: int):
+        pr = self._pr_for_issue(issue_number)
+        return pr.number if pr else None
 
     def post_issue_comment(self, issue_number: int, body: str) -> bool:
         self.comments.append((issue_number, body))
@@ -83,7 +116,8 @@ class TestTryAdoptDeveloperPr(unittest.TestCase):
     def setUp(self):
         self.disp = _load_dispatch()
 
-    def _adopt(self, provider, tasks=None, dry_run=False, edit_ok=True):
+    def _adopt(self, provider, tasks=None, dry_run=False, edit_ok=True,
+               base_branch=""):
         with (
             mock.patch.object(
                 self.disp.kanban,
@@ -102,12 +136,13 @@ class TestTryAdoptDeveloperPr(unittest.TestCase):
             ) as edit_summary,
         ):
             adopted = self.disp._try_adopt_developer_pr(
-                "slug", 42, "developer-daedalus", provider, dry_run=dry_run
+                "slug", 42, "developer-daedalus", provider,
+                base_branch=base_branch, dry_run=dry_run,
             )
         return adopted, edit_summary
 
     def test_open_pr_adopts_stale_card(self):
-        adopted, edit_summary = self._adopt(FakeProvider(pr_number=101))
+        adopted, edit_summary = self._adopt(FakeProvider(pr=_pr(101)))
         self.assertTrue(adopted)
         edit_summary.assert_called_once()
         slug, tid, summary = edit_summary.call_args[0]
@@ -118,20 +153,20 @@ class TestTryAdoptDeveloperPr(unittest.TestCase):
     def test_adopted_summary_is_parseable(self):
         """The rewritten summary must satisfy extract_pr_number_from_summary so
         _developer_task_state reports 'complete' on the next tick."""
-        _, edit_summary = self._adopt(FakeProvider(pr_number=101))
+        _, edit_summary = self._adopt(FakeProvider(pr=_pr(101)))
         _, _, summary = edit_summary.call_args[0]
         self.assertEqual(self.disp.extract_pr_number_from_summary(summary), 101)
 
     def test_adoption_edits_newest_stale_card(self):
         adopted, edit_summary = self._adopt(
-            FakeProvider(pr_number=7), tasks=_stale_dev_tasks(42, count=3)
+            FakeProvider(pr=_pr(7)), tasks=_stale_dev_tasks(42, count=3)
         )
         self.assertTrue(adopted)
         _, tid, _ = edit_summary.call_args[0]
         self.assertEqual(tid, "t_dev2")
 
     def test_no_pr_returns_false(self):
-        adopted, edit_summary = self._adopt(FakeProvider(pr_number=None))
+        adopted, edit_summary = self._adopt(FakeProvider(pr=None))
         self.assertFalse(adopted)
         edit_summary.assert_not_called()
 
@@ -147,12 +182,14 @@ class TestTryAdoptDeveloperPr(unittest.TestCase):
         edit_summary.assert_not_called()
 
     def test_dry_run_adopts_without_mutation(self):
-        adopted, edit_summary = self._adopt(FakeProvider(pr_number=101), dry_run=True)
+        adopted, edit_summary = self._adopt(
+            FakeProvider(pr=_pr(101)), dry_run=True
+        )
         self.assertTrue(adopted)
         edit_summary.assert_not_called()
 
     def test_edit_summary_failure_returns_false(self):
-        adopted, _ = self._adopt(FakeProvider(pr_number=101), edit_ok=False)
+        adopted, _ = self._adopt(FakeProvider(pr=_pr(101)), edit_ok=False)
         self.assertFalse(adopted)
 
     def test_card_with_pr_in_summary_is_not_a_target(self):
@@ -166,9 +203,83 @@ class TestTryAdoptDeveloperPr(unittest.TestCase):
                 "summary": "review-required: PR #90 — fix/issue-42-x",
             },
         ]
-        adopted, edit_summary = self._adopt(FakeProvider(pr_number=101), tasks=tasks)
+        adopted, edit_summary = self._adopt(
+            FakeProvider(pr=_pr(101)), tasks=tasks
+        )
         self.assertFalse(adopted)
         edit_summary.assert_not_called()
+
+    # ── Security tests (#1168) ──────────────────────────────────────────────
+
+    def test_fork_pr_is_rejected(self):
+        """A PR from a fork must NOT be adopted — outsider injection guard."""
+        provider = FakeProvider(pr=_pr(101, is_fork=True))
+        adopted, edit_summary = self._adopt(provider)
+        self.assertFalse(adopted)
+        edit_summary.assert_not_called()
+
+    def test_fork_pr_dry_run_is_rejected(self):
+        """Fork rejection happens before the dry-run short-circuit so the
+        caller does not get a false 'adopted' signal."""
+        provider = FakeProvider(pr=_pr(101, is_fork=True))
+        adopted, edit_summary = self._adopt(provider, dry_run=True)
+        self.assertFalse(adopted)
+        edit_summary.assert_not_called()
+
+    def test_base_branch_mismatch_is_rejected(self):
+        """A PR targeting the wrong base branch must NOT be adopted."""
+        provider = FakeProvider(pr=_pr(101, base_branch="main"))
+        adopted, edit_summary = self._adopt(provider, base_branch="dev")
+        self.assertFalse(adopted)
+        edit_summary.assert_not_called()
+
+    def test_base_branch_match_adopts(self):
+        """A PR targeting the correct base branch is adopted."""
+        provider = FakeProvider(pr=_pr(101, base_branch="dev"))
+        adopted, _ = self._adopt(provider, base_branch="dev")
+        self.assertTrue(adopted)
+
+    def test_base_branch_empty_skips_check(self):
+        """When base_branch is not supplied, the base-branch check is skipped."""
+        provider = FakeProvider(pr=_pr(101, base_branch="main"))
+        adopted, _ = self._adopt(provider, base_branch="")
+        self.assertTrue(adopted)
+
+    def test_substring_issue_number_no_false_match(self):
+        """A task for issue #420 must NOT be adopted as a target for #42."""
+        tasks = [
+            {
+                "id": "t_420",
+                "assignee": "developer-daedalus",
+                "status": "done",
+                "title": "#420 Developer: some other feature",
+                "summary": "",
+            },
+        ]
+        adopted, edit_summary = self._adopt(
+            FakeProvider(pr=_pr(101)), tasks=tasks
+        )
+        self.assertFalse(adopted)
+        edit_summary.assert_not_called()
+
+    def test_correct_issue_number_still_matches(self):
+        """Ensure the exact-match fix doesn't break the happy path: a task for
+        issue #42 with a different number nearby in the title still matches."""
+        tasks = [
+            {
+                "id": "t_42",
+                "assignee": "developer-daedalus",
+                "status": "done",
+                "title": "#42 Developer: fix issue 420 related bug",
+                "summary": "",
+            },
+        ]
+        adopted, edit_summary = self._adopt(
+            FakeProvider(pr=_pr(101)), tasks=tasks
+        )
+        self.assertTrue(adopted)
+        _, tid, _ = edit_summary.call_args[0]
+        self.assertEqual(tid, "t_42")
 
 
 class _RetryHarness(unittest.TestCase):
@@ -208,8 +319,7 @@ class _RetryHarness(unittest.TestCase):
             mock.patch.object(
                 self.disp.kanban, "edit_summary", side_effect=_fake_edit_summary
             ) as edit_summary,
-            mock.patch.object(
-                self.disp.kanban, "create_task", return_value="t_new"
+            mock.patch.object(self.disp.kanban, "create_task", return_value="t_new"
             ) as create_task,
             mock.patch.object(self.disp, "_send_retry_cap_notification") as cap_notif,
             mock.patch.object(
@@ -232,7 +342,7 @@ class _RetryHarness(unittest.TestCase):
                 {42: {"number": 42, "title": "feature", "body": ""}},
                 3,
                 "/tmp",
-                "main",
+                "dev",
                 "github",
                 provider=provider,
                 resolved=_minimal_resolved(),
@@ -252,7 +362,7 @@ class TestRetryPathAdoption(_RetryHarness):
     def test_stale_card_with_open_pr_adopts_and_skips_retry(self):
         """The #1160→#1163 scenario: empty-summary completion + open PR must
         NOT mint a second developer card (which opened the duplicate PR)."""
-        m = self._run(FakeProvider(pr_number=101), _stale_dev_tasks(42))
+        m = self._run(FakeProvider(pr=_pr(101)), _stale_dev_tasks(42))
         m["edit_summary"].assert_called_once()
         _, tid, summary = m["edit_summary"].call_args[0]
         self.assertEqual(tid, "t_dev0")
@@ -278,18 +388,18 @@ class TestRetryPathAdoption(_RetryHarness):
                 " — developer completed with empty summary, #1164)",
             },
         ]
-        m = self._run(FakeProvider(pr_number=101), adopted_tasks)
+        m = self._run(FakeProvider(pr=_pr(101)), adopted_tasks)
         m["create_task"].assert_not_called()
         m["edit_summary"].assert_not_called()
 
     def test_stale_card_with_merged_pr_adopts(self):
-        m = self._run(FakeProvider(pr_number=202), _stale_dev_tasks(42))
+        m = self._run(FakeProvider(pr=_pr(202, state="merged")), _stale_dev_tasks(42))
         m["edit_summary"].assert_called_once()
         m["create_task"].assert_not_called()
 
     def test_stale_card_without_pr_keeps_retry_behavior(self):
         """No PR → retry path byte-identical to today (#1104 behavior)."""
-        m = self._run(FakeProvider(pr_number=None), _stale_dev_tasks(42))
+        m = self._run(FakeProvider(pr=None), _stale_dev_tasks(42))
         m["edit_summary"].assert_not_called()
         m["create_task"].assert_called_once()
         key = m["create_task"].call_args.kwargs.get("idempotency_key")
@@ -300,7 +410,7 @@ class TestRetryPathAdoption(_RetryHarness):
     def test_stale_at_cap_with_open_pr_skips_cap_notification(self):
         """Even at/over the retry cap an in-flight PR rescues the issue —
         no cap notification, no GitHub cap comment."""
-        provider = FakeProvider(pr_number=101)
+        provider = FakeProvider(pr=_pr(101))
         m = self._run(provider, _stale_dev_tasks(42, count=4))
         m["edit_summary"].assert_called_once()
         m["cap_notif"].assert_not_called()
@@ -308,7 +418,7 @@ class TestRetryPathAdoption(_RetryHarness):
 
     def test_stale_at_cap_without_pr_fires_cap_once(self):
         """No PR at cap → cap notification + GitHub comment unchanged."""
-        provider = FakeProvider(pr_number=None)
+        provider = FakeProvider(pr=None)
         m = self._run(provider, _stale_dev_tasks(42, count=4))
         m["edit_summary"].assert_not_called()
         m["create_task"].assert_not_called()
@@ -323,10 +433,64 @@ class TestRetryPathAdoption(_RetryHarness):
         m["create_task"].assert_called_once()
 
     def test_dry_run_with_open_pr_skips_retry_without_mutation(self):
-        m = self._run(FakeProvider(pr_number=101), _stale_dev_tasks(42), dry_run=True)
+        m = self._run(FakeProvider(pr=_pr(101)), _stale_dev_tasks(42), dry_run=True)
         m["edit_summary"].assert_not_called()
         m["create_task"].assert_not_called()
         self.assertEqual(m["triggered"], [])
+
+    def test_fork_pr_falls_back_to_retry(self):
+        """A fork PR is rejected by _try_adopt_developer_pr, so the retry
+        path must still run — the pipeline does NOT silently adopt an
+        outsider PR."""
+        m = self._run(
+            FakeProvider(pr=_pr(101, is_fork=True)), _stale_dev_tasks(42)
+        )
+        m["edit_summary"].assert_not_called()
+        m["create_task"].assert_called_once()
+
+
+class TestIssueLinkedToPrSubstring(unittest.TestCase):
+    """Tests for the issue_linked_to_pr branch-name substring fix (#1168)."""
+
+    def test_issue_42_matches_exact(self):
+        pr = PRSummary(number=1, head_branch="fix/issue-42-bug")
+        self.assertTrue(issue_linked_to_pr(pr, 42))
+
+    def test_issue_42_does_not_match_issue_420(self):
+        """The substring bug: 'issue-42' was found inside 'issue-420'."""
+        pr = PRSummary(number=1, head_branch="fix/issue-420-feature")
+        self.assertFalse(issue_linked_to_pr(pr, 42))
+
+    def test_issue_420_matches_itself(self):
+        pr = PRSummary(number=1, head_branch="fix/issue-420-feature")
+        self.assertTrue(issue_linked_to_pr(pr, 420))
+
+    def test_slash_n_dash_still_matches(self):
+        pr = PRSummary(number=1, head_branch="fix/42-bug")
+        self.assertTrue(issue_linked_to_pr(pr, 42))
+
+    def test_slash_n_dash_does_not_match_420(self):
+        """'/42-' is NOT a substring of '/420-' — already safe."""
+        pr = PRSummary(number=1, head_branch="fix/420-bug")
+        self.assertFalse(issue_linked_to_pr(pr, 42))
+
+    def test_suffix_n_still_matches(self):
+        pr = PRSummary(number=1, head_branch="fix/issue-42")
+        self.assertTrue(issue_linked_to_pr(pr, 42))
+
+    def test_suffix_n_does_not_match_420(self):
+        """'-42' suffix is NOT a match for '-420' suffix — already safe."""
+        pr = PRSummary(number=1, head_branch="fix/issue-420")
+        self.assertFalse(issue_linked_to_pr(pr, 42))
+
+    def test_closing_keyword_still_matches(self):
+        pr = PRSummary(number=1, head_branch="other", body="Closes #42")
+        self.assertTrue(issue_linked_to_pr(pr, 42))
+
+    def test_closing_keyword_does_not_match_420(self):
+        """Closing keyword uses \\b word boundary — already safe."""
+        pr = PRSummary(number=1, head_branch="other", body="Closes #420")
+        self.assertFalse(issue_linked_to_pr(pr, 42))
 
 
 if __name__ == "__main__":

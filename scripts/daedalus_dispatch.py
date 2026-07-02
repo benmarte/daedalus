@@ -2772,6 +2772,7 @@ def _try_adopt_developer_pr(
     developer_profile: str,
     provider,
     *,
+    base_branch: str = "",
     dry_run: bool = False,
 ) -> bool:
     """Self-heal a stale developer card by adopting its in-flight PR (#1164).
@@ -2787,6 +2788,13 @@ def _try_adopt_developer_pr(
     A pushed branch without a PR is deliberately NOT adopted — it is not a
     completion, and the retry developer can reuse the branch.
 
+    Security (#1168): validates the PR is NOT from a fork and (when
+    ``base_branch`` is supplied) targets the correct base branch before
+    adopting. An outsider could otherwise open a PR with ``Closes #42`` or a
+    branch named ``fix/issue-42-evil`` and have the dispatcher adopt it into
+    the daedalus pipeline. Fork PRs and base-branch mismatches are rejected
+    so the retry path runs instead.
+
     Returns True when adopted (caller must skip retry and cap notification).
     Provider errors are treated as "no PR" so the tick never crashes and the
     existing retry behavior remains the fallback.
@@ -2794,31 +2802,54 @@ def _try_adopt_developer_pr(
     if provider is None:
         return False
     try:
-        pr_num = provider.pr_number_for_issue(issue_number)
+        pr = provider._pr_for_issue(issue_number)
     except Exception as exc:
         logger.warning(
-            "dispatch: pr_number_for_issue(#%s) raised %s — "
+            "dispatch: _pr_for_issue(#%s) raised %s — "
             "falling back to developer retry",
             issue_number,
             exc,
         )
         return False
-    if not pr_num:
+    if not pr or not pr.number:
+        return False
+    # Security: reject fork PRs — only adopt PRs from the canonical repo.
+    if getattr(pr, "is_fork", False):
+        logger.warning(
+            "dispatch: PR #%s for issue #%s is from a fork — rejecting "
+            "adoption, falling back to developer retry (#1168)",
+            pr.number,
+            issue_number,
+        )
+        return False
+    # Security: validate the PR targets the expected base branch.
+    if base_branch and pr.base_branch and pr.base_branch != base_branch:
+        logger.warning(
+            "dispatch: PR #%s for issue #%s targets base %r, expected %r — "
+            "rejecting adoption, falling back to developer retry (#1168)",
+            pr.number,
+            issue_number,
+            pr.base_branch,
+            base_branch,
+        )
         return False
     if dry_run:
         logger.info(
             "[dry-run] developer stale #%s but PR #%s exists — would adopt it "
             "as the card summary instead of retrying",
             issue_number,
-            pr_num,
+            pr.number,
         )
         return True
     # Newest done developer card without a PR reference (same filter as
-    # _developer_task_state).
-    pattern = f"#{issue_number}"
+    # _developer_task_state). Use extract_issue_number instead of substring
+    # matching so a task for issue #420 is NOT adopted as a target for #42
+    # (substring bug, #1168).
     target_tid = ""
     for t in kanban.list_tasks(slug):
-        if pattern not in (t.get("title") or ""):
+        title = t.get("title") or ""
+        # Exact issue-number match — not a substring check.
+        if extract_issue_number(title) != issue_number:
             continue
         if (t.get("assignee") or "").strip() != developer_profile:
             continue
@@ -2834,7 +2865,7 @@ def _try_adopt_developer_pr(
     if not kanban.edit_summary(
         slug,
         target_tid,
-        f"review-required: PR #{pr_num} (adopted from provider state — "
+        f"review-required: PR #{pr.number} (adopted from provider state — "
         f"developer completed with empty summary, #1164)",
     ):
         return False
@@ -2843,7 +2874,7 @@ def _try_adopt_developer_pr(
         "but provider shows PR #%s — auto-adopted it as the card summary (#1164)",
         target_tid,
         issue_number,
-        pr_num,
+        pr.number,
     )
     return True
 
@@ -5425,6 +5456,7 @@ def _check_completed_developer(
             n,
             p.get("developer", _DEFAULT_PROFILES["developer"]),
             provider,
+            base_branch=base_branch,
             dry_run=dry_run,
         ):
             continue

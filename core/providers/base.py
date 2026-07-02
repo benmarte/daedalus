@@ -252,6 +252,8 @@ class PRSummary:
     body: str = ""
     url: str = ""
     head_sha: str = ""
+    author: str = ""  # login of the PR author (issue #1168)
+    is_fork: bool = False  # True when the head is from a fork (issue #1168)
 
 
 @dataclass
@@ -326,12 +328,16 @@ def issue_linked_to_pr(pr: PRSummary, issue_number: int) -> bool:
 
     Matches ``…issue-<n>…`` / ``…/<n>-…`` / ``…-<n>`` head branches or a
     ``Closes/Fixes/Resolves #<n>`` body reference.
+
+    The ``issue-<n>`` check uses a negative-digit-lookahead regex so
+    ``issue-42`` does NOT match inside ``issue-420`` (substring bug, #1168).
+    The ``/<n>-`` and ``-<n>`` suffix checks are already delimiter-bounded.
     """
     n = str(issue_number)
     head = pr.head_branch or ""
     body = pr.body or ""
     return (
-        f"issue-{n}" in head
+        bool(re.search(rf"issue-{n}(?!\d)", head))
         or f"/{n}-" in head
         or head.endswith(f"-{n}")
         or any(m.group(1) == n for m in _CLOSING_RE.finditer(body))
