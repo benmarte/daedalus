@@ -85,6 +85,17 @@ _MUTEX_LOCK_PATH = str(Path(__file__).resolve().parent / ".daedalus_dispatch.loc
 # invocations for hours (issue #1115).
 _LOCK_WATCHDOG_SECS = 30 * 60  # 30 minutes
 
+# Rerun-on-contention (issue #1160): a dispatch that loses the FileLock race
+# records its intended scope in a marker file next to the lock instead of being
+# silently dropped; the lock HOLDER consumes the marker and runs one extra pass
+# per recorded scope before releasing. Drain rounds are capped so processes that
+# keep re-losing the race cannot hold the lock forever (the #1115 watchdog still
+# bounds total hold time).
+_RERUN_MAX_PASSES = 3
+# Marker line meaning "unscoped sweep requested" (a dropped invocation whose
+# cwd matched no registered project).
+_RERUN_GLOBAL_SCOPE = "*"
+
 # Environment variable that signals we are already running the dev-mode
 # redirect copy of the dispatcher (infinite-loop guard for dev re-exec).
 _DEV_MODE_ENV = "DAEDALUS_DEV"
@@ -7542,13 +7553,111 @@ def _format_history(records: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _rerun_marker_path() -> Path:
+    """Path of the rerun-request marker, always a sibling of the current lock.
+
+    Derived at call time (not import time) so tests that patch
+    ``_MUTEX_LOCK_PATH`` automatically redirect the marker too.
+    """
+    return Path(_MUTEX_LOCK_PATH).with_suffix(".rerun")
+
+
+def _rerun_scope_from_argv(argv: List[str]) -> Optional[str]:
+    """Intended dispatch scope of an invocation that lost the lock race.
+
+    Returns the resolved repo path the dropped invocation would have processed,
+    ``_RERUN_GLOBAL_SCOPE`` for a registry sweep, or None for invocations that
+    must NOT be rerun by the lock holder (--dry-run / --history / --self-test:
+    read-only or explicitly no-mutate, and --history/--self-test output would
+    go to the wrong process anyway).
+    """
+    for a in argv:
+        if a in ("--dry-run", "--history", "--self-test") or a.startswith(
+            ("--history=", "--dry-run=", "--self-test=")
+        ):
+            return None
+    raw: Optional[str] = None
+    for i, a in enumerate(argv):
+        if a == "--repo" and i + 1 < len(argv):
+            raw = argv[i + 1]
+            break
+        if a.startswith("--repo="):
+            raw = a.split("=", 1)[1]
+            break
+    try:
+        if raw:
+            # Mirror _main_inner()'s resolution NOW, in the dropping process:
+            # the holder has a different cwd, so a relative path or slug must
+            # be pinned to an absolute path before it is recorded.
+            return _resolve_repo_arg(raw) or str(Path(raw).expanduser().resolve())
+        return _resolve_repo_from_cwd() or _RERUN_GLOBAL_SCOPE
+    except Exception as e:  # never let scope resolution break the exit path
+        logger.warning(
+            "dispatch: rerun scope resolution failed (%s) — recording global", e
+        )
+        return _RERUN_GLOBAL_SCOPE
+
+
+def _record_rerun_request(scope: str) -> None:
+    """Append ``scope`` to the rerun marker (best-effort, O_APPEND atomic line)."""
+    try:
+        with open(_rerun_marker_path(), "a", encoding="utf-8") as f:
+            f.write(scope + "\n")
+    except OSError as e:
+        logger.warning("dispatch: could not record rerun request: %s", e)
+
+
+def _consume_rerun_requests() -> List[str]:
+    """Read + delete the rerun marker; return recorded scopes deduped in order."""
+    marker = _rerun_marker_path()
+    try:
+        lines = marker.read_text(encoding="utf-8").splitlines()
+        marker.unlink()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        logger.warning("dispatch: could not consume rerun marker: %s", e)
+        return []
+    return list(dict.fromkeys(s.strip() for s in lines if s.strip()))
+
+
+def _drain_rerun_requests() -> None:
+    """Run extra dispatch passes for scopes dropped while we held the lock.
+
+    Called by the lock holder after its own pass, before releasing. Capped at
+    ``_RERUN_MAX_PASSES`` drain rounds; a leftover marker is left for the next
+    tick and logged so the stall is visible (issue #1160).
+    """
+    for _ in range(_RERUN_MAX_PASSES):
+        scopes = _consume_rerun_requests()
+        if not scopes:
+            return
+        for scope in scopes:
+            logger.info(
+                "dispatch: rerun requested while lock was held — extra pass (scope=%s)",
+                scope,
+            )
+            try:
+                _main_inner([] if scope == _RERUN_GLOBAL_SCOPE else ["--repo", scope])
+            except Exception as e:
+                logger.error("dispatch: rerun pass failed for scope %s: %s", scope, e)
+    if _rerun_marker_path().exists():
+        logger.warning(
+            "dispatch: rerun marker still present after %d drain rounds — "
+            "leaving it for the next tick",
+            _RERUN_MAX_PASSES,
+        )
+
+
 def main() -> int:
     """Process-level mutex wrapper.
 
-    Acquires a FileLock with timeout=0 (non-blocking). If another instance holds
-    the lock, logs a warning and exits cleanly (rc=0) to prevent concurrent
-    dispatchers on the same host. Otherwise calls _main_inner() for the actual
-    dispatch logic.
+    Acquires a FileLock with timeout=0 (non-blocking). If another instance
+    holds the lock, records a rerun request in a marker file (issue #1160) so
+    the holder runs the dropped scope before releasing, then exits cleanly
+    (rc=0) to prevent concurrent dispatchers on the same host. Otherwise calls
+    _main_inner() for the actual dispatch logic and drains any rerun requests
+    recorded while the lock was held.
 
     A SIGALRM watchdog (Unix only) force-exits after _LOCK_WATCHDOG_SECS so a
     stuck tick cannot starve queued advance-hook invocations for hours (#1115).
@@ -7557,11 +7666,22 @@ def main() -> int:
     try:
         lock.acquire(timeout=0)
     except Timeout:
-        logger.warning(
-            "FileLock already held by another dispatcher process at %s — exiting cleanly. "
-            "(This is expected when two cron ticks land on top of each other.)",
-            _MUTEX_LOCK_PATH,
-        )
+        scope = _rerun_scope_from_argv(sys.argv[1:])
+        if scope is not None:
+            _record_rerun_request(scope)
+            logger.warning(
+                "FileLock already held by another dispatcher process at %s — "
+                "recorded rerun request (scope=%s); the lock holder will run "
+                "another pass before releasing (issue #1160).",
+                _MUTEX_LOCK_PATH,
+                scope,
+            )
+        else:
+            logger.warning(
+                "FileLock already held by another dispatcher process at %s — exiting cleanly. "
+                "(This is expected when two cron ticks land on top of each other.)",
+                _MUTEX_LOCK_PATH,
+            )
         return 0
 
     _t0 = time.monotonic()
@@ -7594,7 +7714,13 @@ def main() -> int:
         signal.alarm(_LOCK_WATCHDOG_SECS)
 
     try:
-        return _main_inner()
+        rc = _main_inner()
+        # Serve dispatches dropped while we held the lock (issue #1160) BEFORE
+        # releasing, so a session-end advance that collided with this tick
+        # lands now instead of waiting for the next cron tick. Still inside
+        # the watchdog window, so total hold time stays bounded (#1115).
+        _drain_rerun_requests()
+        return rc
     finally:
         if _watchdog_armed:
             signal.alarm(0)  # cancel watchdog before releasing lock
@@ -7604,7 +7730,7 @@ def main() -> int:
             pass  # best-effort cleanup on shutdown
 
 
-def _main_inner() -> int:
+def _main_inner(argv: Optional[List[str]] = None) -> int:
     """Cron / single-repo entrypoint.
 
     With --repo <path-or-slug>: resolves that single repo (a filesystem path or a
@@ -7655,7 +7781,10 @@ def _main_inner() -> int:
         "issues/tasks, drives a real tick, asserts state "
         "transitions) without touching real GitHub, then exit.",
     )
-    args = parser.parse_args()
+    # argv is None for a normal invocation (parse sys.argv); the lock holder
+    # passes an explicit argv when rerunning a scope dropped on contention
+    # (issue #1160).
+    args = parser.parse_args(argv)
 
     # --self-test is a hermetic, GitHub-free smoke of the pipeline wiring: seed
     # fake data, drive a real tick, print PASS/FAIL, and exit non-zero on failure
