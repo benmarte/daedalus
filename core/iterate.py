@@ -522,19 +522,37 @@ def _role_cards_for_issue(slug: str, issue_number: int, role: str) -> List[Dict[
     Matches the assignee profile prefix (stable) plus the issue reference in the
     title (digit-boundary so #114 != #1140). Title role-words are unreliable — the
     dispatcher emits several QA/reviewer title formats.
+
+    Crucially, a completed gate card ARCHIVES (QA finishes first, so it archives
+    first), and the default ``list_tasks`` excludes archived cards. Reading only
+    active cards therefore lost the QA verdict once its card archived → the gate
+    evaluated "not passed" → auto-merge stranded the PR (observed on #1141). So when
+    the active list has no match, fall back to archived cards, where the verdict
+    still lives.
     """
     prefix = _ROLE_ASSIGNEE_PREFIX.get(role, role + "-")
     pat = re.compile(rf"#{issue_number}(?!\d)")
+
+    def _match(tasks: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        return [
+            t for t in (tasks or [])
+            if (t.get("assignee") or "").strip().lower().startswith(prefix)
+            and pat.search(t.get("title") or "")
+        ]
+
     try:
-        tasks = kanban.list_tasks(slug) or []
+        found = _match(kanban.list_tasks(slug))
     except Exception as e:
         logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
+        found = []
+    if found:
+        return found
+    # Fall back to archived cards — a done gate card may have already archived.
+    try:
+        return _match(kanban.list_tasks(slug, status="archived"))
+    except Exception as e:
+        logger.error("iterate: failed to list archived tasks for board %s: %s", slug, e)
         return []
-    return [
-        t for t in tasks
-        if (t.get("assignee") or "").strip().lower().startswith(prefix)
-        and pat.search(t.get("title") or "")
-    ]
 
 
 def _role_gate_passed(
