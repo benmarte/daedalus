@@ -1502,8 +1502,11 @@ def test_qa_task_body_comment_targets_pr_not_issue():
 def test_reviewer_task_body_comment_targets_pr_not_issue():
     """_reviewer_task_body comment instruction targets the PR, not the issue (#115)."""
     body = disp._reviewer_task_body("org/repo", _ISSUE, "/tmp", "github")
-    assert "Post review findings on the PR (not the issue)" in body
+    assert "review findings on the PR (not the issue)" in body
     assert "Post review findings on GitHub issue #" not in body
+    # #1192: inner agent must not re-invoke skills or spawn subagents (churn).
+    assert "Invoke /review" not in body and "Invoke /code-simplify" not in body
+    assert "do NOT spawn subagents" in body
 
 
 def test_security_task_body_comment_targets_pr_not_issue():
