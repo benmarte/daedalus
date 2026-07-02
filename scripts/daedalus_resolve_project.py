@@ -11,7 +11,12 @@ Resolution order:
 Then: task id -> which board DB contains it -> board slug ->
       registry project whose daedalus.yaml `repo:` slugifies to that slug.
 """
-import os, sys, re, glob, json, subprocess, sqlite3
+import os, sys, re, glob, json, subprocess
+
+# Make the plugin root importable so this standalone hook script can share the
+# WAL connection helper with the rest of the codebase (issue #1134).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.db import connect_wal  # noqa: E402
 
 HERMES = os.path.expanduser("~/.hermes")
 
@@ -67,7 +72,7 @@ def task_from_proctree() -> str:
 def board_for_task(task_id: str) -> str:
     for db in glob.glob(os.path.join(HERMES, "kanban", "boards", "*", "kanban.db")):
         try:
-            c = sqlite3.connect(db)
+            c = connect_wal(db)
             hit = c.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone()
             c.close()
             if hit:
