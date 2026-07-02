@@ -1,3 +1,5 @@
+## [fix(security): Azure webhook verification fails open when token header is missing](https://github.com/benmarte/daedalus/issues/1140) — [PR #1181](https://github.com/benmarte/daedalus/pull/1181)
+
 ## [fix: durable dedup + stage-recovery suppression for retry-cap notifications](https://github.com/benmarte/daedalus/issues/1167) — [PR #1172](https://github.com/benmarte/daedalus/pull/1172)
 
 Role-scoped markers (`<!-- daedalus:retry-cap-notified:<role> -->`) replace the bare marker so distinct stall episodes for developer/PM/validator on the same issue don't collide. `_mark_notified_block` returns bool, logs warnings on failure, and falls back to stamping the triggering card when no validator card is found. New `_retry_cap_stage_recovered()` helper checks whether the stage has recovered (running card, open PR, downstream role active) before sending a notification; provider errors fail open to "not recovered" (better one duplicate than a swallowed real alert). All five cap paths (developer, validator x2, PM x2) updated with guard order: dedup-check → recovery-check → send → mark.
