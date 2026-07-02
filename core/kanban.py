@@ -195,6 +195,21 @@ def complete(slug: str, task_id: str, summary: str = "") -> bool:
     return True
 
 
+def edit_summary(slug: str, task_id: str, summary: str) -> bool:
+    """Overwrite a done task's result summary (``hermes kanban edit --result --summary``).
+
+    This is the operator's proven recovery for the hermes premature-completion
+    bug (#1161): a card completed with an empty summary gets its recorded result
+    replaced so downstream gates (e.g. the dispatcher's SPEC: gate) can proceed.
+    """
+    rc, out, err = _hk(["--board", slug, "edit", task_id, "--result", "--summary", summary])
+    if rc != 0:
+        logger.warning("kanban: edit summary on %s failed: %s", task_id, (err or out or "").strip())
+        return False
+    logger.info("kanban: edited summary on %s", task_id)
+    return True
+
+
 def decompose_all_triage(slug: str) -> bool:
     """Decompose every card in the board's triage column (kanban-only mode).
 

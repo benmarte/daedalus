@@ -2667,6 +2667,124 @@ def _validator_github_comment_outcome(
     return ""
 
 
+def _pm_role_slug(profile: str) -> str:
+    """Return the role portion of an agent profile name for attribution matching.
+
+    Profiles are ``<role>-<project>`` (e.g. ``project-manager-daedalus``).
+    ``profile.split("-")[0]`` would truncate multi-word roles to ``project``
+    (the #1161 gotcha), so drop only the trailing project suffix.
+    """
+    return profile.rsplit("-", 1)[0] if "-" in profile else profile
+
+
+_SPEC_HEADING_RE = re.compile(r"^\s{0,3}#{2,3}\s+[^\n]*\bspec\b", re.IGNORECASE | re.MULTILINE)
+
+
+def _pm_spec_comment(
+    provider,
+    issue_number: int,
+    pm_profile: str = "project-manager-daedalus",
+) -> str:
+    """Return a short head from the newest PM-authored spec comment, or ''.
+
+    When the hermes premature-completion bug records an empty summary on the PM
+    kanban card, the ``## Implementation Spec`` comment on the GitHub issue is
+    the only durable record of the spec (#1161). Mirrors
+    ``_validator_github_comment_outcome``: scan comments newest-first for one
+    carrying the PM attribution marker in its first ~300 chars and a markdown
+    heading containing "spec" (live PM comments use both "## Implementation
+    Spec" and "## Spec — Issue #NNN" forms).
+    """
+    if provider is None:
+        return ""
+    try:
+        comments = provider.get_issue_comments(issue_number) or []
+    except Exception:
+        return ""
+    agent_marker = f"agent: {_pm_role_slug(pm_profile)}"  # "agent: project-manager"
+    for c in reversed(comments):
+        body = c.get("body") or ""
+        if agent_marker not in body.lower()[:300]:
+            continue
+        m = _SPEC_HEADING_RE.search(body)
+        if m is None:
+            continue
+        # Synthesize a head from the first non-empty line after the heading.
+        after = body[m.end():]
+        for line in after.splitlines():
+            line = line.strip()
+            if line:
+                return line[:200]
+        return "Implementation Spec comment found"
+    return ""
+
+
+def _adopt_pm_spec_comment(
+    slug: str,
+    issue_number: int,
+    pm_profile: str,
+    provider,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Self-heal a stale PM card by adopting the issue's spec comment (#1161).
+
+    Returns True when the newest stale done PM card's summary was rewritten to
+    ``SPEC: (adopted from issue comment) <head>`` (or would be, in dry-run) —
+    the caller then skips retry/cap handling and ``_check_completed_pm`` fans
+    out the team on the same or next tick. Returns False when no attributed
+    spec comment exists or the edit fails, so the existing retry path runs.
+    """
+    head = _pm_spec_comment(provider, issue_number, pm_profile)
+    if not head:
+        return False
+    # Locate the newest done PM spec card lacking a SPEC:/assigned: summary —
+    # the same selection _pm_task_state counts as stale.
+    pattern = f"#{issue_number}"
+    stale_tid = ""
+    for t in kanban.list_tasks(slug):
+        if pattern not in (t.get("title") or ""):
+            continue
+        if (t.get("assignee") or "").strip() != pm_profile:
+            continue
+        if (t.get("title") or "").lower().startswith("consult:"):
+            continue
+        if (t.get("status") or "").lower() not in ("done", "complete", "completed"):
+            continue
+        s = _get_task_summary(t, slug).lower()
+        if s.startswith("spec:") or s.startswith("assigned:"):
+            continue
+        tid = str(t.get("id") or t.get("task_id") or "")
+        if tid:
+            stale_tid = tid
+    if not stale_tid:
+        return False
+    summary = f"SPEC: (adopted from issue comment) {head}"
+    if dry_run:
+        logger.info(
+            "[dry-run] PM card %s for #%s lacks SPEC: but issue has a spec "
+            "comment — would auto-adopt",
+            stale_tid,
+            issue_number,
+        )
+        return True
+    if not kanban.edit_summary(slug, stale_tid, summary):
+        logger.warning(
+            "dispatch: failed to adopt spec comment onto PM card %s for #%s — "
+            "falling back to retry path",
+            stale_tid,
+            issue_number,
+        )
+        return False
+    logger.warning(
+        "dispatch: PM card %s for #%s lacked SPEC: but issue has an "
+        "Implementation Spec comment — auto-adopted (#1161)",
+        stale_tid,
+        issue_number,
+    )
+    return True
+
+
 def _has_notified_block(
     slug: str,
     issue_number: int,
@@ -4106,6 +4224,12 @@ def _check_confirmed_validators(
                         # unbounded PM tasks — observed: 6 consecutive empty-summary
                         # PM runs for one issue with no cap enforcement.
                         if pm_state == "stale":
+                            # Self-heal (#1161): adopt the issue's spec comment
+                            # before burning a retry or exhausting the cap.
+                            if _adopt_pm_spec_comment(
+                                slug, n_nr, p["pm"], provider, dry_run=dry_run
+                            ):
+                                continue
                             max_pm_retries = _resolve_max_pm_retries(
                                 (resolved or {}).get("execution") or {}
                             )
@@ -4409,6 +4533,12 @@ def _check_confirmed_validators(
         if pm_state in ("running", "complete"):
             continue  # PM task active or properly done
         if pm_state == "stale":
+            # Self-heal (#1161): the hermes premature-completion bug can leave a
+            # valid spec on the issue while the card summary is empty. Adopt the
+            # spec comment instead of retrying/stalling; _check_completed_pm then
+            # sees SPEC: and fans out the team without human action.
+            if _adopt_pm_spec_comment(slug, n, p["pm"], provider, dry_run=dry_run):
+                continue
             max_pm_retries = _resolve_max_pm_retries(
                 (resolved or {}).get("execution") or {}
             )
