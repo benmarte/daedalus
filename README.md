@@ -1018,9 +1018,12 @@ python -m core.sweeper_cli <board_slug> [--threshold-hours 48] [--archive] [--dr
 (`validator-retry-N-r*`) and PM stale-task recovery (`pm-{n}-r*`) each cap at a
 maximum (2 for validator, 3 for PM). When an attempt counter exhausts the cap,
 the dispatcher fires a one-time `retry-cap-exhausted` notification — idempotently
-deduped on the issue via an `<!-- daedalus:retry-cap-notified -->` marker comment
-so the same cap-exhaustion is never messaged twice per issue — and posts a
-comment on the card instructing a human to investigate. Route this event to a
+deduped on the issue via a role-scoped `<!-- daedalus:retry-cap-notified:<role> -->`
+marker comment so the same cap-exhaustion is never messaged twice per issue per
+role — and posts a comment on the card instructing a human to investigate. A
+stage-recovery check (`_retry_cap_stage_recovered()`) suppresses the notification
+if the stalled stage has already recovered (running card, open PR, or downstream
+role active), avoiding stale alerts. Route this event to a
 high-visibility channel in the Notifications editor alongside
 `security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
 is unchanged: it posts a per-card comment and stops escalating, but does not
