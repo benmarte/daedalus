@@ -190,6 +190,88 @@ class TestValidatorRetryCapGithubComment(unittest.TestCase):
         )
 
 
+class TestCapCommentSuppressedOnRecovery(unittest.TestCase):
+    """When _retry_cap_stage_recovered returns True, no GitHub cap_comment is posted (#1167).
+
+    The post_issue_comment call must be inside the else (non-recovered) branch,
+    not outside the if/else — otherwise recovery suppresses the notification
+    but the GitHub comment fires on every subsequent tick.
+    """
+
+    def setUp(self):
+        self.disp = _load_dispatch()
+
+    def test_validator_cap_comment_suppressed_when_recovered(self):
+        """Validator cap exhaustion with recovered stage → no GitHub comment."""
+        fake_tasks = [
+            {"title": "#42 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": f"t{i}"}
+            for i in range(4)
+        ]
+        provider = FakeProvider()
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+             mock.patch.object(self.disp, "_mark_notified_block"), \
+             mock.patch.object(self.disp, "_retry_cap_stage_recovered", return_value=True):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {42: {"number": 42, "title": "fix bug", "body": ""}},
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        cap_comments = [
+            (n, b) for n, b in provider.comments
+            if n == 42 and "retry cap exhausted" in b
+        ]
+        self.assertEqual(
+            cap_comments, [],
+            "No retry-cap GitHub comment when stage is recovered (#1167)",
+        )
+
+    def test_validator_cap_comment_posted_when_not_recovered(self):
+        """Validator cap exhaustion without recovery → GitHub comment posted."""
+        fake_tasks = [
+            {"title": "#42 fix bug", "assignee": "validator-daedalus",
+             "status": "done", "id": f"t{i}"}
+            for i in range(4)
+        ]
+        provider = FakeProvider()
+
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=fake_tasks), \
+             mock.patch.object(self.disp.kanban, "show_card",
+                               return_value={"latest_summary": _NO_VERDICT_SUMMARY}), \
+             mock.patch.object(self.disp.kanban, "comment"), \
+             mock.patch.object(self.disp, "_validator_github_comment_outcome", return_value=""), \
+             mock.patch.object(self.disp, "_send_retry_cap_notification"), \
+             mock.patch.object(self.disp, "_has_notified_block", return_value=False), \
+             mock.patch.object(self.disp, "_mark_notified_block"), \
+             mock.patch.object(self.disp, "_retry_cap_stage_recovered", return_value=False):
+            self.disp._check_confirmed_validators(
+                "slug", "owner/repo",
+                {42: {"number": 42, "title": "fix bug", "body": ""}},
+                3, "/tmp", "", "main", "github",
+                provider=provider,
+                resolved=_minimal_resolved(),
+            )
+
+        cap_comments = [
+            (n, b) for n, b in provider.comments
+            if n == 42 and "retry cap exhausted" in b
+        ]
+        self.assertTrue(
+            len(cap_comments) > 0,
+            "Retry-cap GitHub comment must be posted when stage is NOT recovered",
+        )
+
+
 class TestPMRetryCapGithubComment(unittest.TestCase):
     """PM retry-cap exhaustion posts a GitHub comment on the issue."""
 

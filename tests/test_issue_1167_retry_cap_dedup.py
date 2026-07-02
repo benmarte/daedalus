@@ -197,11 +197,104 @@ class TestRetryCapDedupMarker(unittest.TestCase):
             self.assertTrue(any("no target card" in line for line in log.output))
 
 
+class TestDownstreamTasksRunningOrDone(unittest.TestCase):
+    """Tests for _downstream_tasks_running_or_done helper (#1167 refactor)."""
+
+    def setUp(self):
+        self.disp = _load_dispatch()
+
+    def test_returns_true_when_downstream_running(self):
+        """A running downstream task returns True."""
+        tasks = [
+            {"title": "#42 bug", "assignee": "qa-daedalus",
+             "status": "running", "id": "t1"},
+        ]
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=tasks):
+            self.assertTrue(
+                self.disp._downstream_tasks_running_or_done(
+                    "slug", 42, ("qa-daedalus", "reviewer-daedalus"),
+                )
+            )
+
+    def test_returns_true_when_downstream_done(self):
+        """A done downstream task returns True."""
+        tasks = [
+            {"title": "#42 bug", "assignee": "developer-daedalus",
+             "status": "done", "id": "t1"},
+        ]
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=tasks):
+            self.assertTrue(
+                self.disp._downstream_tasks_running_or_done(
+                    "slug", 42, ("developer-daedalus",),
+                )
+            )
+
+    def test_returns_false_when_no_matching_downstream(self):
+        """No downstream tasks for the issue returns False."""
+        tasks = [
+            {"title": "#99 other", "assignee": "qa-daedalus",
+             "status": "running", "id": "t1"},
+        ]
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=tasks):
+            self.assertFalse(
+                self.disp._downstream_tasks_running_or_done(
+                    "slug", 42, ("qa-daedalus",),
+                )
+            )
+
+    def test_returns_false_when_wrong_assignee(self):
+        """Tasks with non-matching assignee return False."""
+        tasks = [
+            {"title": "#42 bug", "assignee": "validator-daedalus",
+             "status": "running", "id": "t1"},
+        ]
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=tasks):
+            self.assertFalse(
+                self.disp._downstream_tasks_running_or_done(
+                    "slug", 42, ("qa-daedalus",),
+                )
+            )
+
+    def test_ignores_cancelled_tasks(self):
+        """Cancelled downstream tasks do not count as running/done."""
+        tasks = [
+            {"title": "#42 bug", "assignee": "qa-daedalus",
+             "status": "cancelled", "id": "t1"},
+        ]
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=tasks):
+            self.assertFalse(
+                self.disp._downstream_tasks_running_or_done(
+                    "slug", 42, ("qa-daedalus",),
+                )
+            )
+
+    def test_handles_multiple_profiles(self):
+        """Multiple downstream profiles are all checked."""
+        tasks = [
+            {"title": "#42 bug", "assignee": "reviewer-daedalus",
+             "status": "completed", "id": "t1"},
+        ]
+        with mock.patch.object(self.disp.kanban, "list_tasks", return_value=tasks):
+            self.assertTrue(
+                self.disp._downstream_tasks_running_or_done(
+                    "slug", 42,
+                    ("qa-daedalus", "reviewer-daedalus"),
+                )
+            )
+
+
 class TestRetryCapStageRecovered(unittest.TestCase):
     """Tests for _retry_cap_stage_recovered helper (#1167)."""
 
     def setUp(self):
         self.disp = _load_dispatch()
+
+    def test_no_base_branch_param(self):
+        """_retry_cap_stage_recovered must not accept base_branch (removed #1167)."""
+        import inspect
+        sig = inspect.signature(self.disp._retry_cap_stage_recovered)
+        self.assertNotIn("base_branch", sig.parameters,
+                         "base_branch param must be removed from _retry_cap_stage_recovered")
 
     def test_developer_recovered_by_running_dev_card(self):
         """A running developer card means the stage recovered."""
