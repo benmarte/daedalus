@@ -16,6 +16,7 @@ fixture wires a single shared ``FakeKanban`` into both the dispatcher and the
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,25 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hermes_home(tmp_path, monkeypatch):
+    """Guarantee NO test ever writes to the real ~/.hermes kanban board.
+
+    A test that exercises the real dispatcher or the ``hermes kanban`` CLI
+    without an isolated HERMES_HOME creates cards on the LIVE board; the running
+    gateway then executes them, spawning real agents that create more cards — a
+    runaway loop (2026-07-02 incident, e.g. ``disp.run(dry_run=False)`` in
+    test_profile_resync_integration.py). Forcing HERMES_HOME to a throwaway dir
+    for every test makes that impossible. Tests that set their own (tmp)
+    HERMES_HOME inside ``with`` blocks still override this — also isolated.
+    """
+    home = tmp_path / "hermes-home"
+    (home / "kanban").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "test-isolated")
+    yield
 
 
 def _load_dispatch():

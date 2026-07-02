@@ -366,9 +366,13 @@ def rename_task(slug: str, task_id: str, new_title: str) -> bool:
     """Update a task's title via direct SQLite write. Returns True on success.
 
     There is no ``hermes kanban rename`` CLI command, so this writes directly to
-    the board's SQLite database at ~/.hermes/kanban/boards/<slug>/kanban.db.
+    the board's SQLite database at $HERMES_HOME/kanban/boards/<slug>/kanban.db
+    (falls back to ~/.hermes). Honoring HERMES_HOME keeps tests off the real
+    board — a hardcoded ~/.hermes let test runs seed the live board and trigger a
+    gateway execution loop (2026-07-02 incident).
     """
-    db_path = os.path.expanduser(f"~/.hermes/kanban/boards/{slug}/kanban.db")
+    _home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    db_path = os.path.join(_home, "kanban", "boards", slug, "kanban.db")
     if not os.path.exists(db_path):
         logger.warning("kanban: rename: DB not found for board %r", slug)
         return False

@@ -120,7 +120,12 @@ def find_stale_running(
 
 
 def _db_path(slug: str) -> str:
-    return os.path.expanduser(f"~/.hermes/kanban/boards/{slug}/kanban.db")
+    # Honor HERMES_HOME so tests (and non-default installs) never touch the real
+    # ~/.hermes board. A hardcoded ~/.hermes here let test runs write cards onto
+    # the live board, which the running gateway then executed — a runaway loop
+    # (2026-07-02 incident).
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return os.path.join(home, "kanban", "boards", slug, "kanban.db")
 
 
 def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
