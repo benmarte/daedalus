@@ -14,9 +14,29 @@ Then: task id -> which board DB contains it -> board slug ->
 import os, sys, re, glob, json, subprocess
 
 # Make the plugin root importable so this standalone hook script can share the
-# WAL connection helper with the rest of the codebase (issue #1134).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.db import connect_wal  # noqa: E402
+# WAL connection helper with the rest of the codebase (issue #1134). This script
+# is deployed to ~/.hermes/agent-hooks/ (whose parent has no ``core/``), so also
+# try the installed plugin root and fall back to a plain sqlite3 connection if
+# neither imports — a crash here made the on_session_end advance hook resolve
+# nothing, silently stalling every pipeline handoff (issue #1202).
+for _p in (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.expanduser("~/.hermes/plugins/daedalus"),
+):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+try:
+    from core.db import connect_wal  # noqa: E402
+except Exception:  # pragma: no cover - deployed-location import fallback
+    import sqlite3
+
+    def connect_wal(path):
+        conn = sqlite3.connect(path, timeout=5)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
+        return conn
 
 HERMES = os.path.expanduser("~/.hermes")
 
@@ -104,7 +124,43 @@ def project_for_board(slug: str) -> str:
     return ""
 
 
+def cwd_from_payload() -> str:
+    """Registry project whose path matches the finishing worker's ``cwd``.
+
+    The on_session_end payload carries ``cwd``; matching it against the registry
+    scopes the sweep to exactly the worker's own project WITHOUT the fragile
+    task-id -> board -> slug chain, which fails when the payload carries only a
+    session id (not a ``t_`` kanban id) and the hook runs detached from the
+    worker process. Still project-scoped (never a global sweep), so it cannot
+    reintroduce the cross-project card leak the task-scoping guards against.
+    """
+    if len(sys.argv) < 2:
+        return ""
+    try:
+        d = json.loads(sys.argv[1])
+    except Exception:
+        return ""
+    cwd = (d.get("cwd") or "").rstrip("/") if isinstance(d, dict) else ""
+    if not cwd:
+        return ""
+    reg = os.path.join(HERMES, "daedalus", "projects")
+    try:
+        paths = [l.strip() for l in open(reg) if l.strip()]
+    except Exception:
+        return ""
+    for p in paths:
+        if cwd == p.rstrip("/"):
+            return p
+    return ""
+
+
 def main():
+    # cwd-first: robust to the session-id payload shape and detached hook exec
+    # (issue #1202). Falls back to the task-id -> board -> slug chain.
+    proj = cwd_from_payload()
+    if proj:
+        print(proj)
+        return
     tid = task_from_payload() or task_from_proctree()
     if not tid:
         return
