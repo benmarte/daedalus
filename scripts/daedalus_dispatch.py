@@ -7542,27 +7542,166 @@ def _format_history(records: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _lock_wait_secs() -> float:
+    """Seconds to wait for the process mutex (``DAEDALUS_LOCK_WAIT``, default 0).
+
+    The advance hook sets this to a bounded wait (120) so session-end dispatch
+    bursts serialize behind an in-flight tick instead of being dropped
+    (issue #1160). Invalid or negative values fall back to 0 (non-blocking).
+    """
+    raw = (os.environ.get("DAEDALUS_LOCK_WAIT") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning(
+            "dispatch: invalid DAEDALUS_LOCK_WAIT=%r — using 0 (non-blocking)", raw
+        )
+        return 0.0
+    return max(0.0, val)
+
+
+def _rerun_marker_path() -> Path:
+    """Rerun-needed marker next to the mutex (resolved lazily — tests repoint
+    ``_MUTEX_LOCK_PATH`` at runtime)."""
+    return Path(_MUTEX_LOCK_PATH + ".rerun")
+
+
+def _queued_scope(argv: List[str]) -> Optional[str]:
+    """Scope string to queue for a holder rerun, or None when not queueable.
+
+    Read-only / dry invocations (--history, --self-test, --dry-run) are never
+    queued — replaying them as a real scoped dispatch would be wrong. An explicit
+    ``--repo`` value wins; otherwise the cwd-resolved project (how cron/hook
+    ticks scope). Returns None when no project resolves (a would-be global
+    registry sweep — the hourly cron retries those anyway).
+    """
+    if any(
+        a == "--dry-run" or a == "--self-test" or a.startswith("--history")
+        for a in argv
+    ):
+        return None
+    for i, a in enumerate(argv):
+        if a == "--repo" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--repo="):
+            return a.split("=", 1)[1]
+    return _resolve_repo_from_cwd()
+
+
+def _queue_rerun(scope: str) -> bool:
+    """Append ``scope`` to the rerun marker (best-effort). True on success."""
+    try:
+        with open(_rerun_marker_path(), "a", encoding="utf-8") as f:
+            f.write(scope + "\n")
+        return True
+    except OSError as e:
+        logger.warning(
+            "dispatch: could not write rerun marker %s: %s", _rerun_marker_path(), e
+        )
+        return False
+
+
+def _consume_rerun_marker() -> List[str]:
+    """Atomically claim the rerun marker and return its deduped scopes.
+
+    ``os.replace`` to a private name first, so a waiter appending concurrently
+    lands in a fresh marker file that the next rerun pass (or next tick) sees —
+    no queued scope can be lost between read and unlink.
+    """
+    marker = _rerun_marker_path()
+    if not marker.exists():
+        return []
+    claimed = Path(str(marker) + ".consuming")
+    try:
+        os.replace(marker, claimed)
+        lines = claimed.read_text(encoding="utf-8").splitlines()
+        claimed.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("dispatch: could not consume rerun marker %s: %s", marker, e)
+        return []
+    scopes: List[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if s and s not in scopes:
+            scopes.append(s)
+    return scopes
+
+
+# Ceiling on holder rerun passes per tick: a marker re-queued during every pass
+# (pathological churn) must not spin the holder forever — leftovers wait for the
+# next tick. The #1115 watchdog stays armed across reruns as the hard backstop.
+_RERUN_MAX_PASSES = 3
+
+
+def _run_queued_reruns() -> None:
+    """Run dispatch passes for scopes queued while this process held the lock.
+
+    Called by the lock HOLDER after its own pass, before releasing — this is
+    what guarantees a session-end advance that hit lock contention still runs
+    within the current tick instead of stalling until the next cron tick
+    (issue #1160).
+    """
+    for _ in range(_RERUN_MAX_PASSES):
+        scopes = _consume_rerun_marker()
+        if not scopes:
+            return
+        for scope in scopes:
+            logger.info(
+                "dispatch: rerun pass for scope %s queued during this tick "
+                "(issue #1160)",
+                scope,
+            )
+            try:
+                _main_inner(["--repo", scope])
+            except Exception as e:
+                logger.error("dispatch: rerun pass failed for %s: %s", scope, e)
+    if _rerun_marker_path().exists():
+        logger.warning(
+            "dispatch: rerun-pass cap (%d) reached with scopes still queued — "
+            "the next tick will pick them up",
+            _RERUN_MAX_PASSES,
+        )
+
+
 def main() -> int:
     """Process-level mutex wrapper.
 
-    Acquires a FileLock with timeout=0 (non-blocking). If another instance holds
-    the lock, logs a warning and exits cleanly (rc=0) to prevent concurrent
-    dispatchers on the same host. Otherwise calls _main_inner() for the actual
-    dispatch logic.
+    Acquires a FileLock with a bounded wait (``DAEDALUS_LOCK_WAIT``, default 0 /
+    non-blocking). On contention the dispatch is NOT dropped (issue #1160): its
+    scope is appended to a rerun marker consumed by the lock holder before it
+    releases, so the handoff advances within the current tick. After writing the
+    marker the waiter retries once — if the holder released in the race window
+    (after its marker check, before our write), the waiter becomes the holder
+    and its own rerun loop consumes the marker.
 
     A SIGALRM watchdog (Unix only) force-exits after _LOCK_WATCHDOG_SECS so a
     stuck tick cannot starve queued advance-hook invocations for hours (#1115).
     """
     lock = FileLock(_MUTEX_LOCK_PATH)
     try:
-        lock.acquire(timeout=0)
+        lock.acquire(timeout=_lock_wait_secs())
     except Timeout:
-        logger.warning(
-            "FileLock already held by another dispatcher process at %s — exiting cleanly. "
-            "(This is expected when two cron ticks land on top of each other.)",
-            _MUTEX_LOCK_PATH,
-        )
-        return 0
+        scope = _queued_scope(sys.argv[1:])
+        if scope is None or not _queue_rerun(scope):
+            logger.warning(
+                "FileLock already held by another dispatcher process at %s — exiting cleanly. "
+                "(This is expected when two cron ticks land on top of each other.)",
+                _MUTEX_LOCK_PATH,
+            )
+            return 0
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            logger.warning(
+                "FileLock already held by another dispatcher process at %s — "
+                "queued scope %s for a rerun by the lock holder before it "
+                "releases (issue #1160).",
+                _MUTEX_LOCK_PATH,
+                scope,
+            )
+            return 0
 
     _t0 = time.monotonic()
 
@@ -7594,7 +7733,11 @@ def main() -> int:
         signal.alarm(_LOCK_WATCHDOG_SECS)
 
     try:
-        return _main_inner()
+        rc = _main_inner()
+        # Consume dispatches queued by waiters that hit lock contention while we
+        # ran — must happen BEFORE releasing the lock (issue #1160).
+        _run_queued_reruns()
+        return rc
     finally:
         if _watchdog_armed:
             signal.alarm(0)  # cancel watchdog before releasing lock
@@ -7604,8 +7747,12 @@ def main() -> int:
             pass  # best-effort cleanup on shutdown
 
 
-def _main_inner() -> int:
+def _main_inner(argv: Optional[List[str]] = None) -> int:
     """Cron / single-repo entrypoint.
+
+    ``argv`` defaults to ``sys.argv[1:]`` (argparse behavior); the lock holder's
+    rerun loop passes an explicit ``["--repo", <scope>]`` so queued advance
+    dispatches replay with their original scope (issue #1160).
 
     With --repo <path-or-slug>: resolves that single repo (a filesystem path or a
     registered ``owner/repo`` VCS identifier and calls run() for it.
@@ -7655,7 +7802,7 @@ def _main_inner() -> int:
         "issues/tasks, drives a real tick, asserts state "
         "transitions) without touching real GitHub, then exit.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # --self-test is a hermetic, GitHub-free smoke of the pipeline wiring: seed
     # fake data, drive a real tick, print PASS/FAIL, and exit non-zero on failure

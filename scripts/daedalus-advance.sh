@@ -24,9 +24,15 @@ repo_path=$(python3 "$HOME/.hermes/agent-hooks/daedalus_resolve_project.py" "$pa
 
 ts=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '')
 log="$HOME/.hermes/logs/daedalus-advance.log"
+# Dispatch output is captured (not /dev/null) so dropped/contended dispatches
+# are visible, and DAEDALUS_LOCK_WAIT gives a bounded wait so session-end
+# bursts serialize behind an in-flight tick instead of being dropped (#1160).
+dispatch_log="$HOME/.hermes/logs/daedalus-advance-dispatch.log"
+mkdir -p "$HOME/.hermes/logs" 2>/dev/null || true
 if [[ -n "$repo_path" ]]; then
   echo "$ts advance: scoped dispatch --repo $repo_path (profile=$profile)" >>"$log" 2>/dev/null || true
-  bash "$HOME/.hermes/scripts/daedalus-cron.sh" --repo "$repo_path" </dev/null >/dev/null 2>&1 &
+  echo "$ts advance: dispatch --repo $repo_path (profile=$profile)" >>"$dispatch_log" 2>/dev/null || true
+  DAEDALUS_LOCK_WAIT="${DAEDALUS_LOCK_WAIT:-120}" bash "$HOME/.hermes/scripts/daedalus-cron.sh" --repo "$repo_path" </dev/null >>"$dispatch_log" 2>&1 &
 else
   # Could NOT resolve the project — do not run a global sweep (that is what leaked
   # cross-project cards). The next scheduled cron tick advances it instead.
