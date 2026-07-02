@@ -103,6 +103,40 @@ def test_reviewer_gate_false_on_changes_requested():
         assert iterate._reviewer_passed_for_issue("slug", 1140) is False
 
 
+def test_gate_falls_back_to_archived_card():
+    # QA finishes first, so its card archives first; default list_tasks excludes
+    # archived. The gate must fall back to archived so the verdict survives (#1141).
+    archived = [{"id": "tq", "assignee": "qa-daedalus", "title": "QA: verify PR for #1140", "status": "archived"}]
+
+    def _lt(slug, status=""):
+        return archived if status == "archived" else []  # active list is empty
+
+    with mock.patch.multiple(
+        iterate.kanban,
+        list_tasks=mock.MagicMock(side_effect=_lt),
+        show_card=mock.MagicMock(return_value={"latest_summary": "qa-passed: PR #1188"}),
+    ):
+        assert iterate._qa_passed_for_issue("slug", 1140) is True
+
+
+def test_active_card_preferred_no_archived_fetch():
+    # When the active list has the card, archived must NOT be fetched (efficiency).
+    active = [{"id": "tq", "assignee": "qa-daedalus", "title": "#1140 QA: x", "status": "done"}]
+    calls = []
+
+    def _lt(slug, status=""):
+        calls.append(status)
+        return active if status == "" else []
+
+    with mock.patch.multiple(
+        iterate.kanban,
+        list_tasks=mock.MagicMock(side_effect=_lt),
+        show_card=mock.MagicMock(return_value={"latest_summary": "qa-passed: PR #1188"}),
+    ):
+        assert iterate._qa_passed_for_issue("slug", 1140) is True
+    assert "archived" not in calls  # archived fallback skipped when active matches
+
+
 def test_security_gate_rejects_flagged_verdict():
     tasks = [{"id": "ts", "assignee": "security-analyst-daedalus", "title": f"#1140 Security: {_T}", "status": "done"}]
     with mock.patch.multiple(
