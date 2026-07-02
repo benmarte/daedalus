@@ -27,10 +27,9 @@ from core.db import connect_wal  # noqa: E402
 _ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_connect_wal_enables_wal(tmp_path=None):
+def test_connect_wal_enables_wal(tmp_path):
     """A file-backed DB opened via the helper reports journal_mode == 'wal'."""
-    base = tmp_path if tmp_path is not None else Path("/tmp")
-    db_path = str(Path(base) / "wal_helper_test.db")
+    db_path = str(Path(tmp_path) / "wal_helper_test.db")
     conn = connect_wal(db_path)
     try:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -39,10 +38,9 @@ def test_connect_wal_enables_wal(tmp_path=None):
         conn.close()
 
 
-def test_connect_wal_synchronous_normal(tmp_path=None):
+def test_connect_wal_synchronous_normal(tmp_path):
     """synchronous is set to NORMAL (1)."""
-    base = tmp_path if tmp_path is not None else Path("/tmp")
-    db_path = str(Path(base) / "wal_helper_sync.db")
+    db_path = str(Path(tmp_path) / "wal_helper_sync.db")
     conn = connect_wal(db_path)
     try:
         sync = conn.execute("PRAGMA synchronous").fetchone()[0]
@@ -51,10 +49,9 @@ def test_connect_wal_synchronous_normal(tmp_path=None):
         conn.close()
 
 
-def test_connect_wal_returns_usable_connection(tmp_path=None):
+def test_connect_wal_returns_usable_connection(tmp_path):
     """The returned connection can run ordinary read/write statements."""
-    base = tmp_path if tmp_path is not None else Path("/tmp")
-    db_path = str(Path(base) / "wal_helper_usable.db")
+    db_path = str(Path(tmp_path) / "wal_helper_usable.db")
     conn = connect_wal(db_path)
     try:
         conn.execute("CREATE TABLE t (id INTEGER)")
