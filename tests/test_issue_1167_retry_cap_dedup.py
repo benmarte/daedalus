@@ -10,8 +10,6 @@ Tests that the retry-cap notification:
 from __future__ import annotations
 
 import importlib.util
-import logging
-import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -349,8 +347,6 @@ class TestMultiTickDedup(unittest.TestCase):
 
         def mock_send(*args, **kwargs):
             send_calls.append(kwargs)
-
-        resolved = _minimal_resolved(notifications=[{"target": "slack"}])
 
         # Also need to mock _notify_targets to return a list.
         def mock_notify_targets(r, event):
