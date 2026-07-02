@@ -1,3 +1,5 @@
+## [fix: PM consultation trigger races APPROVE_ADVANCE — approved gate cards don't auto-advance](https://github.com/benmarte/daedalus/issues/1182) — [PR #1186](https://github.com/benmarte/daedalus/pull/1186)
+
 ## [fix(security): Azure webhook verification fails open when token header is missing](https://github.com/benmarte/daedalus/issues/1140) — [PR #1181](https://github.com/benmarte/daedalus/pull/1181)
 
 ## [fix: durable dedup + stage-recovery suppression for retry-cap notifications](https://github.com/benmarte/daedalus/issues/1167) — [PR #1172](https://github.com/benmarte/daedalus/pull/1172)
