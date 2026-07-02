@@ -61,10 +61,10 @@ from core import source_specs  # noqa: E402
 from core import sweeper  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core import thread_delivery  # noqa: E402
-from core.notification_sender import (
+from core.notification_sender import (  # noqa: E402
     NotificationPayload,
     send as send_webhook_notification,
-)  # noqa: E402
+)
 from core.providers.base import (  # noqa: E402
     _DECOMP_LANGUAGE_RE,
     _SUB_ISSUE_CHECKLIST_RE,
@@ -1116,7 +1116,7 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     # list_issues() now paginates automatically, so this is no longer a hard cap.
     page_size = int(filters.get("limit", 100))
     max_issues = filters.get("max_issues")  # optional hard ceiling
-    labels = [l for l in (filters.get("labels") or []) if l]
+    labels = [lbl for lbl in (filters.get("labels") or []) if lbl]
     issues = [
         i.as_dict()
         for i in provider.list_issues(state=state, labels=labels, limit=page_size)
@@ -4931,7 +4931,9 @@ def _planner_not_suitable_validator_body(
     """
     n, title, body, _ = _unpack_issue(issue)
     _h = _resolve_howtos(provider_name, repo, n)
-    security_notify_cmds = _build_security_notify_cmds(
+    # NOTE: built but not yet interpolated into the body below — unlike the other
+    # validator body builders (see ~1962/~2184). Kept as-is pending a scoped fix.
+    _security_notify_cmds = _build_security_notify_cmds(
         repo, n, title, security_targets or []
     )
     _body = (
