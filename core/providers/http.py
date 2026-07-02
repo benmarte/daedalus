@@ -12,11 +12,14 @@ nothing in this module ever logs or embeds a credential.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import warnings
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+from .base import ProviderConfigError
 
 logger = logging.getLogger("daedalus.providers.http")
 
@@ -49,8 +52,16 @@ class HTTPClient:
         self._timeout = timeout
         self._verify_ssl = verify_ssl
         if not verify_ssl:
+            if not os.environ.get("DAEDALUS_DEV_MODE"):
+                raise ProviderConfigError(
+                    "verify_ssl=false is not permitted outside dev mode "
+                    "(set DAEDALUS_DEV_MODE env var to override)"
+                )
             warnings.filterwarnings("ignore", message="Unverified HTTPS request")
-            logger.warning("SSL certificate verification disabled (base_url=%s)", base_url)
+            logger.error(
+                "SSL certificate verification disabled (base_url=%s) — DAEDALUS_DEV_MODE active",
+                base_url,
+            )
 
     # ── core ─────────────────────────────────────────────────────────────────
     def _redact(self, text: str) -> str:
