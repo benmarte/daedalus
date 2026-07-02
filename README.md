@@ -1018,9 +1018,12 @@ python -m core.sweeper_cli <board_slug> [--threshold-hours 48] [--archive] [--dr
 (`validator-retry-N-r*`) and PM stale-task recovery (`pm-{n}-r*`) each cap at a
 maximum (2 for validator, 3 for PM). When an attempt counter exhausts the cap,
 the dispatcher fires a one-time `retry-cap-exhausted` notification — idempotently
-deduped on the issue via an `<!-- daedalus:retry-cap-notified -->` marker comment
-so the same cap-exhaustion is never messaged twice per issue — and posts a
-comment on the card instructing a human to investigate. Route this event to a
+deduped on the issue via a role-scoped `<!-- daedalus:retry-cap-notified:<role> -->`
+marker comment so the same cap-exhaustion is never messaged twice per issue per
+role — and posts a comment on the card instructing a human to investigate. A
+stage-recovery check (`_retry_cap_stage_recovered()`) suppresses the notification
+if the stalled stage has already recovered (running card, open PR, or downstream
+role active), avoiding stale alerts. Route this event to a
 high-visibility channel in the Notifications editor alongside
 `security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
 is unchanged: it posts a per-card comment and stops escalating, but does not
@@ -1409,6 +1412,36 @@ external tool) uses to manage projects. All endpoints live under
 The `/meta/*` endpoints power the dashboard's dropdown selectors when editing
 project config. All config reads pass through `_strip_secrets()` to ensure
 tokens are never echoed back to the UI.
+
+### Authentication (#1130)
+
+Every route under `/api/plugins/daedalus/` is gated by a shared-secret
+dependency (`require_dashboard_auth`). The gate is **fail-closed by default**:
+if no secret is configured and the explicit opt-in is unset, all requests are
+rejected with **HTTP 403**.
+
+| Env var | Purpose |
+|---------|---------|
+| `DAEDALUS_DASHBOARD_TOKEN` | Daedalus-specific shared secret. When set, requests must present it. |
+| `HERMES_DASHBOARD_SESSION_TOKEN` | The value the Hermes dashboard host injects into the SPA. Honored automatically — no frontend change required. |
+| `DAEDALUS_DASHBOARD_AUTH_DISABLED` | Set to `1` for local dev only. Allows unauthenticated access and logs a loud once-per-process warning. **Never use in production.** |
+
+**Credential extraction** — the gate accepts either `X-Hermes-Session-Token`
+(Hermes dashboard SDK) or `Authorization: Bearer <token>` (standard OAuth
+header). Comparison is constant-time via `hmac.compare_digest`.
+
+**Behavior matrix:**
+
+| State | No token presented | Wrong token | Correct token |
+|-------|-------------------|-------------|---------------|
+| Secret configured | 401 | 401 | 200 |
+| No secret, no opt-in | 403 | 403 | 403 |
+| No secret, `AUTH_DISABLED=1` | 200 | 200 | 200 |
+
+When a secret is configured, a missing/malformed/mismatched credential raises
+**HTTP 401**. When no secret is configured and `DAEDALUS_DASHBOARD_AUTH_DISABLED`
+is not set, the request is rejected with **HTTP 403** regardless of the
+presented credential — the API is closed by default.
 
 ---
 

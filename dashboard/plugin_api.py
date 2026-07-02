@@ -14,7 +14,9 @@ Endpoints:
 
 from __future__ import annotations
 
+import hmac
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,7 +28,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 # ConfigLoader + deep_merge live in the daedalus package root (config/__init__.py).
 # When the dashboard host runs, it adds the plugin dir to sys.path so
@@ -117,6 +119,102 @@ except ImportError:
 projects_router = APIRouter(prefix="/projects", tags=["daedalus-projects"])
 project_config_router = APIRouter(prefix="/project", tags=["daedalus-project-config"])
 meta_router = APIRouter(prefix="/meta", tags=["daedalus-meta"])
+
+
+# ── Authentication ───────────────────────────────────────────────────────────
+# Every route under the daedalus plugin API prefix is gated by a shared secret.
+# Without this, any local process (or network peer, if the dashboard binds a
+# non-loopback interface) can read/corrupt configs, trigger dispatches, delete
+# projects, and send messages to configured notification platforms. See #1130.
+
+_auth_log = logging.getLogger("daedalus.dashboard.auth")
+
+# Env vars that may carry the gating secret, in priority order.
+#   DAEDALUS_DASHBOARD_TOKEN        — daedalus-specific override.
+#   HERMES_DASHBOARD_SESSION_TOKEN  — the value the Hermes dashboard host injects
+#     into ``window.__HERMES_SESSION_TOKEN__`` (hermes_cli/web_server.py). When
+#     the host sets it, the SPA's ``Authorization: Bearer`` / session-token
+#     header validates against the same secret with no frontend change.
+_AUTH_TOKEN_ENV_KEYS = ("DAEDALUS_DASHBOARD_TOKEN", "HERMES_DASHBOARD_SESSION_TOKEN")
+
+# Explicit opt-in env var that disables auth for local dev. When set to "1",
+# requests are allowed without a token and a loud warning is logged. This is
+# the ONLY way to get unauthenticated access — the default is fail-closed.
+_AUTH_DISABLED_ENV_KEY = "DAEDALUS_DASHBOARD_AUTH_DISABLED"
+
+# Emit the "auth disabled" warning at most once per process so a polling
+# dashboard doesn't spam the log. Reset in tests to assert the warning fires.
+_auth_warning_emitted = False
+
+
+def _configured_dashboard_token() -> str:
+    """Return the first non-empty gating secret from the environment, or ''.
+
+    Resolved at request time (not import time) so a token provisioned after the
+    plugin loads still takes effect without a restart.
+    """
+    for key in _AUTH_TOKEN_ENV_KEYS:
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
+def _presented_token(request: Request) -> str:
+    """Extract the caller's credential from the request headers.
+
+    Accepts ``X-Hermes-Session-Token`` (Hermes dashboard SDK) and
+    ``Authorization: Bearer <token>`` (the daedalus SPA's fetchJSON fallback),
+    mirroring how the Hermes host itself validates the session token.
+    """
+    session_header = (request.headers.get("X-Hermes-Session-Token") or "").strip()
+    if session_header:
+        return session_header
+    auth = request.headers.get("Authorization") or ""
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):].strip()
+    return ""
+
+
+async def require_dashboard_auth(request: Request) -> None:
+    """FastAPI dependency gating every daedalus plugin API route.
+
+    Fail-closed by default: when no secret is configured and the explicit
+    ``DAEDALUS_DASHBOARD_AUTH_DISABLED`` opt-in is NOT set, requests are
+    rejected with ``HTTPException(403)``.
+
+    Opt-in no-auth: set ``DAEDALUS_DASHBOARD_AUTH_DISABLED=1`` to allow
+    unauthenticated requests (local dev only). A loud warning is logged.
+
+    When a secret IS configured, a missing, malformed, or mismatched
+    credential raises ``HTTPException(401)``. The comparison is constant-time
+    via ``hmac.compare_digest``.
+    """
+    expected = _configured_dashboard_token()
+    if not expected:
+        global _auth_warning_emitted
+        # Check explicit opt-in for no-auth mode (local dev).
+        auth_disabled = (os.environ.get(_AUTH_DISABLED_ENV_KEY) or "").strip()
+        if auth_disabled == "1":
+            if not _auth_warning_emitted:
+                _auth_warning_emitted = True
+                _auth_log.warning(
+                    "dashboard auth EXPLICITLY DISABLED via "
+                    "DAEDALUS_DASHBOARD_AUTH_DISABLED=1; all daedalus plugin "
+                    "API routes are UNAUTHENTICATED. This is an explicit opt-in "
+                    "for local dev — NEVER use in production."
+                )
+            return
+        # Fail-closed: no token configured and no explicit opt-in.
+        raise HTTPException(
+            status_code=403,
+            detail="dashboard auth not configured — set "
+                   "DAEDALUS_DASHBOARD_TOKEN or HERMES_DASHBOARD_SESSION_TOKEN, "
+                   "or set DAEDALUS_DASHBOARD_AUTH_DISABLED=1 for local dev.",
+        )
+    presented = _presented_token(request)
+    if not presented or not hmac.compare_digest(presented, expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 def _bootstrap_provider_env() -> None:
@@ -1872,7 +1970,11 @@ async def post_uninstall() -> dict[str, Any]:
 
 # ── Top-level router (defined at end so sub-routers are already populated) ───
 
+# Gate every sub-router with the shared-secret dependency at include time, so
+# all current AND future routes are covered — no endpoint can be accidentally
+# left open (#1130).
+_auth_dep = [Depends(require_dashboard_auth)]
 router = APIRouter(tags=["daedalus"])
-router.include_router(projects_router)
-router.include_router(project_config_router)
-router.include_router(meta_router)
+router.include_router(projects_router, dependencies=_auth_dep)
+router.include_router(project_config_router, dependencies=_auth_dep)
+router.include_router(meta_router, dependencies=_auth_dep)

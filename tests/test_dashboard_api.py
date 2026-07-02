@@ -55,8 +55,13 @@ def registry_repo(tmp_path):
 
 
 @pytest.fixture
-def client(registry_repo):
-    """FastAPI TestClient with the full daedalus router mounted."""
+def client(registry_repo, monkeypatch):
+    """FastAPI TestClient with the full daedalus router mounted.
+
+    Auth bypass is enabled so functional tests (not testing auth) can reach
+    the endpoints. Auth tests explicitly control the env vars themselves.
+    """
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/daedalus")
     return TestClient(app)
@@ -319,8 +324,9 @@ def test_get_projects_graceful_degradation_when_sources_return_nothing(client):
     assert proj["tracking_mode"] in ("github", "kanban")
 
 
-def test_get_projects_empty_registry(registry_repo):
+def test_get_projects_empty_registry(registry_repo, monkeypatch):
     """An empty registry returns an empty list (no global config fallback)."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/daedalus")
     c = TestClient(app)
@@ -382,8 +388,12 @@ def project_repo_dir():
 
 
 @pytest.fixture
-def project_client(project_repo_dir):
-    """Create a FastAPI TestClient with the project config router mounted."""
+def project_client(project_repo_dir, monkeypatch):
+    """Create a FastAPI TestClient with the project config router mounted.
+
+    Auth bypass is enabled so functional tests can reach the endpoints.
+    """
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     # Mount the project config router from plugin_api
     from dashboard.plugin_api import project_config_router
 
@@ -1771,7 +1781,7 @@ class TestMetaTestDeliverEndpoint:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
+def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir, monkeypatch):
     """Build a FastAPI app, mount the unified router, and assert every endpoint
     group (/projects, /project/{name}/config, /meta/notifications) is reachable.
 
@@ -1780,6 +1790,7 @@ def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
     """
     from dashboard.plugin_api import router as unified_router
 
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
     app = FastAPI()
     app.include_router(unified_router, prefix="/api/plugins/daedalus")
     client = TestClient(app)
@@ -1834,7 +1845,7 @@ def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir):
     ]
 
 
-def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
+def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir, monkeypatch):
     """Build a FastAPI app, mount only plugin_api.router, introspect the module
     for all APIRouter instances (config, projects, project_config, meta),
     and assert each one's routes resolve to non-404 responses.
@@ -1845,6 +1856,8 @@ def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir):
     discovers all router instances by name and verifies their routes work.
     """
     import dashboard.plugin_api as papi
+
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
 
     # ── Discover all APIRouter instances in the module ──────────────────
     sub_routers: dict[str, APIRouter] = {}
@@ -2208,3 +2221,144 @@ class TestRegistryNameResolution:
             )
             assert entry is not None
             assert entry["repo"] == "org/test-repo"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Authentication — require_dashboard_auth gates every daedalus plugin route (#1130)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_AUTH_TOKEN = "s3cr3t-dashboard-token"
+_PROJECTS_URL = "/api/plugins/daedalus/projects"
+_RUN_URL = "/api/plugins/daedalus/project/test-project/run"
+_CONFIG_URL = "/api/plugins/daedalus/project/test-project/config"
+_CREATE_URL = "/api/plugins/daedalus/project/create"
+_DELETE_URL = "/api/plugins/daedalus/project/test-project"
+
+
+@pytest.fixture(autouse=True)
+def _clear_auth_env(monkeypatch):
+    """Ensure no stray gating secret or auth-disabled flag leaks between tests."""
+    monkeypatch.delenv("DAEDALUS_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", raising=False)
+
+
+def _bearer(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_get_route_401_without_token_when_configured(client, monkeypatch):
+    """With a secret configured, an unauthenticated GET is rejected 401."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    resp = client.get(_PROJECTS_URL)
+    assert resp.status_code == 401, resp.text
+
+
+def test_get_route_401_with_wrong_token(client, monkeypatch):
+    """A mismatched bearer token is rejected 401 (constant-time compare)."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    resp = client.get(_PROJECTS_URL, headers=_bearer("wrong-token"))
+    assert resp.status_code == 401, resp.text
+
+
+def test_get_route_success_with_bearer_token(client, monkeypatch):
+    """A correct Authorization: Bearer token authenticates a GET."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        resp = client.get(_PROJECTS_URL, headers=_bearer(_AUTH_TOKEN))
+    assert resp.status_code == 200, resp.text
+
+
+def test_get_route_success_with_session_header(client, monkeypatch):
+    """The Hermes X-Hermes-Session-Token header also authenticates."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        resp = client.get(_PROJECTS_URL,
+                           headers={"X-Hermes-Session-Token": _AUTH_TOKEN})
+    assert resp.status_code == 200, resp.text
+
+
+def test_hermes_dashboard_session_token_env_is_honored(client, monkeypatch):
+    """The token the Hermes host injects into the SPA validates unchanged."""
+    monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", _AUTH_TOKEN)
+    assert client.get(_PROJECTS_URL).status_code == 401
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        ok = client.get(_PROJECTS_URL, headers=_bearer(_AUTH_TOKEN))
+    assert ok.status_code == 200, ok.text
+
+
+def test_run_mutation_401_without_token(client, monkeypatch):
+    """The dispatch-trigger mutation is gated: 401 without a token."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    resp = client.post(_RUN_URL)
+    assert resp.status_code == 401, resp.text
+
+
+def test_run_mutation_passes_gate_with_token(client, monkeypatch):
+    """A correct token lets the dispatch-trigger mutation through the gate."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+    with mock.patch("dashboard.plugin_api.subprocess.run", return_value=fake):
+        resp = client.post(_RUN_URL, headers=_bearer(_AUTH_TOKEN))
+    assert resp.status_code != 401, resp.text
+
+
+def test_config_write_mutation_401_without_token(client, monkeypatch):
+    """The config-write mutation is gated: 401 without a token."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    resp = client.post(_CONFIG_URL, json={"cron": {"schedule": "15m"}})
+    assert resp.status_code == 401, resp.text
+
+
+def test_create_mutation_401_without_token(client, monkeypatch):
+    """The project-create mutation is gated: 401 without a token."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    resp = client.post(_CREATE_URL, json={"name": "x", "workdir": "/tmp/x"})
+    assert resp.status_code == 401, resp.text
+
+
+def test_delete_mutation_401_without_token(client, monkeypatch):
+    """The project-delete mutation is gated: 401 without a token."""
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_TOKEN", _AUTH_TOKEN)
+    resp = client.delete(_DELETE_URL)
+    assert resp.status_code == 401, resp.text
+
+
+def test_no_token_configured_rejects_with_403(client, monkeypatch, caplog):
+    """Fail-closed: no secret configured and no explicit opt-in → 403."""
+    import logging as _logging
+
+    import dashboard.plugin_api as plugin_api
+
+    # The `client` fixture sets AUTH_DISABLED=1 for functional tests; remove it
+    # so we test the true fail-closed default.
+    monkeypatch.delenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", raising=False)
+    plugin_api._auth_warning_emitted = False
+    with caplog.at_level(_logging.WARNING, logger="daedalus.dashboard.auth"):
+        with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+            mock_list.return_value = []
+            resp = client.get(_PROJECTS_URL)
+    assert resp.status_code == 403, resp.text
+    assert "auth not configured" in resp.json()["detail"]
+    # No "auth disabled" warning should be logged in fail-closed mode.
+    assert not any("auth" in r.message.lower() and "disabled" in r.message.lower()
+                   for r in caplog.records)
+
+
+def test_auth_disabled_opt_in_allows_request_and_warns(client, monkeypatch, caplog):
+    """DAEDALUS_DASHBOARD_AUTH_DISABLED=1 → request allowed + loud warning."""
+    import logging as _logging
+
+    import dashboard.plugin_api as plugin_api
+
+    monkeypatch.setenv("DAEDALUS_DASHBOARD_AUTH_DISABLED", "1")
+    plugin_api._auth_warning_emitted = False
+    with caplog.at_level(_logging.WARNING, logger="daedalus.dashboard.auth"):
+        with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+            mock_list.return_value = []
+            resp = client.get(_PROJECTS_URL)
+    assert resp.status_code == 200, resp.text
+    assert any("EXPLICITLY DISABLED" in r.message for r in caplog.records)
