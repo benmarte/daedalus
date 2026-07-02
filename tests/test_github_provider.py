@@ -213,6 +213,16 @@ def _gql_mock(provider, mutation_result=None, field_mutation_result=None):
                 {"id": "F_status", "name": "Status", "options": opts},
             ]}}}}
             return {"data": data}
+        if "projectItems(first" in q:
+            # Direct per-issue lookup (issue #1158). NB: this branch must come
+            # before the "items(first" check — "projectItems(first" contains it.
+            number = (payload.get("variables") or {}).get("number")
+            nodes = []
+            for it in ITEMS_GQL["repository"]["projectV2"]["items"]["nodes"] + added_items:
+                if (it.get("content") or {}).get("number") == number:
+                    nodes.append({"id": it["id"], "project": {"number": 1},
+                                  "fieldValueByName": it.get("fieldValueByName")})
+            return {"data": {"repository": {"issue": {"projectItems": {"nodes": nodes}}}}}
         if "items(first" in q:
             import copy
             data = copy.deepcopy(ITEMS_GQL)
@@ -470,3 +480,139 @@ def test_board_add_item_exhaustion_logs_error(sleep, provider, caplog):
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert any("99" in r.getMessage() and "manually" in r.getMessage()
                for r in errors), f"expected ERROR naming issue #99: {[r.getMessage() for r in errors]}"
+
+
+# ── _items() pagination / direct item lookup (issue #1158) ──────────────────
+
+
+def _items_pages_mock(provider, pages):
+    """Serve item-listing pages in sequence across _graphql calls.
+
+    ``pages`` is a list of (nodes, has_next) tuples; a None entry simulates a
+    failed _graphql call (GraphQL errors). The last entry repeats if the loop
+    asks for more pages. Returns a state dict tracking the call count.
+    """
+    state = {"calls": 0}
+
+    def fake_post(path, payload, **kw):
+        q = payload["query"]
+        assert "items(first" in q and "projectItems" not in q, q
+        i = state["calls"]
+        state["calls"] += 1
+        page = pages[min(i, len(pages) - 1)]
+        if page is None:
+            return {"errors": [{"message": "boom"}]}
+        nodes, has_next = page
+        return {"data": {"repository": {"projectV2": {"items": {
+            "pageInfo": {"hasNextPage": has_next, "endCursor": f"c{i}"},
+            "nodes": nodes}}}}}
+    provider._http.post_json.side_effect = fake_post
+    return state
+
+
+def _item_node(n):
+    return {"id": f"I_{n}", "content": {"number": n}, "fieldValueByName": None}
+
+
+def test_items_paginates_past_old_500_cap(provider):
+    """_items() follows hasNextPage past 5 pages (old hard cap — issue #1158)."""
+    pages = [([_item_node(i)], True) for i in range(6)]
+    pages[-1] = ([_item_node(5)], False)
+    _items_pages_mock(provider, pages)
+    items = provider._items()
+    assert [it["number"] for it in items] == [0, 1, 2, 3, 4, 5]
+
+
+def test_items_page_error_returns_partial_without_caching(provider):
+    """A failed page mid-pagination must not poison the cache (issue #1158)."""
+    pages = [([_item_node(0)], True), None, ([_item_node(1)], False)]
+    state = _items_pages_mock(provider, pages)
+    first = provider._items()
+    assert [it["number"] for it in first] == [0]  # partial result returned
+    assert provider._board_items is None, "partial listing must not be cached"
+    # Next call re-fetches (call 3 serves the good final page) and caches.
+    second = provider._items()
+    assert [it["number"] for it in second] == [1]
+    assert provider._board_items == second
+    assert state["calls"] == 3
+
+
+def test_items_safety_cap_stops_runaway_pagination(provider):
+    """hasNextPage forever stops at the 50-page safety cap and still caches."""
+    _items_pages_mock(provider, [([_item_node(0)], True)])
+    items = provider._items()
+    assert len(items) == 50
+    assert provider._board_items == items
+
+
+def test_board_item_for_issue_filters_by_project(provider):
+    """_board_item_for_issue picks the item on the configured project only."""
+    def fake_post(path, payload, **kw):
+        assert "projectItems(first" in payload["query"]
+        return {"data": {"repository": {"issue": {"projectItems": {"nodes": [
+            {"id": "I_OTHER", "project": {"number": 2},
+             "fieldValueByName": {"name": "Done"}},
+            {"id": "I_MINE", "project": {"number": 1},
+             "fieldValueByName": None}]}}}}}
+    provider._http.post_json.side_effect = fake_post
+    item = provider._board_item_for_issue(42)
+    assert item == {"id": "I_MINE", "number": 42, "status": ""}
+
+
+def test_board_item_for_issue_none_when_not_enrolled(provider):
+    _gql_mock(provider)
+    assert provider._board_item_for_issue(4242) is None
+
+
+def test_board_set_status_direct_lookup_when_listing_misses(provider):
+    """Acceptance (b), issue #1158: an enrolled item with null Status that the
+    board listing misses is resolved via the projectItems edge — no re-enroll,
+    status mutation targets the directly-resolved item id."""
+    _gql_mock(provider)
+    base = provider._http.post_json.side_effect
+
+    def side(path, payload, **kw):
+        q = payload["query"]
+        if "projectItems(first" in q and (payload.get("variables") or {}).get("number") == 42:
+            return {"data": {"repository": {"issue": {"projectItems": {"nodes": [
+                {"id": "I_HIDDEN", "project": {"number": 1},
+                 "fieldValueByName": None}]}}}}}
+        return base(path, payload, **kw)
+    provider._http.post_json.side_effect = side
+    assert provider.board_set_status(42, "Ready") is True
+    queries = [(c.args[1] if c.args else c.kwargs.get("payload", {}))
+               for c in provider._http.post_json.call_args_list]
+    assert not any("addProjectV2ItemById" in p.get("query", "") for p in queries), \
+        "must not re-enroll an item that the direct lookup found"
+    update = next(p for p in queries if "updateProjectV2ItemFieldValue" in p.get("query", ""))
+    assert update["variables"]["item"] == "I_HIDDEN"
+
+
+def test_board_set_status_enrollment_retry_uses_direct_lookup(provider):
+    """Post-enrollment retry resolves via projectItems, not a listing re-scan."""
+    _gql_mock(provider)
+    assert provider.board_set_status(99, "Ready") is True
+    queries = [(c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")
+               for c in provider._http.post_json.call_args_list]
+    add_idx = next(i for i, q in enumerate(queries) if "addProjectV2ItemById" in q)
+    assert any("projectItems(first" in q for q in queries[add_idx + 1:]), \
+        "expected a direct projectItems lookup after enrollment"
+
+
+def test_board_ensure_backlog_direct_lookup_skips_reenroll(provider):
+    """board_ensure_backlog must not re-enroll an item the listing misses."""
+    _gql_mock(provider)
+    base = provider._http.post_json.side_effect
+
+    def side(path, payload, **kw):
+        q = payload["query"]
+        if "projectItems(first" in q and (payload.get("variables") or {}).get("number") == 42:
+            return {"data": {"repository": {"issue": {"projectItems": {"nodes": [
+                {"id": "I_HIDDEN", "project": {"number": 1},
+                 "fieldValueByName": None}]}}}}}
+        return base(path, payload, **kw)
+    provider._http.post_json.side_effect = side
+    assert provider.board_ensure_backlog(42) is True
+    queries = [(c.args[1] if c.args else c.kwargs.get("payload", {})).get("query", "")
+               for c in provider._http.post_json.call_args_list]
+    assert not any("addProjectV2ItemById" in q for q in queries)
