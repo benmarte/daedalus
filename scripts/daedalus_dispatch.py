@@ -2624,7 +2624,13 @@ _ESCALATION_MARKER = "<!-- daedalus:escalation-notified -->"
 
 # Stamped on the validator task once a retry-cap-exhausted notification has been
 # sent, so subsequent dispatcher ticks don't re-send the identical alert (#183).
+# Role-scoped variant (#1167): <!-- daedalus:retry-cap-notified:<role> -->
 _RETRY_CAP_MARKER = "<!-- daedalus:retry-cap-notified -->"
+
+
+def _retry_cap_marker_for_role(role: str) -> str:
+    """Return the role-scoped retry-cap marker for the given role (#1167)."""
+    return f"<!-- daedalus:retry-cap-notified:{role} -->"
 
 _RETRY_CAP_NOTIFICATION_MARKER = "RETRY_CAP_NOTIFICATION_SENT"
 
@@ -2884,19 +2890,37 @@ def _has_notified_block(
     issue_number: int,
     validator_profile: str = "validator-daedalus",
     marker: str = _ESCALATION_MARKER,
+    *,
+    role: str = "",
 ) -> bool:
     """Return True if we already sent ``marker``'s notification for this issue.
 
-    Uses the validator kanban task's comments as a persistent, zero-overhead
+    Uses the kanban task comments as a persistent, zero-overhead
     idempotency store — no local JSON files needed. ``marker`` selects which
     one-shot notification to check (block-escalation by default, or
     ``_RETRY_CAP_MARKER`` for retry-cap exhaustion — #183).
+
+    When ``role`` is supplied (#1167), the check is role-scoped: it looks for
+    the role-specific marker ``<!-- daedalus:retry-cap-notified:<role> -->``
+    OR the legacy bare ``<!-- daedalus:retry-cap-notified -->`` for backward
+    compatibility. It also scans cards from ALL pipeline assignees (not just
+    the validator profile) so a marker stamped on a developer or PM card is
+    also found.
     """
+    # Determine which marker strings to look for.
+    markers_to_check = {marker}
+    if role:
+        markers_to_check.add(_retry_cap_marker_for_role(role))
+
     pattern = f"#{issue_number}"
     for task in kanban.list_tasks(slug):
         if pattern not in (task.get("title") or ""):
             continue
-        if (task.get("assignee") or "") != validator_profile:
+        # When role-scoped (#1167), scan all assignees — the marker may have
+        # been stamped on the triggering developer/PM card, not just the
+        # validator card. When not role-scoped (escalation marker), keep the
+        # original validator-only behaviour.
+        if not role and (task.get("assignee") or "") != validator_profile:
             continue
         tid = str(task.get("id") or task.get("task_id") or "")
         if not tid:
@@ -2905,7 +2929,8 @@ def _has_notified_block(
         if not card:
             continue
         for c in card.get("comments") or []:
-            if marker in (c.get("body") or ""):
+            body = c.get("body") or ""
+            if any(m in body for m in markers_to_check):
                 return True
     return False
 
@@ -2915,8 +2940,25 @@ def _mark_notified_block(
     issue_number: int,
     validator_profile: str = "validator-daedalus",
     marker: str = _ESCALATION_MARKER,
-) -> None:
-    """Stamp the validator task with ``marker`` so future ticks skip re-sending."""
+    *,
+    role: str = "",
+    fallback_task_id: str = "",
+) -> bool:
+    """Stamp a kanban task with ``marker`` so future ticks skip re-sending.
+
+    Returns True on success, False when no suitable card was found or the
+    comment failed to post (#1167 — never fail silently).
+
+    When ``role`` is supplied, stamps the role-scoped marker
+    ``<!-- daedalus:retry-cap-notified:<role> -->``.
+
+    Stamp target priority (#1167):
+    1. The validator card for the issue (original behaviour).
+    2. If no validator card is found and ``fallback_task_id`` is provided,
+       stamp the triggering card directly (it always exists in the cap path).
+    3. If neither is found, log a warning and return False.
+    """
+    actual_marker = _retry_cap_marker_for_role(role) if role else marker
     pattern = f"#{issue_number}"
     for task in kanban.list_tasks(slug):
         if pattern not in (task.get("title") or ""):
@@ -2925,8 +2967,142 @@ def _mark_notified_block(
             continue
         tid = str(task.get("id") or task.get("task_id") or "")
         if tid:
-            kanban.comment(slug, tid, marker)
-            return
+            if kanban.comment(slug, tid, actual_marker):
+                return True
+            logger.warning(
+                "dispatch: _mark_notified_block kanban.comment failed for "
+                "issue #%s (role=%s, marker=%s) — marker may not persist",
+                issue_number, role or "n/a", actual_marker,
+            )
+            return False
+    # Fallback: stamp the triggering card directly (#1167).
+    if fallback_task_id:
+        if kanban.comment(slug, fallback_task_id, actual_marker):
+            logger.info(
+                "dispatch: _mark_notified_block used fallback card %s for "
+                "issue #%s (role=%s) — validator card not found",
+                fallback_task_id, issue_number, role or "n/a",
+            )
+            return True
+        logger.warning(
+            "dispatch: _mark_notified_block fallback kanban.comment failed "
+            "for issue #%s (role=%s, card=%s) — marker may not persist",
+            issue_number, role or "n/a", fallback_task_id,
+        )
+        return False
+    logger.warning(
+        "dispatch: _mark_notified_block found no target card for issue #%s "
+        "(role=%s, marker=%s) — notification may re-fire on next tick",
+        issue_number, role or "n/a", actual_marker,
+    )
+    return False
+
+
+def _retry_cap_stage_recovered(
+    slug: str,
+    issue_number: int,
+    role: str,
+    *,
+    profiles: Dict[str, str] | None = None,
+    provider=None,
+    base_branch: str = "",
+) -> bool:
+    """Return True when the stage has recovered and should NOT be notified (#1167).
+
+    A stage is considered recovered when:
+    - A newer card for the same issue+role is running or complete-with-PR/summary.
+    - For role="developer": an open PR referencing the issue exists (even a fork PR
+      or base-mismatch proves the stage isn't stalled — the developer did produce output).
+    - For role="developer": a downstream role card (QA/reviewer) is running or done.
+
+    Provider errors during the PR check fail open to "not recovered" (better one
+    duplicate alert than a silently swallowed real one).
+    """
+    p = profiles or {}
+    pattern = f"#{issue_number}"
+
+    if role == "developer":
+        dev_profile = p.get("developer", "developer-daedalus")
+        dev_state, _ = _developer_task_state(slug, issue_number, dev_profile)
+        if dev_state in ("running", "complete"):
+            return True
+        # Check for downstream role cards (QA, reviewer) that are running or done.
+        for downstream_profile in (
+            p.get("qa", "qa-daedalus"),
+            p.get("reviewer", "reviewer-daedalus"),
+        ):
+            for t in kanban.list_tasks(slug):
+                if pattern not in (t.get("title") or ""):
+                    continue
+                if (t.get("assignee") or "").strip() != downstream_profile:
+                    continue
+                status = (t.get("status") or "").lower()
+                if status in ("running", "done", "complete", "completed"):
+                    return True
+        # Check for an open PR for the issue (provider lookup).
+        if provider is not None:
+            try:
+                pr = provider._pr_for_issue(issue_number)
+                if pr and pr.number:
+                    logger.info(
+                        "dispatch: _retry_cap_stage_recovered: developer PR #%s "
+                        "exists for #%s — suppressing retry-cap notification",
+                        pr.number, issue_number,
+                    )
+                    return True
+            except Exception as exc:
+                logger.warning(
+                    "dispatch: _retry_cap_stage_recovered: _pr_for_issue(#%s) "
+                    "raised %s — failing open (not recovered)",
+                    issue_number, exc,
+                )
+
+    elif role == "pm":
+        pm_profile = p.get("pm", "project-manager-daedalus")
+        pm_state, _ = _pm_task_state(slug, issue_number, pm_profile)
+        if pm_state in ("running", "complete"):
+            return True
+        # Check for downstream role cards (developer) that are running or done.
+        dev_profile = p.get("developer", "developer-daedalus")
+        for t in kanban.list_tasks(slug):
+            if pattern not in (t.get("title") or ""):
+                continue
+            if (t.get("assignee") or "").strip() != dev_profile:
+                continue
+            status = (t.get("status") or "").lower()
+            if status in ("running", "done", "complete", "completed"):
+                return True
+
+    elif role == "validator":
+        val_profile = p.get("validator", "validator-daedalus")
+        # Check for validator cards that are running (not stale/done-empty).
+        for t in kanban.list_tasks(slug):
+            if pattern not in (t.get("title") or ""):
+                continue
+            if (t.get("assignee") or "").strip() != val_profile:
+                continue
+            status = (t.get("status") or "").lower()
+            if status == "running":
+                return True
+            if status in ("done", "complete", "completed"):
+                summary = _get_task_summary(t, slug).lower()
+                if summary.startswith("confirmed"):
+                    return True
+        # Check for downstream role cards (PM, developer) that are running or done.
+        for downstream_profile in (
+            p.get("pm", "project-manager-daedalus"),
+            p.get("developer", "developer-daedalus"),
+        ):
+            for t in kanban.list_tasks(slug):
+                if pattern not in (t.get("title") or ""):
+                    continue
+                if (t.get("assignee") or "").strip() != downstream_profile:
+                    continue
+                status = (t.get("status") or "").lower()
+                if status in ("running", "done", "complete", "completed"):
+                    return True
+
+    return False
 
 
 def _has_downstream_tasks(
@@ -4343,22 +4519,34 @@ def _check_confirmed_validators(
                                     n_nr,
                                     validator_profile=p["validator"],
                                     marker=_RETRY_CAP_MARKER,
+                                    role="pm",
                                 ):
-                                    _send_retry_cap_notification(
-                                        role="pm",
-                                        issue_number=n_nr,
-                                        retry_count=stale_count,
-                                        max_retries=max_pm_retries,
-                                        resolved=resolved,
-                                        dry_run=dry_run,
-                                    )
-                                    if not dry_run:
-                                        _mark_notified_block(
-                                            slug,
+                                    if _retry_cap_stage_recovered(
+                                        slug, n_nr, "pm",
+                                        profiles=p, provider=provider,
+                                    ):
+                                        logger.info(
+                                            "dispatch: PM retry-cap for #%s suppressed "
+                                            "— stage recovered (#1167)",
                                             n_nr,
-                                            validator_profile=p["validator"],
-                                            marker=_RETRY_CAP_MARKER,
                                         )
+                                    else:
+                                        _send_retry_cap_notification(
+                                            role="pm",
+                                            issue_number=n_nr,
+                                            retry_count=stale_count,
+                                            max_retries=max_pm_retries,
+                                            resolved=resolved,
+                                            dry_run=dry_run,
+                                        )
+                                        if not dry_run:
+                                            _mark_notified_block(
+                                                slug,
+                                                n_nr,
+                                                validator_profile=p["validator"],
+                                                marker=_RETRY_CAP_MARKER,
+                                                role="pm",
+                                            )
                                     if provider is not None and not dry_run:
                                         try:
                                             cap_comment = (
@@ -4487,22 +4675,34 @@ def _check_confirmed_validators(
                     n_nr,
                     validator_profile=p["validator"],
                     marker=_RETRY_CAP_MARKER,
+                    role="validator",
                 ):
-                    _send_retry_cap_notification(
-                        role="validator",
-                        issue_number=n_nr,
-                        retry_count=retry_count,
-                        max_retries=max_validator_retries,
-                        resolved=resolved,
-                        dry_run=dry_run,
-                    )
-                    if not dry_run:
-                        _mark_notified_block(
-                            slug,
+                    if _retry_cap_stage_recovered(
+                        slug, n_nr, "validator",
+                        profiles=p, provider=provider,
+                    ):
+                        logger.info(
+                            "dispatch: validator retry-cap for #%s suppressed "
+                            "— stage recovered (#1167)",
                             n_nr,
-                            validator_profile=p["validator"],
-                            marker=_RETRY_CAP_MARKER,
                         )
+                    else:
+                        _send_retry_cap_notification(
+                            role="validator",
+                            issue_number=n_nr,
+                            retry_count=retry_count,
+                            max_retries=max_validator_retries,
+                            resolved=resolved,
+                            dry_run=dry_run,
+                        )
+                        if not dry_run:
+                            _mark_notified_block(
+                                slug,
+                                n_nr,
+                                validator_profile=p["validator"],
+                                marker=_RETRY_CAP_MARKER,
+                                role="validator",
+                            )
                     # Post a GitHub comment so humans see the failure on the issue (t_dee62e1a).
                     # Matches the pattern used in all other validator completion paths
                     # (STOP/BLOCKED/ESCALATE) which post comments via provider.post_issue_comment.
@@ -4545,22 +4745,34 @@ def _check_confirmed_validators(
                         n_nr,
                         validator_profile=p["validator"],
                         marker=_RETRY_CAP_MARKER,
+                        role="validator",
                     ):
-                        _send_retry_cap_notification(
-                            role="validator",
-                            issue_number=n_nr,
-                            retry_count=retry_count,
-                            max_retries=max_validator_retries,
-                            resolved=resolved,
-                            dry_run=dry_run,
-                        )
-                        if not dry_run:
-                            _mark_notified_block(
-                                slug,
+                        if _retry_cap_stage_recovered(
+                            slug, n_nr, "validator",
+                            profiles=p, provider=provider,
+                        ):
+                            logger.info(
+                                "dispatch: validator retry-cap for #%s suppressed "
+                                "— stage recovered (#1167)",
                                 n_nr,
-                                validator_profile=p["validator"],
-                                marker=_RETRY_CAP_MARKER,
                             )
+                        else:
+                            _send_retry_cap_notification(
+                                role="validator",
+                                issue_number=n_nr,
+                                retry_count=retry_count,
+                                max_retries=max_validator_retries,
+                                resolved=resolved,
+                                dry_run=dry_run,
+                            )
+                            if not dry_run:
+                                _mark_notified_block(
+                                    slug,
+                                    n_nr,
+                                    validator_profile=p["validator"],
+                                    marker=_RETRY_CAP_MARKER,
+                                    role="validator",
+                                )
                 continue
             # Intermediate retry — send a distinct "retry-attempt" notification before retrying (#287).
             # Fires only when we are actually about to create a new retry task (not at cap exhaustion).
@@ -4647,22 +4859,34 @@ def _check_confirmed_validators(
                     n,
                     validator_profile=p["validator"],
                     marker=_RETRY_CAP_MARKER,
+                    role="pm",
                 ):
-                    _send_retry_cap_notification(
-                        role="pm",
-                        issue_number=n,
-                        retry_count=stale_count,
-                        max_retries=max_pm_retries,
-                        resolved=resolved,
-                        dry_run=dry_run,
-                    )
-                    if not dry_run:
-                        _mark_notified_block(
-                            slug,
+                    if _retry_cap_stage_recovered(
+                        slug, n, "pm",
+                        profiles=p, provider=provider,
+                    ):
+                        logger.info(
+                            "dispatch: PM retry-cap for #%s suppressed "
+                            "— stage recovered (#1167)",
                             n,
-                            validator_profile=p["validator"],
-                            marker=_RETRY_CAP_MARKER,
                         )
+                    else:
+                        _send_retry_cap_notification(
+                            role="pm",
+                            issue_number=n,
+                            retry_count=stale_count,
+                            max_retries=max_pm_retries,
+                            resolved=resolved,
+                            dry_run=dry_run,
+                        )
+                        if not dry_run:
+                            _mark_notified_block(
+                                slug,
+                                n,
+                                validator_profile=p["validator"],
+                                marker=_RETRY_CAP_MARKER,
+                                role="pm",
+                            )
                     # Post a GitHub comment so humans see the failure on the issue (t_dee62e1a).
                     # Matches the pattern used in all other validator/PM completion paths
                     # which post comments via provider.post_issue_comment.
@@ -5476,24 +5700,39 @@ def _check_completed_developer(
                 n,
                 validator_profile=p.get("validator", _DEFAULT_PROFILES["validator"]),
                 marker=_RETRY_CAP_MARKER,
+                role="developer",
             ):
-                _send_retry_cap_notification(
-                    role="developer",
-                    issue_number=n,
-                    retry_count=stale_count,
-                    max_retries=max_dev_retries,
-                    resolved=resolved,
-                    dry_run=dry_run,
-                )
-                if not dry_run:
-                    _mark_notified_block(
-                        slug,
+                if _retry_cap_stage_recovered(
+                    slug, n, "developer",
+                    profiles=p, provider=provider,
+                ):
+                    logger.info(
+                        "dispatch: developer retry-cap for #%s suppressed "
+                        "— stage recovered (#1167)",
                         n,
-                        validator_profile=p.get(
-                            "validator", _DEFAULT_PROFILES["validator"]
-                        ),
-                        marker=_RETRY_CAP_MARKER,
                     )
+                else:
+                    _send_retry_cap_notification(
+                        role="developer",
+                        issue_number=n,
+                        retry_count=stale_count,
+                        max_retries=max_dev_retries,
+                        resolved=resolved,
+                        dry_run=dry_run,
+                    )
+                    if not dry_run:
+                        _mark_notified_block(
+                            slug,
+                            n,
+                            validator_profile=p.get(
+                                "validator", _DEFAULT_PROFILES["validator"]
+                            ),
+                            marker=_RETRY_CAP_MARKER,
+                            role="developer",
+                            fallback_task_id=str(
+                                task.get("id") or task.get("task_id") or ""
+                            ),
+                        )
                 if provider is not None and not dry_run:
                     try:
                         cap_comment = (
