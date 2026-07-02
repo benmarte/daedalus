@@ -1,10 +1,12 @@
-"""Tests for issue #1183 — gate lookups must find role cards by title.
+"""Tests for issue #1183 — gate lookups must find role cards by ASSIGNEE.
 
 hermes' kanban API no longer returns ``idempotency_key``, so the old
 ``task['idempotency_key'] == 'qa-<n>'`` lookups always missed → every auto-merge
-gate evaluated "not passed" → auto-merge never fired. Gates now match by title
-(``#<n> <Role>:``), anchored after the ``#<n>`` ref so the issue's own title text
-(e.g. ``fix(security):``) can't false-match another role's card.
+gate evaluated "not passed" → auto-merge never fired. Gates now match by the card's
+``assignee`` profile (stable) plus the issue ref in the title — card TITLE formats
+are inconsistent ("#<n> QA:", "QA: verify PR for #<n>", "Review PR for issue #<n>:"),
+and matching assignee also stops the security gate from picking up the developer
+card when the issue title itself contains "fix(security):".
 """
 from __future__ import annotations
 
@@ -17,22 +19,22 @@ sys.path.insert(0, str(ROOT))
 
 from core import iterate  # noqa: E402
 
-# Realistic board: role cards titled "#1140 <Role>: <issue title>" where the
-# issue title itself contains "fix(security):" — the collision trap.
-_TITLE = "fix(security): Azure webhook verification fails open when token header is missing"
+_T = "fix(security): Azure webhook verification fails open when token header is missing"
+# Deliberately varied title formats + a developer card whose title contains
+# "fix(security):" (the collision trap). Match must key off assignee.
 _TASKS = [
-    {"id": "tv", "title": f"#1140 {_TITLE}", "status": "done"},              # validator
-    {"id": "td", "title": f"#1140 Developer: {_TITLE}", "status": "done"},   # developer
-    {"id": "tq", "title": f"#1140 QA: {_TITLE}", "status": "done"},
-    {"id": "tr", "title": f"#1140 Reviewer: {_TITLE}", "status": "done"},
-    {"id": "ts", "title": f"#1140 Security: {_TITLE}", "status": "done"},
-    {"id": "tdoc", "title": f"#1140 Docs: {_TITLE}", "status": "done"},
+    {"id": "tv", "assignee": "validator-daedalus", "title": f"#1140 {_T}", "status": "done"},
+    {"id": "td", "assignee": "developer-daedalus", "title": f"#1140 Developer: {_T}", "status": "done"},
+    {"id": "tq", "assignee": "qa-daedalus", "title": "QA: verify PR for #1140 azure webhook", "status": "done"},
+    {"id": "tr", "assignee": "reviewer-daedalus", "title": "Review PR for issue #1140: azure webhook", "status": "done"},
+    {"id": "ts", "assignee": "security-analyst-daedalus", "title": f"#1140 Security: {_T}", "status": "done"},
+    {"id": "tdoc", "assignee": "documentation-daedalus", "title": f"#1140 Docs: {_T}", "status": "done"},
 ]
 
 _SUMMARIES = {
-    "tq": "qa-passed: PR #1181",
+    "tq": "qa-passed: PR #1181 verified",
     "tr": "review-approved: PR #1181",
-    "ts": "security: cleared — no findings for PR #1181",
+    "ts": "security: cleared — PR #1181 (fix/issue-1140)",
     "td": "review-required: PR #1181 — fix/issue-1140",
 }
 
@@ -45,40 +47,38 @@ def _patched():
     )
 
 
-def test_qa_gate_found_by_title():
+def test_qa_gate_found_despite_nonstandard_title():
     with _patched():
         assert iterate._qa_passed_for_issue("slug", 1140) is True
 
 
-def test_reviewer_gate_found_by_title():
+def test_reviewer_gate_found_despite_nonstandard_title():
     with _patched():
         assert iterate._reviewer_passed_for_issue("slug", 1140) is True
 
 
-def test_security_gate_found_by_title():
+def test_security_gate_found_and_accepts_cleared():
     with _patched():
         assert iterate._security_passed_for_issue("slug", 1140) is True
 
 
 def test_security_gate_does_not_match_developer_card():
-    # The developer card title contains "fix(security):" — the security gate must
-    # NOT pick it up. Its summary is a review-required handoff, not a clearance.
+    # Developer card title contains "fix(security):"; assignee is developer-daedalus,
+    # so the security gate (assignee security-) must NOT pick it up.
     only_dev = [t for t in _TASKS if t["id"] == "td"]
     with mock.patch.multiple(
         iterate.kanban,
         list_tasks=mock.MagicMock(return_value=only_dev),
         show_card=mock.MagicMock(side_effect=lambda slug, cid: {"latest_summary": _SUMMARIES.get(cid, "")}),
     ):
-        # No Security: card present → gate must be False (not fooled by fix(security):).
         assert iterate._security_passed_for_issue("slug", 1140) is False
 
 
-def test_role_card_finder_anchors_after_issue_ref():
+def test_role_finder_matches_by_assignee():
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=_TASKS):
-        sec = iterate._role_cards_for_issue("slug", 1140, "security")
-        assert [c["id"] for c in sec] == ["ts"]  # only the Security: card
-        qa = iterate._role_cards_for_issue("slug", 1140, "qa")
-        assert [c["id"] for c in qa] == ["tq"]
+        assert [c["id"] for c in iterate._role_cards_for_issue("slug", 1140, "security")] == ["ts"]
+        assert [c["id"] for c in iterate._role_cards_for_issue("slug", 1140, "qa")] == ["tq"]
+        assert [c["id"] for c in iterate._role_cards_for_issue("slug", 1140, "reviewer")] == ["tr"]
 
 
 def test_gate_false_when_no_matching_card():
@@ -87,14 +87,14 @@ def test_gate_false_when_no_matching_card():
 
 
 def test_issue_number_boundary_no_prefix_match():
-    # #114 must not match #1140's cards, and vice-versa.
-    tasks = [{"id": "x", "title": "#11400 QA: other", "status": "done"}]
+    # A qa-daedalus card for #11400 must NOT satisfy the #1140 gate.
+    tasks = [{"id": "x", "assignee": "qa-daedalus", "title": "QA: verify PR for #11400", "status": "done"}]
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks):
         assert iterate._role_cards_for_issue("slug", 1140, "qa") == []
 
 
 def test_reviewer_gate_false_on_changes_requested():
-    tasks = [{"id": "tr", "title": f"#1140 Reviewer: {_TITLE}", "status": "done"}]
+    tasks = [{"id": "tr", "assignee": "reviewer-daedalus", "title": "Review PR for issue #1140:", "status": "done"}]
     with mock.patch.multiple(
         iterate.kanban,
         list_tasks=mock.MagicMock(return_value=tasks),
@@ -103,19 +103,8 @@ def test_reviewer_gate_false_on_changes_requested():
         assert iterate._reviewer_passed_for_issue("slug", 1140) is False
 
 
-def test_security_gate_accepts_bare_cleared_verdict():
-    # The security agent emits "security: cleared" (no "no findings" text) — must pass.
-    tasks = [{"id": "ts", "title": f"#1140 Security: {_TITLE}", "status": "done"}]
-    with mock.patch.multiple(
-        iterate.kanban,
-        list_tasks=mock.MagicMock(return_value=tasks),
-        show_card=mock.MagicMock(return_value={"latest_summary": "security: cleared — PR #1181 (fix/issue-1140)"}),
-    ):
-        assert iterate._security_passed_for_issue("slug", 1140) is True
-
-
 def test_security_gate_rejects_flagged_verdict():
-    tasks = [{"id": "ts", "title": f"#1140 Security: {_TITLE}", "status": "done"}]
+    tasks = [{"id": "ts", "assignee": "security-analyst-daedalus", "title": f"#1140 Security: {_T}", "status": "done"}]
     with mock.patch.multiple(
         iterate.kanban,
         list_tasks=mock.MagicMock(return_value=tasks),

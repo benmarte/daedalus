@@ -493,37 +493,41 @@ def _handoff_from_card(card: dict) -> str:
     return (card.get("reason") or "").strip()
 
 
-# Role → the exact title word the dispatcher uses for that role's card, e.g.
-# "#1140 QA: ...", "#1140 Reviewer: ...", "#1140 Security: ...", "#1140 Docs: ...".
-# Gate lookups key off the CARD TITLE (anchored right after the "#<n>" ref)
-# because hermes' kanban list/show API no longer returns ``idempotency_key`` — the
-# old ``qa-<n>`` lookups always missed, so every gate evaluated "not passed" and
-# auto-merge never fired. Anchoring the role word after "#<n>" also avoids a false
-# match when the issue's own title contains e.g. "fix(security):".
-_ROLE_TITLE_WORD: Dict[str, str] = {
-    "qa": "QA",
-    "reviewer": "Reviewer",
-    "security": "Security",
-    "documentation": "Docs",
-    "docs": "Docs",
+# Role → the ASSIGNEE-profile prefix for that role's card. Gate lookups match by
+# assignee (+ the issue ref in the title) rather than a title role-word, because
+# card TITLE formats are inconsistent ("#<n> QA:", "QA: verify PR for #<n>",
+# "Review PR for issue #<n>:"), while the assignee is always the stable role
+# profile. idempotency_key is no longer returned by the kanban API, so assignee is
+# the reliable key; matching assignee also avoids the developer card being picked up
+# by the security gate when the issue title contains "fix(security):".
+_ROLE_ASSIGNEE_PREFIX: Dict[str, str] = {
+    "qa": "qa-",
+    "reviewer": "reviewer-",
+    "security": "security-",
+    "documentation": "documentation-",
+    "docs": "documentation-",
 }
 
 
 def _role_cards_for_issue(slug: str, issue_number: int, role: str) -> List[Dict[str, Any]]:
-    """Return the kanban cards for a given (role, issue), matched by title.
+    """Return the kanban cards for a given (role, issue), matched by assignee.
 
-    Titles are ``#<n> <Role>: <issue title>``. idempotency_key is no longer
-    returned by the kanban API, so the title (with the role word anchored right
-    after the ``#<n>`` reference) is the only stable key available.
+    Matches the assignee profile prefix (stable) plus the issue reference in the
+    title (digit-boundary so #114 != #1140). Title role-words are unreliable — the
+    dispatcher emits several QA/reviewer title formats.
     """
-    word = _ROLE_TITLE_WORD.get(role, role)
-    pat = re.compile(rf"#{issue_number}\s+{re.escape(word)}:", re.IGNORECASE)
+    prefix = _ROLE_ASSIGNEE_PREFIX.get(role, role + "-")
+    pat = re.compile(rf"#{issue_number}(?!\d)")
     try:
         tasks = kanban.list_tasks(slug) or []
     except Exception as e:
         logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
         return []
-    return [t for t in tasks if pat.search(t.get("title") or "")]
+    return [
+        t for t in tasks
+        if (t.get("assignee") or "").strip().lower().startswith(prefix)
+        and pat.search(t.get("title") or "")
+    ]
 
 
 def _role_gate_passed(
@@ -2494,17 +2498,16 @@ def sweep_deferred_merges(
     merged: List[int] = []
     ci_cache: Dict[int, str] = {}
     seen_issues: Set[int] = set()
-    # Match DONE documentation cards by title ("#<n> Docs: ...") — idempotency_key
-    # is no longer returned by the kanban API.
-    docs_pat = re.compile(r"#(\d+)\s+Docs:", re.IGNORECASE)
+    # Match DONE documentation cards by ASSIGNEE (title formats vary; idempotency_key
+    # is no longer returned by the kanban API). Extract the issue number from the
+    # title via the canonical helper.
     for task in tasks:
         if (task.get("status") or "").lower() != "done":
             continue
-        m = docs_pat.search(task.get("title") or "")
-        if not m:
+        if not (task.get("assignee") or "").strip().lower().startswith("documentation-"):
             continue
-        issue_n = int(m.group(1))
-        if issue_n in seen_issues:
+        issue_n = extract_issue_number(task.get("title") or "")
+        if issue_n is None or issue_n in seen_issues:
             continue
         seen_issues.add(issue_n)
         # A closed issue already landed; only still-open issues need merging.
