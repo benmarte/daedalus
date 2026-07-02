@@ -61,10 +61,10 @@ from core import source_specs  # noqa: E402
 from core import sweeper  # noqa: E402
 from core import notify_templates  # noqa: E402
 from core import thread_delivery  # noqa: E402
-from core.notification_sender import (
+from core.notification_sender import (  # noqa: E402
     NotificationPayload,
     send as send_webhook_notification,
-)  # noqa: E402
+)
 from core.providers.base import (  # noqa: E402
     _DECOMP_LANGUAGE_RE,
     _SUB_ISSUE_CHECKLIST_RE,
@@ -1116,7 +1116,7 @@ def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     # list_issues() now paginates automatically, so this is no longer a hard cap.
     page_size = int(filters.get("limit", 100))
     max_issues = filters.get("max_issues")  # optional hard ceiling
-    labels = [l for l in (filters.get("labels") or []) if l]
+    labels = [lbl for lbl in (filters.get("labels") or []) if lbl]
     issues = [
         i.as_dict()
         for i in provider.list_issues(state=state, labels=labels, limit=page_size)
@@ -2667,6 +2667,105 @@ def _validator_github_comment_outcome(
     return ""
 
 
+def _pm_spec_comment(
+    provider,
+    issue_number: int,
+    pm_profile: str = "project-manager-daedalus",
+) -> str:
+    """Return a short head of the issue's '## Implementation Spec' comment, or ''.
+
+    When the PM kanban card completes with an empty summary (hermes
+    premature-completion bug, #1161), the spec the PM posted on the GitHub issue
+    is the only surviving record. Mirrors _validator_github_comment_outcome: scan
+    comments newest-first for one carrying the PM attribution marker in its head
+    and an '## Implementation Spec' heading, and return the first non-empty line
+    after the heading (truncated to 200 chars) for use in an adopted summary.
+
+    The marker strips the trailing profile suffix with rsplit — the validator
+    helper's split('-')[0] would derive 'agent: project' from
+    'project-manager-daedalus' and match unrelated 'project-*' agents.
+    """
+    if provider is None:
+        return ""
+    try:
+        comments = provider.get_issue_comments(issue_number) or []
+    except Exception:
+        return ""
+    role_slug = pm_profile.rsplit("-", 1)[0] if "-" in pm_profile else pm_profile
+    agent_marker = f"agent: {role_slug}"  # "agent: project-manager"
+    for c in reversed(comments):
+        body = c.get("body") or ""
+        body_lower = body.lower()
+        if agent_marker not in body_lower[:300]:
+            continue
+        idx = body_lower.find("## implementation spec")
+        if idx == -1:
+            continue
+        for line in body[idx:].splitlines()[1:]:
+            line = line.strip()
+            if line:
+                return line[:200]
+    return ""
+
+
+def _try_adopt_pm_spec_comment(
+    slug: str,
+    issue_number: int,
+    pm_profile: str,
+    provider,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Self-heal a stale PM card by adopting the issue's spec comment (#1161).
+
+    Rewrites the newest done PM card lacking a SPEC:/assigned: summary so that
+    _check_completed_pm sees a SPEC: outcome and fans out the team — instead of
+    retrying PM to the cap and stalling for manual `hermes kanban edit` recovery.
+    Returns True when adopted (caller must skip retry and cap notification).
+    """
+    head = _pm_spec_comment(provider, issue_number, pm_profile)
+    if not head:
+        return False
+    if dry_run:
+        logger.info(
+            "[dry-run] PM card for #%s lacks SPEC: but issue has an Implementation "
+            "Spec comment — would adopt it as the card summary",
+            issue_number,
+        )
+        return True
+    # Newest done PM spec card without SPEC:/assigned: (same filter as _pm_task_state).
+    pattern = f"#{issue_number}"
+    target_tid = ""
+    for t in kanban.list_tasks(slug):
+        if pattern not in (t.get("title") or ""):
+            continue
+        if (t.get("assignee") or "").strip() != pm_profile:
+            continue
+        if (t.get("title") or "").lower().startswith("consult:"):
+            continue
+        if (t.get("status") or "").lower() not in ("done", "complete", "completed"):
+            continue
+        s = _get_task_summary(t, slug).lower()
+        if s.startswith("spec:") or s.startswith("assigned:"):
+            continue
+        tid = str(t.get("id") or t.get("task_id") or "")
+        if tid:
+            target_tid = tid  # list order is creation order — keep the newest
+    if not target_tid:
+        return False
+    if not kanban.edit_summary(
+        slug, target_tid, f"SPEC: (adopted from issue comment) {head}"
+    ):
+        return False
+    logger.warning(
+        "dispatch: PM card %s for #%s lacked SPEC: but issue has an Implementation "
+        "Spec comment — auto-adopted it as the card summary (#1161)",
+        target_tid,
+        issue_number,
+    )
+    return True
+
+
 def _has_notified_block(
     slug: str,
     issue_number: int,
@@ -4106,6 +4205,12 @@ def _check_confirmed_validators(
                         # unbounded PM tasks — observed: 6 consecutive empty-summary
                         # PM runs for one issue with no cap enforcement.
                         if pm_state == "stale":
+                            # Self-heal (#1161): adopt the issue's spec comment
+                            # instead of retrying (mirrors the primary path).
+                            if _try_adopt_pm_spec_comment(
+                                slug, n_nr, p["pm"], provider, dry_run=dry_run
+                            ):
+                                continue
                             max_pm_retries = _resolve_max_pm_retries(
                                 (resolved or {}).get("execution") or {}
                             )
@@ -4409,6 +4514,11 @@ def _check_confirmed_validators(
         if pm_state in ("running", "complete"):
             continue  # PM task active or properly done
         if pm_state == "stale":
+            # Self-heal (#1161): the PM may have posted a full spec comment on
+            # the issue even though its card completed with an empty summary.
+            # Adopt it instead of retrying — _check_completed_pm then fans out.
+            if _try_adopt_pm_spec_comment(slug, n, p["pm"], provider, dry_run=dry_run):
+                continue
             max_pm_retries = _resolve_max_pm_retries(
                 (resolved or {}).get("execution") or {}
             )
@@ -4821,7 +4931,9 @@ def _planner_not_suitable_validator_body(
     """
     n, title, body, _ = _unpack_issue(issue)
     _h = _resolve_howtos(provider_name, repo, n)
-    security_notify_cmds = _build_security_notify_cmds(
+    # NOTE: built but not yet interpolated into the body below — unlike the other
+    # validator body builders (see ~1962/~2184). Kept as-is pending a scoped fix.
+    _security_notify_cmds = _build_security_notify_cmds(
         repo, n, title, security_targets or []
     )
     _body = (
