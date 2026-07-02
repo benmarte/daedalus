@@ -321,6 +321,10 @@ def _wait_for_agent_cmd(
     err = f"/tmp/{pfx}-{issue_number}-err.txt"
     pid = f"/tmp/{pfx}-{issue_number}-pid.txt"
     detect = "$HOME/.hermes/plugins/daedalus/scripts/daedalus-detect-pr.sh"
+    # Pass the deterministic branch so detection is race-free (the developer runs
+    # in an isolated worktree on fix/issue-<N>; reading the shared HEAD would
+    # report another concurrent agent's branch — the #1131 cross-wire loop).
+    detect_branch = f"fix/issue-{issue_number}" if issue_number else ""
     # No double quotes anywhere — this whole string is embedded inside a
     # terminal("...") call, so a literal " would terminate it early. An empty or
     # stale PID makes ``kill -0`` exit non-zero (treated as dead), which is the
@@ -331,7 +335,7 @@ def _wait_for_agent_cmd(
     # loop without consuming a 30s sleep when a PR was just found. {out} is a
     # space-free /tmp path so it needs no quoting.
     detect_step = (
-        f"bash {detect} {out} {pid} 2>/dev/null; [ -s {out} ] && break; "
+        f"bash {detect} {out} {pid} {detect_branch} 2>/dev/null; [ -s {out} ] && break; "
         if detect_pr
         else ""
     )
@@ -417,8 +421,45 @@ _CLOUD_AGENT_LABELS: Dict[str, str] = {
 }
 
 
+def _spawn_step3(
+    pfx: str, issue_number: int, run_cmd: str, role: str, base_branch: str
+) -> str:
+    """Build the step-3 ``terminal(...)`` spawn line for the delegated coding agent.
+
+    For the developer role the agent is launched inside a dedicated per-issue git
+    worktree (branch ``fix/issue-<N>`` forked off freshly-fetched ``origin/<base>``)
+    via ``daedalus-worktree-spawn.sh``. This isolates concurrent developers so they
+    never share a working tree — the fix for the shared-workdir branch/PR cross-wire
+    race (a #1131-style CODING_AGENT_DIED loop). Every worktree forks off *current*
+    ``base`` (the wrapper fetches first) to minimise merge conflicts.
+
+    Other roles keep the original in-place spawn (they run against an existing PR
+    and do not create branches).
+    """
+    tmp = f"/tmp/{pfx}-{issue_number}-task.txt"
+    outf = f"/tmp/{pfx}-{issue_number}-out.txt"
+    errf = f"/tmp/{pfx}-{issue_number}-err.txt"
+    pidf = f"/tmp/{pfx}-{issue_number}-pid.txt"
+    if role == "developer":
+        spawn = (
+            "$HOME/.hermes/plugins/daedalus/scripts/daedalus-worktree-spawn.sh "
+            f"{issue_number} {base_branch} {tmp} {outf} {errf} {run_cmd}"
+        )
+        return (
+            f"  3. terminal(\"bash -c 'echo $$ > {pidf}; exec {spawn}'\", background=True)\n"
+        )
+    return (
+        f"  3. terminal(\"bash -c 'echo $$ > {pidf}; "
+        f"{run_cmd} < {tmp} > {outf} 2> {errf}'\", background=True)\n"
+    )
+
+
 def _build_delegation_instructions(
-    agent: str, cmd: str = "", role: str = "developer", issue_number: int = 0
+    agent: str,
+    cmd: str = "",
+    role: str = "developer",
+    issue_number: int = 0,
+    base_branch: str = "dev",
 ) -> str:
     """Return delegation instruction text to inject into any role's task body.
 
@@ -426,6 +467,7 @@ def _build_delegation_instructions(
     ``role`` selects role-specific post-spawn steps (what to do with the output).
     ``issue_number`` scopes the /tmp task/out filenames so concurrent tasks for
     different issues never clobber each other's files (issue #114).
+    ``base_branch`` is the branch the developer's isolated worktree forks off.
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
     pfx = _ROLE_TMP_PREFIX.get(role, role)
@@ -466,7 +508,7 @@ def _build_delegation_instructions(
             + "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
-            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
             + after
         )
     if agent == "codex":
@@ -478,7 +520,7 @@ def _build_delegation_instructions(
             + "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
-            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
             + after
         )
     if agent == "opencode":
@@ -490,7 +532,7 @@ def _build_delegation_instructions(
             + "  Steps:\n"
             "  1. Copy the full task body from this card.\n"
             f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
-            f"  3. terminal(\"bash -c 'echo $$ > /tmp/{pfx}-{issue_number}-pid.txt; {run_cmd} < /tmp/{pfx}-{issue_number}-task.txt > /tmp/{pfx}-{issue_number}-out.txt 2> /tmp/{pfx}-{issue_number}-err.txt'\", background=True)\n"
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
             + after
         )
     return ""
@@ -505,6 +547,7 @@ def _prepend_delegation(
     *,
     append: bool = False,
     trailing: str = "\n\n",
+    base_branch: str = "dev",
 ) -> str:
     """Inject the agent-delegation block into a role body.
 
@@ -522,7 +565,8 @@ def _prepend_delegation(
     if coding_agent in ("none", "hermes"):
         return body
     block = _build_delegation_instructions(
-        coding_agent, coding_agent_cmd, role=role, issue_number=issue_number
+        coding_agent, coding_agent_cmd, role=role, issue_number=issue_number,
+        base_branch=base_branch,
     )
     if append:
         return body + block + trailing
@@ -2045,7 +2089,8 @@ def _task_body(
         f"--- Issue #{n} ---\n{body}\n"
     )
     return _prepend_delegation(
-        _body, coding_agent, coding_agent_cmd, issue_number=n, append=True, trailing=""
+        _body, coding_agent, coding_agent_cmd, issue_number=n, append=True, trailing="",
+        base_branch=base_branch,
     )
 
 
@@ -2402,7 +2447,8 @@ def _downstream_body(
         f"\n--- Issue #{n} ---\n{body}\n"
     )
     return _prepend_delegation(
-        _body, coding_agent, coding_agent_cmd, issue_number=n, append=True, trailing=""
+        _body, coding_agent, coding_agent_cmd, issue_number=n, append=True, trailing="",
+        base_branch=base_branch,
     )
 
 
@@ -2435,8 +2481,12 @@ def _dev_task_body(
             f"  /build         → implement one thin slice at a time, verify before expanding\n"
             f"  /test          → write the failing test first, then make it pass\n"
             f"⛔ Do NOT run /ship — the dispatcher owns the merge step.\n"
-            f"Branch: `git checkout {base_branch} && git pull && git checkout -b fix/issue-{n}-<slug>`\n"
-            f"Always branch off `{base_branch}`, never off main or any other branch.\n"
+            f"BRANCH (already set up for you): you are running inside a dedicated git "
+            f"worktree already checked out on branch `fix/issue-{n}`, forked from the "
+            f"current `{base_branch}`. Do NOT run `git checkout`, `git switch`, or create "
+            f"any branch — just implement here. Commit your work and push with "
+            f"`git push -u origin fix/issue-{n}` (use `--force-with-lease` if the remote "
+            f"branch already exists from a prior attempt).\n"
             f"Iterate up to {iterations}x if tests fail.\n\n"
             f"### 2. Lint before pushing\n"
             f"Run whichever is configured, skip gracefully if absent:\n"
@@ -2460,6 +2510,7 @@ def _dev_task_body(
         coding_agent,
         coding_agent_cmd,
         issue_number=n,
+        base_branch=base_branch,
     )
     return _body
 
