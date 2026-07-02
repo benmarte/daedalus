@@ -69,7 +69,7 @@ class GitHubProvider(VCSProvider):
         to apply a hard ceiling on the total result count.
         """
         per_page = min(limit, 100)
-        label_sets = [[l] for l in (labels or []) if l] or [[]]
+        label_sets = [[lb] for lb in (labels or []) if lb] or [[]]
         seen: Dict[int, IssueSummary] = {}
         for ls in label_sets:
             params: Dict[str, Any] = {"state": state, "per_page": per_page}
@@ -94,7 +94,7 @@ class GitHubProvider(VCSProvider):
                     seen[num] = IssueSummary(
                         number=num, title=it.get("title") or "",
                         body=it.get("body") or "",
-                        labels=[l.get("name", "") for l in it.get("labels") or []],
+                        labels=[lb.get("name", "") for lb in it.get("labels") or []],
                         state=(it.get("state") or "open").lower(),
                         url=it.get("html_url") or "")
         return list(seen.values())
@@ -146,7 +146,7 @@ class GitHubProvider(VCSProvider):
             number=data.get("number", issue_number),
             title=data.get("title") or "",
             body=data.get("body") or "",
-            labels=[l.get("name", "") for l in data.get("labels") or []],
+            labels=[lb.get("name", "") for lb in data.get("labels") or []],
             state=(data.get("state") or "open").lower(),
             url=data.get("html_url") or "",
         )
@@ -425,7 +425,7 @@ class GitHubProvider(VCSProvider):
                 old_content = ""
         new_content = entry.rstrip("\n") + "\n\n" + old_content
         payload: Dict[str, Any] = {
-            "message": f"docs: update CHANGELOG.md [skip ci]",
+            "message": "docs: update CHANGELOG.md [skip ci]",
             "content": _b64.b64encode(new_content.encode()).decode(),
             "branch": base_branch,
         }
@@ -807,5 +807,5 @@ class GitHubProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("list_labels failed: %s", e)
             return []
-        return [LabelDef(name=l.get("name") or "", color=l.get("color") or "")
-                for l in data or [] if l.get("name")]
+        return [LabelDef(name=lb.get("name") or "", color=lb.get("color") or "")
+                for lb in data or [] if lb.get("name")]
