@@ -1,3 +1,7 @@
+## [fix(security): use timing-safe comparison for GitLab webhook token](https://github.com/benmarte/daedalus/issues/1129) — [PR #1174](https://github.com/benmarte/daedalus/pull/1174)
+
+The GitLab webhook handler in `core/webhook_normalizer.py` verified the inbound `X-Gitlab-Token` header against the configured secret with a plain `!=` string comparison, which short-circuits on the first mismatching byte and leaks token length/prefix information through response timing. The fix replaces the comparison with `hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8"))`, giving a constant-time check that closes the timing side-channel. Behavior is otherwise unchanged — valid tokens still pass, invalid tokens still return `False`. A regression test spies on `hmac.compare_digest` to assert the timing-safe path is taken.
+
 ## [fix(security): delimit untrusted issue content in agent prompts; escape title in security-notify command](https://github.com/benmarte/daedalus/issues/1131) — [PR #1175](https://github.com/benmarte/daedalus/pull/1175)
 
 ## [fix(security): delimit untrusted issue content in agent prompts; escape title in security-notify command](https://github.com/benmarte/daedalus/issues/1131)
