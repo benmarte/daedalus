@@ -69,7 +69,7 @@ class GitHubProvider(VCSProvider):
         to apply a hard ceiling on the total result count.
         """
         per_page = min(limit, 100)
-        label_sets = [[l] for l in (labels or []) if l] or [[]]
+        label_sets = [[lb] for lb in (labels or []) if lb] or [[]]
         seen: Dict[int, IssueSummary] = {}
         for ls in label_sets:
             params: Dict[str, Any] = {"state": state, "per_page": per_page}
@@ -94,7 +94,7 @@ class GitHubProvider(VCSProvider):
                     seen[num] = IssueSummary(
                         number=num, title=it.get("title") or "",
                         body=it.get("body") or "",
-                        labels=[l.get("name", "") for l in it.get("labels") or []],
+                        labels=[lb.get("name", "") for lb in it.get("labels") or []],
                         state=(it.get("state") or "open").lower(),
                         url=it.get("html_url") or "")
         return list(seen.values())
@@ -146,7 +146,7 @@ class GitHubProvider(VCSProvider):
             number=data.get("number", issue_number),
             title=data.get("title") or "",
             body=data.get("body") or "",
-            labels=[l.get("name", "") for l in data.get("labels") or []],
+            labels=[lb.get("name", "") for lb in data.get("labels") or []],
             state=(data.get("state") or "open").lower(),
             url=data.get("html_url") or "",
         )
@@ -425,7 +425,7 @@ class GitHubProvider(VCSProvider):
                 old_content = ""
         new_content = entry.rstrip("\n") + "\n\n" + old_content
         payload: Dict[str, Any] = {
-            "message": f"docs: update CHANGELOG.md [skip ci]",
+            "message": "docs: update CHANGELOG.md [skip ci]",
             "content": _b64.b64encode(new_content.encode()).decode(),
             "branch": base_branch,
         }
@@ -534,10 +534,18 @@ class GitHubProvider(VCSProvider):
                          ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }"""
         items: List[Dict[str, Any]] = []
         cursor = None
-        for _ in range(5):  # ≤500 items, parity with the old --limit 200
+        max_pages = 50  # safety cap (~5000 items); real boards never hit this
+        for page_num in range(1, max_pages + 1):
             data = self._graphql(q, {"owner": self.owner,
                                      "name": self.repo.split("/", 1)[1],
                                      "number": int(self._board_number or 0), "cursor": cursor})
+            if data is None:
+                # Page fetch failed — return what we have, but leave the cache
+                # empty so the next call re-fetches instead of serving a
+                # silently-truncated listing (issue #1158).
+                self._log.warning("board: items page %d fetch failed — "
+                                  "partial listing not cached", page_num)
+                return items
             block = (((data or {}).get("repository") or {}).get("projectV2") or {}).get("items") or {}
             for n in block.get("nodes") or []:
                 items.append({
@@ -548,8 +556,42 @@ class GitHubProvider(VCSProvider):
             if not page.get("hasNextPage"):
                 break
             cursor = page.get("endCursor")
+        else:
+            self._log.warning("board: item listing hit the %d-page safety cap "
+                              "(%d items) — listing may be incomplete",
+                              max_pages, len(items))
         self._board_items = items
         return items
+
+    def _board_item_for_issue(self, issue_number: int) -> Optional[Dict[str, Any]]:
+        """Resolve an issue's project item directly via its projectItems edge.
+
+        Fallback for when the board listing misses an enrolled item (page-error
+        truncation or the pagination safety cap — issue #1158). Returns the
+        same shape as ``_items()`` entries, or None if the issue has no item on
+        the configured project.
+        """
+        q = """query($owner:String!,$name:String!,$number:Int!){
+                 repository(owner:$owner,name:$name){
+                   issue(number:$number){
+                     projectItems(first:20){
+                       nodes{ id
+                         project{ number }
+                         fieldValueByName(name:"Status"){
+                           ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }"""
+        data = self._graphql(q, {"owner": self.owner,
+                                 "name": self.repo.split("/", 1)[1],
+                                 "number": issue_number})
+        nodes = (((((data or {}).get("repository") or {}).get("issue") or {})
+                  .get("projectItems") or {}).get("nodes") or [])
+        for n in nodes:
+            if not n or not n.get("id"):
+                continue
+            if ((n.get("project") or {}).get("number")) != int(self._board_number or 0):
+                continue
+            return {"id": n["id"], "number": issue_number,
+                    "status": ((n.get("fieldValueByName") or {}).get("name") or "")}
+        return None
 
     def invalidate_board_cache(self) -> None:
         self._board_items = None
@@ -675,9 +717,12 @@ class GitHubProvider(VCSProvider):
         """
         if not self.board_configured():
             return False
-        # Check if already on the board.
+        # Check if already on the board — the listing can miss enrolled items
+        # (issue #1158), so fall back to the direct per-issue lookup.
         current_item = next((it for it in self._items()
                              if it.get("number") == issue_number), None)
+        if not current_item:
+            current_item = self._board_item_for_issue(issue_number)
         if not current_item:
             added = self._board_add_item(issue_number)
             if not added:
@@ -703,14 +748,17 @@ class GitHubProvider(VCSProvider):
         current_item = next((it for it in self._items()
                              if it.get("number") == issue_number), None)
         if not current_item:
+            # The listing can miss enrolled items (issue #1158) — resolve via
+            # the issue's projectItems edge before assuming it needs enrolling.
+            current_item = self._board_item_for_issue(issue_number)
+        if not current_item:
             # Auto-enroll: item not on project yet — add it first, then retry status.
             self._log.info("board: #%s not on project #%s — auto-enrolling",
                            issue_number, self._board_number)
             added = self._board_add_item(issue_number)
             if not added:
                 return False
-            current_item = next((it for it in self._items()
-                                 if it.get("number") == issue_number), None)
+            current_item = self._board_item_for_issue(issue_number)
             if not current_item:
                 self._log.warning("board: issue #%s still not found after enrollment",
                                   issue_number)
@@ -759,5 +807,5 @@ class GitHubProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("list_labels failed: %s", e)
             return []
-        return [LabelDef(name=l.get("name") or "", color=l.get("color") or "")
-                for l in data or [] if l.get("name")]
+        return [LabelDef(name=lb.get("name") or "", color=lb.get("color") or "")
+                for lb in data or [] if lb.get("name")]

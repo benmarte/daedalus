@@ -253,7 +253,10 @@ enrolls it on the configured project board (when present) with dependency-aware 
 tier-0 sub-issues (no dependencies) land in **Ready**; dependent sub-issues land in **Todo**.
 Enrollment failures are logged and non-fatal so sibling sub-issues still get processed.
 This ensures sub-issues are visible on the board immediately after decomposition, not just
-after they pick up the `Ready` label via tier promotion.
+after they pick up the `Ready` label via tier promotion. Board item lookup is resilient to
+pagination truncation and partial page failures: if the cached board listing misses an
+enrolled item (e.g., null Status or beyond the old 500-item cap), a direct per-issue
+`projectItems` GraphQL lookup resolves it as a fallback (#1158).
 
 **Not-suitable fallback.** When the planner completes its card but concludes the parent
 issue is not suitable for decomposition (e.g., already small, blocked on a dependency),
