@@ -373,8 +373,8 @@ def _read_fix_attempts(workdir: str) -> Dict[str, int]:
         if Path(path).is_file():
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("iterate: failed to read fix-attempts counter for %s: %s", workdir, exc)
     return {}
 
 

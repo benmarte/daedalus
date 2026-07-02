@@ -129,6 +129,12 @@ meta_router = APIRouter(prefix="/meta", tags=["daedalus-meta"])
 
 _auth_log = logging.getLogger("daedalus.dashboard.auth")
 
+# Module logger for degrade-gracefully paths. These handlers intentionally return
+# a fallback ([], {}, None) so the dashboard keeps rendering, but a silent swallow
+# hides the root cause (malformed config, missing token, CLI failure). Log the
+# exception detail at each site so failures are diagnosable. See #1133.
+logger = logging.getLogger("daedalus.dashboard.plugin_api")
+
 # Env vars that may carry the gating secret, in priority order.
 #   DAEDALUS_DASHBOARD_TOKEN        — daedalus-specific override.
 #   HERMES_DASHBOARD_SESSION_TOKEN  — the value the Hermes dashboard host injects
@@ -368,7 +374,8 @@ def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
     if rc == 0:
         try:
             platforms = json.loads(out or "{}").get("platforms") or {}
-        except Exception:
+        except Exception as exc:
+            logger.warning("send-list: failed to parse `hermes send --list --json` output: %s", exc)
             platforms = {}
 
         if platforms:
@@ -471,7 +478,8 @@ def _fetch_project_tasks(slug: str) -> Optional[list[dict[str, Any]]]:
         return None
     try:
         return list_tasks(slug)
-    except Exception:
+    except Exception as exc:
+        logger.warning("kanban: list_tasks failed for board %r: %s", slug, exc)
         return None
 
 
@@ -508,7 +516,8 @@ def _needs_attention(slug: str, all_tasks: Optional[list[dict[str, Any]]] = None
     if tasks is None:
         try:
             tasks = list_tasks(slug)
-        except Exception:
+        except Exception as exc:
+            logger.warning("kanban: list_tasks failed for board %r (needs-attention): %s", slug, exc)
             return None
     items: list[dict[str, str]] = []
     for t in (tasks or []):
@@ -535,7 +544,9 @@ def _project_provider(resolved: dict[str, Any]):
         return None
     try:
         return get_provider(resolved)
-    except Exception:
+    except Exception as exc:
+        logger.warning("vcs: failed to build provider for project %r — check vcs config and token: %s",
+                       resolved.get("name") or resolved.get("repo"), exc)
         return None
 
 
@@ -548,7 +559,8 @@ def _open_prs(provider) -> Optional[dict[str, Any]]:
         return None
     try:
         prs = provider.list_prs(state="open", limit=20)
-    except Exception:
+    except Exception as exc:
+        logger.warning("vcs: list_prs failed: %s", exc)
         return None
     if not prs:
         return None
@@ -558,7 +570,8 @@ def _open_prs(provider) -> Optional[dict[str, Any]]:
         if pr.number is not None and provider.supports_ci_status:
             try:
                 ci_status = provider.get_pr_ci_status(int(pr.number))
-            except Exception:
+            except Exception as exc:
+                logger.warning("vcs: get_pr_ci_status failed for PR #%s: %s", pr.number, exc)
                 ci_status = None
         pr_list.append({
             "number": pr.number,
@@ -609,7 +622,8 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
     if registry is not None:
         try:
             registry_repos = registry.list_projects()
-        except Exception:
+        except Exception as exc:
+            logger.warning("registry: list_projects failed — project list will be empty: %s", exc)
             registry_repos = []
 
     # Deduplicate while preserving order.
@@ -628,7 +642,9 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
     def _build_one(repo_path: str) -> dict[str, Any]:
         try:
             resolved = loader.resolve_repo_config(repo_path)
-        except Exception:
+        except Exception as exc:
+            logger.warning("config: resolve_repo_config failed for %r — showing registry-only entry: %s",
+                           repo_path, exc)
             return _build_registry_only_entry(repo_path, Path(repo_path).name, cron_all)
         return _build_project_entry(resolved, cron_all)
 
@@ -745,14 +761,16 @@ def _resolve_project_path(name: str) -> Path:
 
     try:
         repo_paths = registry.list_projects()
-    except Exception:
+    except Exception as exc:
+        logger.warning("registry: list_projects failed while locating workdir: %s", exc)
         repo_paths = []
 
     loader = ConfigLoader()
     for rp in repo_paths:
         try:
             resolved = loader.resolve_repo_config(rp)
-        except Exception:
+        except Exception as exc:
+            logger.warning("config: resolve_repo_config failed for %r — skipping: %s", rp, exc)
             continue
         if resolved.get("name") == name:
             return Path(rp)
@@ -1028,7 +1046,8 @@ async def create_project(request: Request) -> dict[str, Any]:
     if detect_repo_vcs is not None and not (body_vcs or {}).get("provider"):
         try:
             detected = detect_repo_vcs(str(workdir_path))
-        except Exception:
+        except Exception as exc:
+            logger.warning("vcs: detect_repo_vcs failed for %s: %s", workdir_path, exc)
             detected = None
     if not repo and detected:
         repo = detected["repo"]
@@ -1108,7 +1127,8 @@ async def create_project(request: Request) -> dict[str, Any]:
         try:
             registry.add_project(str(workdir_path))
             registered = True
-        except Exception:
+        except Exception as exc:
+            logger.warning("registry: add_project failed for %s: %s", workdir_path, exc)
             registered = False
 
     # Each project gets its OWN kanban board (idempotent create).
