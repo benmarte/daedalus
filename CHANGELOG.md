@@ -1,3 +1,5 @@
+## [fix: CHANGELOG.md prepend causes merge conflicts between concurrent PRs](https://github.com/benmarte/daedalus/issues/1179) — [PR #1197](https://github.com/benmarte/daedalus/pull/1197)
+
 ## [fix: paginate _board_item_for_issue projectItems + deduplicate board item fallback logic](https://github.com/benmarte/daedalus/issues/1171) — [PR #1196](https://github.com/benmarte/daedalus/pull/1196)
 
 ## [fix: paginate _board_item_for_issue projectItems + deduplicate board item fallback logic](https://github.com/benmarte/daedalus/issues/1171) — [PR #1196](https://github.com/benmarte/daedalus/pull/1196)
