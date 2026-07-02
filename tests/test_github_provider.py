@@ -564,6 +564,62 @@ def test_board_item_for_issue_none_when_not_enrolled(provider):
     assert provider._board_item_for_issue(4242) is None
 
 
+def _project_items_pages_mock(provider, pages):
+    """Serve projectItems pages in sequence across _graphql calls (issue #1171).
+
+    ``pages`` is a list of (nodes, has_next) tuples; a None entry simulates a
+    failed _graphql call. Returns a state dict tracking the call count.
+    """
+    state = {"calls": 0}
+
+    def fake_post(path, payload, **kw):
+        q = payload["query"]
+        assert "projectItems(first" in q, q
+        i = state["calls"]
+        state["calls"] += 1
+        page = pages[min(i, len(pages) - 1)]
+        if page is None:
+            return {"errors": [{"message": "boom"}]}
+        nodes, has_next = page
+        return {"data": {"repository": {"issue": {"projectItems": {
+            "pageInfo": {"hasNextPage": has_next, "endCursor": f"pc{i}"},
+            "nodes": nodes}}}}}
+    provider._http.post_json.side_effect = fake_post
+    return state
+
+
+def _project_item_node(project_number, item_id):
+    return {"id": item_id, "project": {"number": project_number},
+            "fieldValueByName": None}
+
+
+def test_board_item_for_issue_paginates_past_first_page(provider):
+    """The target item sits on the 3rd page — 20+ projects, issue #1171.
+
+    A single first:20 page would miss it and force a spurious re-enroll; the
+    hasNextPage loop must walk pages until it finds the configured board.
+    """
+    # Board is project #1 (BOARD_GQL). Pages 1-2 hold only other projects.
+    pages = [
+        ([_project_item_node(2, "I_A"), _project_item_node(3, "I_B")], True),
+        ([_project_item_node(4, "I_C"), _project_item_node(5, "I_D")], True),
+        ([_project_item_node(1, "I_MINE")], False),
+    ]
+    state = _project_items_pages_mock(provider, pages)
+    item = provider._board_item_for_issue(42)
+    assert item == {"id": "I_MINE", "number": 42, "status": ""}
+    assert state["calls"] == 3, "must have walked all three pages"
+
+
+def test_board_item_for_issue_pagination_safety_cap(provider):
+    """hasNextPage forever stops at the 50-page safety cap and returns None."""
+    # Every page holds only a non-matching project and claims another page.
+    state = _project_items_pages_mock(
+        provider, [([_project_item_node(2, "I_X")], True)])
+    assert provider._board_item_for_issue(42) is None
+    assert state["calls"] == 50, "must stop at the 50-page safety cap"
+
+
 def test_board_set_status_direct_lookup_when_listing_misses(provider):
     """Acceptance (b), issue #1158: an enrolled item with null Status that the
     board listing misses is resolved via the projectItems edge — no re-enroll,
