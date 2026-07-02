@@ -91,7 +91,8 @@ You are a **documentation writer**, not a developer. Your job is to document wha
 
 ### 2. Update README and relevant docs
 - **README.md**: Update any section that describes functionality changed by this PR — how it works, configuration, pipeline diagrams, feature lists. If a new feature was added, add a section. If behavior changed, update the description. If nothing in the README is affected, skip with a note.
-- **Other docs**: Check for any additional files that reference the changed behavior (e.g. `INSTALLATION_GUIDE.md`, `docs/`, `CHANGELOG.md`, ADRs). Update them if they would be stale after this PR.
+- **Other docs**: Check for any additional files that reference the changed behavior (e.g. `INSTALLATION_GUIDE.md`, `docs/`, ADRs). Update them if they would be stale after this PR.
+- **Do NOT create or modify `CHANGELOG.md`.** It is auto-generated on the base branch by the dispatcher post-merge (`append_changelog`). Editing it in a PR branch causes concurrent PRs to conflict on line 1 (#1179) — never add, stage, or commit `CHANGELOG.md`.
 - Commit and push doc changes to the **same PR branch** (do not open a new PR):
   ```bash
   cd <workspace>
@@ -112,7 +113,7 @@ Keep this **lightweight** — it is bounded by the number of recent PRs, not the
    last_sha = json.loads(state_path.read_text()).get("last_doc_sweep_sha") if state_path.exists() else None
    ```
 2. **List PRs merged since the cursor.** Use the GitHub API (`/repos/<org>/<repo>/pulls?state=closed&base=<base>`) or `git log <last_sha>..<base> --merges` to enumerate commits/PRs merged since `last_doc_sweep_sha`. This bounds the audit.
-3. **Enumerate tracked docs.** List every markdown file in the repo **root** and in `docs/` (e.g. `README.md`, `SETUP.md`, `CONTRIBUTING.md`, `docs/INSTALLATION_GUIDE.md`, `CHANGELOG.md`, ADRs). Use `git ls-files '*.md' 'docs/*.md'` so it is project-agnostic — never assume a fixed list.
+3. **Enumerate tracked docs.** List every markdown file in the repo **root** and in `docs/` (e.g. `README.md`, `SETUP.md`, `CONTRIBUTING.md`, `docs/INSTALLATION_GUIDE.md`, ADRs). Use `git ls-files '*.md' 'docs/*.md'` so it is project-agnostic — never assume a fixed list. **Exclude `CHANGELOG.md`** from this set: it is owned by the dispatcher and must never be edited in a PR branch (#1179).
 4. **Cross-reference and update.** For each merged PR diff, check whether it introduced behavior (new flags, config keys, commands, file moves, renamed features) that the docs above describe but no longer match. Update any stale or missing section. This includes changes **unrelated to the current issue** — that is the whole point.
 5. **Commit the audit fixes.**
    - If the current issue's PR branch still exists (normal case), commit the doc-health fixes to that **same branch** so they ride along with this PR:
