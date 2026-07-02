@@ -1,3 +1,5 @@
+## [fix: enable SQLite WAL mode at all direct connection sites](https://github.com/benmarte/daedalus/issues/1134) — [PR #1193](https://github.com/benmarte/daedalus/pull/1193)
+
 ## [fix(security): refuse verify_ssl:false outside dev mode](https://github.com/benmarte/daedalus/issues/1132) — [PR #1189](https://github.com/benmarte/daedalus/pull/1189)
 
 ## [fix(security): webhook signature verification is never invoked — wire verify_signature into the ready-event path](https://github.com/benmarte/daedalus/issues/1141) — [PR #1188](https://github.com/benmarte/daedalus/pull/1188)
