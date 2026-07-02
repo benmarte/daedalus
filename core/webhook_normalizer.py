@@ -442,19 +442,19 @@ def _verify_gitlab_token(headers: Dict[str, str], secret: str) -> bool:
 
 
 def _verify_azure_secret(headers: Dict[str, str], secret: str) -> bool:
-    """Verify Azure DevOps shared secret.
+    """Verify Azure DevOps shared secret sent in the X-Azure-Webhook-Token header.
 
-    Azure DevOps doesn't use HMAC — it sends a shared secret in the request body
-    for service hooks. We check the header path if present; body-level verification
-    is deferred to the caller (the normalizer parses the body).
+    A secret is always configured by the time we reach here (the caller rejects
+    empty secrets), so a missing header means the request is unauthenticated and
+    must be rejected — failing open would let any Azure-shaped payload bypass
+    authentication entirely. The present-header path uses a timing-safe compare.
     """
     token = headers.get("X-Azure-Webhook-Token") or headers.get("x-azure-webhook-token")
     if not token:
-        # Azure doesn't always send a header; body verification is the caller's job
-        logger.info("webhook: azure no token header, deferring to body-level verification")
-        return True  # Permissive — Azure webhook body carries the secret
+        logger.warning("webhook: azure missing X-Azure-Webhook-Token header")
+        return False
 
-    if token != secret:
+    if not hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8")):
         logger.warning("webhook: azure token mismatch")
         return False
 

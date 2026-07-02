@@ -590,6 +590,53 @@ def test_verify_gitlab_token_uses_constant_time_comparison(monkeypatch):
     assert (secret.encode("utf-8"), secret.encode("utf-8")) in calls
 
 
+# -- Azure DevOps (X-Azure-Webhook-Token) --
+
+
+def test_verify_azure_valid_token():
+    """Azure webhook with matching X-Azure-Webhook-Token returns True."""
+    secret = "azure-secret"
+    payload_bytes = b'{"eventType":"workitem.updated"}'
+    headers = {"X-Azure-Webhook-Token": secret}
+    assert verify_signature("azure", payload_bytes, headers, secret) is True
+
+
+def test_verify_azure_invalid_token():
+    """Azure webhook with mismatched X-Azure-Webhook-Token returns False."""
+    payload_bytes = b'{"eventType":"workitem.updated"}'
+    headers = {"X-Azure-Webhook-Token": "wrong-token"}
+    assert verify_signature("azure", payload_bytes, headers, "real-secret") is False
+
+
+def test_verify_azure_missing_token_fails_closed():
+    """Azure webhook without X-Azure-Webhook-Token header returns False (no fail-open)."""
+    payload_bytes = b'{"eventType":"workitem.updated"}'
+    headers = {}
+    assert verify_signature("azure", payload_bytes, headers, "secret") is False
+
+
+def test_verify_azure_token_uses_constant_time_comparison(monkeypatch):
+    """Azure token check must use hmac.compare_digest (timing-safe), not ==."""
+    import core.webhook_normalizer as wn
+
+    calls = []
+    real_compare = hmac.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real_compare(a, b)
+
+    monkeypatch.setattr(wn.hmac, "compare_digest", spy)
+
+    secret = "azure-secret"
+    payload_bytes = b'{"eventType":"workitem.updated"}'
+    headers = {"X-Azure-Webhook-Token": secret}
+    assert verify_signature("azure", payload_bytes, headers, secret) is True
+
+    # compare_digest was invoked with the encoded token and secret (constant-time path)
+    assert (secret.encode("utf-8"), secret.encode("utf-8")) in calls
+
+
 # -- Edge cases --
 
 
