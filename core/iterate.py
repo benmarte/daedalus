@@ -493,143 +493,85 @@ def _handoff_from_card(card: dict) -> str:
     return (card.get("reason") or "").strip()
 
 
-def _qa_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
-    """Check if QA has passed for an issue by examining kanban cards for QA signal.
+# Role → the exact title word the dispatcher uses for that role's card, e.g.
+# "#1140 QA: ...", "#1140 Reviewer: ...", "#1140 Security: ...", "#1140 Docs: ...".
+# Gate lookups key off the CARD TITLE (anchored right after the "#<n>" ref)
+# because hermes' kanban list/show API no longer returns ``idempotency_key`` — the
+# old ``qa-<n>`` lookups always missed, so every gate evaluated "not passed" and
+# auto-merge never fired. Anchoring the role word after "#<n>" also avoids a false
+# match when the issue's own title contains e.g. "fix(security):".
+_ROLE_TITLE_WORD: Dict[str, str] = {
+    "qa": "QA",
+    "reviewer": "Reviewer",
+    "security": "Security",
+    "documentation": "Docs",
+    "docs": "Docs",
+}
 
-    Looks for a QA card for this issue (idempotency_key 'qa-{issue_number}')
-    and checks if its latest_summary contains 'qa-passed' (case-insensitive).
 
-    Args:
-        slug: The kanban board slug
-        issue_number: The issue number to check
+def _role_cards_for_issue(slug: str, issue_number: int, role: str) -> List[Dict[str, Any]]:
+    """Return the kanban cards for a given (role, issue), matched by title.
 
-    Returns:
-        True if QA passed for this issue, False otherwise
+    Titles are ``#<n> <Role>: <issue title>``. idempotency_key is no longer
+    returned by the kanban API, so the title (with the role word anchored right
+    after the ``#<n>`` reference) is the only stable key available.
+    """
+    word = _ROLE_TITLE_WORD.get(role, role)
+    pat = re.compile(rf"#{issue_number}\s+{re.escape(word)}:", re.IGNORECASE)
+    try:
+        tasks = kanban.list_tasks(slug) or []
+    except Exception as e:
+        logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
+        return []
+    return [t for t in tasks if pat.search(t.get("title") or "")]
+
+
+def _role_gate_passed(
+    slug: str, issue_number: Optional[int], role: str, approval_signals: List[str]
+) -> bool:
+    """True if ANY card for (role, issue) has an approval signal in its summary.
+
+    Scans all matching cards (there may be retries) and passes if any one's
+    latest_summary contains an approval signal.
     """
     if issue_number is None:
         return False
-
-    expected_idempotency_key = f"qa-{issue_number}"
-
-    try:
-        tasks = kanban.list_tasks(slug)
-    except Exception as e:
-        logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
+    cards = _role_cards_for_issue(slug, issue_number, role)
+    if not cards:
+        logger.debug("iterate: no %s card found for issue #%s", role, issue_number)
         return False
+    for card in cards:
+        try:
+            detail = kanban.show_card(slug, card["id"])
+        except Exception as e:
+            logger.error("iterate: failed to get %s card %s: %s", role, card.get("id"), e)
+            continue
+        summary = ((detail or {}).get("latest_summary") or "").lower()
+        if summary and any(sig in summary for sig in approval_signals):
+            return True
+    return False
 
-    qa_card = None
-    for task in tasks or []:
-        if task.get("idempotency_key") == expected_idempotency_key:
-            qa_card = task
-            break
 
-    if not qa_card:
-        logger.debug("iterate: no QA card found for issue #%s", issue_number)
-        return False
-
-    try:
-        card_details = kanban.show_card(slug, qa_card["id"])
-    except Exception as e:
-        logger.error("iterate: failed to get QA card %s: %s", qa_card["id"], e)
-        return False
-
-    if not card_details:
-        logger.error("iterate: QA card %s not found", qa_card["id"])
-        return False
-
-    latest_summary = card_details.get("latest_summary", "")
-    if not latest_summary:
-        logger.debug("iterate: QA card %s has no latest_summary", qa_card["id"])
-        return False
-
-    return "qa-passed" in latest_summary.lower()
+def _qa_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
+    """Check if QA has passed for an issue (QA card summary contains 'qa-passed')."""
+    return _role_gate_passed(slug, issue_number, "qa", ["qa-passed"])
 
 
 def _reviewer_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
-    """Check if the reviewer has approved the PR for an issue.
-
-    Looks for a reviewer card (idempotency_key 'reviewer-{issue_number}')
-    and checks if its latest_summary contains an approval signal
-    ('approved', 'review-approved', 'lgtm', 'sign-off') case-insensitively.
-    Returns False if no reviewer card exists or it hasn't approved yet.
-    """
-    if issue_number is None:
-        return False
-    return _gate_card_passed(slug, issue_number, "reviewer", [
+    """Check if the reviewer has approved the PR for an issue."""
+    return _role_gate_passed(slug, issue_number, "reviewer", [
         "approved", "review-approved", "lgtm", "sign-off", "signoff",
         "looks good", "no findings", ":+1:",
     ])
 
 
 def _security_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
-    """Check if the security analyst has approved the PR for an issue.
-
-    Looks for a security card (idempotency_key 'security-{issue_number}')
-    and checks if its latest_summary contains a security approval signal
-    ('security-approved', 'security-passed', 'no findings') case-insensitively.
-    Returns False if no security card exists or it hasn't approved yet.
-    """
-    if issue_number is None:
-        return False
-    return _gate_card_passed(slug, issue_number, "security", [
+    """Check if the security analyst has cleared the PR for an issue."""
+    return _role_gate_passed(slug, issue_number, "security", [
         "security-approved", "security approved",
         "security-passed", "security passed",
         "no findings", "approved",
     ])
-
-
-def _gate_card_passed(
-    slug: str,
-    issue_number: int,
-    role_prefix: str,
-    approval_signals: list,
-) -> bool:
-    """Check if a role-specific gate card has posted an approval signal.
-
-    Args:
-        slug: Kanban board slug.
-        issue_number: The issue number to check.
-        role_prefix: The idempotency_key prefix (e.g. 'reviewer', 'security').
-        approval_signals: List of lowercase substrings that indicate approval.
-
-    Returns:
-        True if the card exists and its latest_summary contains any approval
-        signal, False otherwise.
-    """
-    expected_idempotency_key = f"{role_prefix}-{issue_number}"
-
-    try:
-        tasks = kanban.list_tasks(slug)
-    except Exception as e:
-        logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
-        return False
-
-    gate_card = None
-    for task in tasks or []:
-        if task.get("idempotency_key") == expected_idempotency_key:
-            gate_card = task
-            break
-
-    if not gate_card:
-        logger.debug("iterate: no %s card found for issue #%s", role_prefix, issue_number)
-        return False
-
-    try:
-        card_details = kanban.show_card(slug, gate_card["id"])
-    except Exception as e:
-        logger.error("iterate: failed to get %s card %s: %s", role_prefix, gate_card["id"], e)
-        return False
-
-    if not card_details:
-        logger.error("iterate: %s card %s not found", role_prefix, gate_card["id"])
-        return False
-
-    latest_summary = (card_details.get("latest_summary") or "").lower()
-    if not latest_summary:
-        logger.debug("iterate: %s card %s has no latest_summary", role_prefix, gate_card["id"])
-        return False
-
-    return any(sig in latest_summary for sig in approval_signals)
 
 
 # ── action executors ────────────────────────────────────────────────────────
@@ -2543,14 +2485,20 @@ def sweep_deferred_merges(
         return []
     merged: List[int] = []
     ci_cache: Dict[int, str] = {}
+    seen_issues: Set[int] = set()
+    # Match DONE documentation cards by title ("#<n> Docs: ...") — idempotency_key
+    # is no longer returned by the kanban API.
+    docs_pat = re.compile(r"#(\d+)\s+Docs:", re.IGNORECASE)
     for task in tasks:
-        key = task.get("idempotency_key") or ""
-        if not key.startswith("docs-") or (task.get("status") or "").lower() != "done":
+        if (task.get("status") or "").lower() != "done":
             continue
-        try:
-            issue_n = int(key.split("docs-", 1)[1])
-        except (ValueError, IndexError):
+        m = docs_pat.search(task.get("title") or "")
+        if not m:
             continue
+        issue_n = int(m.group(1))
+        if issue_n in seen_issues:
+            continue
+        seen_issues.add(issue_n)
         # A closed issue already landed; only still-open issues need merging.
         if hasattr(provider, "is_issue_open"):
             try:

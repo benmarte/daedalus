@@ -24,7 +24,7 @@ class TestQAPassedForIssue:
         mock_list_tasks.return_value = [
             {
                 'id': 'qa-card-1',
-                'title': 'QA: Issue #42',
+                'title': '#42 QA: Issue',
                 'assignee': 'qa-daedalus',
                 'status': 'blocked',
                 'reason': 'qa-passed: PR #42',
@@ -54,7 +54,7 @@ class TestQAPassedForIssue:
         mock_list_tasks.return_value = [
             {
                 'id': 'qa-card-1',
-                'title': 'QA: Issue #42',
+                'title': '#42 QA: Issue',
                 'assignee': 'qa-daedalus',
                 'status': 'blocked',
                 'reason': 'qa-failed: tests broken',
@@ -93,7 +93,7 @@ class TestQAPassedForIssue:
         mock_list_tasks.return_value = [
             {
                 'id': 'qa-card-1',
-                'title': 'QA: Issue #42',
+                'title': '#42 QA: Issue',
                 'assignee': 'qa-daedalus',
                 'status': 'blocked',
                 'reason': '',
@@ -121,7 +121,7 @@ class TestQAPassedForIssue:
         mock_list_tasks.return_value = [
             {
                 'id': 'qa-card-1',
-                'title': 'QA: Issue #42',
+                'title': '#42 QA: Issue',
                 'assignee': 'qa-daedalus',
                 'status': 'blocked',
                 'reason': 'QA-PASSED: PR #42',
@@ -156,7 +156,7 @@ class TestQAPassedForIssue:
         mock_list_tasks.return_value = [
             {
                 'id': 'qa-card-1',
-                'title': 'QA: Issue #99',
+                'title': '#99 QA: Issue',
                 'assignee': 'qa-daedalus',
                 'status': 'blocked',
                 'reason': 'qa-passed: PR #99',
@@ -180,7 +180,7 @@ class TestQAPassedForIssue:
         mock_list_tasks.return_value = [
             {
                 'id': 'qa-card-1',
-                'title': 'QA: Issue #42',
+                'title': '#42 QA: Issue',
                 'assignee': 'qa-daedalus',
                 'status': 'blocked',
                 'reason': 'qa-passed: PR #42',
@@ -214,7 +214,7 @@ class TestAutoMergeQAGateIntegration:
         # Setup: docs card for PR #42
         docs_card = {
             'id': 'docs-card-1',
-            'title': 'Documentation: Issue #42',
+            'title': '#42 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'reason': 'review-required: PR #42',
@@ -260,7 +260,7 @@ class TestAutoMergeQAGateIntegration:
         # Setup: docs card for PR #42
         docs_card = {
             'id': 'docs-card-1',
-            'title': 'Documentation: Issue #42',
+            'title': '#42 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'reason': 'docs posted: PR #42',
@@ -305,7 +305,7 @@ class TestAutoMergeQAGateIntegration:
 
         docs_card = {
             'id': 'docs-card-1',
-            'title': 'Documentation: Issue #42',
+            'title': '#42 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'latest_summary': 'docs posted: PR #42',
@@ -345,7 +345,7 @@ class TestAutoMergeQAGateIntegration:
 
         docs_card = {
             'id': 'docs-card-2',
-            'title': 'Documentation: Issue #7',
+            'title': '#7 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'latest_summary': 'docs posted: PR #7',
@@ -386,7 +386,7 @@ class TestAutoMergeQAGateIntegration:
 
         docs_card = {
             'id': 'docs-card-ci-red',
-            'title': 'Documentation: Issue #55',
+            'title': '#55 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'latest_summary': 'docs posted: PR #55',
@@ -430,7 +430,7 @@ class TestAutoMergeQAGateIntegration:
 
         docs_card = {
             'id': 'docs-card-ci-green',
-            'title': 'Documentation: Issue #56',
+            'title': '#56 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'latest_summary': 'docs posted: PR #56',
@@ -481,7 +481,7 @@ class TestAutoMergeQAGateIntegration:
 
         docs_card = {
             'id': 'docs-card-ci-deferred',
-            'title': 'Documentation: Issue #77',
+            'title': '#77 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'latest_summary': 'docs posted: PR #77',
@@ -543,7 +543,7 @@ class TestAutoMergeQAGateIntegration:
 
         docs_card = {
             'id': 'docs-card-ci-pending',
-            'title': 'Documentation: Issue #88',
+            'title': '#88 Docs: Issue',
             'assignee': 'documentation-daedalus',
             'status': 'blocked',
             'latest_summary': 'docs posted: PR #88',
@@ -596,7 +596,7 @@ class TestAutoMergeCIGateIntegration:
 
             docs_tid = fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -604,7 +604,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -614,7 +614,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -624,7 +624,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -678,7 +678,7 @@ class TestAutoMergeCIGateIntegration:
 
             docs_tid = fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -686,7 +686,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -726,7 +726,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -734,7 +734,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -744,7 +744,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -754,7 +754,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -797,7 +797,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -805,7 +805,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -815,7 +815,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -825,7 +825,7 @@ class TestAutoMergeCIGateIntegration:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -888,7 +888,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -896,7 +896,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -906,7 +906,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -916,7 +916,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -963,7 +963,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -972,7 +972,7 @@ class TestCronTickMergeTrigger:
             # QA passed
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -983,7 +983,7 @@ class TestCronTickMergeTrigger:
             # Reviewer has NOT approved — blocked with changes-requested
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-changes-requested: PR #{pr_n}",
                 summary=f"review-changes-requested: PR #{pr_n}",
@@ -994,7 +994,7 @@ class TestCronTickMergeTrigger:
             # Security passed
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -1031,7 +1031,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -1040,7 +1040,7 @@ class TestCronTickMergeTrigger:
             # QA passed
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -1051,7 +1051,7 @@ class TestCronTickMergeTrigger:
             # Reviewer approved
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -1062,7 +1062,7 @@ class TestCronTickMergeTrigger:
             # Security has NOT approved — still pending
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-pending: PR #{pr_n}",
                 summary=f"security-pending: PR #{pr_n}",
@@ -1099,7 +1099,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -1108,7 +1108,7 @@ class TestCronTickMergeTrigger:
             # QA passed
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -1119,7 +1119,7 @@ class TestCronTickMergeTrigger:
             # Reviewer approved
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -1130,7 +1130,7 @@ class TestCronTickMergeTrigger:
             # Security approved
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -1174,7 +1174,7 @@ class TestCronTickMergeTrigger:
 
             docs_tid = fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -1182,7 +1182,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -1192,7 +1192,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -1202,7 +1202,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -1249,7 +1249,7 @@ class TestCronTickMergeTrigger:
 
             docs_tid = fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -1257,7 +1257,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -1267,7 +1267,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -1277,7 +1277,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -1346,7 +1346,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -1354,7 +1354,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -1364,7 +1364,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -1374,7 +1374,7 @@ class TestCronTickMergeTrigger:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
@@ -1442,7 +1442,7 @@ class TestCronTickMergeTriggerIntegration:
 
             docs_tid = fk.seed(
                 assignee="documentation-daedalus",
-                title=f"Documentation: Issue #{issue_n}",
+                title=f"#{issue_n} Docs: Issue",
                 status="blocked",
                 reason=f"docs posted: PR #{pr_n}",
                 body=f"Issue #{issue_n}\nPR #{pr_n}",
@@ -1450,7 +1450,7 @@ class TestCronTickMergeTriggerIntegration:
 
             fk.seed(
                 assignee="qa-daedalus",
-                title=f"QA: Issue #{issue_n}",
+                title=f"#{issue_n} QA: Issue",
                 status="blocked",
                 reason=f"qa-passed: PR #{pr_n}",
                 summary=f"qa-passed: PR #{pr_n}",
@@ -1460,7 +1460,7 @@ class TestCronTickMergeTriggerIntegration:
 
             fk.seed(
                 assignee="reviewer-daedalus",
-                title=f"Review: Issue #{issue_n}",
+                title=f"#{issue_n} Reviewer: Issue",
                 status="blocked",
                 reason=f"review-approved: PR #{pr_n}",
                 summary=f"review-approved: PR #{pr_n}",
@@ -1470,7 +1470,7 @@ class TestCronTickMergeTriggerIntegration:
 
             fk.seed(
                 assignee="security-analyst-daedalus",
-                title=f"Security: Issue #{issue_n}",
+                title=f"#{issue_n} Security: Issue",
                 status="blocked",
                 reason=f"security-approved: PR #{pr_n}",
                 summary=f"security-approved: PR #{pr_n}",
