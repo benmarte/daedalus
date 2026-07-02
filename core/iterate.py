@@ -164,6 +164,13 @@ def _parse_handoff(handoff_text: str) -> Dict[str, Any]:
         "a11y-passed", "a11y passed",
         "security-approved", "security approved",
         "security-passed", "security passed",
+        # The security agent's documented pass signal is 'security: cleared'
+        # (#1185). Without it, classify_blocked returned "" for a cleared
+        # security card — it never APPROVE_ADVANCEd and the #1182 PM-consult
+        # skip could not recognise it as a passing handoff. Keep these
+        # prefixed so a reviewer merely mentioning "cleared" is not mistaken
+        # for an approval.
+        "security: cleared", "security cleared",
     ]
     if any(s in lower for s in approve_signals):
         result["is_approved"] = True

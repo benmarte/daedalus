@@ -6064,6 +6064,18 @@ def _check_team_blockers(
             continue  # PR in review or awaiting-pr — iterate handles this, PM can't unblock it
         if summary.startswith("a11y-skipped:"):
             continue  # accessibility skipped (no UI changes) — not a real blocker
+        # #1182: reuse the authoritative classifier as the single source of
+        # truth. Passing gate verdicts (review-approved / qa-passed /
+        # security-approved / security: cleared / accessibility approved /
+        # docs posted) are handoffs that iterate.classify_blocked will
+        # ADVANCE or APPROVE_ADVANCE on this tick — not PM blockers. Spawning
+        # a PM consultation for them races that completion: the PM UNBLOCKs
+        # the card, moving it out of the blocked column before APPROVE_ADVANCE
+        # can fire, so the card stalls until the next cron tick (and wastes a
+        # PM agent). Skip these — iterate owns the handoff.
+        action = iterate.classify_blocked(assignee, summary, True)
+        if action in (iterate.ADVANCE, iterate.APPROVE_ADVANCE):
+            continue
         n = extract_issue_number(card.get("title") or "")
         if n is None:
             continue
