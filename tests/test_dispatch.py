@@ -1110,6 +1110,28 @@ def test_documentation_soul_has_proactive_doc_audit():
     check("documentation SOUL wires proactive doc-health audit", not missing)
 
 
+def test_documentation_soul_does_not_edit_changelog():
+    """documentation SOUL must not instruct editing CHANGELOG.md in a PR branch (#1179).
+
+    The dispatcher (append_changelog) is the single writer of CHANGELOG.md on the
+    base branch; docs-agent in-branch edits caused concurrent PRs to conflict on
+    line 1 (#1173/#1174). The SOUL must drop CHANGELOG.md from its editable/enumerated
+    docs and carry an explicit do-not-touch rule.
+    """
+    soul = (Path(__file__).resolve().parent.parent
+            / "config" / "souls" / "documentation-daedalus.md").read_text()
+    # Explicit do-not-touch rule present, tied to the issue.
+    assert "Do NOT create or modify `CHANGELOG.md`" in soul
+    assert "#1179" in soul
+    # CHANGELOG.md removed from the "Other docs" editable example list.
+    assert "`docs/`, `CHANGELOG.md`, ADRs" not in soul
+    # CHANGELOG.md removed from the enumerate-tracked-docs example list.
+    assert "`docs/INSTALLATION_GUIDE.md`, `CHANGELOG.md`, ADRs" not in soul
+    # Enumerate step explicitly excludes it.
+    assert "Exclude `CHANGELOG.md`" in soul
+    check("documentation SOUL does not edit CHANGELOG.md (#1179)", True)
+
+
 # ── _CODING_AGENT_DEFAULTS and per-agent default commands ────────────────────
 
 
@@ -2380,6 +2402,7 @@ if __name__ == "__main__":
         test_resolve_coding_agent_no_skill_when_none,
         test_all_souls_wire_claude_code_skill_as_step0,
         test_documentation_soul_has_proactive_doc_audit,
+        test_documentation_soul_does_not_edit_changelog,
     ):
         fn()
     print()
