@@ -1521,6 +1521,28 @@ def test_qa_task_body_comment_targets_pr_not_issue():
     assert "Post a QA summary comment on GitHub issue #" not in body
 
 
+def test_qa_task_body_runs_full_suite_as_ci():
+    """QA prompt runs the full suite exactly as CI does, so QA-green matches CI-green (#1201)."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "pytest tests/ -n auto --timeout=60" in body
+
+
+def test_qa_task_body_installs_ci_test_deps():
+    """QA prompt installs the CI test deps so `-n auto` is available in the worktree (#1201)."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "pytest-xdist" in body
+    assert "pytest-timeout" in body
+
+
+def test_qa_task_body_full_suite_gates_verdict():
+    """qa-passed requires BOTH acceptance criteria AND the full suite to pass (#1201)."""
+    body = disp._qa_task_body("org/repo", _ISSUE, "/tmp", "github")
+    assert "BOTH" in body
+    # A full-suite failure — even unrelated to the PR — is qa-failed, never qa-passed.
+    assert "qa-failed" in body
+    assert "acceptance criteria" in body.lower()
+
+
 def test_reviewer_task_body_comment_targets_pr_not_issue():
     """_reviewer_task_body comment instruction targets the PR, not the issue (#115)."""
     body = disp._reviewer_task_body("org/repo", _ISSUE, "/tmp", "github")

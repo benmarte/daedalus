@@ -34,16 +34,31 @@ sys.path.insert(0, str(ROOT))
 # host, so two workers that each call main() collide on that one lock: the loser
 # gets Timeout and returns early WITHOUT running _main_inner(), which flakes any
 # test asserting on dispatch side effects (e.g. test_main_scopes_to_cwd_project).
-# Point the lock at a unique per-worker file so workers never contend. Set at
-# conftest import — before any test module loads ``disp`` — and honored by the
-# ``DAEDALUS_DISPATCH_LOCK`` override in daedalus_dispatch, so every freshly
-# re-exec'd module (see _load_dispatch) picks it up. Dedicated lock-contention
-# suites still override _MUTEX_LOCK_PATH directly, so they are unaffected.
-if "DAEDALUS_DISPATCH_LOCK" not in os.environ:
-    _worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
-    os.environ["DAEDALUS_DISPATCH_LOCK"] = str(
-        Path(tempfile.gettempdir()) / f".daedalus_dispatch_test_{_worker}.lock"
-    )
+# Point the lock at a unique per-worker file so workers never contend. This must
+# run in pytest_configure, NOT at conftest import: xdist exports
+# PYTEST_XDIST_WORKER only after conftest is imported, so an import-time
+# fallback gave every worker the same "master" lock and workers contended again
+# (issue #1201). ``config.workerinput`` is xdist's documented per-worker handle
+# and is always populated by configure time. pytest_configure runs before test
+# modules import ``disp``, and _load_dispatch re-reads the env on every re-exec,
+# so all loads pick the override up. Dedicated lock-contention suites still
+# override _MUTEX_LOCK_PATH directly, so they are unaffected.
+# The xdist controller also runs pytest_configure and its workers INHERIT its
+# environment, so a plain "if not set" guard would freeze the controller's
+# "master" value into every worker. The _AUTOSET sentinel distinguishes our own
+# auto-set value (workers re-derive it with their real workerid) from a path a
+# user exported deliberately (respected as-is everywhere).
+_LOCK_AUTOSET_FLAG = "_DAEDALUS_DISPATCH_LOCK_AUTOSET"
+
+
+def pytest_configure(config):
+    autoset = os.environ.get(_LOCK_AUTOSET_FLAG) == "1"
+    if "DAEDALUS_DISPATCH_LOCK" not in os.environ or autoset:
+        worker = getattr(config, "workerinput", {}).get("workerid", "master")
+        os.environ["DAEDALUS_DISPATCH_LOCK"] = str(
+            Path(tempfile.gettempdir()) / f".daedalus_dispatch_test_{worker}.lock"
+        )
+        os.environ[_LOCK_AUTOSET_FLAG] = "1"
 
 
 @pytest.fixture(autouse=True)

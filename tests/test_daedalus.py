@@ -1713,6 +1713,19 @@ def test_dispatch_lock_isolated_per_worker():
         disp._MUTEX_LOCK_PATH != real_default,
     )
 
+    # Issue #1201 follow-up to #1198: under xdist the lock must embed THIS
+    # worker's id. PYTEST_XDIST_WORKER is not yet exported when conftest is
+    # imported, so an import-time fallback silently gave every worker the
+    # shared "master" lock — reintroducing the cross-worker contention flake.
+    # Hard assert (not check): a shared lock only flakes intermittently, so a
+    # soft-tally FAIL line would scroll by unnoticed.
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker:
+        assert override and worker in Path(override).name, (
+            f"dispatch lock {override!r} does not embed xdist worker id "
+            f"{worker!r} — workers are sharing one lock (issue #1198 flake)"
+        )
+
 
 def test_deliver_doc_reports_multi_target():
     """_deliver_doc_reports fans a report out to every configured target."""
@@ -4511,6 +4524,19 @@ def test_check_completed_developer_well_formed_summary_no_retry():
 
 
 if __name__ == "__main__":
+    # Dual-mode parity (issue #1201): the standalone runner never invokes
+    # conftest.pytest_configure, so the DAEDALUS_DISPATCH_LOCK test override that
+    # pytest gets would be unset here — breaking the lock-isolation checks. There
+    # is no xdist worker in standalone mode, so a single fixed test-lock path is
+    # correct; setdefault respects a deliberately-exported value.
+    import os as _os
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+    _os.environ.setdefault(
+        "DAEDALUS_DISPATCH_LOCK",
+        str(_Path(_tempfile.gettempdir()) / ".daedalus_dispatch_test_standalone.lock"),
+    )
+
     print("Daedalus tests")
     print("-" * 60)
     for fn in (
