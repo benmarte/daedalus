@@ -50,7 +50,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from core import dispatch_state, kanban
+from core import dispatch_state, kanban, provider_failover
 from core.util import extract_issue_number
 
 logger = logging.getLogger("daedalus.crash_retry")
@@ -62,23 +62,32 @@ ESCALATED_MARKER = "<!-- daedalus:crash-retry-exhausted -->"
 # Summary prefix a card gets when its crash retries are exhausted.
 EXHAUSTED_PREFIX = "crash-retries-exhausted:"
 
-# Crash signatures: the worker/agent process died or never ran. Mirrors
-# iterate.classify_blocked's ``_crash_markers`` plus the transient
-# provider/session failures from the #1205 incident and #1200.
-_CRASH_MARKERS = (
-    EXHAUSTED_PREFIX,
-    "coding-agent-failed:",
-    "coding_agent_died",
-    "coding_agent_timeout",
-    "pid not alive",
-    "apiconnectionerror",
-    "api connection error",
-    "permission-error:",
-    "exited with code",
-    "agent crash",
-    "session limit",
-    "usage limit",
+# Crash signatures, grouped by trigger class (#1207 provider failover).
+# Mirrors iterate.classify_blocked's ``_crash_markers`` plus the transient
+# provider/session failures from the #1205 incident and #1200. Order matters:
+# specific classes are checked before the generic ``crash`` bucket so e.g.
+# "coding-agent-failed: CODING_AGENT_TIMEOUT" classifies as ``timeout``.
+_TRIGGER_MARKERS = (
+    ("session_limit", ("session limit", "usage limit")),
+    ("quota_exceeded", ("quota", "rate limit")),
+    ("timeout", ("coding_agent_timeout",)),
+    ("api_connection_error", ("apiconnectionerror", "api connection error")),
+    (
+        "crash",
+        (
+            EXHAUSTED_PREFIX,
+            "coding-agent-failed:",
+            "coding_agent_died",
+            "pid not alive",
+            "permission-error:",
+            "exited with code",
+            "agent crash",
+        ),
+    ),
 )
+
+# Flat marker tuple retained for callers that only need "is this crash-class".
+_CRASH_MARKERS = tuple(m for _, markers in _TRIGGER_MARKERS for m in markers)
 
 _DEFAULT_BACKOFF_MINUTES = [0, 15, 30, 60, 120]
 
@@ -92,16 +101,22 @@ _DEFAULTS: Dict[str, Any] = {
 
 
 def classify(evidence: str) -> Optional[str]:
-    """Return ``"crash"`` when *evidence* matches a crash signature, else None.
+    """Return the trigger class of *evidence*, or None when not crash-class.
 
-    ``None`` means not crash-class — review-required / qa-failed / escalate /
-    human blocks are owned by iterate and the PM flow, never retried here.
+    Trigger classes (#1207): ``session_limit`` | ``quota_exceeded`` |
+    ``timeout`` | ``api_connection_error`` | ``crash`` (the generic bucket).
+    All classes are truthy, so ``classify(e) is None`` keeps meaning "not
+    crash-class" for existing callers — review-required / qa-failed /
+    escalate / human blocks are owned by iterate and the PM flow, never
+    retried here. The specific class feeds the provider-failover trigger
+    filter (``failover.triggers``).
     """
     s = (evidence or "").lower()
     if not s:
         return None
-    if any(m in s for m in _CRASH_MARKERS):
-        return "crash"
+    for cls, markers in _TRIGGER_MARKERS:
+        if any(m in s for m in markers):
+            return cls
     return None
 
 
@@ -250,6 +265,7 @@ def reconcile(
     *,
     now: Optional[float] = None,
     dry_run: bool = False,
+    failover: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Retry / escalate crashed cards; return the actions taken this tick.
 
@@ -264,6 +280,25 @@ def reconcile(
 
     At most one re-dispatch per card per tick by construction (each card is
     visited once and the attempt is persisted state-first).
+
+    *failover* (issue #1207) is an optional cross-provider failover context
+    built by the dispatcher::
+
+        {"cfg":    resolve_failover_config(...),
+         "chains": {"coding_agent": [{name, cmd}, …],
+                    "brain":        [{provider, default}, …]},
+         "apply":  {"coding_agent": fn(card, entry) -> bool,
+                    "brain":        fn(card, entry) -> bool},
+         "current": {"coding_agent": "<name>", "brain": "<provider>"}}
+
+    When present and a card's crash classifies to an enabled trigger whose
+    layer has a chain of 2+ providers, each retry is bounded per provider
+    (``max_attempts_per_provider``); a capped provider enters a global
+    cooldown and the re-dispatch moves to the next eligible chain entry via
+    the ``apply`` callback (delegation-block rewrite / profile resync), with
+    a card comment + log line per switch. Escalation happens only once every
+    chain entry is exhausted. ``failover=None`` (or a one-element chain)
+    reproduces the pre-#1207 behavior exactly.
 
     Never raises: kanban/state failures are logged and the card is skipped
     (it will be reconsidered next tick).
@@ -284,7 +319,7 @@ def reconcile(
     for card in tasks:
         try:
             action = _reconcile_card(
-                slug, workdir, cfg, card, ts, dry_run, candidate_ids
+                slug, workdir, cfg, card, ts, dry_run, candidate_ids, failover
             )
         except Exception as exc:
             logger.warning(
@@ -308,6 +343,7 @@ def _reconcile_card(
     ts: float,
     dry_run: bool,
     candidate_ids: set,
+    failover: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Apply the retry policy to one card. Returns an action dict or None."""
     status = (card.get("status") or "").lower()
@@ -349,7 +385,19 @@ def _reconcile_card(
         )
         entry, attempts, first_ts, last_ts = {}, 0, ts, ts
 
+    # Trigger class + failover plan (#1207). ``trigger`` falls back to the
+    # generic "crash" for gave_up cards whose event evidence carries no marker.
+    trigger = classify(evidence) or "crash"
+    plan = _failover_plan(failover, trigger, evidence, entry)
+
     max_attempts = int(cfg["max_crash_retries"])
+    if plan:
+        # A 2+ provider chain is bounded by per-provider caps: never let the
+        # flat #1205 counter escalate before every provider had its tries.
+        max_attempts = max(
+            max_attempts,
+            int(plan["cfg"]["max_attempts_per_provider"]) * len(plan["chain"]),
+        )
     elapsed_min = (ts - first_ts) / 60
     issue_n = extract_issue_number(card.get("title") or "")
 
@@ -399,23 +447,55 @@ def _reconcile_card(
             elapsed_min,
         )
         return None
+
+    # Provider failover (#1207): pick which chain entry this re-dispatch
+    # runs on; cap-exhausted providers cool down and the card moves to the
+    # next one. May decide to wait (all candidates cooling) or escalate
+    # (whole chain exhausted).
+    provider_state: Optional[Dict[str, Any]] = None
+    provider_name = ""
+    if plan:
+        outcome = _apply_failover(slug, workdir, tid, card, plan, trigger, ts)
+        if outcome is None:
+            return None  # wait for a cooldown to expire / apply retry next tick
+        if outcome == "exhausted":
+            entry["provider"] = _provider_snapshot(plan)
+            return _escalate(
+                slug,
+                workdir,
+                tid,
+                entry,
+                card,
+                evidence,
+                attempts,
+                max_attempts,
+                elapsed_min,
+                issue_n,
+                ts,
+                dry_run,
+            )
+        provider_state = outcome
+        provider_name = str(provider_state.get("name") or "")
+
     # Persist the attempt BEFORE unblocking: a crash mid-tick cannot lose the
     # count, and a concurrent tick reading the state mid-flight sees the
     # attempt as spent and stays in backoff.
-    dispatch_state.set_crash_retry(
-        workdir,
-        tid,
-        {
-            "first_crash_ts": first_ts,
-            "attempts": attempt_n,
-            "last_attempt_ts": ts,
-            "escalated": False,
-            "class": "crash",
-        },
-    )
+    new_entry: Dict[str, Any] = {
+        "first_crash_ts": first_ts,
+        "attempts": attempt_n,
+        "last_attempt_ts": ts,
+        "escalated": False,
+        "class": trigger,
+    }
+    if provider_state:
+        new_entry["provider"] = provider_state
+    elif entry.get("provider"):
+        new_entry["provider"] = entry["provider"]
+    dispatch_state.set_crash_retry(workdir, tid, new_entry)
     reason = (
         f"crash-retry: auto re-dispatch attempt {attempt_n}/{max_attempts} "
-        f"({elapsed_min:.0f} min since first crash) "
+        + (f"via {provider_name} " if provider_name else "")
+        + f"({elapsed_min:.0f} min since first crash) "
         f"[{(evidence or 'no failure details')[:120]}] (#1205)"
     )
     if not kanban.unblock_task(slug, tid, reason=reason):
@@ -445,7 +525,185 @@ def _reconcile_card(
         "summary": evidence,
         "title": card.get("title") or "",
         "assignee": card.get("assignee") or "",
+        "provider": provider_name,
     }
+
+
+def _failover_plan(
+    failover: Optional[Dict[str, Any]],
+    trigger: str,
+    evidence: str,
+    entry: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Build the per-card failover plan, or None when failover doesn't apply.
+
+    Applies only when a context was supplied, the trigger is enabled in
+    ``failover.triggers``, and the evidence's layer has a 2+ provider chain —
+    deterministic task failures never classify (no crash marker), so they can
+    never rotate providers by construction (#1207).
+    """
+    if not failover:
+        return None
+    fcfg = failover.get("cfg") or {}
+    if trigger not in (fcfg.get("triggers") or ()):
+        return None
+    layer = provider_failover.layer_for_evidence(evidence)
+    chain = (failover.get("chains") or {}).get(layer) or []
+    if len(chain) < 2:
+        return None
+    names = [provider_failover.entry_name(e) for e in chain]
+    prov = entry.get("provider") if isinstance(entry.get("provider"), dict) else {}
+    cur = str(
+        prov.get("name") or (failover.get("current") or {}).get(layer) or names[0]
+    )
+    if cur not in names:
+        cur = names[0]
+    attempts_map = {
+        str(k): int(v)
+        for k, v in (prov.get("attempts") or {}).items()
+        if isinstance(v, (int, float))
+    }
+    # Episode start: the original dispatch that produced this crash counts as
+    # one spent attempt on the current provider.
+    if not attempts_map:
+        attempts_map[cur] = 1
+    history = [h for h in (prov.get("history") or []) if isinstance(h, dict)]
+    return {
+        "layer": layer,
+        "chain": chain,
+        "names": names,
+        "cfg": fcfg,
+        "cur_name": cur,
+        "attempts_map": attempts_map,
+        "history": history,
+        "apply": (failover.get("apply") or {}).get(layer),
+    }
+
+
+def _provider_snapshot(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Current provider bookkeeping of *plan*, for persistence / diagnostics."""
+    return {
+        "layer": plan["layer"],
+        "name": plan["cur_name"],
+        "attempts": dict(plan["attempts_map"]),
+        "history": list(plan["history"]),
+    }
+
+
+def _apply_failover(
+    slug: str,
+    workdir: str,
+    tid: str,
+    card: Dict[str, Any],
+    plan: Dict[str, Any],
+    trigger: str,
+    ts: float,
+):
+    """Select (and if needed switch to) the provider for this re-dispatch.
+
+    Returns the updated per-card provider state dict on success,
+    ``"exhausted"`` when every chain entry spent its per-provider cap, or
+    ``None`` when this tick should do nothing (all remaining candidates are
+    cooling down, or applying the switch failed — both re-evaluated next
+    tick). Never raises.
+    """
+    layer = plan["layer"]
+    names = plan["names"]
+    fcfg = plan["cfg"]
+    cur = plan["cur_name"]
+    attempts_map = plan["attempts_map"]
+    cap = int(fcfg["max_attempts_per_provider"])
+
+    # The provider that just failed enters its global cooldown once its
+    # per-provider cap is spent (re-armed only after the previous window
+    # expired, so repeated reconciles never extend it indefinitely).
+    cooldowns = dispatch_state.get_provider_cooldowns(workdir)
+    cur_key = provider_failover.provider_key(layer, cur)
+    if attempts_map.get(cur, 0) >= cap and cooldowns.get(cur_key, 0) <= ts:
+        until = ts + float(fcfg["cooldown_minutes"]) * 60.0
+        dispatch_state.set_provider_cooldown(workdir, cur_key, until)
+        cooldowns[cur_key] = until
+        logger.info(
+            "crash-retry: provider %s capped (%d/%d attempts) — cooling down "
+            "for %s min",
+            cur_key,
+            attempts_map.get(cur, 0),
+            cap,
+            fcfg["cooldown_minutes"],
+        )
+
+    cooling = {
+        n
+        for n in names
+        if cooldowns.get(provider_failover.provider_key(layer, n), 0) > ts
+    }
+    sel = provider_failover.select_provider(
+        plan["chain"],
+        attempts_map,
+        cooling,
+        fcfg,
+        current_index=names.index(cur),
+    )
+    if sel["action"] == "exhausted":
+        return "exhausted"
+    if sel["action"] == "wait":
+        logger.info(
+            "crash-retry: %s — every eligible %s provider is cooling down; "
+            "waiting for a cooldown to expire",
+            tid,
+            layer,
+        )
+        return None
+
+    nxt = provider_failover.entry_name(sel["entry"])
+    if nxt != cur:
+        apply_fn = plan.get("apply")
+        ok = True
+        if callable(apply_fn):
+            try:
+                ok = bool(apply_fn(card, sel["entry"]))
+            except Exception as exc:  # noqa: BLE001 — apply is dispatcher code
+                logger.warning(
+                    "crash-retry: failover apply raised for %s (%s → %s): %s",
+                    tid,
+                    cur,
+                    nxt,
+                    exc,
+                )
+                ok = False
+        if not ok:
+            logger.warning(
+                "crash-retry: failover %s → %s could not be applied for %s — "
+                "will retry next tick",
+                cur,
+                nxt,
+                tid,
+            )
+            return None
+        plan["history"].append(
+            {"from": cur, "to": nxt, "reason": trigger, "layer": layer, "ts": ts}
+        )
+        if not kanban.comment(
+            slug,
+            tid,
+            f"🔁 **Provider failover** — {layer}: `{cur}` → `{nxt}` "
+            f"(reason: {trigger}) (#1207)",
+        ):
+            logger.warning(
+                "crash-retry: failed to stamp failover comment on %s", tid
+            )
+        logger.info(
+            "crash-retry: failover %s: %s → %s (reason: %s) for %s (#%s)",
+            layer,
+            cur,
+            nxt,
+            trigger,
+            tid,
+            extract_issue_number(card.get("title") or ""),
+        )
+    attempts_map[nxt] = attempts_map.get(nxt, 0) + 1
+    plan["cur_name"] = nxt
+    return _provider_snapshot(plan)
 
 
 def _escalate(
@@ -480,9 +738,10 @@ def _escalate(
             "last_attempt_ts": ts,
             "first_crash_ts": entry.get("first_crash_ts") or ts,
             "escalated": True,
-            "class": "crash",
+            "class": classify(evidence) or "crash",
         }
     )
+    provider_history = _render_provider_history(entry.get("provider"))
     # Belt-and-braces dedup: a lost/reset state file must not re-notify a card
     # that already carries the exhausted marker.
     if _already_escalated_on_card(slug, tid):
@@ -496,7 +755,8 @@ def _escalate(
         f"⚠️ **Crash retries exhausted** — {attempts}/{max_attempts} automatic "
         f"re-dispatches over {elapsed_min:.0f} min failed.\n\n"
         f"Last failure: {last_error[:300]}\n\n"
-        f"The card stays hard-blocked. Recovery: fix the underlying cause, then "
+        + (f"Per-provider history:\n{provider_history}\n\n" if provider_history else "")
+        + f"The card stays hard-blocked. Recovery: fix the underlying cause, then "
         f"`hermes kanban unblock {tid}` (this resets the crash-retry counter)."
     )
     if not kanban.comment(slug, tid, diag):
@@ -525,7 +785,31 @@ def _escalate(
         "summary": last_error,
         "title": card.get("title") or "",
         "assignee": card.get("assignee") or "",
+        "provider_history": provider_history,
     }
+
+
+def _render_provider_history(provider: Any) -> str:
+    """Human-readable per-provider failure history for escalation diagnostics.
+
+    Renders the attempts-per-provider tally plus every recorded failover
+    (from → to, reason). Returns "" when the card never entered failover.
+    """
+    if not isinstance(provider, dict):
+        return ""
+    lines: List[str] = []
+    attempts = provider.get("attempts")
+    if isinstance(attempts, dict) and attempts:
+        tally = ", ".join(f"{k}: {v} attempt(s)" for k, v in attempts.items())
+        lines.append(f"- attempts — {tally}")
+    for h in provider.get("history") or []:
+        if not isinstance(h, dict):
+            continue
+        lines.append(
+            f"- failover — {h.get('from')} → {h.get('to')} "
+            f"(reason: {h.get('reason')}, layer: {h.get('layer')})"
+        )
+    return "\n".join(lines)
 
 
 def _cleanup_recovered(workdir: str, candidate_ids: set, dry_run: bool) -> None:

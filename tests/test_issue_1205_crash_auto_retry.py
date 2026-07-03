@@ -104,13 +104,18 @@ CRASH = "coding-agent-failed: CODING_AGENT_DIED — see stderr above"
 @pytest.mark.parametrize(
     "evidence,expected",
     [
+        # #1207: classify returns the trigger CLASS (all truthy — every one of
+        # these remains crash-class for the reconciler's is-None checks).
         (CRASH, "crash"),
-        ("coding_agent_timeout: exceeded 3600s", "crash"),
+        ("coding_agent_timeout: exceeded 3600s", "timeout"),
         ("run 2403 crashed (pid not alive)", "crash"),
-        ("ollama APIConnectionError while spawning", "crash"),
+        ("ollama APIConnectionError while spawning", "api_connection_error"),
         ("permission-error: cannot write /tmp", "crash"),
         ("worker exited with code 137", "crash"),
-        ("claude code session limit not yet reset", "crash"),
+        ("claude code session limit not yet reset", "session_limit"),
+        ("usage limit reached", "session_limit"),
+        ("quota exceeded for project", "quota_exceeded"),
+        ("429 rate limit from provider", "quota_exceeded"),
         ("crash-retries-exhausted: whatever", "crash"),
         ("review-required: PR #12 — fix/issue-42", None),
         ("qa-failed: 3 tests failing", None),

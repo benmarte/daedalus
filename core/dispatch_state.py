@@ -223,6 +223,83 @@ def all_crash_retry(workdir: str) -> Dict[str, Dict[str, Any]]:
     return {str(k): dict(v) for k, v in table.items() if isinstance(v, dict)}
 
 
+# ── Provider failover (issue #1207) ──────────────────────────────────────────
+#
+# Global (cross-card) failover bookkeeping under a top-level
+# ``provider_failover`` section:
+#
+#   "cooldowns":          {"<layer>:<name>": until_ts}  — a provider that just
+#                         failed on a limit/outage is skipped until this
+#                         wall-clock time (limited for one card = limited for
+#                         every card, hence global).
+#   "brain_active_index": int — which model.providers chain entry the
+#                         *-daedalus profiles are currently resynced to
+#                         (0 = primary). Lets the dispatcher restore the
+#                         primary once its cooldown expires (reset_to_primary).
+
+
+def _failover_section(state: Dict[str, Any]) -> Dict[str, Any]:
+    section = state.setdefault("provider_failover", {})
+    if not isinstance(section, dict):
+        section = {}
+        state["provider_failover"] = section
+    return section
+
+
+def get_provider_cooldowns(workdir: str) -> Dict[str, float]:
+    """Return the ``{"<layer>:<name>": until_ts}`` cooldown map (may be empty)."""
+    section = _load(workdir).get("provider_failover")
+    if not isinstance(section, dict):
+        return {}
+    cooldowns = section.get("cooldowns")
+    if not isinstance(cooldowns, dict):
+        return {}
+    out: Dict[str, float] = {}
+    for key, ts in cooldowns.items():
+        if isinstance(ts, (int, float)):
+            out[str(key)] = float(ts)
+    return out
+
+
+def set_provider_cooldown(workdir: str, key: str, until_ts: float) -> None:
+    """Mark provider *key* (``<layer>:<name>``) unavailable until *until_ts*."""
+    state = _load(workdir)
+    section = _failover_section(state)
+    cooldowns = section.setdefault("cooldowns", {})
+    if not isinstance(cooldowns, dict):
+        cooldowns = {}
+        section["cooldowns"] = cooldowns
+    cooldowns[str(key)] = float(until_ts)
+    _save(workdir, state)
+
+
+def clear_provider_cooldown(workdir: str, key: str) -> None:
+    """Remove the cooldown record for provider *key* (recovered)."""
+    state = _load(workdir)
+    cooldowns = state.get("provider_failover", {}).get("cooldowns")
+    if isinstance(cooldowns, dict) and cooldowns.pop(str(key), None) is not None:
+        _save(workdir, state)
+
+
+def get_brain_active_index(workdir: str) -> int:
+    """Index of the model.providers entry the profiles are resynced to (0 = primary)."""
+    section = _load(workdir).get("provider_failover")
+    if not isinstance(section, dict):
+        return 0
+    idx = section.get("brain_active_index")
+    try:
+        return max(0, int(idx))
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_brain_active_index(workdir: str, index: int) -> None:
+    """Persist which model.providers entry the profiles are resynced to."""
+    state = _load(workdir)
+    _failover_section(state)["brain_active_index"] = max(0, int(index))
+    _save(workdir, state)
+
+
 # ── PR / issue flags (idempotency guards) ─────────────────────────────────────
 
 def has_pr_flag(workdir: str, number: int, flag: str) -> bool:
