@@ -1336,6 +1336,13 @@ Each piece exists because the obvious approach failed:
   learns about it days later by scrolling the board. A one-time `retry-cap-exhausted`
   notification (deduped per issue via a marker comment) surfaces the wedge the
   moment it happens, routed to the same channels as `security-escalation`.
+- **Provider-instantiation warning in tick-summary notify** (`scripts/daedalus_dispatch.py`, issue #1113) —
+  when `providers.get_provider()` raised inside `_notify_project_summary()`, the code fell back to
+  `provider = None` with no log, silently degrading the dispatch summary for the entire tick. The
+  `except` branch now emits a `logger.warning()` with the exception detail and project identity
+  (name + workdir), so operators can see *why* the summary was degraded instead of guessing.
+  Behaviour is otherwise unchanged: the summary still renders (degraded) and the rest of dispatch
+  continues normally.
 - **Fetch limit raised to 100** — the original page limit of 20 silently truncated
   boards with more than 20 open issues: validator sweep missed work, merged-PR
   archival missed completions, and the board looked healthy while issues rotted in
