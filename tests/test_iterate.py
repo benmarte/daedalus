@@ -664,6 +664,30 @@ def test_execute_dev_fix_escalate_when_over_cap():
     assert "escalate" in mk_comment.call_args[0][2].lower()
 
 
+def test_check_and_maybe_escalate_below_threshold():
+    """_check_and_maybe_escalate returns the incremented attempt count when under cap."""
+    card = {"id": "t_dev", "runs": [{"metadata": {"fix_attempts": 1}}]}
+    with mock.patch.object(kanban, "comment") as mk_comment:
+        res = iterate._check_and_maybe_escalate(
+            "slug", card, "O/R", "review-required: PR #42",
+        )
+    assert res == 2, f"expected incremented attempt count 2, got {res!r}"
+    assert not isinstance(res, bool)
+    mk_comment.assert_not_called()
+
+
+def test_check_and_maybe_escalate_over_threshold():
+    """_check_and_maybe_escalate delegates to _execute_escalate when over cap."""
+    card = {"id": "t_dev", "runs": [{"metadata": {"fix_attempts": iterate.MAX_FIX_ATTEMPTS}}]}
+    with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        res = iterate._check_and_maybe_escalate(
+            "slug", card, "O/R", "review-required: PR #42",
+        )
+    assert res is True, f"expected escalate result True, got {res!r}"
+    mk_comment.assert_called_once()
+    assert "escalate" in mk_comment.call_args[0][2].lower()
+
+
 # ── run_iterate (main loop) ─────────────────────────────────────────────────
 
 
@@ -2326,6 +2350,8 @@ if __name__ == "__main__":
         test_execute_approve_advance,
         test_execute_escalate,
         test_execute_dev_fix_escalate_when_over_cap,
+        test_check_and_maybe_escalate_below_threshold,
+        test_check_and_maybe_escalate_over_threshold,
         test_run_iterate_empty,
         test_run_iterate_dev_advance,
         test_run_iterate_qa_fix,

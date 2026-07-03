@@ -917,6 +917,31 @@ def _create_downstream_review_tasks(
     return created
 
 
+def _check_and_maybe_escalate(
+    slug: str,
+    card: dict,
+    repo: str,
+    handoff_text: str,
+    *,
+    workdir: str = "",
+    dry_run: bool = False,
+) -> bool | int:
+    """Shared fix-attempt escalation guard for the fix-card executors.
+
+    Returns the incremented ``fix_attempts`` count (an ``int``) when the caller
+    should proceed with creating a fix card, or the ``bool`` result of
+    ``_execute_escalate()`` when the cap is exceeded. Callers must check
+    ``isinstance(res, bool)`` and return early on the escalate path — a plain
+    truthiness check would misread attempt counts as escalation results.
+    """
+    # Read-then-increment is not atomic, but the dispatcher is a single-process
+    # cron (projects processed sequentially) — no lock needed unless that changes.
+    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
+    if fix_attempts > MAX_FIX_ATTEMPTS:
+        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    return fix_attempts
+
+
 def _execute_qa_fix(
     slug: str,
     card: dict,
@@ -940,11 +965,11 @@ def _execute_qa_fix(
     if not pr:
         logger.warning("iterate: qa_fix on %s but no PR found in handoff", tid)
         return False
-    # Read-then-increment is not atomic, but the dispatcher is a single-process
-    # cron (projects processed sequentially) — no lock needed unless that changes.
-    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
-    if fix_attempts > MAX_FIX_ATTEMPTS:
-        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
+                                    workdir=workdir, dry_run=dry_run)
+    if isinstance(res, bool):
+        return res
+    fix_attempts = res
 
     title = f"Task 2.3 FIX — QA failure on PR #{pr} — fix and push"
     body = (
@@ -1069,9 +1094,11 @@ def _execute_pm_route(
         logger.info("iterate: %s blocked awaiting-pr — skipping PM route", tid)
         return False
     pr = pr_number or _parse_pr_number(handoff_text)
-    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
-    if fix_attempts > MAX_FIX_ATTEMPTS:
-        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
+                                    workdir=workdir, dry_run=dry_run)
+    if isinstance(res, bool):
+        return res
+    fix_attempts = res
 
     rp = (router_profile or "").strip()
     ws = f"dir:{workdir}" if workdir else card.get("workspace", "")
@@ -1164,9 +1191,11 @@ def _execute_legacy_dev_fix_review(
     """
     tid = card.get("id")
     pr = pr_number or _parse_pr_number(handoff_text)
-    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
-    if fix_attempts > MAX_FIX_ATTEMPTS:
-        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
+                                    workdir=workdir, dry_run=dry_run)
+    if isinstance(res, bool):
+        return res
+    fix_attempts = res
 
     title = f"Task 2.3 FIX — address review findings for PR #{pr or '?'} — push changes"
     body = (
