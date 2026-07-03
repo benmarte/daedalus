@@ -8841,6 +8841,12 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
         "issues/tasks, drives a real tick, asserts state "
         "transitions) without touching real GitHub, then exit.",
     )
+    parser.add_argument(
+        "--sync-profiles-model",
+        action="store_true",
+        help="Force sync all *-daedalus profiles to the current global model, "
+        "bypassing manual-override skip, then exit.",
+    )
     # argv is None for a normal invocation (parse sys.argv); the lock holder
     # passes an explicit argv when rerunning a scope dropped on contention
     # (issue #1160).
@@ -8860,6 +8866,21 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
     if args.history is not None:
         n = args.history if args.history and args.history > 0 else 10
         print(_format_history(_read_history(n)))
+        return 0
+
+    # --sync-profiles-model is a one-shot operation: sync all *-daedalus profiles
+    # to the current global model (bypassing manual-override skip) and exit.
+    # This is a standalone admin task, not part of the dispatch pipeline, so it
+    # runs before any project dispatch work.
+    if args.sync_profiles_model:
+        from core.sync_profiles import sync_profiles_to_model
+        count, updated = sync_profiles_to_model(force=True)
+        if updated:
+            print(f"Synced {count} profile(s) to global model:")
+            for name in updated:
+                print(f"  - {name}")
+        else:
+            print("No profiles updated (already in sync or no *-daedalus profiles found)")
         return 0
 
     dry_run = args.dry_run
