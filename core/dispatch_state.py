@@ -174,6 +174,55 @@ def mark_thread_event(workdir: str, issue_number: int, target: str, event_key: s
     _save(workdir, state)
 
 
+# ── Crash-retry bookkeeping (issue #1205) ─────────────────────────────────────
+#
+# Per-card retry episodes for the crash reconciler (core/crash_retry.py).
+# Keyed by kanban task id under a top-level ``crash_retry`` map:
+#
+#   {"first_crash_ts": float, "attempts": int, "last_attempt_ts": float,
+#    "escalated": bool, "class": "crash"}
+#
+# The reconciler persists the incremented attempt BEFORE unblocking the card so
+# a concurrent tick that reads the state mid-flight sees the attempt as already
+# spent (at most one re-dispatch per card per tick).
+
+
+def get_crash_retry(workdir: str, task_id: str) -> Optional[Dict[str, Any]]:
+    """Return the crash-retry entry for *task_id*, or *None* if absent/malformed."""
+    table = _load(workdir).get("crash_retry")
+    if not isinstance(table, dict):
+        return None
+    entry = table.get(str(task_id))
+    return dict(entry) if isinstance(entry, dict) else None
+
+
+def set_crash_retry(workdir: str, task_id: str, entry: Dict[str, Any]) -> None:
+    """Persist *entry* as the crash-retry record for *task_id*."""
+    state = _load(workdir)
+    table = state.setdefault("crash_retry", {})
+    if not isinstance(table, dict):
+        table = {}
+        state["crash_retry"] = table
+    table[str(task_id)] = dict(entry)
+    _save(workdir, state)
+
+
+def clear_crash_retry(workdir: str, task_id: str) -> None:
+    """Remove the crash-retry record for *task_id* (card recovered / archived)."""
+    state = _load(workdir)
+    table = state.get("crash_retry")
+    if isinstance(table, dict) and table.pop(str(task_id), None) is not None:
+        _save(workdir, state)
+
+
+def all_crash_retry(workdir: str) -> Dict[str, Dict[str, Any]]:
+    """Return the full ``{task_id: entry}`` crash-retry map (may be empty)."""
+    table = _load(workdir).get("crash_retry")
+    if not isinstance(table, dict):
+        return {}
+    return {str(k): dict(v) for k, v in table.items() if isinstance(v, dict)}
+
+
 # ── PR / issue flags (idempotency guards) ─────────────────────────────────────
 
 def has_pr_flag(workdir: str, number: int, flag: str) -> bool:
