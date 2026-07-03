@@ -179,16 +179,76 @@ def test_drain_rounds_are_capped(tmp_lock, caplog):
         _marker(tmp_lock).write_text("/proj/a\n")
         return 0
 
+    # Pin the hard round cap small so the unrelenting-contention path is fast and
+    # deterministic regardless of the production constant.
     with mock.patch.object(sys, "argv", ["daedalus_dispatch.py"]):
-        with mock.patch.object(disp, "_main_inner", side_effect=retrigger):
-            with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
-                rc = disp.main()
+        with mock.patch.object(disp, "_RERUN_MAX_PASSES", 3):
+            with mock.patch.object(disp, "_main_inner", side_effect=retrigger):
+                with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
+                    rc = disp.main()
 
     assert rc == 0
-    assert len(rerun_calls) == disp._RERUN_MAX_PASSES
+    # The hard round cap bounds the drain so the holder cannot spin forever under
+    # unrelenting contention; the residual marker is left for the next tick.
+    assert len(rerun_calls) == 3
     assert _marker(tmp_lock).exists(), "leftover marker stays for the next tick"
     assert any("marker still present" in r.message for r in caplog.records)
     assert not FileLock(str(tmp_lock)).is_locked
+
+
+def test_drain_continues_until_marker_empty(tmp_lock):
+    """#1235: the holder keeps draining past the old fixed 3-round cap until the
+    marker is empty, so a burst of completions arriving over several rounds is
+    fully handed off in this lock cycle instead of stalling until the next tick.
+    """
+    _marker(tmp_lock).write_text("/proj/a\n")
+    rounds = {"n": 0}
+    rerun_calls = []
+
+    def retrigger(argv=None):
+        # Initial pass has argv=None; rerun passes carry --repo.
+        if argv is None:
+            return 0
+        rerun_calls.append(argv)
+        rounds["n"] += 1
+        # Fresh reruns keep arriving for 6 rounds (> old cap of 3), then stop.
+        if rounds["n"] < 6:
+            _marker(tmp_lock).write_text("/proj/a\n")
+        return 0
+
+    with mock.patch.object(sys, "argv", ["daedalus_dispatch.py"]):
+        with mock.patch.object(disp, "_main_inner", side_effect=retrigger):
+            rc = disp.main()
+
+    assert rc == 0
+    assert len(rerun_calls) == 6, "all 6 rounds drained, not stopped at the old cap of 3"
+    assert not _marker(tmp_lock).exists(), "marker fully drained"
+    assert not FileLock(str(tmp_lock)).is_locked
+
+
+def test_drain_stops_at_wall_clock_budget(tmp_lock, caplog):
+    """#1235: draining is bounded by the wall-clock budget even if reruns keep
+    arriving, so the holder releases before the #1115 watchdog force-exits."""
+    _marker(tmp_lock).write_text("/proj/a\n")
+    # Controlled clock: start=0, one round runs (t=1 < budget), then jump past
+    # the budget so the loop breaks. Called directly to avoid main()'s own clock.
+    budget = float(disp._RERUN_DRAIN_BUDGET_SECS)
+    ticks = iter([0.0, 1.0, budget + 1.0, budget + 2.0, budget + 3.0])
+    rerun_calls = []
+
+    def retrigger(argv=None):
+        rerun_calls.append(argv)
+        _marker(tmp_lock).write_text("/proj/a\n")  # never stops on its own
+        return 0
+
+    with mock.patch.object(disp.time, "monotonic", side_effect=lambda: next(ticks)):
+        with mock.patch.object(disp, "_main_inner", side_effect=retrigger):
+            with caplog.at_level(logging.WARNING, logger="daedalus.dispatch"):
+                disp._drain_rerun_requests()
+
+    assert len(rerun_calls) == 1, "budget trips after one round despite endless reruns"
+    assert _marker(tmp_lock).exists()
+    assert any("marker still present" in r.message for r in caplog.records)
 
 
 # ── AC5: rerun failure is non-fatal ──────────────────────────────────────────
