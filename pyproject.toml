@@ -17,6 +17,9 @@ filterwarnings = [
     "ignore::DeprecationWarning",
 ]
 xfail_strict = true
+markers = [
+    "uses_real_hk: opt out of the autouse core.kanban._hk stub to exercise the real _hk (still guarded against writing the live board; issue #1209)",
+]
 
 [dependency-groups]
 dev = [

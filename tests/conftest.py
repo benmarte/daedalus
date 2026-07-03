@@ -47,7 +47,7 @@ if "DAEDALUS_DISPATCH_LOCK" not in os.environ:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_hermes_home(tmp_path, monkeypatch):
+def _isolate_hermes_home(tmp_path, monkeypatch, request):
     """Guarantee NO test ever writes to the real ~/.hermes kanban board.
 
     A test that exercises the real dispatcher or the ``hermes kanban`` CLI
@@ -57,11 +57,30 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
     test_profile_resync_integration.py). Forcing HERMES_HOME to a throwaway dir
     for every test makes that impossible. Tests that set their own (tmp)
     HERMES_HOME inside ``with`` blocks still override this — also isolated.
+
+    Defense in depth (issue #1209): HERMES_HOME alone proved insufficient under
+    the pipeline QA/PM worker environment, where the env override failed to
+    propagate to some subprocess/re-exec'd path and real cards still leaked. So
+    we ALSO stub the single chokepoint — ``core.kanban._hk``, which shells out
+    to the real ``hermes kanban`` CLI — with an in-memory no-op that mimics
+    ``_hk``'s graceful-degradation contract (rc!=0 → callers log-and-return
+    falsy). No test spawns the real CLI by default. A test that legitimately
+    exercises real ``_hk`` parsing either patches ``_hk`` itself (its explicit
+    ``mock.patch`` wins over this stub) or opts out with
+    ``@pytest.mark.uses_real_hk`` (still guarded by ``_guard_test_isolation``).
     """
     home = tmp_path / "hermes-home"
     (home / "kanban").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "test-isolated")
+
+    if request.node.get_closest_marker("uses_real_hk") is None:
+        import core.kanban as _kanban
+
+        def _stub_hk(args, timeout=60):
+            return (1, "", "core.kanban._hk stubbed in tests (issue #1209)")
+
+        monkeypatch.setattr(_kanban, "_hk", _stub_hk)
     yield
 
 

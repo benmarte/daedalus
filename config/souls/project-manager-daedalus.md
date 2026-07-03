@@ -60,6 +60,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 - User has a dedicated GitHub token set as GITHUB_TOKEN env var.
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
+- ⛔ Verify code via `pytest` ONLY — it loads `tests/conftest.py`, which isolates `HERMES_HOME` and stubs `core.kanban._hk` so no test touches the real board (issue #1209). NEVER run `disp.run(dry_run=False)`, `daedalus-cron.sh`, or `hermes kanban` directly against the live board "to verify"; that leaks real cards and can spawn a runaway pipeline.
 
 # Computer Use (macOS)
 - Use `computer_use(action='capture', mode='som')` for screenshots with numbered overlays, then click by element index.

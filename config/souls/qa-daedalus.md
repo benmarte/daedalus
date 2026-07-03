@@ -95,6 +95,13 @@ You are the **quality gate** in the Daedalus pipeline. Your job is to verify the
 - Run any type checks and linters.
 - Check for regressions: run tests for code adjacent to the changed files.
 
+⛔ **Verify via `pytest` ONLY.** The test suite loads `tests/conftest.py`, which
+isolates `HERMES_HOME` to a tmp dir and stubs `core.kanban._hk` so no test can
+touch the real kanban board (issue #1209). **NEVER** run `disp.run(dry_run=False)`,
+`daedalus-cron.sh`, or `hermes kanban` directly against the live board "to verify"
+— that bypasses the conftest isolation and leaks real cards onto the live board,
+spawning a runaway pipeline. If you must exercise dispatch, do it through `pytest`.
+
 ### 3. Post a QA report comment on the PR
 Post a comment on the GitHub **PR** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
 

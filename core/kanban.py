@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import subprocess
+from pathlib import Path
 from typing import List, Optional, Set
 
 from core.db import connect_wal
@@ -23,8 +24,32 @@ from core.db import connect_wal
 logger = logging.getLogger("daedalus.kanban")
 
 
+def _guard_test_isolation() -> None:
+    """Refuse to touch the real ``~/.hermes`` kanban board while under pytest.
+
+    Defense-in-depth for issue #1209. If a test path reaches ``_hk`` without an
+    isolated ``HERMES_HOME`` — the env override failed to propagate, as seen in
+    pipeline QA/PM workers — running the real ``hermes kanban`` CLI would write
+    cards to the LIVE board and trigger a runaway. This converts that silent leak
+    into a loud failure. No-op in production: the ``PYTEST_CURRENT_TEST`` sentinel
+    is only set by pytest, so real runs never enter this branch.
+    """
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    home = os.environ.get("HERMES_HOME")
+    real = (Path.home() / ".hermes").resolve()
+    if not home or Path(home).expanduser().resolve() == real:
+        raise RuntimeError(
+            "core.kanban._hk refused to spawn the real 'hermes kanban' CLI during "
+            f"a test: HERMES_HOME={home!r} points at the live board ({real}). "
+            "Tests must stub core.kanban._hk (the autouse conftest fixture does "
+            "this by default) or set an isolated tmp HERMES_HOME. See issue #1209."
+        )
+
+
 def _hk(args: List[str], timeout: int = 60) -> tuple[int, str, str]:
     """Run ``hermes kanban <args>``; return (rc, stdout, stderr). Patched in tests."""
+    _guard_test_isolation()
     try:
         r = subprocess.run(["hermes", "kanban"] + args, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
