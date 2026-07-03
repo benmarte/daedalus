@@ -29,7 +29,7 @@ import time
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from filelock import FileLock, Timeout
 
@@ -3979,6 +3979,163 @@ def _repair_orphan_tasks(
     return repaired
 
 
+# Issue attribution for registered worktrees: the branch name our developer
+# worktrees are spawned on (fix/issue-<N>), falling back to the directory name
+# convention (.worktrees/dev-<N>). Worktrees matching neither are left alone —
+# the sweep never removes what it cannot attribute to an issue.
+_WT_BRANCH_ISSUE_RE = re.compile(r"fix/issue-(\d+)$")
+_WT_PATH_ISSUE_RE = re.compile(r"(?:issue|dev)-(\d+)$")
+
+# Kanban statuses that mean "this issue's pipeline is finished" — a worktree
+# whose issue has ONLY tasks in these states (or none at all) is an orphan.
+_WT_TERMINAL_STATUSES = ("done", "complete", "completed", "cancelled", "archived")
+
+
+def _sweep_orphan_worktrees(workdir: str, slug: str, *, dry_run: bool = False) -> int:
+    """Remove registered git worktrees whose issue has no active kanban task.
+
+    Agents are instructed to ``git worktree remove --force`` on cleanup, but a
+    crashed/reclaimed agent leaves its worktree behind and they accumulate
+    unboundedly (issue #1114). This enforcement sweep runs once per tick:
+
+      1. Enumerate worktrees via ``git worktree list --porcelain``.
+      2. Attribute each to an issue number (branch ``fix/issue-<N>``, falling
+         back to a ``dev-<N>``/``issue-<N>`` directory name). The main worktree
+         and unattributable entries are always skipped.
+      3. Remove any whose issue has no active (non-terminal) kanban task, then
+         ``git worktree prune`` the stale metadata.
+
+    Every git call is wrapped so a single broken worktree (locked, missing,
+    permission error) is logged at WARNING and skipped — this function never
+    raises and never aborts the tick. If the board itself can't be read the
+    sweep aborts without removing anything (active worktrees are at risk when
+    the active-task set is unknown). Returns the count of removed worktrees
+    (in dry-run mode, the count that would be removed).
+    """
+    if not workdir:
+        return 0
+    try:
+        listed = subprocess.run(
+            ["git", "-C", workdir, "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:
+        logger.warning("dispatch: worktree sweep skipped — git list failed: %s", exc)
+        return 0
+    if listed.returncode != 0:
+        logger.debug(
+            "dispatch: worktree sweep skipped — %s is not a usable git repo", workdir
+        )
+        return 0
+
+    # Porcelain output: one block per worktree ("worktree <path>" / "HEAD <sha>"
+    # / "branch refs/heads/<name>" or "detached"), blocks separated by blank lines.
+    entries: List[Dict[str, str]] = []
+    cur: Dict[str, str] = {}
+    for line in (listed.stdout or "").splitlines():
+        if not line.strip():
+            if cur:
+                entries.append(cur)
+                cur = {}
+        elif line.startswith("worktree "):
+            cur["path"] = line[len("worktree ") :].strip()
+        elif line.startswith("branch "):
+            cur["branch"] = line[len("branch ") :].strip()
+    if cur:
+        entries.append(cur)
+
+    root = os.path.realpath(workdir)
+    candidates: List[Tuple[str, str, int]] = []
+    for entry in entries:
+        path = entry.get("path") or ""
+        if not path or os.path.realpath(path) == root:
+            continue  # never touch the main worktree
+        branch = entry.get("branch") or ""
+        if branch.startswith("refs/heads/"):
+            branch = branch[len("refs/heads/") :]
+        m = _WT_BRANCH_ISSUE_RE.search(branch) or _WT_PATH_ISSUE_RE.search(
+            os.path.basename(path.rstrip("/"))
+        )
+        if not m:
+            logger.debug(
+                "dispatch: worktree sweep: cannot attribute %s to an issue — skipping",
+                path,
+            )
+            continue
+        candidates.append((path, branch, int(m.group(1))))
+    if not candidates:
+        return 0
+
+    try:
+        tasks = kanban.list_tasks(slug)
+    except Exception as exc:
+        logger.warning("dispatch: worktree sweep skipped — kanban list failed: %s", exc)
+        return 0
+    active: set = set()
+    for task in tasks:
+        if (task.get("status") or "").lower() in _WT_TERMINAL_STATUSES:
+            continue
+        n = extract_issue_number(task.get("title") or "")
+        if n is not None:
+            active.add(n)
+
+    removed = 0
+    for path, branch, issue_n in candidates:
+        if issue_n in active:
+            continue
+        if dry_run:
+            logger.info(
+                "[dry-run] would remove orphan worktree %s (branch=%s, issue=#%d)",
+                path,
+                branch,
+                issue_n,
+            )
+            removed += 1
+            continue
+        try:
+            rm = subprocess.run(
+                ["git", "-C", workdir, "worktree", "remove", "--force", path],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except Exception as exc:
+            logger.warning(
+                "dispatch: failed to remove orphan worktree %s: %s — skipping",
+                path,
+                exc,
+            )
+            continue
+        if rm.returncode != 0:
+            logger.warning(
+                "dispatch: failed to remove orphan worktree %s: %s — skipping",
+                path,
+                (rm.stderr or rm.stdout or "").strip()[:200],
+            )
+            continue
+        logger.info(
+            "dispatch: swept orphan worktree %s (branch=%s, issue=#%d)",
+            path,
+            branch,
+            issue_n,
+        )
+        removed += 1
+
+    if removed and not dry_run:
+        try:
+            subprocess.run(
+                ["git", "-C", workdir, "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception as exc:
+            logger.warning("dispatch: git worktree prune failed: %s", exc)
+    return removed
+
+
 def _send_retry_cap_notification(
     *,
     role: str,
@@ -6646,6 +6803,16 @@ def run(
         )
 
     kanban.ensure_board(slug)
+
+    # Enforcement sweep for orphaned git worktrees (issue #1114): agents are
+    # told to `git worktree remove --force` on cleanup, but crashed/reclaimed
+    # agents leave theirs behind and they accumulate unboundedly. Runs before
+    # any dispatch so a stale worktree is gone within one tick of its pipeline
+    # finishing; worktrees with an active kanban task are preserved.
+    if workdir:
+        swept = _sweep_orphan_worktrees(workdir, slug, dry_run=dry_run)
+        if swept:
+            logger.info("dispatch: swept %d orphan worktree(s)", swept)
 
     # ── spec-file trigger source ─────────────────────────────────────────────
     # When sources.local_specs.enabled, scan <repo>/.hermes/pending/ for *.md
