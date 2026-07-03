@@ -1480,6 +1480,7 @@ on its board.
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
 | `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |
 | `dashboard/` | Dashboard tab: project grid, add/edit project modals, notifications editor (`plugin_api.py` + React `src/App.jsx`). |
+| `templates/agent_bodies/` | Agent prompt-body templates — one `.md` per role (planner, validator, pm, downstream, dev, qa, reviewer, security, docs, task_body). Rendered via `string.Template` (`$placeholder`) by `_render_agent_body()` in the dispatcher. Prompt-only changes now diff as markdown, not Python (#1147). |
 | `tests/` | Unit tests — config, providers (mocked HTTP), dispatcher, dashboard API, installers. |
 
 The **ship-gate hook**, **cron wrapper**, and **roster profiles** live in the Hermes

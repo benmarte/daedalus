@@ -1,3 +1,5 @@
+## [refactor: extract agent prompt bodies to templates/agent_bodies/](https://github.com/benmarte/daedalus/issues/1147) — [PR #1240](https://github.com/benmarte/daedalus/pull/1240)
+
 ## [perf: cache kanban list_tasks per dispatch tick](https://github.com/benmarte/daedalus/issues/1142) — [PR #1238](https://github.com/benmarte/daedalus/pull/1238)
 
 ## [perf: cache notification platform probes with a short TTL](https://github.com/benmarte/daedalus/issues/1144) — [PR #1232](https://github.com/benmarte/daedalus/pull/1232)
