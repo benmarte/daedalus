@@ -269,6 +269,98 @@ class GitHubProvider(VCSProvider):
         green = all((c["conclusion"] or "").lower() in ok for c in checks)
         return CIStatus.GREEN if green else CIStatus.RED
 
+    # ── batch CI status (single GraphQL round-trip, #1143) ──────────────────────
+    def get_prs_ci_status(self, pr_numbers: List[int]) -> Dict[int, str]:
+        """Batch CI-status lookup for multiple PRs via a single GraphQL query.
+
+        Falls back to the sequential base implementation when the list is
+        empty or the GraphQL request fails.
+        """
+        if not pr_numbers:
+            return {}
+        # Deduplicate while preserving order for stable dict construction.
+        seen: set = set()
+        unique = [n for n in pr_numbers if not (n in seen or seen.add(n))]
+        q = """
+        query($owner:String!,$name:String!,$prNumbers:[Int!]!){
+          repository(owner:$owner, name:$name){
+            pullRequests(numbers:$prNumbers, first:100){
+              nodes{
+                number
+                headRefOid
+                commits(last:1){ nodes{ commit{
+                  statusCheckRollup{ state } } } }
+                statusCheckRollup{ state } } } } }"""
+        try:
+            data = self._graphql(q, {"owner": self.owner,
+                                     "name": self.repo.split("/", 1)[1],
+                                     "prNumbers": unique})
+        except Exception as e:  # pragma: no cover — defensive
+            self._log.warning("get_prs_ci_status GraphQL failed: %s", e)
+            data = None
+        if not data:
+            self._log.warning("get_prs_ci_status GraphQL returned no data — "
+                              "falling back to sequential")
+            return super().get_prs_ci_status(unique)
+        nodes = (((data or {}).get("repository") or {}).get("pullRequests") or {}).get("nodes") or []
+        # GraphQL errors → fall back to sequential for the missing PRs.
+        got: set = set()
+        result: Dict[int, str] = {}
+        for node in nodes:
+            num = node.get("number")
+            if num is None:
+                continue
+            got.add(num)
+            result[num] = self._graphql_rollup_to_status(node)
+        missing = [n for n in unique if n not in got]
+        if missing:
+            self._log.warning("get_prs_ci_status: %s PRs missing from GraphQL "
+                              "response — fetching sequentially", len(missing))
+            for n in missing:
+                try:
+                    result[n] = self.get_pr_ci_status(n)
+                except Exception as e:
+                    self._log.warning("get_prs_ci_status PR #%s fallback failed: %s", n, e)
+                    result[n] = CIStatus.UNKNOWN
+        return result
+
+    @staticmethod
+    def _graphql_rollup_to_status(node: Dict[str, Any]) -> str:
+        """Map a GraphQL ``statusCheckRollup.state`` value to ``CIStatus``.
+
+        The rollup field lives at two possible locations depending on the
+        query shape: top-level on the PR node, or nested inside
+        ``commits.nodes[].commit.statusCheckRollup``. We check both for
+        robustness.
+        """
+        def _state(d: Optional[Dict[str, Any]]) -> Optional[str]:
+            if not d:
+                return None
+            rollup = d.get("statusCheckRollup")
+            if isinstance(rollup, dict):
+                s = rollup.get("state")
+                if s:
+                    return str(s).upper()
+            return None
+
+        state = _state(node)
+        if state is None:
+            commits = (node.get("commits") or {}).get("nodes") or []
+            for c in commits:
+                state = _state(c.get("commit") if isinstance(c, dict) else None)
+                if state:
+                    break
+        if state is None:
+            return CIStatus.UNKNOWN
+        mapping = {
+            "SUCCESS": CIStatus.GREEN,
+            "FAILURE": CIStatus.RED,
+            "ERROR": CIStatus.RED,
+            "PENDING": CIStatus.PENDING,
+            "EXPECTED": CIStatus.PENDING,
+        }
+        return mapping.get(state, CIStatus.UNKNOWN)
+
     # ── CI re-run (bounded auto-retry of transiently-red CI, #1199) ────────────
     def get_pr_head_sha(self, pr_number: int) -> Optional[str]:
         """Head commit SHA of a PR — keys the bounded CI-rerun budget."""

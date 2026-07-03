@@ -146,6 +146,97 @@ def test_ci_includes_legacy_commit_statuses(provider):
     assert provider.get_pr_ci_status(5) == CIStatus.RED
 
 
+# ── batch CI status (#1143) ───────────────────────────────────────────────────
+
+def _gql_ci_response(prs):
+    """Build a fake GraphQL ``repository.pullRequests.nodes`` list."""
+    nodes = []
+    for num, state in prs:
+        nodes.append({"number": num, "headRefOid": "sha%d" % num,
+                      "commits": {"nodes": [{"commit": {
+                          "statusCheckRollup": {"state": state}}}]},
+                      "statusCheckRollup": {"state": state}})
+    return {"data": {"repository": {"pullRequests": {"nodes": nodes}}}}
+
+
+def test_batch_ci_empty_input(provider):
+    assert provider.get_prs_ci_status([]) == {}
+
+
+def test_batch_ci_graphql_success(provider):
+    provider._http.post_json.return_value = _gql_ci_response([
+        (5, "SUCCESS"), (6, "FAILURE"), (7, "PENDING")])
+    result = provider.get_prs_ci_status([5, 6, 7])
+    assert result == {5: CIStatus.GREEN, 6: CIStatus.RED, 7: CIStatus.PENDING}
+
+
+def test_batch_ci_graphql_error_falls_back_to_sequential(provider):
+    # GraphQL returns errors → _graphql returns None → sequential fallback
+    provider._http.post_json.return_value = {"errors": [{"message": "oops"}]}
+    # Sequential fallback calls get_pr_ci_status per PR (mocked)
+    with mock.patch.object(provider, "get_pr_ci_status",
+                           side_effect=["green", "red"]) as mk:
+        result = provider.get_prs_ci_status([5, 6])
+    assert result == {5: "green", 6: "red"}
+    assert mk.call_count == 2
+
+
+def test_batch_ci_graphql_returns_none_falls_back(provider):
+    provider._http.post_json.return_value = None
+    with mock.patch.object(provider, "get_pr_ci_status", return_value="green"):
+        result = provider.get_prs_ci_status([5])
+    assert result == {5: "green"}
+
+
+def test_batch_ci_partial_results_fill_sequential(provider):
+    # Only PR 5 comes back from GraphQL; PR 6 is fetched sequentially
+    provider._http.post_json.return_value = _gql_ci_response([(5, "SUCCESS")])
+    with mock.patch.object(provider, "get_pr_ci_status", return_value="red") as mk:
+        result = provider.get_prs_ci_status([5, 6])
+    assert result == {5: CIStatus.GREEN, 6: "red"}
+    # Only the missing PR 6 is fetched via sequential fallback
+    mk.assert_called_once_with(6)
+
+
+def test_batch_ci_deduplicates_input(provider):
+    provider._http.post_json.return_value = _gql_ci_response([(5, "SUCCESS")])
+    result = provider.get_prs_ci_status([5, 5, 5])
+    assert result == {5: CIStatus.GREEN}
+
+
+def test_batch_ci_rollup_state_mapping(provider):
+    from core.providers.github import GitHubProvider as _GHP
+    assert _GHP._graphql_rollup_to_status(
+        {"statusCheckRollup": {"state": "SUCCESS"}}) == CIStatus.GREEN
+    assert _GHP._graphql_rollup_to_status(
+        {"statusCheckRollup": {"state": "FAILURE"}}) == CIStatus.RED
+    assert _GHP._graphql_rollup_to_status(
+        {"statusCheckRollup": {"state": "ERROR"}}) == CIStatus.RED
+    assert _GHP._graphql_rollup_to_status(
+        {"statusCheckRollup": {"state": "PENDING"}}) == CIStatus.PENDING
+    assert _GHP._graphql_rollup_to_status(
+        {"statusCheckRollup": {"state": "EXPECTED"}}) == CIStatus.PENDING
+    assert _GHP._graphql_rollup_to_status({}) == CIStatus.UNKNOWN
+    # Nested in commits
+    assert _GHP._graphql_rollup_to_status(
+        {"commits": {"nodes": [{"commit": {
+            "statusCheckRollup": {"state": "SUCCESS"}}}]}}) == CIStatus.GREEN
+
+
+def test_batch_ci_graphql_exception_falls_back(provider):
+    provider._http.post_json.side_effect = ProviderError("500", status_code=500)
+    with mock.patch.object(provider, "get_pr_ci_status", return_value="green"):
+        result = provider.get_prs_ci_status([5])
+    assert result == {5: "green"}
+
+
+def test_batch_ci_no_existing_single_pr_method_changes(provider):
+    """The single-PR method must still work exactly as before."""
+    _ci_mock(provider, [
+        {"name": "ci-complete", "status": "completed", "conclusion": "success"}])
+    assert provider.get_pr_ci_status(5) == CIStatus.GREEN
+
+
 # ── comments / delivery marker ────────────────────────────────────────────────
 
 def test_pr_comments_and_marker(provider):

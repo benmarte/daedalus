@@ -287,7 +287,8 @@ def test_get_projects_open_prs_mocked(client):
         mock.MagicMock(number=p["number"], title=p["title"],
                        head_branch=p["headRefName"]) for p in mock_pr_data
     ]
-    fake_provider.get_pr_ci_status.side_effect = ["green", "red"]
+    # Batch CI-status lookup returns a dict keyed by PR number.
+    fake_provider.get_prs_ci_status.return_value = {42: "green", 43: "red"}
 
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
@@ -305,6 +306,49 @@ def test_get_projects_open_prs_mocked(client):
     assert prs["prs"][0]["ci_status"] == "green"
     assert prs["prs"][1]["number"] == 43
     assert prs["prs"][1]["ci_status"] == "red"
+    # ── batch verification (#1143) ────────────────────────────────────────
+    # One batch call — not one per PR.
+    fake_provider.get_prs_ci_status.assert_called_once_with([42, 43])
+    # The sequential per-PR method must NOT be called on the success path.
+    fake_provider.get_pr_ci_status.assert_not_called()
+
+
+def test_get_projects_open_prs_batch_fallback_to_sequential(client):
+    """When the batch CI call raises, _open_prs falls back to per-PR lookup."""
+    mock_pr_data = [
+        {"number": 10, "title": "PR A", "headRefName": "fix/a", "state": "open"},
+        {"number": 11, "title": "PR B", "headRefName": "fix/b", "state": "open"},
+    ]
+
+    fake_provider = mock.MagicMock()
+    fake_provider.supports_ci_status = True
+    fake_provider.list_prs.return_value = [
+        mock.MagicMock(number=p["number"], title=p["title"],
+                       head_branch=p["headRefName"]) for p in mock_pr_data
+    ]
+    # Batch call blows up — sequential fallback should take over.
+    fake_provider.get_prs_ci_status.side_effect = RuntimeError("graphql 502")
+    fake_provider.get_pr_ci_status.side_effect = ["green", "red"]
+
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        with mock.patch("dashboard.plugin_api.get_provider",
+                        return_value=fake_provider):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+
+    prs = data[0]["open_prs"]
+    assert prs is not None
+    assert prs["count"] == 2
+    assert prs["prs"][0]["number"] == 10
+    assert prs["prs"][0]["ci_status"] == "green"
+    assert prs["prs"][1]["number"] == 11
+    assert prs["prs"][1]["ci_status"] == "red"
+    # Verify the batch call was attempted exactly once.
+    fake_provider.get_prs_ci_status.assert_called_once_with([10, 11])
+    # And the sequential fallback was used for both PRs.
+    assert fake_provider.get_pr_ci_status.call_count == 2
 
 
 def test_get_projects_graceful_degradation_when_sources_return_nothing(client):

@@ -555,6 +555,11 @@ def _open_prs(provider) -> Optional[dict[str, Any]]:
     """Return open/in-review PRs with counts, numbers, and CI state.
 
     Returns None when no provider is available or the repo has no open PRs.
+
+    CI status is fetched in a single batch call (``get_prs_ci_status``) when
+    the provider supports it, replacing up to 20 sequential per-PR round-trips.
+    If the batch call raises, we gracefully degrade to the legacy sequential
+    loop so a transient GraphQL failure never blanks the dashboard.
     """
     if provider is None:
         return None
@@ -565,15 +570,41 @@ def _open_prs(provider) -> Optional[dict[str, Any]]:
         return None
     if not prs:
         return None
+
+    # ── Batch CI-status lookup (single round-trip, #1143) ────────────────
+    # Collect PR numbers up-front, then make one batch call.  If the batch
+    # call raises or the provider lacks the method, fall back to the legacy
+    # sequential per-PR loop so the dashboard still renders.
+    ci_map: dict[int, str] = {}
+    batch_ok = False
+    if provider.supports_ci_status:
+        pr_numbers = [int(pr.number) for pr in prs if pr.number is not None]
+        if pr_numbers:
+            try:
+                ci_map = provider.get_prs_ci_status(pr_numbers)
+                batch_ok = True
+            except Exception as exc:
+                logger.warning(
+                    "vcs: get_prs_ci_status batch failed (%s) — falling back "
+                    "to sequential per-PR lookup", exc)
+
     pr_list: list[dict[str, Any]] = []
     for pr in prs:
         ci_status = None
         if pr.number is not None and provider.supports_ci_status:
-            try:
-                ci_status = provider.get_pr_ci_status(int(pr.number))
-            except Exception as exc:
-                logger.warning("vcs: get_pr_ci_status failed for PR #%s: %s", pr.number, exc)
-                ci_status = None
+            num = int(pr.number)
+            if batch_ok:
+                # Batch succeeded — use the pre-fetched map (missing == None).
+                ci_status = ci_map.get(num)
+            else:
+                # Batch failed (or not attempted) — sequential fallback.
+                try:
+                    ci_status = provider.get_pr_ci_status(num)
+                except Exception as exc:
+                    logger.warning(
+                        "vcs: get_pr_ci_status failed for PR #%s: %s",
+                        pr.number, exc)
+                    ci_status = None
         pr_list.append({
             "number": pr.number,
             "title": pr.title,
