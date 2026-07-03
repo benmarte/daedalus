@@ -52,6 +52,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
 from config import ConfigLoader  # noqa: E402
+from core import crash_retry  # noqa: E402
 from core import dispatch_state  # noqa: E402
 from core import iterate  # noqa: E402
 from core import providers  # noqa: E402
@@ -121,6 +122,7 @@ NOTIFY_EVENTS = (
     "security-escalation",
     "comment-mirror",
     "retry-cap-exhausted",
+    "crash-retries-exhausted",
     "retry-attempt",
     "validator-blocked",
     "qa-failed",
@@ -4077,6 +4079,89 @@ def _fire_webhook_notification(
     thread.start()
 
 
+def _send_crash_retries_exhausted_notification(
+    *,
+    action: Dict[str, Any],
+    resolved: Dict[str, Any],
+    dry_run: bool,
+) -> None:
+    """Notify humans that a card's crash retries are exhausted (#1205).
+
+    ``action`` is the ``escalated`` dict returned by ``crash_retry.reconcile``
+    (already deduped there — this fires at most once per episode). Routes to
+    targets subscribed to ``crash-retries-exhausted``, falling back to
+    ``retry-cap-exhausted`` / catch-all targets so existing configs get the
+    escalation without edits. Also fires the webhook sender in a background
+    thread. Failures are logged, never raised.
+    """
+    issue_n = action.get("issue")
+    task_id = action.get("task_id") or "?"
+    attempts = action.get("attempt")
+    max_attempts = action.get("max_attempts")
+    elapsed = action.get("elapsed_minutes")
+    last_error = (action.get("summary") or "no failure details")[:300]
+    body = (
+        "⚠️ **Crash Retries Exhausted**\n\n"
+        f"Issue #{issue_n} (card `{task_id}`, {action.get('assignee') or 'unknown'}) "
+        f"crashed through {attempts}/{max_attempts} automatic re-dispatches "
+        f"over {elapsed} min.\n\n"
+        f"**Last failure**: {last_error}\n"
+        "**Status**: hard-blocked (`crash-retries-exhausted`) — manual "
+        "intervention required\n"
+        f"**Recovery**: fix the underlying cause, then `hermes kanban unblock "
+        f"{task_id}` (resets the crash-retry counter)."
+    )
+
+    if not dry_run:
+
+        def _fire():
+            try:
+                send_webhook_notification(
+                    NotificationPayload(
+                        title="Crash Retries Exhausted",
+                        body=body,
+                        severity="critical",
+                        context={
+                            "issue": f"#{issue_n}",
+                            "task_id": str(task_id),
+                            "attempts": f"{attempts}/{max_attempts}",
+                            "elapsed_minutes": str(elapsed),
+                            "last_error": last_error,
+                        },
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "crash-retry webhook notification failed for #%s: %s",
+                    issue_n, exc,
+                )
+
+        threading.Thread(target=_fire, daemon=True).start()
+
+    targets = _notify_targets(resolved, "crash-retries-exhausted") or _notify_targets(
+        resolved, "retry-cap-exhausted"
+    )
+    for target in targets:
+        if dry_run:
+            logger.info(
+                "[dry-run] would send crash-retries-exhausted notification "
+                "to %s for #%s",
+                target, issue_n,
+            )
+            continue
+        ok, _anchor = _hermes_send(target, body)
+        if ok:
+            logger.info(
+                "sent crash-retries-exhausted notification to %s for #%s (card %s)",
+                target, issue_n, task_id,
+            )
+        else:
+            logger.warning(
+                "failed to send crash-retries-exhausted notification to %s for #%s",
+                target, issue_n,
+            )
+
+
 def _send_retry_attempt_notification(
     *,
     role: str,
@@ -6082,6 +6167,13 @@ def _check_team_blockers(
             continue  # PR in review or awaiting-pr — iterate handles this, PM can't unblock it
         if summary.startswith("a11y-skipped:"):
             continue  # accessibility skipped (no UI changes) — not a real blocker
+        # #1205: crash-class blocks (worker died / breaker gave_up) are owned
+        # by the crash-retry reconciler, which performs a REAL unblock +
+        # re-dispatch with time-bounded retries. A PM consultation for them
+        # was advisory-only (it never unblocked anything) and PM routing
+        # cannot fix an infrastructure crash anyway.
+        if crash_retry.is_crash_class(slug, card, summary):
+            continue
         # #1182: reuse the authoritative classifier as the single source of
         # truth. Passing gate verdicts (review-approved / qa-passed /
         # security-approved / security: cleared / accessibility approved /
@@ -6171,6 +6263,11 @@ def _enforce_validator_blocks(
     for card in blocked:
         assignee_card = (card.get("assignee") or "").strip()
         summary = (card.get("summary") or card.get("last_summary") or "").lower()
+        # #1205: an infrastructure crash is not a validator verdict — the
+        # crash-retry reconciler owns these (board enforcement + downstream
+        # cancellation would fight the auto re-dispatch during backoff).
+        if crash_retry.is_crash_class(slug, card, summary):
+            continue
         # Identify validator cards by profile name OR by the block-summary prefix
         is_validator = (
             assignee_card == validator_profile
@@ -6525,6 +6622,34 @@ def run(
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-running sweep failed: %s", exc)
 
+    # ── crash-retry reconciler (issue #1205) ─────────────────────────────────
+    # Crash-class blocked / gave-up cards (worker died, session limit, provider
+    # connection error) are auto-unblocked with time-bounded, backed-off
+    # retries instead of stranding until a manual `hermes kanban unblock`.
+    # Runs on EVERY dispatch entry point (cron tick and on_session_end advance
+    # both funnel through run(), serialized by the main() FileLock), before
+    # iterate/team-blockers so a retried card re-runs this same tick and never
+    # spawns an advisory-only PM consultation.
+    crash_actions: List[Dict[str, Any]] = []
+    if workdir:
+        try:
+            crash_actions = crash_retry.reconcile(
+                slug, workdir, execution, dry_run=dry_run
+            )
+        except Exception as exc:  # never let the reconciler break a dispatch tick
+            logger.warning("dispatch: crash-retry reconcile failed: %s", exc)
+    else:
+        logger.debug(
+            "dispatch: crash-retry reconcile skipped — no workdir configured "
+            "(episode state needs the project state file)"
+        )
+    crash_retried = sum(1 for a in crash_actions if a.get("action") == "retried")
+    crash_escalated = [a for a in crash_actions if a.get("action") == "escalated"]
+    for _esc in crash_escalated:
+        _send_crash_retries_exhausted_notification(
+            action=_esc, resolved=resolved, dry_run=dry_run
+        )
+
     (
         iterate_counts,
         advance_prs,
@@ -6562,7 +6687,10 @@ def run(
         if v > 0
         and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE, iterate.PENDING_SIGNAL)
     }
-    if any(c > 0 for c in iterate_counts.values()) and not dry_run:
+    # crash_retried > 0 forces a dispatch even when iterate saw nothing to do:
+    # the crash-retry reconciler just returned card(s) to ready and they must
+    # re-run within this same trigger (#1205).
+    if (any(c > 0 for c in iterate_counts.values()) or crash_retried) and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     # ── doc-report delivery ──────────────────────────────────────────────────
@@ -6607,6 +6735,8 @@ def run(
             "slack_delivered": slack_delivered,
             "vcs_autoconfig": vcs_autoconfig,
             "stale_running": stale_running,
+            "crash_retried": crash_retried,
+            "crash_escalated": [a.get("task_id") for a in crash_escalated],
             "enrollment_failures": sorted(
                 set(getattr(provider, "enrollment_failures", []))
             )[:500],
@@ -7364,6 +7494,8 @@ def run(
         "blocker_triggered": blocker_triggered,
         "vcs_autoconfig": vcs_autoconfig,
         "stale_running": stale_running,
+        "crash_retried": crash_retried,
+        "crash_escalated": [a.get("task_id") for a in crash_escalated],
         "enrollment_failures": sorted(
             set(getattr(provider, "enrollment_failures", []))
         ),

@@ -222,6 +222,21 @@ def _already_escalated_on_card(slug: str, task_id: str) -> bool:
     )
 
 
+def is_crash_class(slug: str, card: Dict[str, Any], evidence: str = "") -> bool:
+    """True when *card* is owned by the crash-retry reconciler.
+
+    Used by the team-blockers / validator-blocks handlers to route crash-class
+    cards AWAY from the advisory PM-consultation path — the reconciler performs
+    a real unblock + re-dispatch instead (#1205).
+    """
+    if (card.get("status") or "").lower() == "gave_up":
+        return True
+    if classify(evidence or _card_evidence(slug, card)):
+        return True
+    tid = str(card.get("id") or card.get("task_id") or "")
+    return bool(tid) and _gave_up_evidence_from_events(slug, tid) is not None
+
+
 def reconcile(
     slug: str,
     workdir: str,

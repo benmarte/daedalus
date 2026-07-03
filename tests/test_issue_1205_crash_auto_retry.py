@@ -406,6 +406,131 @@ def test_kanban_error_on_one_card_does_not_break_the_tick(fake, tmp_path, monkey
     assert [a["task_id"] for a in actions] == ["t_ok"]
 
 
+# ── dispatcher integration ────────────────────────────────────────────────────
+
+from unittest import mock  # noqa: E402
+
+from conftest import _load_dispatch  # noqa: E402
+
+disp = _load_dispatch()
+
+
+def _blocked_card(tid, assignee, summary, title):
+    return {"id": tid, "assignee": assignee, "summary": summary,
+            "last_summary": summary, "title": title, "status": "blocked"}
+
+
+def test_team_blockers_skip_crash_class_summary():
+    """Crash-class blocks get a REAL re-dispatch from the reconciler — the
+    advisory-only PM consultation must not be created for them."""
+    card = _blocked_card(
+        "t_c1", "developer-daedalus",
+        "coding-agent-failed: CODING_AGENT_DIED — see stderr above",
+        "#75 Developer: fix bug",
+    )
+    issue = {"number": 75, "title": "fix bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {75: issue}, "/w", "dev", "github",
+        )
+    assert mk_create.call_count == 0 and triggered == []
+
+
+def test_team_blockers_skip_breaker_gave_up_event_card():
+    """Breaker-blocked card (empty summary, gave_up event) is crash-class."""
+    card = _blocked_card("t_c2", "developer-daedalus", "", "#76 Developer: fix bug")
+    shown = {**card, "events": [{"type": "gave_up", "error": "pid not alive"}],
+             "comments": []}
+    issue = {"number": 76, "title": "fix bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=""), \
+         mock.patch.object(disp.kanban, "show_card", return_value=shown), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {76: issue}, "/w", "dev", "github",
+        )
+    assert mk_create.call_count == 0 and triggered == []
+
+
+def test_team_blockers_still_consult_for_genuine_blocker():
+    card = _blocked_card(
+        "t_c3", "developer-daedalus",
+        "cannot determine VCS provider credentials",
+        "#77 Developer: fix auth bug",
+    )
+    issue = {"number": 77, "title": "fix auth bug", "body": ""}
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
+         mock.patch.object(disp.kanban, "show_card", return_value={**card, "events": [], "comments": []}), \
+         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
+         mock.patch.object(disp.kanban, "create_task", return_value="t_consult") as mk_create:
+        triggered = disp._check_team_blockers(
+            "slug", "org/repo", {77: issue}, "/w", "dev", "github",
+        )
+    assert mk_create.call_count == 1 and triggered == [77]
+
+
+def test_enforce_validator_blocks_skips_crash_class():
+    """An infrastructure crash is not a validator verdict — no board 'Blocked'
+    enforcement, no downstream cancellation."""
+    card = _blocked_card(
+        "t_v1", "validator-daedalus",
+        "coding-agent-failed: CODING_AGENT_TIMEOUT — see stderr above",
+        "#78 Validator: confirm bug",
+    )
+    provider = mock.Mock()
+    provider.board_configured.return_value = True
+    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
+         mock.patch.object(disp.kanban, "close_non_blocked_issue_tasks") as mk_close:
+        enforced = disp._enforce_validator_blocks("slug", provider, {78})
+    assert enforced == []
+    provider.board_set_status.assert_not_called()
+    mk_close.assert_not_called()
+
+
+def test_crash_notification_falls_back_to_retry_cap_targets():
+    action = {"action": "escalated", "task_id": "t_1", "issue": 42, "attempt": 5,
+              "max_attempts": 5, "elapsed_minutes": 90.0,
+              "summary": "pid not alive", "title": "#42", "assignee": "developer-daedalus"}
+
+    def _targets(resolved, event):
+        return {"retry-cap-exhausted": ["slack:C123"]}.get(event, [])
+
+    with mock.patch.object(disp, "_notify_targets", side_effect=_targets), \
+         mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as mk_send, \
+         mock.patch.object(disp, "send_webhook_notification"):
+        disp._send_crash_retries_exhausted_notification(
+            action=action, resolved={}, dry_run=False
+        )
+    assert mk_send.call_count == 1
+    target, body = mk_send.call_args[0]
+    assert target == "slack:C123"
+    assert "Crash Retries Exhausted" in body and "#42" in body
+    assert "pid not alive" in body and "hermes kanban unblock t_1" in body
+
+
+def test_crash_notification_dry_run_sends_nothing():
+    action = {"action": "escalated", "task_id": "t_1", "issue": 42, "attempt": 5,
+              "max_attempts": 5, "elapsed_minutes": 90.0, "summary": "x",
+              "title": "#42", "assignee": "developer-daedalus"}
+    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C123"]), \
+         mock.patch.object(disp, "_hermes_send") as mk_send, \
+         mock.patch.object(disp, "send_webhook_notification") as mk_hook:
+        disp._send_crash_retries_exhausted_notification(
+            action=action, resolved={}, dry_run=True
+        )
+    mk_send.assert_not_called()
+    mk_hook.assert_not_called()
+
+
+def test_notify_events_include_crash_retries_exhausted():
+    assert "crash-retries-exhausted" in disp.NOTIFY_EVENTS
+
+
 # ── incident reproduction (card t_34adae1f, 2026-07-02) ──────────────────────
 
 def test_incident_two_fast_crashes_auto_recover_without_manual_unblock(fake, tmp_path):
