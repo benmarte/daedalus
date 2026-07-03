@@ -100,10 +100,21 @@ _LOCK_WATCHDOG_SECS = 30 * 60  # 30 minutes
 # Rerun-on-contention (issue #1160): a dispatch that loses the FileLock race
 # records its intended scope in a marker file next to the lock instead of being
 # silently dropped; the lock HOLDER consumes the marker and runs one extra pass
-# per recorded scope before releasing. Drain rounds are capped so processes that
-# keep re-losing the race cannot hold the lock forever (the #1115 watchdog still
-# bounds total hold time).
-_RERUN_MAX_PASSES = 3
+# per recorded scope before releasing.
+#
+# The holder drains the marker until it is EMPTY (issue #1235) so a burst of
+# near-simultaneous completions — e.g. all five gate agents for a PR finishing at
+# once, each firing an on_session_end advance that loses the race — is fully
+# handed off in this lock cycle instead of stalling until the next */15 cron
+# tick. A previous fixed 3-round cap abandoned the rerun queue under sustained
+# load, deferring handoffs by up to a full cron interval.
+#
+# Draining is bounded by a wall-clock budget (a fraction of the #1115 watchdog
+# window, so we release gracefully before the watchdog force-exits) and a hard
+# round cap as a non-Unix safety net (SIGALRM watchdog is Unix-only). Whichever
+# trips first leaves any residual marker for the next tick.
+_RERUN_MAX_PASSES = 200
+_RERUN_DRAIN_BUDGET_SECS = int(_LOCK_WATCHDOG_SECS * 0.8)
 # Marker line meaning "unscoped sweep requested" (a dropped invocation whose
 # cwd matched no registered project).
 _RERUN_GLOBAL_SCOPE = "*"
@@ -8906,14 +8917,24 @@ def _consume_rerun_requests() -> List[str]:
 def _drain_rerun_requests() -> None:
     """Run extra dispatch passes for scopes dropped while we held the lock.
 
-    Called by the lock holder after its own pass, before releasing. Capped at
-    ``_RERUN_MAX_PASSES`` drain rounds; a leftover marker is left for the next
-    tick and logged so the stall is visible (issue #1160).
+    Called by the lock holder after its own pass, before releasing. Drains the
+    rerun marker until it is EMPTY so a burst of near-simultaneous completions is
+    fully handed off in this lock cycle instead of stalling until the next cron
+    tick (issue #1235). Bounded by a wall-clock budget
+    (``_RERUN_DRAIN_BUDGET_SECS``, a fraction of the #1115 watchdog window) and a
+    hard round cap (``_RERUN_MAX_PASSES``, a non-Unix safety net); whichever
+    trips first leaves any residual marker for the next tick and logs it so the
+    stall stays visible.
     """
-    for _ in range(_RERUN_MAX_PASSES):
+    start = time.monotonic()
+    passes = 0
+    while passes < _RERUN_MAX_PASSES:
+        if time.monotonic() - start >= _RERUN_DRAIN_BUDGET_SECS:
+            break
         scopes = _consume_rerun_requests()
         if not scopes:
             return
+        passes += 1
         for scope in scopes:
             logger.info(
                 "dispatch: rerun requested while lock was held — extra pass (scope=%s)",
@@ -8925,9 +8946,9 @@ def _drain_rerun_requests() -> None:
                 logger.error("dispatch: rerun pass failed for scope %s: %s", scope, e)
     if _rerun_marker_path().exists():
         logger.warning(
-            "dispatch: rerun marker still present after %d drain rounds — "
+            "dispatch: rerun marker still present after draining (%d passes) — "
             "leaving it for the next tick",
-            _RERUN_MAX_PASSES,
+            passes,
         )
 
 
