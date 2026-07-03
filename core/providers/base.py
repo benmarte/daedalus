@@ -577,6 +577,28 @@ class VCSProvider(abc.ABC):
     def pr_ci_green(self, pr_number: int) -> bool:
         return self.get_pr_ci_status(pr_number) == CIStatus.GREEN
 
+    def get_prs_ci_status(self, pr_numbers: List[int]) -> Dict[int, str]:
+        """Batch CI-status lookup for multiple PRs.
+
+        Default implementation iterates sequentially over
+        :meth:`get_pr_ci_status` — providers that support a true batch query
+        (e.g. GitHub GraphQL) override this for a single round-trip.
+
+        Returns a dict keyed by PR number with the same status string
+        (``CIStatus.GREEN`` / ``RED`` / ``PENDING`` / ``UNKNOWN``) as the
+        single-PR method. PRs whose lookup raises are mapped to
+        ``CIStatus.UNKNOWN`` so callers always get an entry for every
+        requested PR number.
+        """
+        result: Dict[int, str] = {}
+        for pr in pr_numbers:
+            try:
+                result[pr] = self.get_pr_ci_status(pr)
+            except Exception as exc:
+                logger.warning("get_prs_ci_status PR #%s failed: %s", pr, exc)
+                result[pr] = CIStatus.UNKNOWN
+        return result
+
     def get_pr_head_sha(self, pr_number: int) -> Optional[str]:
         """Head commit SHA of a PR — keys the bounded CI-rerun budget (#1199).
         Returns None when unknown; providers that support it override."""
