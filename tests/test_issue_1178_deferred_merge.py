@@ -169,6 +169,53 @@ def test_sweep_uses_deterministic_branch_name():
     p.find_pr_for_branch.assert_called_with("fix/issue-1234")
 
 
+# ── issue #1226: docs card already archived must still merge ───────────────────
+
+
+def _split_board(active, archived):
+    """list_tasks side_effect: active board vs the status='archived' list.
+
+    Mirrors the real kanban CLI, where the default ``list`` EXCLUDES archived
+    cards and only ``--status archived`` returns them.
+    """
+    def _side_effect(slug, status=None, **_kw):
+        return list(archived) if status == "archived" else list(active)
+    return _side_effect
+
+
+def test_sweep_merges_when_docs_card_already_archived():
+    # Regression for #1226: completed gate cards archive quickly (#1141), so the
+    # terminal documentation card is frequently ARCHIVED by the time this every-tick
+    # sweep runs. It was absent from the active board, so the PR was never even
+    # considered → stranded open until a manual merge. The sweep must scan the
+    # archived list too and treat an archived docs card as a completion signal.
+    p = _provider(pr=99)
+    archived = [{"assignee": "documentation-daedalus",
+                 "title": "#42 Docs: fix the thing", "status": "archived"}]
+    with mock.patch.object(iterate.kanban, "list_tasks",
+                           side_effect=_split_board([], archived)), _all_gates_pass() as m:
+        for k in m:
+            m[k].return_value = True
+        merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
+    assert merged == [99]
+    p.merge_pr.assert_called_once_with(99, merge_method="squash")
+
+
+def test_sweep_does_not_double_consider_docs_card_in_both_lists():
+    # An issue appears once even if its docs card shows up in both active and
+    # archived snapshots (seen_issues dedup) — no double merge attempt.
+    p = _provider(pr=99)
+    card = {"assignee": "documentation-daedalus",
+            "title": "#42 Docs: fix the thing", "status": "done"}
+    with mock.patch.object(iterate.kanban, "list_tasks",
+                           side_effect=_split_board([card], [card])), _all_gates_pass() as m:
+        for k in m:
+            m[k].return_value = True
+        merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
+    assert merged == [99]
+    p.merge_pr.assert_called_once_with(99, merge_method="squash")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

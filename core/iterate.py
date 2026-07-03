@@ -2722,11 +2722,23 @@ def sweep_deferred_merges(
     merged: list[int] = []
     ci_cache: dict[int, str] = {}
     seen_issues: set[int] = set()
-    # Match DONE documentation cards by ASSIGNEE (title formats vary; idempotency_key
+    # Match documentation cards by ASSIGNEE (title formats vary; idempotency_key
     # is no longer returned by the kanban API). Extract the issue number from the
     # title via the canonical helper.
-    for task in tasks:
-        if (task.get("status") or "").lower() != "done":
+    #
+    # Scan BOTH the active board AND the archived list, and accept a docs card in
+    # either the DONE or ARCHIVED state. Completed gate cards archive quickly
+    # (#1141) — the documentation card (terminal stage) is frequently already
+    # archived by the time this every-tick sweep runs. Scanning only active DONE
+    # cards therefore never even *considered* a pipeline-complete PR once its docs
+    # card archived, stranding it open until a manual merge (#1226). Archiving only
+    # happens post-completion, so an archived docs card is a valid completion
+    # signal; the gate/CI/mergeability checks below still re-verify before merging.
+    candidate_tasks = list(tasks)
+    if archived_tasks:
+        candidate_tasks += archived_tasks
+    for task in candidate_tasks:
+        if (task.get("status") or "").lower() not in ("done", "archived"):
             continue
         if not (task.get("assignee") or "").strip().lower().startswith("documentation-"):
             continue
@@ -2747,6 +2759,9 @@ def sweep_deferred_merges(
         except Exception:
             pr = None
         if pr is None:
+            logger.debug(
+                "iterate: deferred-merge sweep: no open PR for issue #%s "
+                "(branch fix/issue-%s) — skipping", issue_n, issue_n)
             continue
         if pr not in ci_cache:
             try:
