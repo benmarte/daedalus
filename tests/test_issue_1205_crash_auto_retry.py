@@ -207,6 +207,34 @@ def test_blocked_card_classified_via_last_failure_error(fake, tmp_path):
     assert len(fk.unblocked) == 1
 
 
+def test_breaker_blocked_card_detected_via_gave_up_event(fake, tmp_path):
+    """Primary incident case: the hermes-core breaker blocks the card with an
+    EMPTY summary — the crash only exists as a ``gave_up`` task event."""
+    fk = fake([_card(summary="",
+                     events=[{"type": "blocked"}, {"type": "unblocked"},
+                             {"type": "gave_up", "error": "pid not alive (run 2484)"}])])
+    actions = crash_retry.reconcile("board", str(tmp_path), {}, now=T0)
+    assert [a["action"] for a in actions] == ["retried"]
+    assert "pid not alive" in fk.unblocked[0][1]
+
+
+def test_blocked_event_after_gave_up_is_not_crash_class(fake, tmp_path):
+    """A worker/human block AFTER the breaker episode owns the card — the most
+    recent lifecycle event is ``blocked``, so the reconciler must not touch it."""
+    fk = fake([_card(summary="",
+                     events=[{"type": "gave_up", "error": "pid not alive"},
+                             {"type": "unblocked"},
+                             {"type": "blocked", "reason": "human hold"}])])
+    actions = crash_retry.reconcile("board", str(tmp_path), {}, now=T0)
+    assert actions == [] and fk.unblocked == []
+
+
+def test_blocked_card_without_events_or_summary_untouched(fake, tmp_path):
+    fk = fake([_card(summary="")])
+    actions = crash_retry.reconcile("board", str(tmp_path), {}, now=T0)
+    assert actions == [] and fk.unblocked == []
+
+
 def test_non_crash_blocks_never_auto_unblocked(fake, tmp_path):
     fk = fake(
         [

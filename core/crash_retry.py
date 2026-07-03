@@ -170,6 +170,48 @@ def _card_evidence(slug: str, card: Dict[str, Any]) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def _gave_up_evidence_from_events(slug: str, task_id: str) -> Optional[str]:
+    """Crash evidence from the card's event log, or None if not crash-class.
+
+    The Hermes-core breaker does NOT leave a crash summary: it flips the card
+    to ``blocked`` via direct SQL and records a ``gave_up`` task event (the
+    error text lives in the event payload / ``last_failure_error``). So a
+    blocked card whose summary doesn't classify is crash-class iff the most
+    recent block-lifecycle event among {``gave_up``, ``blocked``,
+    ``unblocked``} is ``gave_up`` — a worker/human ``blocked`` event or a
+    later ``unblocked`` means the breaker is not what parked the card.
+
+    Event schema is parsed defensively (``type``/``event``/``kind`` keys,
+    error under ``error``/``data.error``/``message``); anything unparseable
+    yields None — the safe default is to never auto-unblock an
+    unclassifiable block.
+    """
+    card = kanban.show_card(slug, task_id)
+    if not card:
+        return None
+    events = card.get("events")
+    if not isinstance(events, list):
+        return None
+    for ev in reversed(events):  # most recent last — scan backwards
+        if not isinstance(ev, dict):
+            continue
+        kind = str(ev.get("type") or ev.get("event") or ev.get("kind") or "").lower()
+        if kind not in ("gave_up", "blocked", "unblocked"):
+            continue
+        if kind != "gave_up":
+            return None
+        data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+        error = (
+            ev.get("error")
+            or data.get("error")
+            or ev.get("message")
+            or card.get("last_failure_error")
+            or "worker gave up (crash breaker)"
+        )
+        return str(error)
+    return None
+
+
 def _already_escalated_on_card(slug: str, task_id: str) -> bool:
     """True if the card already carries the exhausted marker comment."""
     card = kanban.show_card(slug, task_id)
@@ -253,9 +295,15 @@ def _reconcile_card(
     evidence = _card_evidence(slug, card)
     # A gave_up card is by definition a repeated worker crash even when its
     # evidence carries no marker (the breaker trips on spawn/session deaths);
-    # a blocked card must positively match a crash signature.
+    # a blocked card must positively match a crash signature — in its
+    # summary/last_failure_error, or via a breaker ``gave_up`` event (the
+    # primary incident case: the breaker blocks with an EMPTY summary and
+    # only the event log carries the crash).
     if status == "blocked" and classify(evidence) is None:
-        return None  # non-crash block — owned by iterate / PM consultation
+        event_evidence = _gave_up_evidence_from_events(slug, tid)
+        if event_evidence is None:
+            return None  # non-crash block — owned by iterate / PM consultation
+        evidence = event_evidence
     candidate_ids.add(tid)
 
     entry = dispatch_state.get_crash_retry(workdir, tid) or {}
