@@ -37,7 +37,7 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA\nFull pytest -n auto suite · coverage\nqa-passed / qa-failed"]
+    Dev --> QA["🧪 QA\nCI-gate → skip local suite if green\nAC check · diff review\nqa-passed / qa-failed"]
     Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
     
     QA --> QAGate{{"🚦 QA Gate\nqa-passed?"}}
@@ -179,11 +179,16 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
      these atomically on the next tick: a triage card is decomposed across all roles with QA gating
      the reviewer/security/accessibility stages.
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR.
-   - **qa** runs the full test suite exactly as CI does (`pytest tests/ -n auto
-     --timeout=60` in the isolated PR worktree), verifies acceptance criteria,
-     analyzes coverage, and reports a verdict (`qa-passed` or `qa-failed`). The
-     verdict is `qa-passed` only if BOTH the acceptance criteria and the full
-     suite pass; any full-suite failure (even unrelated to the PR) yields
+   - **qa** checks CI status first via a **CI-gate** (#1118): if all checks are
+     green on the PR head commit, QA skips the local full-suite run entirely
+     (saving ~10–20 min) and goes straight to acceptance-criteria verification
+     and diff review. If CI is pending, failing, or has no checks, QA falls back
+     to running the full suite locally exactly as CI does (`pytest tests/ -n auto
+     --timeout=60` in the isolated PR worktree). If QA pushes new tests, the old
+     CI-green is stale and those tests are run locally (targeted). The verdict is
+     `qa-passed` only if BOTH the acceptance criteria AND the suite pass — where
+     "suite passes" means CI is green on the PR head OR the local full suite
+     passed; any full-suite failure (even unrelated to the PR) yields
      `qa-failed`. This ensures QA-green matches CI-green (#1201). The pipeline
      advances to reviewer/security/accessibility only after QA passes.
    - **reviewer** reviews, **security-analyst** audits, **accessibility** audits the PR for
