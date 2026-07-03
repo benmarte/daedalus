@@ -23,6 +23,46 @@ from core.db import connect_wal
 
 logger = logging.getLogger("daedalus.kanban")
 
+# ── Per-tick list_tasks cache (issue #1142) ─────────────────────────────────
+#
+# Opt-in, process-local, non-persistent cache for ``list_tasks`` results.
+# Keyed by ``(slug, status)`` → parsed task list.  Disabled by default; the
+# dispatcher enables it at tick start (``enable_tick_cache`` + ``reset_tick_cache``)
+# and disables it in a ``finally`` at tick end (``disable_tick_cache``).  Every
+# board-mutating function clears the cache so no stale read occurs within a
+# tick.  Single-dispatcher-process assumption: the cache is NOT shared across
+# processes and is not thread-safe by design (run() is single-threaded).
+_tick_cache_enabled: bool = False
+_tick_cache: Dict[tuple[str, str], List[dict]] = {}
+
+
+def enable_tick_cache() -> None:
+    """Turn on the per-tick ``list_tasks`` cache (dispatcher tick start)."""
+    global _tick_cache_enabled
+    _tick_cache_enabled = True
+
+
+def reset_tick_cache() -> None:
+    """Clear all cached ``list_tasks`` entries (call at tick start after enable)."""
+    _tick_cache.clear()
+
+
+def disable_tick_cache() -> None:
+    """Turn off the cache and clear all entries (dispatcher tick end / finally)."""
+    global _tick_cache_enabled
+    _tick_cache_enabled = False
+    _tick_cache.clear()
+
+
+def _invalidate_tick_cache() -> None:
+    """Clear all cached entries so the next ``list_tasks`` refetches.
+
+    Called by every board-mutating function to prevent stale reads within a
+    tick.  Clearing all keys is the simplest correct invalidation — the cache
+    is rebuilt lazily on the next ``list_tasks`` call.
+    """
+    _tick_cache.clear()
+
 
 def _guard_test_isolation() -> None:
     """Refuse to touch the real ``~/.hermes`` kanban board while under pytest.
@@ -139,6 +179,7 @@ def create_triage(slug: str, issue_number: Optional[int], title: str, body: str,
         if goal_max_turns is not None:
             args += ["--goal-max-turns", str(goal_max_turns)]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: create triage for #%s failed: %s", issue_number, (err or "").strip())
         return None
@@ -156,6 +197,7 @@ def decompose(slug: str, task_id: str) -> bool:
     terse triage body fans out broadly; a prescriptive one may stay single.
     """
     rc, out, err = _hk(["--board", slug, "decompose", task_id], timeout=180)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: decompose %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -214,6 +256,7 @@ def complete(slug: str, task_id: str, summary: str = "") -> bool:
     if summary:
         args += ["--summary", summary]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: complete %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -230,6 +273,7 @@ def edit_summary(slug: str, task_id: str, summary: str) -> bool:
     """
     args = ["--board", slug, "edit", task_id, "--result", "--summary", summary]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: edit_summary %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -246,6 +290,7 @@ def decompose_all_triage(slug: str) -> bool:
     triage cards.
     """
     rc, out, err = _hk(["--board", slug, "decompose", "--all"], timeout=180)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: decompose --all failed: %s", (err or out or "").strip())
         return False
@@ -319,6 +364,7 @@ def create_task(
         if goal_max_turns is not None:
             args += ["--goal-max-turns", str(goal_max_turns)]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: create task failed: %s", (err or "").strip())
         return None
@@ -355,6 +401,7 @@ def block_task(slug: str, task_id: str, reason: str = "") -> bool:
     if reason:
         args += [reason]  # hermes kanban block uses positional reason, not --reason
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: block %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -457,6 +504,7 @@ def edit_body(slug: str, task_id: str, body: str) -> bool:
         cur = conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
         conn.commit()
         conn.close()
+        _invalidate_tick_cache()
         return cur.rowcount > 0
     except Exception as exc:
         logger.warning("kanban: edit_body %s failed: %s", task_id, exc)
@@ -485,7 +533,18 @@ def diagnostics(slug: str) -> List[dict]:
 
 
 def list_tasks(slug: str, status: str = "") -> List[dict]:
-    """List all tasks on a board, optionally filtered by status. Returns parsed JSON list."""
+    """List all tasks on a board, optionally filtered by status. Returns parsed JSON list.
+
+    When the per-tick cache is enabled (``enable_tick_cache``), repeated calls
+    with the same ``(slug, status)`` return the cached list without spawning a
+    subprocess.  The cache is cleared on every board mutation and at tick end.
+    When disabled (default), behavior is unchanged — every call hits ``_hk``.
+    """
+    if _tick_cache_enabled:
+        key = (slug, status)
+        cached = _tick_cache.get(key)
+        if cached is not None:
+            return cached
     args = ["--board", slug, "list", "--json"]
     if status:
         args += ["--status", status]
@@ -493,9 +552,12 @@ def list_tasks(slug: str, status: str = "") -> List[dict]:
     if rc != 0:
         return []
     try:
-        return json.loads(out or "[]")
+        result = json.loads(out or "[]")
     except Exception:
         return []
+    if _tick_cache_enabled:
+        _tick_cache[(slug, status)] = result
+    return result
 
 
 def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:

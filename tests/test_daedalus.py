@@ -4495,6 +4495,7 @@ def test_check_completed_developer_well_formed_summary_no_retry():
 
     _orig_create = disp.kanban.create_task
     _orig_show = disp.kanban.show_card
+    _orig_list = disp.kanban.list_tasks
     try:
         disp.kanban.list_tasks = fake_list_tasks
         disp.kanban.show_card = lambda s, tid: {"latest_summary": ""}
@@ -4517,6 +4518,7 @@ def test_check_completed_developer_well_formed_summary_no_retry():
     finally:
         disp.kanban.create_task = _orig_create
         disp.kanban.show_card = _orig_show
+        disp.kanban.list_tasks = _orig_list
 
     # Well-formed summary: no retry task should be created
     dev_keys = [k for k in created_keys if k.startswith("developer-")]

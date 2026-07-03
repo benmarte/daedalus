@@ -6907,6 +6907,29 @@ def run(
     ``provider`` (a core.providers.VCSProvider) is built from the resolved config
     when not injected (tests inject a fake).
     """
+    # Per-tick list_tasks cache (issue #1142): enable for the duration of this
+    # tick so repeated ``kanban.list_tasks(slug, status)`` calls collapse to a
+    # single subprocess per distinct key.  The try/finally guarantees the cache
+    # is disabled even if run() raises, so it never leaks across ticks or
+    # persists in a long-lived process.
+    kanban.enable_tick_cache()
+    kanban.reset_tick_cache()
+    try:
+      return _run_impl(resolved, assignee=assignee, max_dispatch=max_dispatch,
+                       dry_run=dry_run, provider=provider)
+    finally:
+      kanban.disable_tick_cache()
+
+
+def _run_impl(
+    resolved: Dict[str, Any],
+    *,
+    assignee: Optional[str] = None,
+    max_dispatch: int = 5,
+    dry_run: bool = False,
+    provider=None,
+) -> Dict[str, Any]:
+    """Inner implementation of run() — called within the tick-cache try/finally."""
     repo = resolved.get("repo", "")
     filters = (resolved.get("issues") or {}).get("filters", {})
     execution = resolved.get("execution") or {}

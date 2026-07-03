@@ -26,7 +26,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import conftest  # noqa: E402
 from conftest import check  # noqa: E402,F401
 from core import kanban  # noqa: E402
-from core.kanban import close_issue_tasks, complete, show_card, _hk  # noqa: E402
+from core.kanban import close_issue_tasks, complete, show_card, _hk  # noqa: E402,F401
+
+# Save original references — some tests in test_daedalus.py replace
+# kanban.show_card / kanban.list_tasks with lambdas and never restore them
+# (pre-existing test hygiene issue).  Restoring here prevents cross-test
+# contamination when the suite runs in file-alphabetical order.
+_ORIG_SHOW_CARD = kanban.show_card
+_ORIG_LIST_TASKS = kanban.list_tasks
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _restore_kanban_funcs():
+    """Restore real kanban functions before each test (prevents contamination
+    from test_daedalus.py tests that leak monkey-patches)."""
+    kanban.show_card = _ORIG_SHOW_CARD
+    kanban.list_tasks = _ORIG_LIST_TASKS
+    yield
+    kanban.show_card = _ORIG_SHOW_CARD
+    kanban.list_tasks = _ORIG_LIST_TASKS
 
 
 # ── Helper to build fake task dicts ──────────────────────────────────────────
