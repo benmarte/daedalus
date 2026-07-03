@@ -2396,6 +2396,123 @@ def test_check_confirmed_validators_stop_no_provider_skips_close():
     assert 504 not in triggered
 
 
+# ── _main_inner exit code (issue #1112) ──────────────────────────────────────
+
+
+def test_sweep_exit_code_all_error_returns_1():
+    """All projects errored (>=1 ran, 0 ok) → exit 1."""
+    check("all-error → 1", disp._sweep_exit_code(0, 2) == 1)
+
+
+def test_sweep_exit_code_partial_success_returns_0():
+    """At least one project succeeded → exit 0 even with errors."""
+    check("partial → 0", disp._sweep_exit_code(1, 1) == 0)
+
+
+def test_sweep_exit_code_all_success_returns_0():
+    """Every project succeeded → exit 0."""
+    check("all-ok → 0", disp._sweep_exit_code(3, 0) == 0)
+
+
+def test_sweep_exit_code_zero_projects_returns_0():
+    """No project ran (empty registry / unresolved repo) → exit 0."""
+    check("zero-projects → 0", disp._sweep_exit_code(0, 0) == 0)
+
+
+def _stub_sweep_env(monkeypatch):
+    """Neutralize dispatch side-effects so _main_inner exercises only the
+    per-project run tally and exit-code logic (issue #1112)."""
+
+    class _FakeLoader:
+        def resolve_repo_config(self, rp):
+            return {"name": rp}
+
+    monkeypatch.setattr(disp, "ConfigLoader", _FakeLoader)
+    monkeypatch.setattr(disp, "_maybe_redirect_dev_mode", lambda *a, **k: None)
+    monkeypatch.setattr(disp, "_resolve_max_dispatch", lambda *a, **k: 1)
+    monkeypatch.setattr(disp, "_append_history", lambda *a, **k: None)
+    monkeypatch.setattr(disp, "_notify_project_summary", lambda *a, **k: False)
+    monkeypatch.setattr(disp, "_human_summary", lambda *a, **k: "")
+    monkeypatch.setattr(disp.providers, "get_provider", lambda *a, **k: None)
+
+
+def test_main_inner_registry_sweep_all_error_returns_1(monkeypatch):
+    """Registry sweep where every project's run() raises → exit 1."""
+    _stub_sweep_env(monkeypatch)
+    monkeypatch.setattr(disp, "_resolve_repo_from_cwd", lambda *a, **k: None)
+    monkeypatch.setattr(disp.registry, "list_projects", lambda: ["a", "b"])
+
+    def _boom(*a, **k):
+        raise RuntimeError("provider misconfigured")
+
+    monkeypatch.setattr(disp, "run", _boom)
+    check("sweep all-error → 1", disp._main_inner([]) == 1)
+
+
+def test_main_inner_registry_sweep_partial_success_returns_0(monkeypatch):
+    """Registry sweep where one project succeeds → exit 0."""
+    _stub_sweep_env(monkeypatch)
+    monkeypatch.setattr(disp, "_resolve_repo_from_cwd", lambda *a, **k: None)
+    monkeypatch.setattr(disp.registry, "list_projects", lambda: ["ok", "bad"])
+
+    def _one_fails(resolved, **k):
+        if resolved["name"] == "bad":
+            raise RuntimeError("boom")
+        return {}
+
+    monkeypatch.setattr(disp, "run", _one_fails)
+    check("sweep partial → 0", disp._main_inner([]) == 0)
+
+
+def test_main_inner_empty_registry_returns_0(monkeypatch):
+    """Empty registry (no projects) → exit 0 (nothing failed to run)."""
+    _stub_sweep_env(monkeypatch)
+    monkeypatch.setattr(disp, "_resolve_repo_from_cwd", lambda *a, **k: None)
+    monkeypatch.setattr(disp.registry, "list_projects", lambda: [])
+    check("empty registry → 0", disp._main_inner([]) == 0)
+
+
+def test_main_inner_single_repo_error_returns_1(monkeypatch):
+    """Single --repo whose run() raises → exit 1."""
+    _stub_sweep_env(monkeypatch)
+    monkeypatch.setattr(disp, "_resolve_repo_arg", lambda a: "/fake/repo")
+
+    def _boom(*a, **k):
+        raise RuntimeError("broken auth")
+
+    monkeypatch.setattr(disp, "run", _boom)
+    check("single-repo error → 1", disp._main_inner(["--repo", "/fake/repo"]) == 1)
+
+
+def test_main_inner_single_repo_success_returns_0(monkeypatch):
+    """Single --repo whose run() succeeds → exit 0."""
+    _stub_sweep_env(monkeypatch)
+    monkeypatch.setattr(disp, "_resolve_repo_arg", lambda a: "/fake/repo")
+    monkeypatch.setattr(disp, "run", lambda *a, **k: {})
+    check("single-repo ok → 0", disp._main_inner(["--repo", "/fake/repo"]) == 0)
+
+
+def test_main_inner_self_test_unchanged(monkeypatch):
+    """--self-test keeps its own exit code, independent of the sweep tally."""
+    from core import dispatch_selftest
+
+    class _Report:
+        def __init__(self, ok):
+            self.ok = ok
+
+        def format(self):
+            return "report"
+
+    monkeypatch.setattr(
+        dispatch_selftest, "run_selftest", lambda *a, **k: _Report(True)
+    )
+    check("self-test pass → 0", disp._main_inner(["--self-test"]) == 0)
+    monkeypatch.setattr(
+        dispatch_selftest, "run_selftest", lambda *a, **k: _Report(False)
+    )
+    check("self-test fail → 1", disp._main_inner(["--self-test"]) == 1)
+
+
 if __name__ == "__main__":
     print("Follow-up extraction tests")
     print("-" * 60)
