@@ -68,7 +68,7 @@ This is a map, not a tutorial — read the linked files for depth.
 | `bash scripts/setup.sh` | Scaffold per-repo `.hermes/daedalus.yaml` |
 
 **Notes:**
-- Python >=3.10 (CI uses 3.12). `pytest-xdist` and `pytest-timeout` are dev deps in `pyproject.toml`.
+- Python >=3.10 (CI uses 3.14). `pytest-xdist` and `pytest-timeout` are dev deps in `pyproject.toml`.
 - Tests use in-memory `FakeKanban` / `FakeProvider` doubles — no network, no subprocess, no real board.
 - The autouse conftest fixture `_isolate_hermes_home` forces `HERMES_HOME` to tmp dir and stubs `core.kanban._hk`. Without it, tests write to the LIVE board and trigger runaway agent spawns.
 - `@pytest.mark.uses_real_hk` opts out of the `_hk` stub (still guarded by `_guard_test_isolation`).
