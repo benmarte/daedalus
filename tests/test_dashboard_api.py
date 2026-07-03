@@ -365,6 +365,62 @@ def test_get_projects_open_prs_batch_provider_raises(client):
     assert prs["prs"][0]["ci_status"] is None
 
 
+def test_get_projects_open_prs_batch_called_with_all_pr_numbers(client):
+    """_open_prs calls batch exactly once with every PR number from list_prs."""
+    fake_provider = mock.MagicMock()
+    fake_provider.supports_ci_status = True
+    fake_provider.list_prs.return_value = [
+        mock.MagicMock(number=n, title=f"PR {n}", head_branch=f"fix/{n}")
+        for n in [101, 202, 303, 404, 505]
+    ]
+    fake_provider.get_pr_ci_status_batch.return_value = {
+        101: "green", 202: "red", 303: "pending", 404: "unknown", 505: "green"
+    }
+
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        with mock.patch("dashboard.plugin_api.get_provider",
+                        return_value=fake_provider):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+
+    prs = data[0]["open_prs"]
+    assert prs["count"] == 5
+    # Batch called exactly once with all 5 PR numbers in order
+    fake_provider.get_pr_ci_status_batch.assert_called_once_with(
+        [101, 202, 303, 404, 505])
+    # Per-PR method never called
+    fake_provider.get_pr_ci_status.assert_not_called()
+    # CI statuses mapped correctly
+    statuses = {pr["number"]: pr["ci_status"] for pr in prs["prs"]}
+    assert statuses == {101: "green", 202: "red", 303: "pending",
+                        404: "unknown", 505: "green"}
+
+
+def test_get_projects_open_prs_no_ci_status_support(client):
+    """When provider doesn't support CI status, batch is not called and
+    ci_status is None for all PRs."""
+    fake_provider = mock.MagicMock()
+    fake_provider.supports_ci_status = False
+    fake_provider.list_prs.return_value = [
+        mock.MagicMock(number=10, title="PR A", head_branch="fix/a")
+    ]
+
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        with mock.patch("dashboard.plugin_api.get_provider",
+                        return_value=fake_provider):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+
+    prs = data[0]["open_prs"]
+    assert prs["count"] == 1
+    assert prs["prs"][0]["ci_status"] is None
+    fake_provider.get_pr_ci_status_batch.assert_not_called()
+
+
 def test_get_projects_graceful_degradation_when_sources_return_nothing(client):
     """When kanban/provider sources return nothing, the endpoint still returns 200."""
     with mock.patch("dashboard.plugin_api.list_tasks", None):

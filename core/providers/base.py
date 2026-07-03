@@ -574,6 +574,27 @@ class VCSProvider(abc.ABC):
     def get_pr_ci_status(self, pr_number: int) -> str:
         return CIStatus.UNKNOWN
 
+    def get_pr_ci_status_batch(self, pr_numbers: List[int]) -> Dict[int, str]:
+        """Batch CI status for multiple PRs in one call.
+
+        Default implementation is a sequential fallback that loops over
+        :meth:`get_pr_ci_status` — providers with a native batch API (e.g.
+        GitHub GraphQL) override this to fetch all PRs in a single round-trip.
+
+        - Empty input → empty dict (no API calls).
+        - Per-PR failures degrade to ``CIStatus.UNKNOWN`` for that PR only;
+          a single PR error never crashes the whole batch.
+        - Duplicate PR numbers are collapsed (last result wins).
+        """
+        result: Dict[int, str] = {}
+        for pr in pr_numbers:
+            try:
+                result[pr] = self.get_pr_ci_status(pr)
+            except Exception as exc:  # noqa: BLE001 — degrade per-PR
+                self._log.warning("get_pr_ci_status_batch PR #%s failed: %s", pr, exc)
+                result[pr] = CIStatus.UNKNOWN
+        return result
+
     def pr_ci_green(self, pr_number: int) -> bool:
         return self.get_pr_ci_status(pr_number) == CIStatus.GREEN
 

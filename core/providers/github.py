@@ -228,6 +228,32 @@ class GitHubProvider(VCSProvider):
         return out[:limit]
 
     # ── CI status ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _aggregate_checks_to_ci_status(
+        checks: List[Dict[str, Optional[str]]],
+    ) -> str:
+        """Map a flat list of ``{name, status, conclusion}`` dicts to a
+        :class:`CIStatus` value. Shared by the per-PR REST path and the batch
+        GraphQL path so semantics stay identical.
+
+        - ``ci-complete`` gate wins over all other checks.
+        - Else every check must be completed and green (success/neutral/skipped).
+        - No checks → UNKNOWN; any in-progress → PENDING.
+        """
+        if not checks:
+            return CIStatus.UNKNOWN
+        gate = [c for c in checks if c["name"] == "ci-complete"]
+        if gate:
+            c = gate[0]
+            if (c["status"] or "") != "completed":
+                return CIStatus.PENDING
+            return CIStatus.GREEN if (c["conclusion"] or "").lower() == "success" else CIStatus.RED
+        if any((c["status"] or "") != "completed" for c in checks):
+            return CIStatus.PENDING
+        ok = {"success", "neutral", "skipped"}
+        green = all((c["conclusion"] or "").lower() in ok for c in checks)
+        return CIStatus.GREEN if green else CIStatus.RED
+
     def get_pr_ci_status(self, pr_number: int) -> str:
         """Prefer the ``ci-complete`` gate; else every check must pass.
 
@@ -255,19 +281,83 @@ class GitHubProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("get_pr_ci_status PR #%s failed: %s", pr_number, e)
             return CIStatus.UNKNOWN
-        if not checks:
-            return CIStatus.UNKNOWN
-        gate = [c for c in checks if c["name"] == "ci-complete"]
-        if gate:
-            c = gate[0]
-            if (c["status"] or "") != "completed":
-                return CIStatus.PENDING
-            return CIStatus.GREEN if (c["conclusion"] or "").lower() == "success" else CIStatus.RED
-        if any((c["status"] or "") != "completed" for c in checks):
-            return CIStatus.PENDING
-        ok = {"success", "neutral", "skipped"}
-        green = all((c["conclusion"] or "").lower() in ok for c in checks)
-        return CIStatus.GREEN if green else CIStatus.RED
+        return self._aggregate_checks_to_ci_status(checks)
+
+    def get_pr_ci_status_batch(self, pr_numbers: List[int]) -> Dict[int, str]:
+        """Fetch CI status for multiple PRs in a single GraphQL round-trip.
+
+        Uses aliased ``pullRequest`` fields (``pr_N: pullRequest(number: N)``)
+        so all PRs are resolved in one query. Each PR's check suites and legacy
+        commit statuses are flattened into the same ``{name, status, conclusion}``
+        shape used by :meth:`get_pr_ci_status` and aggregated via
+        :meth:`_aggregate_checks_to_ci_status` — semantics are identical.
+
+        - Empty input → empty dict (no API call).
+        - PRs not found (GraphQL returns ``null`` for the alias) → ``UNKNOWN``.
+        - Partial GraphQL errors (some aliases fail) never crash the batch;
+          affected PRs degrade to ``UNKNOWN``.
+        - Duplicates collapsed (last result wins).
+        """
+        # De-dup while preserving order for deterministic alias naming.
+        unique = list(dict.fromkeys(pr_numbers))
+        if not unique:
+            return {}
+        # Build aliased pullRequest selections: pr_5: pullRequest(number: 5) { ... }
+        aliases: List[str] = []
+        alias_to_pr: Dict[str, int] = {}
+        for pr in unique:
+            alias = f"pr_{pr}"
+            alias_to_pr[alias] = pr
+            aliases.append(
+                f'{alias}: pullRequest(number: {pr}) {{'
+                f"  headRefOid"
+                f"  commits(last: 1) {{ nodes {{ commit {{"
+                f"    checkSuites(first: 100) {{ nodes {{"
+                f"      checkRuns(first: 100) {{ nodes {{ name status conclusion }} }}"
+                f"    }} }}"
+                f"    status {{ contexts {{ context state }} }}"
+                f"  }} }} }}"
+                f" }}"
+            )
+        query = (
+            "query($owner:String!,$name:String!){ repository(owner:$owner, name:$name){\n"
+            + "\n".join(aliases)
+            + "\n} }"
+        )
+        data = self._graphql(query, {"owner": self.owner, "name": self.repo.split("/", 1)[1]})
+        repo_data = (data or {}).get("repository") or {}
+        result: Dict[int, str] = {}
+        for alias, pr in alias_to_pr.items():
+            pr_node = repo_data.get(alias)
+            if not pr_node:
+                result[pr] = CIStatus.UNKNOWN
+                continue
+            checks: List[Dict[str, Optional[str]]] = []
+            commit_nodes = (((pr_node.get("commits") or {}).get("nodes")) or [])
+            if not commit_nodes:
+                result[pr] = CIStatus.UNKNOWN
+                continue
+            commit = (commit_nodes[0] or {}).get("commit") or {}
+            # Check runs via checkSuites
+            for suite in (commit.get("checkSuites") or {}).get("nodes") or []:
+                for run in ((suite or {}).get("checkRuns") or {}).get("nodes") or []:
+                    checks.append({
+                        "name": run.get("name") or "",
+                        "status": run.get("status") or "",
+                        "conclusion": run.get("conclusion"),
+                    })
+            # Legacy commit statuses
+            status_node = commit.get("status") or {}
+            for ctx in status_node.get("contexts") or []:
+                state = (ctx.get("state") or "").lower()
+                checks.append({
+                    "name": ctx.get("context") or "",
+                    "status": "in_progress" if state == "pending" else "completed",
+                    "conclusion": {"success": "success", "failure": "failure",
+                                   "error": "failure"}.get(state),
+                })
+            result[pr] = self._aggregate_checks_to_ci_status(checks)
+        return result
 
     # ── CI re-run (bounded auto-retry of transiently-red CI, #1199) ────────────
     def get_pr_head_sha(self, pr_number: int) -> Optional[str]:

@@ -146,6 +146,207 @@ def test_ci_includes_legacy_commit_statuses(provider):
     assert provider.get_pr_ci_status(5) == CIStatus.RED
 
 
+# ── batch CI status (GraphQL) ─────────────────────────────────────────────────
+
+
+def _batch_graphql_response(pr_checks: dict):
+    """Build a GraphQL ``repository`` data dict matching the batch query shape.
+
+    pr_checks = {pr_number: {"runs": [...], "statuses": [...]}}
+    Each run: {name, status, conclusion}; each status: {context, state}
+    """
+    repository = {}
+    for pr, payload in pr_checks.items():
+        runs = payload.get("runs", [])
+        statuses = payload.get("statuses", [])
+        suite_nodes = []
+        if runs:
+            suite_nodes.append({"checkRuns": {"nodes": runs}})
+        commit = {"checkSuites": {"nodes": suite_nodes},
+                  "status": {"contexts": statuses}}
+        repository[f"pr_{pr}"] = {
+            "headRefOid": "abc",
+            "commits": {"nodes": [{"commit": commit}]},
+        }
+    return {"repository": repository}
+
+
+def test_batch_ci_single_graphql_request(provider):
+    """Batch method makes exactly one GraphQL request for multiple PRs."""
+    data = _batch_graphql_response({
+        5: {"runs": [{"name": "ci-complete", "status": "completed", "conclusion": "success"}]},
+        7: {"runs": [{"name": "ci-complete", "status": "completed", "conclusion": "failure"}]},
+        9: {"runs": [{"name": "ci-complete", "status": "completed", "conclusion": "success"}]},
+    })
+    provider._http.post_json.return_value = {"data": data}
+    result = provider.get_pr_ci_status_batch([5, 7, 9])
+    assert result == {5: CIStatus.GREEN, 7: CIStatus.RED, 9: CIStatus.GREEN}
+    # Exactly one GraphQL call — no per-PR REST calls
+    assert provider._http.post_json.call_count == 1
+    provider._http.get_json.assert_not_called()
+
+
+def test_batch_ci_empty_input_returns_empty_dict(provider):
+    """Empty input list → empty dict, no API call made."""
+    assert provider.get_pr_ci_status_batch([]) == {}
+    assert provider._http.post_json.call_count == 0
+
+
+def test_batch_ci_partial_failure_pr_not_found(provider):
+    """One PR not found (GraphQL returns null for alias) → UNKNOWN for that PR,
+    other PRs still get correct statuses."""
+    data = {"repository": {
+        "pr_5": None,  # PR 5 not found
+        "pr_7": {
+            "headRefOid": "abc",
+            "commits": {"nodes": [{"commit": {
+                "checkSuites": {"nodes": [{"checkRuns": {"nodes": [
+                    {"name": "ci-complete", "status": "completed", "conclusion": "success"}
+                ]}}]},
+                "status": {"contexts": []},
+            }}]},
+        },
+    }}
+    provider._http.post_json.return_value = {"data": data}
+    result = provider.get_pr_ci_status_batch([5, 7])
+    assert result == {5: CIStatus.UNKNOWN, 7: CIStatus.GREEN}
+
+
+def test_batch_ci_green_via_ci_complete_gate(provider):
+    """ci-complete gate with success → GREEN; with failure → RED."""
+    data = _batch_graphql_response({
+        5: {"runs": [{"name": "ci-complete", "status": "completed", "conclusion": "success"}]},
+        7: {"runs": [{"name": "ci-complete", "status": "completed", "conclusion": "failure"}]},
+    })
+    provider._http.post_json.return_value = {"data": data}
+    result = provider.get_pr_ci_status_batch([5, 7])
+    assert result == {5: CIStatus.GREEN, 7: CIStatus.RED}
+
+
+def test_batch_ci_pending_and_unknown(provider):
+    """In-progress check → PENDING; no checks → UNKNOWN."""
+    data = _batch_graphql_response({
+        5: {"runs": [{"name": "a", "status": "in_progress", "conclusion": None}]},
+        7: {"runs": [], "statuses": []},
+    })
+    provider._http.post_json.return_value = {"data": data}
+    result = provider.get_pr_ci_status_batch([5, 7])
+    assert result == {5: CIStatus.PENDING, 7: CIStatus.UNKNOWN}
+
+
+def test_batch_ci_legacy_statuses(provider):
+    """Legacy commit statuses are aggregated alongside check runs."""
+    data = _batch_graphql_response({
+        5: {"runs": [], "statuses": [{"context": "jenkins", "state": "failure"}]},
+    })
+    provider._http.post_json.return_value = {"data": data}
+    assert provider.get_pr_ci_status_batch([5]) == {5: CIStatus.RED}
+
+
+def test_batch_ci_all_checks_must_pass(provider):
+    """Without ci-complete gate, every check must be green."""
+    data = _batch_graphql_response({
+        5: {"runs": [
+            {"name": "a", "status": "completed", "conclusion": "success"},
+            {"name": "b", "status": "completed", "conclusion": "failure"},
+        ]},
+    })
+    provider._http.post_json.return_value = {"data": data}
+    assert provider.get_pr_ci_status_batch([5]) == {5: CIStatus.RED}
+
+
+def test_batch_ci_deduplicates(provider):
+    """Duplicate PR numbers collapsed — single alias, single result key."""
+    data = _batch_graphql_response({
+        5: {"runs": [{"name": "ci-complete", "status": "completed", "conclusion": "success"}]},
+    })
+    provider._http.post_json.return_value = {"data": data}
+    result = provider.get_pr_ci_status_batch([5, 5])
+    assert result == {5: CIStatus.GREEN}
+    sent_body = provider._http.post_json.call_args[0][1]
+    assert sent_body["query"].count("pr_5: pullRequest") == 1
+
+
+def test_batch_ci_graphql_error_degrades_to_unknown(provider):
+    """GraphQL returns errors → all PRs degrade to UNKNOWN, no crash."""
+    provider._http.post_json.return_value = {"errors": [{"message": "boom"}]}
+    result = provider.get_pr_ci_status_batch([5, 7])
+    assert result == {5: CIStatus.UNKNOWN, 7: CIStatus.UNKNOWN}
+
+
+def test_batch_ci_network_failure_degrades_to_unknown(provider):
+    """_graphql returns None (network failure) → all UNKNOWN."""
+    provider._http.post_json.side_effect = ProviderError("network down")
+    result = provider.get_pr_ci_status_batch([5, 7])
+    assert result == {5: CIStatus.UNKNOWN, 7: CIStatus.UNKNOWN}
+
+
+# ── base class sequential fallback ────────────────────────────────────────────
+
+
+def test_base_batch_fallback_delegates_to_get_pr_ci_status():
+    """VCSProvider.get_pr_ci_status_batch sequential fallback loops over
+    get_pr_ci_status and handles per-PR failures gracefully."""
+    from core.providers.base import VCSProvider
+
+    class StubProvider(VCSProvider):
+        name = "stub"
+
+        def __init__(self):
+            self._cfg = {}
+            import logging
+            self._log = logging.getLogger("test")
+            self.calls = []
+
+        def list_issues(self, state="open", labels=None, limit=50):
+            return []
+
+        def close_issue(self, issue_number):
+            return False
+
+        def list_prs(self, state="all", limit=50):
+            return []
+
+        def get_pr_ci_status(self, pr_number: int) -> str:
+            self.calls.append(pr_number)
+            if pr_number == 3:
+                raise RuntimeError("boom")
+            return CIStatus.GREEN if pr_number % 2 == 0 else CIStatus.RED
+
+    p = StubProvider()
+    result = p.get_pr_ci_status_batch([1, 2, 3, 4])
+    assert result == {1: CIStatus.RED, 2: CIStatus.GREEN, 3: CIStatus.UNKNOWN, 4: CIStatus.GREEN}
+    assert p.calls == [1, 2, 3, 4]  # called each PR exactly once
+
+
+def test_base_batch_fallback_empty_input():
+    """Empty input → empty dict, no per-PR calls."""
+    from core.providers.base import VCSProvider
+
+    class StubProvider(VCSProvider):
+        name = "stub"
+
+        def __init__(self):
+            self._cfg = {}
+            import logging
+            self._log = logging.getLogger("test")
+
+        def list_issues(self, state="open", labels=None, limit=50):
+            return []
+
+        def close_issue(self, issue_number):
+            return False
+
+        def list_prs(self, state="all", limit=50):
+            return []
+
+        def get_pr_ci_status(self, pr_number: int) -> str:
+            raise AssertionError("should not be called for empty input")
+
+    p = StubProvider()
+    assert p.get_pr_ci_status_batch([]) == {}
+
+
 # ── comments / delivery marker ────────────────────────────────────────────────
 
 def test_pr_comments_and_marker(provider):
