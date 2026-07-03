@@ -57,6 +57,44 @@ def _hk(args: List[str], timeout: int = 60) -> tuple[int, str, str]:
         return 1, "", str(e)
 
 
+# ── per-tick list_tasks cache (issue #1142) ──────────────────────────────────
+# The dispatcher calls list_tasks() at ~30 sites per tick, each spawning a
+# hermes subprocess to read identical board state. This is an OPT-IN,
+# process-local read cache keyed by (slug, status): disabled by default (so
+# library callers and tests see unchanged behavior), enabled by the dispatcher
+# for the duration of a single tick via a try/finally in run().
+#
+# ``None`` means disabled; a dict means enabled. It is invalidated (fully
+# cleared) after every board mutation so a read never returns stale state within
+# a tick. Non-persistent and NOT thread-safe — the dispatcher is single-process,
+# single-threaded per tick (serialized by the main() FileLock).
+_TICK_CACHE: Optional[dict] = None
+
+
+def enable_tick_cache() -> None:
+    """Enable (and reset) the per-tick list_tasks cache. Idempotent."""
+    global _TICK_CACHE
+    _TICK_CACHE = {}
+
+
+def reset_tick_cache() -> None:
+    """Clear cached list_tasks results without disabling the cache. No-op if disabled."""
+    if _TICK_CACHE is not None:
+        _TICK_CACHE.clear()
+
+
+def disable_tick_cache() -> None:
+    """Disable the per-tick cache — subsequent list_tasks always hit the subprocess."""
+    global _TICK_CACHE
+    _TICK_CACHE = None
+
+
+def _invalidate_tick_cache() -> None:
+    """Drop all cached list_tasks results after a mutation. No-op if disabled."""
+    if _TICK_CACHE is not None:
+        _TICK_CACHE.clear()
+
+
 def ensure_board(slug: str) -> bool:
     """Create the board if missing (idempotent). True if usable.
 
@@ -139,6 +177,7 @@ def create_triage(slug: str, issue_number: Optional[int], title: str, body: str,
         if goal_max_turns is not None:
             args += ["--goal-max-turns", str(goal_max_turns)]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: create triage for #%s failed: %s", issue_number, (err or "").strip())
         return None
@@ -156,6 +195,7 @@ def decompose(slug: str, task_id: str) -> bool:
     terse triage body fans out broadly; a prescriptive one may stay single.
     """
     rc, out, err = _hk(["--board", slug, "decompose", task_id], timeout=180)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: decompose %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -214,6 +254,7 @@ def complete(slug: str, task_id: str, summary: str = "") -> bool:
     if summary:
         args += ["--summary", summary]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: complete %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -230,6 +271,7 @@ def edit_summary(slug: str, task_id: str, summary: str) -> bool:
     """
     args = ["--board", slug, "edit", task_id, "--result", "--summary", summary]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: edit_summary %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -246,6 +288,7 @@ def decompose_all_triage(slug: str) -> bool:
     triage cards.
     """
     rc, out, err = _hk(["--board", slug, "decompose", "--all"], timeout=180)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: decompose --all failed: %s", (err or out or "").strip())
         return False
@@ -255,6 +298,7 @@ def decompose_all_triage(slug: str) -> bool:
 def dispatch(slug: str, max_spawns: int = 5) -> bool:
     """Spawn workers for ready tasks on the board (Hermes tracks them live)."""
     rc, out, err = _hk(["--board", slug, "dispatch", "--max", str(max_spawns)])
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: dispatch failed: %s", (err or out or "").strip())
         return False
@@ -319,6 +363,7 @@ def create_task(
         if goal_max_turns is not None:
             args += ["--goal-max-turns", str(goal_max_turns)]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: create task failed: %s", (err or "").strip())
         return None
@@ -331,6 +376,7 @@ def create_task(
 def comment(slug: str, task_id: str, body: str) -> bool:
     """Append a comment to a task. Returns True on success."""
     rc, out, err = _hk(["--board", slug, "comment", task_id, body])
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: comment on %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -343,6 +389,7 @@ def unblock_task(slug: str, task_id: str, reason: str = "") -> bool:
     if reason:
         args += ["--reason", reason]
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: unblock %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -355,6 +402,7 @@ def block_task(slug: str, task_id: str, reason: str = "") -> bool:
     if reason:
         args += [reason]  # hermes kanban block uses positional reason, not --reason
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: block %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -368,6 +416,7 @@ def archive_task(slug: str, task_id: str) -> bool:
     columns. Returns True on success; degrades gracefully (logs + returns False).
     """
     rc, out, err = _hk(["--board", slug, "archive", task_id])
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: archive %s failed: %s", task_id, (err or out or "").strip())
         return False
@@ -381,6 +430,7 @@ def reassign_task(slug: str, task_id: str, profile: str, *, reclaim: bool = Fals
     if reclaim:
         args.append("--reclaim")
     rc, out, err = _hk(args)
+    _invalidate_tick_cache()
     if rc != 0:
         logger.warning("kanban: reassign %s → %s failed: %s", task_id, profile, (err or out or "").strip())
         return False
@@ -406,6 +456,7 @@ def rename_task(slug: str, task_id: str, new_title: str) -> bool:
         conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (new_title, task_id))
         conn.commit()
         conn.close()
+        _invalidate_tick_cache()
         return True
     except Exception as exc:
         logger.warning("kanban: rename %s failed: %s", task_id, exc)
@@ -457,6 +508,7 @@ def edit_body(slug: str, task_id: str, body: str) -> bool:
         cur = conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
         conn.commit()
         conn.close()
+        _invalidate_tick_cache()
         return cur.rowcount > 0
     except Exception as exc:
         logger.warning("kanban: edit_body %s failed: %s", task_id, exc)
@@ -485,7 +537,18 @@ def diagnostics(slug: str) -> List[dict]:
 
 
 def list_tasks(slug: str, status: str = "") -> List[dict]:
-    """List all tasks on a board, optionally filtered by status. Returns parsed JSON list."""
+    """List all tasks on a board, optionally filtered by status. Returns parsed JSON list.
+
+    When the per-tick cache is enabled (see ``enable_tick_cache``), the parsed
+    result is memoized by ``(slug, status)`` so repeated reads within one tick
+    reuse a single subprocess. Only successful reads are cached (a failed/malformed
+    read returns ``[]`` and is retried on the next call). Mutations invalidate the
+    cache, so cached reads never go stale within a tick.
+    """
+    if _TICK_CACHE is not None:
+        cached = _TICK_CACHE.get((slug, status))
+        if cached is not None:
+            return cached
     args = ["--board", slug, "list", "--json"]
     if status:
         args += ["--status", status]
@@ -493,9 +556,12 @@ def list_tasks(slug: str, status: str = "") -> List[dict]:
     if rc != 0:
         return []
     try:
-        return json.loads(out or "[]")
+        result = json.loads(out or "[]")
     except Exception:
         return []
+    if _TICK_CACHE is not None:
+        _TICK_CACHE[(slug, status)] = result
+    return result
 
 
 def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:

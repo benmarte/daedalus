@@ -89,14 +89,22 @@ def _isolate_hermes_home(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "test-isolated")
 
-    if request.node.get_closest_marker("uses_real_hk") is None:
-        import core.kanban as _kanban
+    # Reset the per-tick list_tasks cache (issue #1142) around every test. It is a
+    # module-level global enabled by the dispatcher's run() for the duration of a
+    # tick; without this a test that enables it (or a real disp.run()) could leak
+    # an enabled/stale cache into an unrelated test, making list_tasks return
+    # cached data instead of hitting the (mocked) subprocess.
+    import core.kanban as _kanban
 
+    _kanban.disable_tick_cache()
+
+    if request.node.get_closest_marker("uses_real_hk") is None:
         def _stub_hk(args, timeout=60):
             return (1, "", "core.kanban._hk stubbed in tests (issue #1209)")
 
         monkeypatch.setattr(_kanban, "_hk", _stub_hk)
     yield
+    _kanban.disable_tick_cache()
 
 
 def _load_dispatch():

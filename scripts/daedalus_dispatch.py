@@ -6887,6 +6887,36 @@ def run(
     dry_run: bool = False,
     provider=None,
 ) -> Dict[str, Any]:
+    """Run one dispatch tick with the per-tick kanban ``list_tasks`` cache active.
+
+    Thin wrapper over ``_run_tick`` (issue #1142): the dispatcher calls
+    ``kanban.list_tasks`` at ~30 sites per tick, each otherwise spawning a hermes
+    subprocess to read identical board state. Enabling the cache here (and
+    disabling it in ``finally``, so the cache never leaks across ticks or on an
+    exception) collapses those repeated reads to one subprocess per distinct
+    ``(slug, status)`` key, while mutations invalidate it so reads never go stale.
+    """
+    kanban.enable_tick_cache()
+    try:
+        return _run_tick(
+            resolved,
+            assignee=assignee,
+            max_dispatch=max_dispatch,
+            dry_run=dry_run,
+            provider=provider,
+        )
+    finally:
+        kanban.disable_tick_cache()
+
+
+def _run_tick(
+    resolved: Dict[str, Any],
+    *,
+    assignee: Optional[str] = None,
+    max_dispatch: int = 5,
+    dry_run: bool = False,
+    provider=None,
+) -> Dict[str, Any]:
     """Reconcile statuses, create tasks for new issues, and dispatch. Returns a summary.
 
     When dry_run is True, no board status moves, kanban cards, or dispatches happen —
