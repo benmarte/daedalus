@@ -15,8 +15,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
-import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -31,6 +29,21 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from dashboard.plugin_api import router
+
+
+@pytest.fixture(autouse=True)
+def _reset_notif_cache():
+    """Clear the notification-probe TTL cache before/after each test.
+
+    ``_list_notification_methods`` memoizes its result for a short TTL; without
+    this reset the cached value would leak across tests that mock the subprocess
+    boundary differently.
+    """
+    from dashboard.plugin_api import _reset_notif_probe_cache
+
+    _reset_notif_probe_cache()
+    yield
+    _reset_notif_probe_cache()
 
 
 @pytest.fixture
@@ -1533,6 +1546,93 @@ class TestNotificationMethods:
         ):
             result = _list_notification_methods()
             assert result == {}
+
+
+class TestNotificationProbeCache:
+    """The 60s TTL cache must avoid re-spawning subprocesses within the window."""
+
+    def test_repeated_calls_within_ttl_probe_once(self):
+        from dashboard.plugin_api import _list_notification_methods
+
+        json_out = json.dumps({"platforms": {
+            "slack": [{"id": "tasks", "name": "tasks"}],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        cli = mock.Mock(side_effect=fake_cli)
+        # Freeze the monotonic clock so all calls fall inside the TTL window.
+        with mock.patch("dashboard.plugin_api._hermes_cli", cli), \
+             mock.patch("dashboard.plugin_api.time.monotonic", return_value=100.0):
+            first = _list_notification_methods()
+            for _ in range(5):
+                assert _list_notification_methods() == first
+
+        # `send --list --json` must have been invoked exactly once across all calls.
+        json_calls = [c for c in cli.call_args_list
+                      if c.args and c.args[0][:3] == ["send", "--list", "--json"]]
+        assert len(json_calls) == 1
+        assert first == {"Slack": [{"value": "slack:tasks", "label": "tasks"}]}
+
+    def test_probe_refreshes_after_ttl_expiry(self):
+        from dashboard.plugin_api import (
+            _NOTIF_PROBE_TTL_SECONDS,
+            _list_notification_methods,
+        )
+
+        json_out = json.dumps({"platforms": {
+            "slack": [{"id": "tasks", "name": "tasks"}],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        cli = mock.Mock(side_effect=fake_cli)
+        clock = mock.Mock(return_value=100.0)
+        with mock.patch("dashboard.plugin_api._hermes_cli", cli), \
+             mock.patch("dashboard.plugin_api.time.monotonic", clock):
+            _list_notification_methods()
+            # Still inside the TTL — no new probe.
+            clock.return_value = 100.0 + _NOTIF_PROBE_TTL_SECONDS - 0.01
+            _list_notification_methods()
+            # Past the TTL — cache refreshes and re-probes.
+            clock.return_value = 100.0 + _NOTIF_PROBE_TTL_SECONDS + 0.01
+            _list_notification_methods()
+
+        json_calls = [c for c in cli.call_args_list
+                      if c.args and c.args[0][:3] == ["send", "--list", "--json"]]
+        assert len(json_calls) == 2
+
+    def test_reset_forces_refresh(self):
+        from dashboard.plugin_api import (
+            _list_notification_methods,
+            _reset_notif_probe_cache,
+        )
+
+        json_out = json.dumps({"platforms": {
+            "slack": [{"id": "tasks", "name": "tasks"}],
+        }})
+
+        def fake_cli(args, timeout=30):
+            if args[:3] == ["send", "--list", "--json"]:
+                return 0, json_out
+            return -1, ""
+
+        cli = mock.Mock(side_effect=fake_cli)
+        with mock.patch("dashboard.plugin_api._hermes_cli", cli), \
+             mock.patch("dashboard.plugin_api.time.monotonic", return_value=100.0):
+            _list_notification_methods()
+            _reset_notif_probe_cache()
+            _list_notification_methods()
+
+        json_calls = [c for c in cli.call_args_list
+                      if c.args and c.args[0][:3] == ["send", "--list", "--json"]]
+        assert len(json_calls) == 2
 
 
 class TestMetaNotificationsEndpoint:

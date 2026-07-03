@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -267,7 +268,38 @@ def _hermes_status_configured_platforms() -> set[str]:
     return configured
 
 
+# ── notification-probe cache ─────────────────────────────────────────────────
+# `_compute_notification_methods` shells out to `hermes send --list [--json]`
+# and `hermes status` on every call. The configured platforms/channels change
+# rarely, so the result is cached for a short TTL: repeated /meta/notifications
+# GETs within the window reuse the cached value and spawn no new subprocesses.
+# A monotonic clock keeps the cache robust to wall-clock changes.
+_NOTIF_PROBE_TTL_SECONDS = 60.0
+_notif_probe_cache: dict[str, tuple[float, dict[str, list[dict[str, str]]]]] = {}
+
+
+def _reset_notif_probe_cache() -> None:
+    """Clear the notification-probe cache. Primarily a test seam."""
+    _notif_probe_cache.clear()
+
+
 def _list_notification_methods() -> dict[str, list[dict[str, str]]]:
+    """Return notification channels grouped by platform (TTL-cached).
+
+    Thin cache wrapper over :func:`_compute_notification_methods`. Serves the
+    cached result while it is younger than ``_NOTIF_PROBE_TTL_SECONDS``;
+    refreshes (and re-probes) on the first call after expiry.
+    """
+    now = time.monotonic()
+    cached = _notif_probe_cache.get("methods")
+    if cached is not None and (now - cached[0]) < _NOTIF_PROBE_TTL_SECONDS:
+        return cached[1]
+    result = _compute_notification_methods()
+    _notif_probe_cache["methods"] = (now, result)
+    return result
+
+
+def _compute_notification_methods() -> dict[str, list[dict[str, str]]]:
     """Return notification channels grouped by platform.
 
     Uses ``hermes send --list --json`` as the primary source — channel names
