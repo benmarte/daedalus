@@ -1299,6 +1299,16 @@ Each piece exists because the obvious approach failed:
   failing-run URL (`<!-- daedalus:ci-escalated:<sha> -->`) and logs a warning instead
   of looping. Natural inter-tick backoff: issuing a re-run flips CI to PENDING, so
   the sweep won't act again until it settles back to RED — no timer needed.
+- **Crash-retry reconciler** (`core/crash_retry.py`, issue #1205) — cards whose
+  worker agent crashed (exit without a valid completion signal) were silently
+  stuck in `running` until the 24h stale-card sweeper noticed. The crash-retry
+  reconciler scans for crashed cards on every dispatch tick and re-queues them
+  with a time-bounded retry policy: stepped backoff between attempts, a per-card
+  attempt cap, and a wall-clock cap. When retries are exhausted, the card is
+  escalated (marked as blocked with a `coding-agent-failed` reason) instead of
+  looping silently. Configurable via `execution.crash_retry` knobs in
+  `templates/daedalus.yaml`. This replaces the old silent-stuck behaviour where
+  a crashed agent card sat indefinitely in `running`.
 - **Tier promotion** — epic decomposition produces multiple sub-issues, but marking
   all of them `Ready` at once overwhelms the validator pipeline and bypasses dependency
   semantics. Instead, sub-issues with no declared blockers get the `Ready` label on
