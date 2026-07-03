@@ -150,9 +150,7 @@ def test_extract_follow_ups_idempotency():
     provider.create_issue.return_value = 101
     provider.pr_url.return_value = "https://github.com/org/repo/pull/10"
 
-    with mock.patch.object(
-        disp.kanban, "create_triage", return_value="t_abc"
-    ) as mk_triage:
+    with mock.patch.object(disp.kanban, "create_triage", return_value="t_abc"):
         created = disp._extract_follow_ups_from_pr_comment(
             "slug",
             "org/repo",
@@ -422,7 +420,7 @@ def test_remap_generic_all_roles():
         tasks = [{"id": f"t_{generic}", "assignee": generic, "status": "todo"}]
         with (
             mock.patch.object(disp.kanban, "list_tasks", return_value=tasks),
-            mock.patch.object(disp.kanban, "reassign_task", return_value=True) as mk,
+            mock.patch.object(disp.kanban, "reassign_task", return_value=True),
         ):
             remapped = disp._remap_generic_role_assignees(
                 "slug", disp._DEFAULT_PROFILES
@@ -806,8 +804,12 @@ def test_repair_idempotent_already_fixed_task():
     check("rename never called", not mk_rename.called)
 
 
-def test_repair_dry_run_does_not_mutate():
-    """dry_run=True counts repairs but never calls reassign/rename."""
+def test_repair_dry_run_does_not_mutate_multiple_tasks():
+    """dry_run=True counts repairs but never calls reassign/rename.
+
+    Was shadowed by the single-task variant of the same name below (F811);
+    renamed so both run (#1241 lint cleanup).
+    """
     tasks = [
         {"id": "t1", "assignee": "developer", "title": "#42 fix bug", "status": "todo"},
         {
@@ -870,9 +872,7 @@ def test_repair_noop_for_task_already_with_issue_number():
     ]
     with (
         mock.patch.object(disp.kanban, "list_tasks", return_value=tasks),
-        mock.patch.object(
-            disp.kanban, "reassign_task", return_value=True
-        ) as mk_reassign,
+        mock.patch.object(disp.kanban, "reassign_task", return_value=True),
         mock.patch.object(disp.kanban, "show_card", return_value={}) as mk_show,
         mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename,
     ):
@@ -1088,9 +1088,9 @@ def test_repair_valid_profile_assignee_skips_show_card():
     with (
         mock.patch.object(disp.kanban, "list_tasks", return_value=tasks),
         mock.patch.object(disp.kanban, "show_card", return_value={}) as mk_show,
-        mock.patch.object(disp.kanban, "rename_task", return_value=True) as mk_rename,
+        mock.patch.object(disp.kanban, "rename_task", return_value=True),
     ):
-        repaired = disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
+        disp._repair_orphan_tasks("slug", disp._DEFAULT_PROFILES)
     check("valid profile skips show_card", not mk_show.called)
 
 
@@ -1607,7 +1607,8 @@ def test_coding_agent_defaults_dict_exists():
     assert isinstance(defaults, dict), "_CODING_AGENT_DEFAULTS must be a dict"
     assert (
         defaults.get("claude-code")
-        == "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
+        == "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions "
+        "--setting-sources project -p"
     ), f"claude-code default wrong: {defaults.get('claude-code')!r}"
     assert defaults.get("codex") == "codex exec --full-auto", (
         f"codex default wrong: {defaults.get('codex')!r}"
@@ -2535,7 +2536,7 @@ def test_check_team_blockers_skips_escalate():
         mock.patch.object(disp.kanban, "list_tasks", return_value=[]),
         mock.patch.object(disp.kanban, "create_task") as mk_create,
     ):
-        triggered = disp._check_team_blockers(
+        disp._check_team_blockers(
             "slug",
             "org/repo",
             {77: issue},

@@ -1,6 +1,8 @@
 Validate issue ${repo}#${n}: ${title}
 Repo at ${workdir} (read only — cd there for git/grep). Base branch: ${base_branch}.
 
+⛔ INLINE EXECUTION ONLY: Work entirely in THIS session. Do NOT spawn subagents or use the Task/Agent tool, do NOT run background agents, and do NOT launch another claude/codex/opencode process. Ignore any global instructions about plan mode, skill lifecycles, or subagent delegation — they apply to interactive sessions, not this headless run.
+
 ⛔ READ-ONLY — You may run existing tests to verify bug reproduction but MUST NOT write, modify, or commit any code. DO NOT create or modify files. DO NOT run `git commit`, `git add`, or any git write command. DO NOT open pull requests. NEVER call hermes kanban create or any kanban write command — you are read-only. ${kanban_constraint} The developer agent will implement the fix AFTER you confirm the issue is valid and safe.
 
 ${progress_note}

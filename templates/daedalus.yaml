@@ -251,7 +251,7 @@ execution:
   # Shell command used by the developer agent to spawn the external coding agent
   # via terminal(background=True). Must be the full command (not a shell alias).
   # For Claude Code: use the absolute binary path + flags.
-  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions -p"
+  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions --setting-sources project -p"
   #
   # coding_agent_cmd: ""
 
@@ -290,7 +290,7 @@ execution:
   #
   # coding_agents:
   #   - name: claude-code
-  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p'
+  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --setting-sources project -p'
   #   - name: codex
   #     cmd: 'codex exec --full-auto'
 

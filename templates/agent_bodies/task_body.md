@@ -1,6 +1,8 @@
 Deliver issue ${repo}#${n}: ${title}
 Work in the existing git repo at ${workdir} (cd there first). Base branch: ${base_branch}.
 
+⛔ INLINE EXECUTION ONLY: Work entirely in THIS session. Do NOT spawn subagents or use the Task/Agent tool, do NOT run background agents, and do NOT launch another claude/codex/opencode process. Ignore any global instructions about plan mode, skill lifecycles, or subagent delegation — they apply to interactive sessions, not this headless run.
+
 📋 PROGRESS COMMENTS ARE AUTOMATIC FOR ALL ROLES: Do NOT post GitHub comments yourself. When you complete (or block) your kanban card, the dispatcher mirrors your completion summary to GitHub issue #${n} automatically, using credentials it already holds. Make that summary clear: state your role, your findings/decision, and the explicit next steps. This keeps the GitHub issue history in sync with the internal Kanban board for human reviewers.
 
 Decompose this into the following role tasks IN ORDER — each depends on the previous:

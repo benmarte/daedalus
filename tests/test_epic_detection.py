@@ -283,7 +283,9 @@ class TestPlannerBody:
         issue = _make_issue(body=long_body)
         body = disp._planner_body("org/repo", issue, "/work", "main", "github")
         assert "X" * 1000 in body
-        assert len(body) < len(long_body)
+        # Assert the truncation itself — a total-length check breaks whenever
+        # the planner template legitimately grows (#1241 inline-execution guard).
+        assert "X" * 1001 not in body
 
 
 # ── Semantic signals: AC exclusion + decomp language (#1100) ────────────────

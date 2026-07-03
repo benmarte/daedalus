@@ -1,6 +1,8 @@
 Validate issue acme/widgets#1234: Fix the widget crash
 Repo at /tmp/work (read only — cd there for git/grep). Base branch: dev.
 
+⛔ INLINE EXECUTION ONLY: Work entirely in THIS session. Do NOT spawn subagents or use the Task/Agent tool, do NOT run background agents, and do NOT launch another claude/codex/opencode process. Ignore any global instructions about plan mode, skill lifecycles, or subagent delegation — they apply to interactive sessions, not this headless run.
+
 ⛔ READ-ONLY — You may run existing tests to verify bug reproduction but MUST NOT write, modify, or commit any code. DO NOT create or modify files. DO NOT run `git commit`, `git add`, or any git write command. DO NOT open pull requests. NEVER call hermes kanban create or any kanban write command — you are read-only. DO NOT call hermes kanban complete or hermes kanban block — kanban writes are FORBIDDEN for inner agents. Your ONLY deliverable is printing the verdict to stdout (the outer agent reads your stdout and calls kanban complete for you). The developer agent will implement the fix AFTER you confirm the issue is valid and safe.
 
 📋 POST A GITHUB COMMENT as described below for each verdict outcome. Then print your verdict to stdout on the LAST LINE of your output (e.g. 'CONFIRMED: <reason>'). The outer agent reads your stdout and calls kanban complete for you.
@@ -79,8 +81,10 @@ The widget crashes when clicked.
    and calls hermes kanban complete on your behalf.
 
   Steps:
-  1. Copy the full task body from this card.
-  2. write_file("/tmp/validator-1234-task.txt", "<full task body>")
+  1. Copy ONLY the inner task body: the text ABOVE the '⚠️  AGENT DELEGATION' line
+     (everything from the top of this card down to that line). NEVER copy this
+     delegation block or these steps — the inner agent re-delegates if it reads them.
+  2. write_file("/tmp/validator-1234-task.txt", "<text above the delegation line ONLY>")
   3. terminal("bash -c 'echo $$ > /tmp/validator-1234-pid.txt; claude -p < /tmp/validator-1234-task.txt > /tmp/validator-1234-out.txt 2> /tmp/validator-1234-err.txt'", background=True)
   4. Wait for the coding agent: terminal("P=$(cat /tmp/validator-1234-pid.txt 2>/dev/null); S=$SECONDS; while [ ! -s /tmp/validator-1234-out.txt ]; do if ! kill -0 $P 2>/dev/null; then echo CODING_AGENT_DIED: agent exited without writing output. stderr tail:; tail -n 40 /tmp/validator-1234-err.txt 2>/dev/null; break; fi; if [ $((SECONDS-S)) -ge 3600 ]; then echo CODING_AGENT_TIMEOUT: exceeded 3600s with no output. stderr tail:; tail -n 40 /tmp/validator-1234-err.txt 2>/dev/null; break; fi; sleep 30; done; cat /tmp/validator-1234-out.txt 2>/dev/null")
   4b. If that output contains 'CODING_AGENT_DIED' or 'CODING_AGENT_TIMEOUT', the coding agent failed to produce a result — do NOT proceed, do NOT attempt to implement or investigate the issue yourself, and do NOT complete your card. Block it with kanban_block("coding-agent-failed: <CODING_AGENT_DIED|CODING_AGENT_TIMEOUT> — see stderr above") and STOP. The dispatcher will retry automatically on your next session end.

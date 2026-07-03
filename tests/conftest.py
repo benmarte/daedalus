@@ -28,6 +28,34 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Capture pristine references to the ``core.kanban`` functions that scenario
+# tests frequently replace via *raw attribute assignment* (e.g.
+# ``disp.kanban.list_tasks = lambda *a, **k: []``). ``disp.kanban`` IS the
+# ``core.kanban`` module, and raw assignment bypasses monkeypatch's automatic
+# teardown — so a test that does not restore leaks its stub into unrelated
+# tests sharing the same xdist worker. Concretely, test_daedalus.py sets
+# ``list_tasks -> []`` without restoring, which zeroes out ``close_issue_tasks``
+# in a later test_kanban.py test (``expected 9 show_card calls, got 0``). The
+# leak only surfaces under a worker split that co-locates the two (CI's 2-core
+# ``-n auto``). Snapshotting here — once, at import, before any test mutates the
+# module — lets the autouse fixture restore them after every test.
+import core.kanban as _kanban_module  # noqa: E402
+
+_KANBAN_PRISTINE = {
+    _name: getattr(_kanban_module, _name)
+    for _name in (
+        "list_tasks",
+        "show_card",
+        "create_task",
+        "complete",
+        "block",
+        "unblock",
+        "edit",
+        "dispatch",
+    )
+    if hasattr(_kanban_module, _name)
+}
+
 # ── isolate the dispatcher process-mutex FileLock per xdist worker (issue #1198)
 # daedalus_dispatch.main() acquires a host-global FileLock at _MUTEX_LOCK_PATH.
 # Under ``pytest -n auto`` every xdist worker is a separate process on the same
@@ -104,6 +132,11 @@ def _isolate_hermes_home(tmp_path, monkeypatch, request):
 
         monkeypatch.setattr(_kanban, "_hk", _stub_hk)
     yield
+    # Restore any core.kanban function a test replaced via raw attribute
+    # assignment (see _KANBAN_PRISTINE) so a leaked stub — e.g.
+    # ``list_tasks -> []`` — cannot poison the next test in this xdist worker.
+    for _name, _fn in _KANBAN_PRISTINE.items():
+        setattr(_kanban_module, _name, _fn)
     _kanban.disable_tick_cache()
 
 
