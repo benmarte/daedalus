@@ -89,6 +89,24 @@ _TRIGGER_MARKERS = (
 # Flat marker tuple retained for callers that only need "is this crash-class".
 _CRASH_MARKERS = tuple(m for _, markers in _TRIGGER_MARKERS for m in markers)
 
+# Block-summary prefixes owned by iterate / PM / QA — never crash-class even
+# when the evidence text contains a crash marker (e.g. "usage limit") later on.
+# classify() returns None when the evidence *starts with* one of these, so the
+# crash-retry reconciler does not hijack review/QA/escalation blocks (#1211).
+_NON_CRASH_PREFIXES = (
+    "review-required",
+    "review-changes-requested",
+    "qa-failed",
+    "qa-fix",
+    "escalate",
+    "pm-route",
+    "awaiting-fix",
+    "awaiting-pr",
+    "pending-pr",
+    "a11y-skipped",
+    "spec:",
+)
+
 _DEFAULT_BACKOFF_MINUTES = [0, 15, 30, 60, 120]
 
 _DEFAULTS: Dict[str, Any] = {
@@ -113,6 +131,10 @@ def classify(evidence: str) -> Optional[str]:
     """
     s = (evidence or "").lower()
     if not s:
+        return None
+    # Non-crash prefixes (review-required:, qa-failed:, …) own the block even
+    # when a crash marker like "usage limit" appears later in the text (#1211).
+    if any(s.startswith(p) for p in _NON_CRASH_PREFIXES):
         return None
     for cls, markers in _TRIGGER_MARKERS:
         if any(m in s for m in markers):

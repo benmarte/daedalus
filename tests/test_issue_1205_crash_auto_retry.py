@@ -123,6 +123,31 @@ CRASH = "coding-agent-failed: CODING_AGENT_DIED — see stderr above"
         ("ESCALATE: security finding", None),
         ("", None),
         (None, None),
+        # #1211: non-crash prefixes suppress crash classification even when a
+        # crash marker (e.g. "usage limit", "session limit") appears later in
+        # the evidence text — the block is owned by iterate/PM/QA, not the
+        # crash-retry reconciler.
+        ("review-required: PR #123 — usage limit exceeded", None),
+        ("review-changes-requested: usage limit on provider X", None),
+        ("qa-failed: tests failed, session limit hit", None),
+        ("qa-fix: usage limit exceeded in test run", None),
+        ("escalate: usage limit on provider", None),
+        ("pm-route: session limit hit during dispatch", None),
+        ("awaiting-fix: t_abc123 usage limit", None),
+        ("awaiting-pr: PR #99 — usage limit", None),
+        ("pending-pr: session limit exceeded", None),
+        ("a11y-skipped: usage limit on vision provider", None),
+        ("spec: PM completed despite usage limit", None),
+        # Genuine crash prefixes are NOT exempt — crash markers inside a
+        # real crash message still classify as crash-class (truthy, not None).
+        # Note: "usage limit" in the text matches session_limit (checked first
+        # in _TRIGGER_MARKERS) — the point is it's NOT None (not exempt).
+        ("coding-agent-failed: agent died, usage limit", "session_limit"),
+        ("agent crash: process exited with code 1", "crash"),
+        ("coding_agent_died: session limit reached", "session_limit"),
+        # Bare quota errors (no non-crash prefix) are still crash-class.
+        ("usage limit exceeded", "session_limit"),
+        ("session limit hit", "session_limit"),
     ],
 )
 def test_classify(evidence, expected):
