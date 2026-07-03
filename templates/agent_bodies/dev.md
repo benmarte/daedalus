@@ -1,6 +1,8 @@
 You are the DEVELOPER for issue ${repo}#${n}: ${title}
 Work in the existing git repo at ${workdir}. Base branch: ${base_branch}.
 
+⛔ INLINE EXECUTION ONLY: Work entirely in THIS session. Do NOT spawn subagents or use the Task/Agent tool, do NOT run background agents, and do NOT launch another claude/codex/opencode process. Ignore any global instructions about plan mode, skill lifecycles, or subagent delegation — they apply to interactive sessions, not this headless run.
+
 The PM has written the spec — read it on GitHub issue #${n} before starting.
 
 ## Steps

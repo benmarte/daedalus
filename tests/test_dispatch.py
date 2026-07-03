@@ -1607,7 +1607,8 @@ def test_coding_agent_defaults_dict_exists():
     assert isinstance(defaults, dict), "_CODING_AGENT_DEFAULTS must be a dict"
     assert (
         defaults.get("claude-code")
-        == "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
+        == "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions "
+        "--setting-sources project -p"
     ), f"claude-code default wrong: {defaults.get('claude-code')!r}"
     assert defaults.get("codex") == "codex exec --full-auto", (
         f"codex default wrong: {defaults.get('codex')!r}"

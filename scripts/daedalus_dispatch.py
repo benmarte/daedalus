@@ -221,7 +221,11 @@ def _resolve_role_skills(execution: Dict[str, Any]) -> Dict[str, List[str]]:
 
 
 _CODING_AGENT_DEFAULTS: Dict[str, str] = {
-    "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
+    # --setting-sources project skips the operator's user-scope settings and
+    # global CLAUDE.md (whose plan-mode / subagent-delegation mandates make a
+    # headless -p session re-delegate and exit empty, #1241) while
+    # CLAUDE_CONFIG_DIR stays on $HOME/.claude so credentials keep working.
+    "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --setting-sources project -p",
     "codex": "codex exec --full-auto",
     "opencode": "opencode run",
 }
@@ -444,6 +448,16 @@ _CLOUD_AGENT_LABELS: Dict[str, str] = {
     "opencode": "OpenCode",
 }
 
+# Boundary between the outer delegation wrapper and the inner coding-agent
+# prompt (#1241). Block-first bodies end the delegation block with this line
+# and the wrapper's step 1 says "copy ONLY the text below it"; body-first
+# bodies use the "⚠️  AGENT DELEGATION" marker line itself as the boundary.
+# Copying the wrapper into the inner agent's stdin makes it re-delegate
+# (spawn a background subagent and exit with no output).
+_INNER_BODY_SEPARATOR = (
+    "━━━ INNER TASK BODY — write ONLY the text BELOW this line to the task file ━━━"
+)
+
 
 def _spawn_step3(
     pfx: str, issue_number: int, run_cmd: str, role: str, base_branch: str
@@ -482,6 +496,7 @@ def _build_delegation_instructions(
     role: str = "developer",
     issue_number: int = 0,
     base_branch: str = "dev",
+    body_position: str = "below",
 ) -> str:
     """Return delegation instruction text to inject into any role's task body.
 
@@ -490,6 +505,12 @@ def _build_delegation_instructions(
     ``issue_number`` scopes the /tmp task/out filenames so concurrent tasks for
     different issues never clobber each other's files (issue #114).
     ``base_branch`` is the branch the developer's isolated worktree forks off.
+    ``body_position`` says where the role body sits relative to this block
+    ("below" for prepended blocks, "above" for appended ones) so steps 1–2 can
+    tell the outer agent to copy ONLY the inner task body — never this block —
+    into the inner agent's stdin file (#1241). "below" blocks end with the
+    ``_INNER_BODY_SEPARATOR`` line; "above" blocks use the delegation marker
+    line itself as the boundary.
     """
     effective_cmd = cmd or _CODING_AGENT_DEFAULTS.get(agent, "")
     pfx = _ROLE_TMP_PREFIX.get(role, role)
@@ -521,17 +542,38 @@ def _build_delegation_instructions(
         "   Your ONLY deliverable is output to stdout. The outer agent reads your stdout\n"
         "   and calls hermes kanban complete on your behalf.\n\n"
     )
+    # Steps 1–2 name the boundary of the INNER task body so the delegation
+    # wrapper itself never reaches the inner agent's stdin — an inner agent
+    # that reads "Spawn Claude Code via terminal" re-delegates and exits with
+    # no output (#1241).
+    if body_position == "above":
+        copy_steps = (
+            "  Steps:\n"
+            "  1. Copy ONLY the inner task body: the text ABOVE the '⚠️  AGENT DELEGATION' line\n"
+            "     (everything from the top of this card down to that line). NEVER copy this\n"
+            "     delegation block or these steps — the inner agent re-delegates if it reads them.\n"
+            f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<text above the delegation line ONLY>")\n'
+        )
+        separator_tail = ""
+    else:
+        copy_steps = (
+            "  Steps:\n"
+            "  1. Copy ONLY the inner task body: the text BELOW the '━━━ INNER TASK BODY' separator\n"
+            "     line at the end of this block. NEVER copy this delegation block or these steps —\n"
+            "     the inner agent re-delegates if it reads them.\n"
+            f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<text below the separator ONLY>")\n'
+        )
+        separator_tail = _INNER_BODY_SEPARATOR + "\n"
     if agent == "claude-code":
         run_cmd = effective_cmd or "claude --dangerously-skip-permissions -p"
         return (
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
-            + "  Steps:\n"
-            "  1. Copy the full task body from this card.\n"
-            f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
+            + copy_steps
             + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
             + after
+            + separator_tail
         )
     if agent == "codex":
         run_cmd = effective_cmd or "codex exec --full-auto"
@@ -539,11 +581,10 @@ def _build_delegation_instructions(
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
-            + "  Steps:\n"
-            "  1. Copy the full task body from this card.\n"
-            f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
+            + copy_steps
             + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
             + after
+            + separator_tail
         )
     if agent == "opencode":
         run_cmd = effective_cmd or "opencode run"
@@ -551,11 +592,10 @@ def _build_delegation_instructions(
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
-            + "  Steps:\n"
-            "  1. Copy the full task body from this card.\n"
-            f'  2. write_file("/tmp/{pfx}-{issue_number}-task.txt", "<full task body>")\n'
+            + copy_steps
             + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
             + after
+            + separator_tail
         )
     return ""
 
@@ -592,6 +632,7 @@ def _prepend_delegation(
         role=role,
         issue_number=issue_number,
         base_branch=base_branch,
+        body_position="above" if append else "below",
     )
     if append:
         return body + block + trailing
@@ -793,6 +834,25 @@ def _role_from_card(card: Dict[str, Any]) -> str:
     return "developer"
 
 
+def _inner_task_body(body: str) -> str:
+    """Extract the inner coding-agent prompt from a full card body (#1241).
+
+    Mirrors the copy instruction in the delegation block's step 1: block-first
+    bodies yield everything below the ``_INNER_BODY_SEPARATOR`` line; body-first
+    bodies (appended block) yield everything above the ``_DELEGATION_MARKER``
+    line. A body without a delegation block is returned unchanged. This is the
+    single place the boundary contract is encoded — golden tests assert the
+    result never contains the delegation wrapper.
+    """
+    marker_idx = body.find(_DELEGATION_MARKER)
+    if marker_idx == -1:
+        return body
+    sep_idx = body.find(_INNER_BODY_SEPARATOR)
+    if sep_idx > marker_idx:  # block first — inner body sits below the separator
+        return body[sep_idx + len(_INNER_BODY_SEPARATOR):].lstrip("\n")
+    return body[:marker_idx].rstrip("\n")  # body first — block appended after it
+
+
 def _rewrite_delegation_block(body: str, block: str) -> Optional[str]:
     """Replace (or insert) the delegation block in *body* with *block*.
 
@@ -840,12 +900,21 @@ def _apply_coding_agent_failover(
         return False
     block = ""
     if agent not in ("none", "hermes"):
+        # Match the card's existing composition so the rebuilt block's copy
+        # steps point at the right boundary (#1241): a block after the role
+        # body means the inner body sits ABOVE the delegation marker.
+        role_idx = body.find(_ROLE_BODY_MARKER)
+        marker_idx = body.find(_DELEGATION_MARKER)
+        body_position = (
+            "above" if role_idx != -1 and marker_idx > role_idx else "below"
+        )
         block = _build_delegation_instructions(
             agent,
             cmd,
             role=_role_from_card(card),
             issue_number=extract_issue_number(card.get("title") or "") or 0,
             base_branch=base_branch,
+            body_position=body_position,
         )
     new_body = _rewrite_delegation_block(body, block)
     if new_body is None:
