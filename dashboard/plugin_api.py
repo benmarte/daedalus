@@ -619,7 +619,7 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
         except Exception as exc:
             logger.warning("config: resolve_repo_config failed for %r — showing registry-only entry: %s",
                            repo_path, exc)
-            return _build_registry_only_entry(repo_path, Path(repo_path).name, cron_all)
+            return _build_registry_only_entry(repo_path, Path(repo_path).name)
         return _build_project_entry(resolved, cron_all)
 
     results = await asyncio.gather(
@@ -635,8 +635,13 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
 
 
 def _build_project_entry(proj: dict[str, Any],
-                          cron_all: Optional[dict[str, dict[str, Any]]] = None) -> dict[str, Any]:
-    """Build a single project status entry from a resolved per-repo config."""
+                          cron_all: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Build a single project status entry from a resolved per-repo config.
+
+    ``cron_all`` is the batched ``{cron_name: health}`` map from
+    :func:`_cron_health_all`, fetched once per :func:`get_projects` call. It is
+    required so no per-project cron fetch can be reintroduced here.
+    """
     name = proj.get("name", "")
     repo = proj.get("repo", "")
     workdir = proj.get("workdir", "")
@@ -653,12 +658,9 @@ def _build_project_entry(proj: dict[str, Any],
     # Cron info — use pre-fetched batch result when available.
     cron_cfg = proj.get("cron") or {}
     cron_name = f"{name}-daedalus"
-    if cron_all is not None:
-        health = cron_all.get(cron_name) or {"name": cron_name, "found": False,
-                                              "state": None, "last_run": None,
-                                              "last_status": None}
-    else:
-        health = _cron_health(cron_name)
+    health = cron_all.get(cron_name) or {"name": cron_name, "found": False,
+                                          "state": None, "last_run": None,
+                                          "last_status": None}
     cfg_schedule = (cron_cfg.get("schedule") or "").strip()
     live_schedule = (health.get("schedule") or "").strip()
     schedule = cfg_schedule or live_schedule
@@ -692,7 +694,6 @@ def _build_project_entry(proj: dict[str, Any],
 def _build_registry_only_entry(
     repo_path: str,
     name: str,
-    cron_all: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Build a lightweight entry for a repo in the registry but not in config."""
     slug = _board_slug(repo_path, name)
@@ -1523,19 +1524,6 @@ def _cron_health_all() -> dict[str, dict[str, Any]]:
     if rc != 0:
         return {}
     return {j["name"]: {**j, "found": True} for j in _parse_cron_jobs(out) if j.get("name")}
-
-
-def _cron_health(cron_name: str) -> dict[str, Any]:
-    """Return health dict for a single cron job. Degrades gracefully to found=False on error."""
-    result: dict[str, Any] = {"name": cron_name, "found": False, "state": None,
-                               "last_run": None, "last_status": None}
-    rc, out = _cron_cli(["list", "--all"])
-    if rc != 0:
-        return result
-    job = next((j for j in _parse_cron_jobs(out) if j.get("name") == cron_name), None)
-    if job:
-        result.update({**job, "found": True})
-    return result
 
 
 @meta_router.get("/detect")
