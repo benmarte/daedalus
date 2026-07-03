@@ -15,14 +15,14 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core import kanban
-from core.file_overlap import detect_file_overlap as _pairwise_file_overlap
-from core.providers.base import CIStatus, issue_linked_to_pr, parse_depends_on
+from core.providers.base import CIStatus, issue_linked_to_pr
 from core.util import extract_issue_number
 from core.util import extract_pr_number_from_summary
 
@@ -917,6 +917,31 @@ def _create_downstream_review_tasks(
     return created
 
 
+def _check_and_maybe_escalate(
+    slug: str,
+    card: dict,
+    repo: str,
+    handoff_text: str,
+    *,
+    workdir: str = "",
+    dry_run: bool = False,
+) -> bool | int:
+    """Shared fix-attempt escalation guard for the fix-card executors.
+
+    Returns the incremented ``fix_attempts`` count (an ``int``) when the caller
+    should proceed with creating a fix card, or the ``bool`` result of
+    ``_execute_escalate()`` when the cap is exceeded. Callers must check
+    ``isinstance(res, bool)`` and return early on the escalate path — a plain
+    truthiness check would misread attempt counts as escalation results.
+    """
+    # Read-then-increment is not atomic, but the dispatcher is a single-process
+    # cron (projects processed sequentially) — no lock needed unless that changes.
+    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
+    if fix_attempts > MAX_FIX_ATTEMPTS:
+        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    return fix_attempts
+
+
 def _execute_qa_fix(
     slug: str,
     card: dict,
@@ -940,11 +965,11 @@ def _execute_qa_fix(
     if not pr:
         logger.warning("iterate: qa_fix on %s but no PR found in handoff", tid)
         return False
-    # Read-then-increment is not atomic, but the dispatcher is a single-process
-    # cron (projects processed sequentially) — no lock needed unless that changes.
-    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
-    if fix_attempts > MAX_FIX_ATTEMPTS:
-        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
+                                    workdir=workdir, dry_run=dry_run)
+    if isinstance(res, bool):
+        return res
+    fix_attempts = res
 
     title = f"Task 2.3 FIX — QA failure on PR #{pr} — fix and push"
     body = (
@@ -1069,9 +1094,11 @@ def _execute_pm_route(
         logger.info("iterate: %s blocked awaiting-pr — skipping PM route", tid)
         return False
     pr = pr_number or _parse_pr_number(handoff_text)
-    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
-    if fix_attempts > MAX_FIX_ATTEMPTS:
-        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
+                                    workdir=workdir, dry_run=dry_run)
+    if isinstance(res, bool):
+        return res
+    fix_attempts = res
 
     rp = (router_profile or "").strip()
     ws = f"dir:{workdir}" if workdir else card.get("workspace", "")
@@ -1164,9 +1191,11 @@ def _execute_legacy_dev_fix_review(
     """
     tid = card.get("id")
     pr = pr_number or _parse_pr_number(handoff_text)
-    fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
-    if fix_attempts > MAX_FIX_ATTEMPTS:
-        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
+                                    workdir=workdir, dry_run=dry_run)
+    if isinstance(res, bool):
+        return res
+    fix_attempts = res
 
     title = f"Task 2.3 FIX — address review findings for PR #{pr or '?'} — push changes"
     body = (
@@ -1839,6 +1868,24 @@ def _build_aggregate_context(
     )
 
 
+def _grep_py_definitions(name: str, workdir: str, *, timeout: int = 5) -> List[str]:
+    """Grep *workdir* for Python files defining ``def name`` or ``class name``.
+
+    Returns the matching file paths (one per stdout line), or ``[]`` on any
+    grep failure — no match, timeout, or missing binary (graceful degradation).
+    """
+    try:
+        res = subprocess.run(
+            ["grep", "-rl", "--include=*.py", "-e", f"def {name}", "-e", f"class {name}", workdir],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError):
+        return []
+    if res.returncode != 0:
+        return []
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+
+
 def identify_relevant_files(
     scope_text: str,
     workdir: str,
@@ -1858,8 +1905,6 @@ def identify_relevant_files(
     4. **Extension fallback** — only if earlier strategies already found
        candidates and we're below *max_files*.
     """
-    import subprocess as _sp
-
     workdir_path = Path(workdir)
     if not workdir_path.exists():
         logger.warning("identify_relevant_files: workdir %s does not exist", workdir)
@@ -1892,24 +1937,15 @@ def identify_relevant_files(
         # Grep for aggregated identifiers directly (more precise than
         # re-extracting from raw scope text).
         if not (len(candidates) >= max_files):
-            import subprocess as _sp_agg
             for ident in sorted(epic_context.all_identifiers):
-                try:
-                    res = _sp_agg.run(
-                        ["grep", "-rl", f"--include=*.py", "-e", f"def {ident}", "-e", f"class {ident}", workdir],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                except (_sp_agg.SubprocessError, _sp_agg.TimeoutExpired, OSError):
-                    continue
-                if res.returncode == 0:
-                    for line in res.stdout.splitlines():
-                        fp = Path(line.strip())
-                        try:
-                            if fp.exists() and fp.resolve().is_relative_to(workdir_path.resolve()):
-                                if _add(fp, f"epic_context:ident:{ident}"):
-                                    break
-                        except (OSError, ValueError):
-                            continue
+                for line in _grep_py_definitions(ident, workdir):
+                    fp = Path(line)
+                    try:
+                        if fp.exists() and fp.resolve().is_relative_to(workdir_path.resolve()):
+                            if _add(fp, f"epic_context:ident:{ident}"):
+                                break
+                    except (OSError, ValueError):
+                        continue
                 if len(candidates) >= max_files:
                     break
 
@@ -1934,24 +1970,16 @@ def identify_relevant_files(
     func_re = re.compile(r"\b(?:def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b")
     for m in func_re.finditer(scope_text or ""):
         name = m.group(1)
-        try:
-            res = _sp.run(
-                ["grep", "-rl", f"--include=*.py", "-e", f"def {name}", "-e", f"class {name}", workdir],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (_sp.SubprocessError, _sp.TimeoutExpired, OSError):
-            continue
-        if res.returncode == 0:
-            for line in res.stdout.splitlines():
-                fp = Path(line.strip())
-                try:
-                    if fp.exists() and fp.resolve().is_relative_to(workdir_path.resolve()):
-                        if _add(fp, f"definition_scan:{name}"):
-                            break
-                except (OSError, ValueError):
-                    continue
-            if len(candidates) >= max_files:
-                break
+        for line in _grep_py_definitions(name, workdir):
+            fp = Path(line)
+            try:
+                if fp.exists() and fp.resolve().is_relative_to(workdir_path.resolve()):
+                    if _add(fp, f"definition_scan:{name}"):
+                        break
+            except (OSError, ValueError):
+                continue
+        if len(candidates) >= max_files:
+            break
 
     # Strategy 3 — directory heuristic. Only fires when scope mentions
     # one of the common directory names, so "Add new feature" returns
@@ -2235,13 +2263,7 @@ def _execute_planner_decompose_inner(
                     parent_n, len(sub_titles), sub_titles)
         return True
 
-    # Compute blocking edges from file overlap analysis
-    blocking_edges = build_blocking_edges(
-        detect_file_overlap(per_sub_contexts),
-        total_tasks=len(per_sub_contexts),
-    )
-
-    inherit_labels = [l for l in parent_labels if l and l.lower() != "epic"]
+    inherit_labels = [lbl for lbl in parent_labels if lbl and lbl.lower() != "epic"]
     created_numbers: List[int] = []
     ready_numbers: List[int] = []
     for idx, (title, scope) in enumerate(zip(sub_titles, sub_scopes)):
@@ -2293,7 +2315,6 @@ def _execute_planner_decompose_inner(
     # Use the new timestamped marker format (<!-- daedalus:decomposed:<ts> -->)
     # so subsequent runs detect it via has_decomposed_marker().
     # Also include the sub-issue list for traceability.
-    marker_numbers = f"[{','.join(str(n) for n in created_numbers)}]"
     provider.post_issue_comment(
         parent_n,
         f"{_build_decomposed_marker()}\n"

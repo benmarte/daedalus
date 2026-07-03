@@ -128,7 +128,7 @@ def test_read_source_files_size_limit():
         contents = read_source_files(file_paths, str(workdir), max_size=1000)
         
         f_large = str(workdir / "large.txt")
-        assert f_large in contents, f"Expected large file in contents"
+        assert f_large in contents, "Expected large file in contents"
         # Truncated to 1000 bytes
         assert len(contents[f_large]) == 1000, f"Expected 1000 chars, got {len(contents[f_large])}"
         assert contents[str(workdir / "normal.txt")] == "small content"
@@ -273,3 +273,50 @@ def test_integration_empty_files_graceful_degradation():
     
     assert enhanced == scope, "Scope unchanged when no source context"
     print("PASS: Graceful degradation when no files match")
+
+
+def test_grep_py_definitions_finds_def_and_class():
+    """_grep_py_definitions locates files defining a function or class (issue #1148)."""
+    from core.iterate import _grep_py_definitions
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workdir = Path(tmpdir)
+        (workdir / "mod.py").write_text("def target_helper():\n    pass\n")
+        (workdir / "other.py").write_text("class TargetClass:\n    pass\n")
+
+        hits = _grep_py_definitions("target_helper", str(workdir))
+        assert any("mod.py" in h for h in hits), f"Should find mod.py, got {hits}"
+
+        hits = _grep_py_definitions("TargetClass", str(workdir))
+        assert any("other.py" in h for h in hits), f"Should find other.py, got {hits}"
+
+        assert _grep_py_definitions("no_such_symbol", str(workdir)) == []
+        print("PASS: _grep_py_definitions finds def/class definitions")
+
+
+def test_grep_py_definitions_failure_graceful():
+    """_grep_py_definitions returns [] on subprocess failure instead of raising."""
+    from unittest import mock
+
+    from core import iterate as _it
+
+    with mock.patch.object(_it.subprocess, "run", side_effect=OSError("no grep")):
+        assert _it._grep_py_definitions("anything", "/tmp") == []
+    print("PASS: _grep_py_definitions degrades gracefully on grep failure")
+
+
+def test_identify_relevant_files_definition_scan():
+    """Strategy 2: def/class names in scope resolve to defining files via grep."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workdir = Path(tmpdir)
+        (workdir / "core").mkdir()
+        (workdir / "core" / "widgets.py").write_text("def spin_widget():\n    pass\n")
+
+        files, metadata = identify_relevant_files(
+            "Refactor def spin_widget to accept a speed argument",
+            str(workdir),
+        )
+        file_strs = [str(f) for f in files]
+        assert any("widgets.py" in f for f in file_strs), f"Should find widgets.py in {file_strs}"
+        assert any("definition_scan" in m for m in metadata.values()), f"metadata: {metadata}"
+        print("PASS: Definition scan resolves def names through _grep_py_definitions")

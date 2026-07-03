@@ -558,7 +558,7 @@ def test_execute_reconcile_merged_dry_run():
 def test_execute_qa_fix():
     """_execute_qa_fix creates a fix task with idempotency key."""
     with mock.patch.object(kanban, "create_task", return_value="t_fix") as mk_create:
-        with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        with mock.patch.object(kanban, "comment", return_value=True):
             card = {
                 "id": "t_dev",
                 "runs": [{"metadata": {"fix_attempts": 0}}],
@@ -623,7 +623,7 @@ def test_execute_pm_route_empty_profile_fallback():
     check("pm_route empty profile → fallback returns True", ok is True)
     call_kwargs = mk_create.call_args[1]
     check("fallback assignee is developer", call_kwargs["assignee"] == "developer-daedalus")
-    check("fallback does NOT use goal", call_kwargs.get("goal") != True)
+    check("fallback does NOT use goal", not call_kwargs.get("goal"))
 
 
 def test_execute_approve_advance():
@@ -661,6 +661,30 @@ def test_execute_dev_fix_escalate_when_over_cap():
     check("qa_fix escalates when over cap", ok is True)
     mk_comment.assert_called_once()
     # Make sure no create was called
+    assert "escalate" in mk_comment.call_args[0][2].lower()
+
+
+def test_check_and_maybe_escalate_below_threshold():
+    """_check_and_maybe_escalate returns the incremented attempt count when under cap."""
+    card = {"id": "t_dev", "runs": [{"metadata": {"fix_attempts": 1}}]}
+    with mock.patch.object(kanban, "comment") as mk_comment:
+        res = iterate._check_and_maybe_escalate(
+            "slug", card, "O/R", "review-required: PR #42",
+        )
+    assert res == 2, f"expected incremented attempt count 2, got {res!r}"
+    assert not isinstance(res, bool)
+    mk_comment.assert_not_called()
+
+
+def test_check_and_maybe_escalate_over_threshold():
+    """_check_and_maybe_escalate delegates to _execute_escalate when over cap."""
+    card = {"id": "t_dev", "runs": [{"metadata": {"fix_attempts": iterate.MAX_FIX_ATTEMPTS}}]}
+    with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        res = iterate._check_and_maybe_escalate(
+            "slug", card, "O/R", "review-required: PR #42",
+        )
+    assert res is True, f"expected escalate result True, got {res!r}"
+    mk_comment.assert_called_once()
     assert "escalate" in mk_comment.call_args[0][2].lower()
 
 
@@ -1320,7 +1344,7 @@ def test_create_downstream_happy_path():
         "body": "Implement benmarte/daedalus#19",
         "workspace": "dir:/work",
     }
-    with mock.patch.object(kanban, "list_tasks", return_value=[]) as mk_list:
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
         with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"]) as mk_create:
             with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
                 created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
@@ -2198,7 +2222,7 @@ def test_escalation_different_issues_independent():
         },
     ]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
-        with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        with mock.patch.object(kanban, "comment", return_value=True):
             with mock.patch.object(kanban, "show_card", return_value={"id": "", "comments": []}):
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
                     counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
@@ -2326,6 +2350,8 @@ if __name__ == "__main__":
         test_execute_approve_advance,
         test_execute_escalate,
         test_execute_dev_fix_escalate_when_over_cap,
+        test_check_and_maybe_escalate_below_threshold,
+        test_check_and_maybe_escalate_over_threshold,
         test_run_iterate_empty,
         test_run_iterate_dev_advance,
         test_run_iterate_qa_fix,
