@@ -4524,6 +4524,19 @@ def test_check_completed_developer_well_formed_summary_no_retry():
 
 
 if __name__ == "__main__":
+    # Dual-mode parity (issue #1201): the standalone runner never invokes
+    # conftest.pytest_configure, so the DAEDALUS_DISPATCH_LOCK test override that
+    # pytest gets would be unset here — breaking the lock-isolation checks. There
+    # is no xdist worker in standalone mode, so a single fixed test-lock path is
+    # correct; setdefault respects a deliberately-exported value.
+    import os as _os
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+    _os.environ.setdefault(
+        "DAEDALUS_DISPATCH_LOCK",
+        str(_Path(_tempfile.gettempdir()) / ".daedalus_dispatch_test_standalone.lock"),
+    )
+
     print("Daedalus tests")
     print("-" * 60)
     for fn in (
