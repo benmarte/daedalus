@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -26,6 +27,23 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# ── isolate the dispatcher process-mutex FileLock per xdist worker (issue #1198)
+# daedalus_dispatch.main() acquires a host-global FileLock at _MUTEX_LOCK_PATH.
+# Under ``pytest -n auto`` every xdist worker is a separate process on the same
+# host, so two workers that each call main() collide on that one lock: the loser
+# gets Timeout and returns early WITHOUT running _main_inner(), which flakes any
+# test asserting on dispatch side effects (e.g. test_main_scopes_to_cwd_project).
+# Point the lock at a unique per-worker file so workers never contend. Set at
+# conftest import — before any test module loads ``disp`` — and honored by the
+# ``DAEDALUS_DISPATCH_LOCK`` override in daedalus_dispatch, so every freshly
+# re-exec'd module (see _load_dispatch) picks it up. Dedicated lock-contention
+# suites still override _MUTEX_LOCK_PATH directly, so they are unaffected.
+if "DAEDALUS_DISPATCH_LOCK" not in os.environ:
+    _worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    os.environ["DAEDALUS_DISPATCH_LOCK"] = str(
+        Path(tempfile.gettempdir()) / f".daedalus_dispatch_test_{_worker}.lock"
+    )
 
 
 @pytest.fixture(autouse=True)
