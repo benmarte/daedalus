@@ -457,9 +457,7 @@ def _spawn_step3(
             "$HOME/.hermes/plugins/daedalus/scripts/daedalus-worktree-spawn.sh "
             f"{issue_number} {base_branch} {tmp} {outf} {errf} {run_cmd}"
         )
-        return (
-            f"  3. terminal(\"bash -c 'echo $$ > {pidf}; exec {spawn}'\", background=True)\n"
-        )
+        return f"  3. terminal(\"bash -c 'echo $$ > {pidf}; exec {spawn}'\", background=True)\n"
     return (
         f"  3. terminal(\"bash -c 'echo $$ > {pidf}; "
         f"{run_cmd} < {tmp} > {outf} 2> {errf}'\", background=True)\n"
@@ -577,7 +575,10 @@ def _prepend_delegation(
     if coding_agent in ("none", "hermes"):
         return body
     block = _build_delegation_instructions(
-        coding_agent, coding_agent_cmd, role=role, issue_number=issue_number,
+        coding_agent,
+        coding_agent_cmd,
+        role=role,
+        issue_number=issue_number,
         base_branch=base_branch,
     )
     if append:
@@ -2124,11 +2125,15 @@ def _task_body(
         f"```\n{notify_templates.DOC_COMMENT_TEMPLATE.replace('<issue_number>', str(n)).replace('<issue_url>', issue_url)}\n```\n\n"
         f"Replace every <placeholder> with the real value. "
         f"NOTE: messaging-platform delivery is handled automatically by the dispatcher — do NOT "
-        f"attempt to send the report yourself.\n\n"
-        + _delimit_issue_content(n, body)
+        f"attempt to send the report yourself.\n\n" + _delimit_issue_content(n, body)
     )
     return _prepend_delegation(
-        _body, coding_agent, coding_agent_cmd, issue_number=n, append=True, trailing="",
+        _body,
+        coding_agent,
+        coding_agent_cmd,
+        issue_number=n,
+        append=True,
+        trailing="",
         base_branch=base_branch,
     )
 
@@ -2203,9 +2208,7 @@ def _validator_body(
             f"completion summary to GitHub issue #{n} automatically. "
             f"Make that summary clear: role (VALIDATOR), findings/decision, and next steps."
         )
-        _action_security = (
-            "→ Block your card with summary starting 'ESCALATE: security threat — ' + one-line desc."
-        )
+        _action_security = "→ Block your card with summary starting 'ESCALATE: security threat — ' + one-line desc."
         _action_block_review = (
             "→ Block your card with summary starting 'BLOCKED: needs human verification — ' "
             "followed by a one-line description of what is missing."
@@ -2215,12 +2218,16 @@ def _validator_body(
             "reproduction note (e.g., 'CONFIRMED: reproduced on main at commit abc1234, test_login fails'). "
             "The dispatcher detects this EXACT prefix to trigger the PM phase."
         )
-        _action_cannot_repro = (
-            "→ Complete your card with summary starting 'STOP: cannot reproduce — ' + one-line description."
+        _action_cannot_repro = "→ Complete your card with summary starting 'STOP: cannot reproduce — ' + one-line description."
+        _action_already_fixed = (
+            "→ Complete your card with summary starting 'STOP: already fixed — '."
         )
-        _action_already_fixed = "→ Complete your card with summary starting 'STOP: already fixed — '."
-        _action_duplicate = "→ Complete your card with summary starting 'STOP: duplicate of #<N>'."
-        _action_needs_info = "→ Block your card with summary starting 'BLOCKED: needs more info'."
+        _action_duplicate = (
+            "→ Complete your card with summary starting 'STOP: duplicate of #<N>'."
+        )
+        _action_needs_info = (
+            "→ Block your card with summary starting 'BLOCKED: needs more info'."
+        )
 
     _vbody = (
         f"Validate issue {repo}#{n}: {title}\n"
@@ -2296,8 +2303,7 @@ def _validator_body(
         f"     {_action_duplicate}\n\n"
         f"NEEDS_MORE_INFO — the issue lacks enough detail to reproduce or implement.\n"
         f"     → Post a comment on issue #{n} listing exactly what info is needed.\n"
-        f"     {_action_needs_info}\n\n"
-        + _delimit_issue_content(n, body)
+        f"     {_action_needs_info}\n\n" + _delimit_issue_content(n, body)
     )
     return _prepend_delegation(
         _vbody,
@@ -2482,12 +2488,15 @@ def _downstream_body(
         f"      Generic role names CANNOT be dispatched and will stall the pipeline.\n\n"
         f"Decompose this into the following role tasks IN ORDER — each depends on the previous:\n\n"
         f"{roles_text}"
-        f"{doc_role}"
-        + "\n"
-        + _delimit_issue_content(n, body)
+        f"{doc_role}" + "\n" + _delimit_issue_content(n, body)
     )
     return _prepend_delegation(
-        _body, coding_agent, coding_agent_cmd, issue_number=n, append=True, trailing="",
+        _body,
+        coding_agent,
+        coding_agent_cmd,
+        issue_number=n,
+        append=True,
+        trailing="",
         base_branch=base_branch,
     )
 
@@ -2739,6 +2748,7 @@ def _retry_cap_marker_for_role(role: str) -> str:
     """Return the role-scoped retry-cap marker for the given role (#1167)."""
     return f"<!-- daedalus:retry-cap-notified:{role} -->"
 
+
 _RETRY_CAP_NOTIFICATION_MARKER = "RETRY_CAP_NOTIFICATION_SENT"
 
 
@@ -2918,8 +2928,7 @@ def _try_adopt_developer_pr(
         pr = provider._pr_for_issue(issue_number)
     except Exception as exc:
         logger.warning(
-            "dispatch: _pr_for_issue(#%s) raised %s — "
-            "falling back to developer retry",
+            "dispatch: _pr_for_issue(#%s) raised %s — falling back to developer retry",
             issue_number,
             exc,
         )
@@ -3079,7 +3088,9 @@ def _mark_notified_block(
             logger.warning(
                 "dispatch: _mark_notified_block kanban.comment failed for "
                 "issue #%s (role=%s, marker=%s) — marker may not persist",
-                issue_number, role or "n/a", actual_marker,
+                issue_number,
+                role or "n/a",
+                actual_marker,
             )
             return False
     # Fallback: stamp the triggering card directly (#1167).
@@ -3088,19 +3099,25 @@ def _mark_notified_block(
             logger.info(
                 "dispatch: _mark_notified_block used fallback card %s for "
                 "issue #%s (role=%s) — validator card not found",
-                fallback_task_id, issue_number, role or "n/a",
+                fallback_task_id,
+                issue_number,
+                role or "n/a",
             )
             return True
         logger.warning(
             "dispatch: _mark_notified_block fallback kanban.comment failed "
             "for issue #%s (role=%s, card=%s) — marker may not persist",
-            issue_number, role or "n/a", fallback_task_id,
+            issue_number,
+            role or "n/a",
+            fallback_task_id,
         )
         return False
     logger.warning(
         "dispatch: _mark_notified_block found no target card for issue #%s "
         "(role=%s, marker=%s) — notification may re-fire on next tick",
-        issue_number, role or "n/a", actual_marker,
+        issue_number,
+        role or "n/a",
+        actual_marker,
     )
     return False
 
@@ -3156,7 +3173,8 @@ def _retry_cap_stage_recovered(
             return True
         # Check for downstream role cards (QA, reviewer) that are running or done.
         if _downstream_tasks_running_or_done(
-            slug, issue_number,
+            slug,
+            issue_number,
             (p.get("qa", "qa-daedalus"), p.get("reviewer", "reviewer-daedalus")),
         ):
             return True
@@ -3168,14 +3186,16 @@ def _retry_cap_stage_recovered(
                     logger.info(
                         "dispatch: _retry_cap_stage_recovered: developer PR #%s "
                         "exists for #%s — suppressing retry-cap notification",
-                        pr.number, issue_number,
+                        pr.number,
+                        issue_number,
                     )
                     return True
             except Exception as exc:
                 logger.warning(
                     "dispatch: _retry_cap_stage_recovered: _pr_for_issue(#%s) "
                     "raised %s — failing open (not recovered)",
-                    issue_number, exc,
+                    issue_number,
+                    exc,
                 )
 
     elif role == "pm":
@@ -3185,7 +3205,8 @@ def _retry_cap_stage_recovered(
             return True
         # Check for downstream role cards (developer) that are running or done.
         if _downstream_tasks_running_or_done(
-            slug, issue_number,
+            slug,
+            issue_number,
             (p.get("developer", "developer-daedalus"),),
         ):
             return True
@@ -3207,9 +3228,12 @@ def _retry_cap_stage_recovered(
                     return True
         # Check for downstream role cards (PM, developer) that are running or done.
         if _downstream_tasks_running_or_done(
-            slug, issue_number,
-            (p.get("pm", "project-manager-daedalus"),
-             p.get("developer", "developer-daedalus")),
+            slug,
+            issue_number,
+            (
+                p.get("pm", "project-manager-daedalus"),
+                p.get("developer", "developer-daedalus"),
+            ),
         ):
             return True
 
@@ -4150,7 +4174,8 @@ def _send_crash_retries_exhausted_notification(
             except Exception as exc:
                 logger.warning(
                     "crash-retry webhook notification failed for #%s: %s",
-                    issue_n, exc,
+                    issue_n,
+                    exc,
                 )
 
         threading.Thread(target=_fire, daemon=True).start()
@@ -4163,19 +4188,23 @@ def _send_crash_retries_exhausted_notification(
             logger.info(
                 "[dry-run] would send crash-retries-exhausted notification "
                 "to %s for #%s",
-                target, issue_n,
+                target,
+                issue_n,
             )
             continue
         ok, _anchor = _hermes_send(target, body)
         if ok:
             logger.info(
                 "sent crash-retries-exhausted notification to %s for #%s (card %s)",
-                target, issue_n, task_id,
+                target,
+                issue_n,
+                task_id,
             )
         else:
             logger.warning(
                 "failed to send crash-retries-exhausted notification to %s for #%s",
-                target, issue_n,
+                target,
+                issue_n,
             )
 
 
@@ -4726,8 +4755,11 @@ def _check_confirmed_validators(
                                     role="pm",
                                 ):
                                     if _retry_cap_stage_recovered(
-                                        slug, n_nr, "pm",
-                                        profiles=p, provider=provider,
+                                        slug,
+                                        n_nr,
+                                        "pm",
+                                        profiles=p,
+                                        provider=provider,
                                     ):
                                         logger.info(
                                             "dispatch: PM retry-cap for #%s suppressed "
@@ -4884,8 +4916,11 @@ def _check_confirmed_validators(
                     role="validator",
                 ):
                     if _retry_cap_stage_recovered(
-                        slug, n_nr, "validator",
-                        profiles=p, provider=provider,
+                        slug,
+                        n_nr,
+                        "validator",
+                        profiles=p,
+                        provider=provider,
                     ):
                         logger.info(
                             "dispatch: validator retry-cap for #%s suppressed "
@@ -4954,8 +4989,11 @@ def _check_confirmed_validators(
                         role="validator",
                     ):
                         if _retry_cap_stage_recovered(
-                            slug, n_nr, "validator",
-                            profiles=p, provider=provider,
+                            slug,
+                            n_nr,
+                            "validator",
+                            profiles=p,
+                            provider=provider,
                         ):
                             logger.info(
                                 "dispatch: validator retry-cap for #%s suppressed "
@@ -5068,8 +5106,11 @@ def _check_confirmed_validators(
                     role="pm",
                 ):
                     if _retry_cap_stage_recovered(
-                        slug, n, "pm",
-                        profiles=p, provider=provider,
+                        slug,
+                        n,
+                        "pm",
+                        profiles=p,
+                        provider=provider,
                     ):
                         logger.info(
                             "dispatch: PM retry-cap for #%s suppressed "
@@ -5909,8 +5950,11 @@ def _check_completed_developer(
                 role="developer",
             ):
                 if _retry_cap_stage_recovered(
-                    slug, n, "developer",
-                    profiles=p, provider=provider,
+                    slug,
+                    n,
+                    "developer",
+                    profiles=p,
+                    provider=provider,
                 ):
                     logger.info(
                         "dispatch: developer retry-cap for #%s suppressed "
@@ -7941,8 +7985,19 @@ def _notify_project_summary(
         return False
     try:
         provider = providers.get_provider(resolved)
-    except Exception:
+    except Exception as exc:
         provider = None
+        # Don't silently drop the tick summary: a provider failure here means
+        # render_dispatch_summary falls back to degraded rendering, so surface
+        # the cause (bad config / missing token) instead of hiding it. The
+        # workdir identifies the resolved project config on disk.
+        logger.warning(
+            "dispatch: provider instantiation failed for project %s "
+            "(workdir=%s): %s — tick summary will use degraded rendering",
+            name,
+            resolved.get("workdir") or "<none>",
+            exc,
+        )
     msg = notify_templates.render_dispatch_summary(
         name, summary, provider, dry_run=dry_run
     )
