@@ -1360,6 +1360,15 @@ Each piece exists because the obvious approach failed:
   and an agent stuck `blocked` (waiting for input) used to share a code path; a
   dead-code branch let `stop:` fall through and leave the card blocked. Separate
   paths — `stop:` auto-closes, `blocked` PM-consults — prevent the regression.
+- **Closed-issue guard gaps** (`scripts/daedalus_dispatch.py`, issue #1120) — the
+  closed-issue skip guard added in #1117 had two gaps: `_check_planner_not_suitable()`
+  was missing the guard entirely (kept creating validator tasks for closed issues), and
+  `_is_issue_closed_cached()` returned `False` ("open") on a 403 rate-limit error, causing
+  a self-reinforcing rate-limit loop. The guard is now three-state: `True` (closed),
+  `False` (confirmed open, or no provider → fail-open for provider-less tests), `None`
+  (unknown — `get_issue_state` raised). All 6 call sites gate on `is not False`, so closed
+  **and** unknown/rate-limited issues are skipped rather than processed. The `None` result
+  is cached so a rate-limited tick makes at most one API call per issue.
 - **`issues_map` miss fallback** — a freshly-created issue can race with the
   dispatcher's sweep such that the sweep has the issue's number but not its body.
   A one-shot `get_issue()` retry on transient failure prevents a single API flake
