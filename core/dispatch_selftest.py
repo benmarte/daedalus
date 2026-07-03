@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 REPO = "benmarte/daedalus"
 SLUG = "daedalus-selftest"
@@ -55,9 +55,9 @@ class _InMemoryKanban:
     """
 
     def __init__(self) -> None:
-        self.tasks: Dict[str, Dict[str, Any]] = {}
+        self.tasks: dict[str, dict[str, Any]] = {}
         self._counter = 0
-        self.created: List[Dict[str, Any]] = []
+        self.created: list[dict[str, Any]] = []
 
     # ---- seeding (not a pipeline mutation) ----
 
@@ -77,26 +77,26 @@ class _InMemoryKanban:
     def ensure_board(self, slug: str) -> None:
         return None
 
-    def list_tasks(self, slug: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_tasks(self, slug: str, status: str | None = None) -> list[dict[str, Any]]:
         return [dict(t) for t in self.tasks.values()
                 if status is None or (t.get("status") or "") == status]
 
-    def list_blocked(self, slug: str) -> List[Dict[str, Any]]:
+    def list_blocked(self, slug: str) -> list[dict[str, Any]]:
         return [dict(t) for t in self.tasks.values() if (t.get("status") or "") == "blocked"]
 
     def get_latest_summary(self, slug: str, task_id: str) -> str:
         t = self.tasks.get(task_id) or {}
         return t.get("latest_summary") or t.get("summary") or ""
 
-    def show_card(self, slug: str, task_id: str) -> Optional[Dict[str, Any]]:
+    def show_card(self, slug: str, task_id: str) -> dict[str, Any] | None:
         t = self.tasks.get(task_id)
         return dict(t) if t else None
 
     def create_task(self, slug: str, title: str, *, body: str = "", assignee: str = "",
                     workspace: str = "", idempotency_key: str = "",
-                    parents: Optional[List[str]] = None, skills: Optional[List[str]] = None,
-                    goal: bool = False, goal_max_turns: Optional[int] = None,
-                    max_retries: Optional[int] = None) -> Optional[str]:
+                    parents: list[str] | None = None, skills: list[str] | None = None,
+                    goal: bool = False, goal_max_turns: int | None = None,
+                    max_retries: int | None = None) -> str | None:
         # Idempotency: a known key returns the existing card id (no duplicate).
         if idempotency_key:
             for t in self.tasks.values():
@@ -134,7 +134,7 @@ class _InMemoryKanban:
     def close_non_blocked_issue_tasks(self, slug: str, *args: Any, **kwargs: Any) -> int:
         return 0
 
-    def created_with_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
+    def created_with_key(self, idempotency_key: str) -> dict[str, Any] | None:
         for t in self.tasks.values():
             if t.get("idempotency_key") == idempotency_key:
                 return t
@@ -146,17 +146,17 @@ class _InMemoryProvider:
 
     name = "github-selftest"
 
-    def __init__(self, issues: Dict[int, Dict[str, Any]]) -> None:
+    def __init__(self, issues: dict[int, dict[str, Any]]) -> None:
         self._issues = issues
-        self.posted_issue_comments: List[tuple] = []
+        self.posted_issue_comments: list[tuple] = []
 
     def board_configured(self) -> bool:
         return False
 
-    def list_issues(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+    def list_issues(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return list(self._issues.values())
 
-    def get_issue(self, issue_number: int) -> Optional[Dict[str, Any]]:
+    def get_issue(self, issue_number: int) -> dict[str, Any] | None:
         return self._issues.get(issue_number)
 
     def get_issue_state(self, issue_number: int) -> str:
@@ -166,7 +166,7 @@ class _InMemoryProvider:
         self.posted_issue_comments.append((issue_number, body))
         return True
 
-    def blockers(self, issue_number: int) -> List[int]:
+    def blockers(self, issue_number: int) -> list[int]:
         return []
 
 
@@ -182,7 +182,7 @@ class _Check:
 
 @dataclass
 class SelfTestReport:
-    checks: List[_Check] = field(default_factory=list)
+    checks: list[_Check] = field(default_factory=list)
 
     def record(self, name: str, passed: bool, detail: str = "") -> bool:
         self.checks.append(_Check(name, bool(passed), detail))
@@ -239,24 +239,24 @@ def run_selftest(disp: Any) -> SelfTestReport:
 
 
 def _run_checks(disp: Any, report: SelfTestReport, board: _InMemoryKanban,
-                provider: _InMemoryProvider, issues_map: Dict[int, Dict[str, Any]],
-                profiles: Dict[str, str], workdir: str) -> None:
+                provider: _InMemoryProvider, issues_map: dict[int, dict[str, Any]],
+                profiles: dict[str, str], workdir: str) -> None:
     n = ISSUE_NUMBER
     title = f"#{n} {issues_map[n]['title']}"
 
-    def _validators() -> List[int]:
+    def _validators() -> list[int]:
         return disp._check_confirmed_validators(
             SLUG, REPO, issues_map, 3, workdir, "", "dev", "github",
             profiles=profiles, provider=provider,
         )
 
-    def _pm() -> List[int]:
+    def _pm() -> list[int]:
         return disp._check_completed_pm(
             SLUG, REPO, issues_map, 3, workdir, "", "dev", "github",
             profiles=profiles, provider=provider,
         )
 
-    def _comments() -> List[int]:
+    def _comments() -> list[int]:
         return disp._post_completion_comments(SLUG, provider, profiles, workdir)
 
     # ── Stage 1: validator CONFIRMED -> a PM spec card appears ────────────────

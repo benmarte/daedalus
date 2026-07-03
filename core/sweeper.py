@@ -26,7 +26,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Dict, List, Optional, Tuple
 
 from core import kanban
 from core.db import connect_wal
@@ -40,7 +39,7 @@ DEFAULT_RUNNING_STALE_HOURS = 24
 _SINCE_KEYS = ("last_heartbeat_at", "started_at", "created_at")
 
 
-def blocked_since(card: Dict) -> Optional[int]:
+def blocked_since(card: dict) -> int | None:
     """Best epoch-seconds estimate of when ``card`` last made progress.
 
     Returns the first present, truthy value among ``last_heartbeat_at``,
@@ -60,19 +59,19 @@ def blocked_since(card: Dict) -> Optional[int]:
 
 
 def _find_stale(
-    cards: List[Dict],
+    cards: list[dict],
     *,
     status: str,
     now: int,
     threshold_hours: float,
-) -> List[Tuple[Dict, float]]:
+) -> list[tuple[dict, float]]:
     """Pure detection: cards in ``status`` with no progress for > ``threshold_hours``.
 
     Returns ``[(card, age_hours)]`` sorted oldest-first. Cards not in ``status``,
     or whose age can't be determined, are skipped.
     """
     cutoff = now - threshold_hours * 3600
-    stale: List[Tuple[Dict, float]] = []
+    stale: list[tuple[dict, float]] = []
     for card in cards:
         if (card.get("status") or "").lower() != status:
             continue
@@ -90,11 +89,11 @@ def _find_stale(
 
 
 def find_stale_blocked(
-    cards: List[Dict],
+    cards: list[dict],
     *,
     now: int,
     threshold_hours: float = DEFAULT_STALE_HOURS,
-) -> List[Tuple[Dict, float]]:
+) -> list[tuple[dict, float]]:
     """Pure detection: blocked cards with no activity for > ``threshold_hours``.
 
     Returns ``[(card, age_hours)]`` sorted oldest-first. Cards that are not
@@ -104,11 +103,11 @@ def find_stale_blocked(
 
 
 def find_stale_running(
-    cards: List[Dict],
+    cards: list[dict],
     *,
     now: int,
     threshold_hours: float = DEFAULT_RUNNING_STALE_HOURS,
-) -> List[Tuple[Dict, float]]:
+) -> list[tuple[dict, float]]:
     """Pure detection: running cards with no progress for > ``threshold_hours``.
 
     A running card whose ``last_heartbeat_at`` (the freshest summary-update
@@ -128,7 +127,7 @@ def _db_path(slug: str) -> str:
     return os.path.join(home, "kanban", "boards", slug, "kanban.db")
 
 
-def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
+def _heartbeats(slug: str, task_ids: list[str]) -> dict[str, int]:
     """``{task_id: last_heartbeat_at}`` from the board DB. Degrades to ``{}``.
 
     Only ids found in the DB with a non-null heartbeat are returned, so callers
@@ -197,9 +196,9 @@ def sweep_stale_blocked(
     *,
     threshold_hours: float = DEFAULT_STALE_HOURS,
     archive: bool = False,
-    now: Optional[int] = None,
+    now: int | None = None,
     dry_run: bool = False,
-) -> List[str]:
+) -> list[str]:
     """Detect, warn, and optionally archive stale blocked cards.
 
     Returns the list of stale card ids found. ``archive`` (off by default) moves
@@ -224,7 +223,7 @@ def sweep_stale_blocked(
                 c["last_heartbeat_at"] = beat
 
     stale = find_stale_blocked(cards, now=now, threshold_hours=threshold_hours)
-    stale_ids: List[str] = []
+    stale_ids: list[str] = []
     for card, age in stale:
         tid = str(card.get("id") or "")
         label = card.get("title") or card.get("assignee") or "?"
@@ -247,8 +246,8 @@ def sweep_stale_running(
     slug: str,
     *,
     threshold_hours: float = DEFAULT_RUNNING_STALE_HOURS,
-    now: Optional[int] = None,
-) -> List[str]:
+    now: int | None = None,
+) -> list[str]:
     """Detect and warn about running cards stuck with no update for > N hours.
 
     A card whose worker has died or wedged stays in ``running`` indefinitely and
@@ -273,7 +272,7 @@ def sweep_stale_running(
                 c["last_heartbeat_at"] = beat
 
     stale = find_stale_running(cards, now=now, threshold_hours=threshold_hours)
-    stale_ids: List[str] = []
+    stale_ids: list[str] = []
     for card, age in stale:
         tid = str(card.get("id") or "")
         assignee = card.get("assignee") or card.get("title") or "?"

@@ -19,7 +19,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from core import kanban
 from core.providers.base import CIStatus, issue_linked_to_pr
@@ -128,14 +128,14 @@ def _release_decompose_lock(workdir: str) -> None:
 # ── pure helpers ────────────────────────────────────────────────────────────
 
 
-def _parse_handoff(handoff_text: str) -> Dict[str, Any]:
+def _parse_handoff(handoff_text: str) -> dict[str, Any]:
     """Parse a handoff string for key signals (review-required, PR #, changes requested, approved).
 
     Returns a dict with keys: is_review_required, pr_number, is_changes_requested,
     is_approved, findings_text.
     """
     text = handoff_text or ""
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "is_review_required": "review-required" in text.lower(),
         "pr_number": extract_pr_number_from_summary(text),
         "is_changes_requested": False,
@@ -184,10 +184,10 @@ def classify_blocked(
     ci_green: bool,
     *,
     fix_attempts: int = 0,
-    pr_number: Optional[int] = None,
-    raw_ci: Optional[str] = None,
-    pr_is_open: Optional[bool] = None,
-    pr_is_merged: Optional[bool] = None,
+    pr_number: int | None = None,
+    raw_ci: str | None = None,
+    pr_is_open: bool | None = None,
+    pr_is_merged: bool | None = None,
     skip_qa: bool = False,
 ) -> str:
     """Classify a blocked card into an action.
@@ -366,7 +366,7 @@ def _fix_attempts_path(workdir: str) -> str:
     return str(Path(workdir) / ".hermes" / "daedalus-fix-attempts.json")
 
 
-def _read_fix_attempts(workdir: str) -> Dict[str, int]:
+def _read_fix_attempts(workdir: str) -> dict[str, int]:
     """Read the per-card fix attempt counter file."""
     try:
         path = _fix_attempts_path(workdir)
@@ -378,7 +378,7 @@ def _read_fix_attempts(workdir: str) -> Dict[str, int]:
     return {}
 
 
-def _write_fix_attempts(workdir: str, data: Dict[str, int]) -> None:
+def _write_fix_attempts(workdir: str, data: dict[str, int]) -> None:
     """Write the per-card fix attempt counter file atomically."""
     path = _fix_attempts_path(workdir)
     p = Path(path)
@@ -449,12 +449,12 @@ def _count_fix_attempts(card: dict, slug: str = "", workdir: str = "") -> int:
     return attempts
 
 
-def _parse_pr_number(handoff_text: str) -> Optional[int]:
+def _parse_pr_number(handoff_text: str) -> int | None:
     """Extract a PR number from handoff text."""
     return extract_pr_number_from_summary(handoff_text)
 
 
-def _extract_issue_number_from_card(card: dict) -> Optional[int]:
+def _extract_issue_number_from_card(card: dict) -> int | None:
     """Parse the GitHub issue number from a card body.
 
     Looks for ``{org}/{repo}#<n>`` or bare ``#<n>`` patterns in the card body.
@@ -507,7 +507,7 @@ def _handoff_from_card(card: dict) -> str:
 # profile. idempotency_key is no longer returned by the kanban API, so assignee is
 # the reliable key; matching assignee also avoids the developer card being picked up
 # by the security gate when the issue title contains "fix(security):".
-_ROLE_ASSIGNEE_PREFIX: Dict[str, str] = {
+_ROLE_ASSIGNEE_PREFIX: dict[str, str] = {
     "qa": "qa-",
     "reviewer": "reviewer-",
     "security": "security-",
@@ -521,9 +521,9 @@ def _role_cards_for_issue(
     issue_number: int,
     role: str,
     *,
-    active_tasks: Optional[List[Dict[str, Any]]] = None,
-    archived_tasks: Optional[List[Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
+    active_tasks: list[dict[str, Any]] | None = None,
+    archived_tasks: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Return the kanban cards for a given (role, issue), matched by assignee.
 
     Matches the assignee profile prefix (stable) plus the issue reference in the
@@ -546,7 +546,7 @@ def _role_cards_for_issue(
     prefix = _ROLE_ASSIGNEE_PREFIX.get(role, role + "-")
     pat = re.compile(rf"#{issue_number}(?!\d)")
 
-    def _match(tasks: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    def _match(tasks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         return [
             t for t in (tasks or [])
             if (t.get("assignee") or "").strip().lower().startswith(prefix)
@@ -575,12 +575,12 @@ def _role_cards_for_issue(
 
 def _role_gate_passed(
     slug: str,
-    issue_number: Optional[int],
+    issue_number: int | None,
     role: str,
-    approval_signals: List[str],
+    approval_signals: list[str],
     *,
-    active_tasks: Optional[List[Dict[str, Any]]] = None,
-    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+    active_tasks: list[dict[str, Any]] | None = None,
+    archived_tasks: list[dict[str, Any]] | None = None,
 ) -> bool:
     """True if ANY card for (role, issue) has an approval signal in its summary.
 
@@ -613,10 +613,10 @@ def _role_gate_passed(
 
 def _qa_passed_for_issue(
     slug: str,
-    issue_number: Optional[int],
+    issue_number: int | None,
     *,
-    active_tasks: Optional[List[Dict[str, Any]]] = None,
-    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+    active_tasks: list[dict[str, Any]] | None = None,
+    archived_tasks: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Check if QA has passed for an issue (QA card summary contains 'qa-passed')."""
     return _role_gate_passed(
@@ -627,10 +627,10 @@ def _qa_passed_for_issue(
 
 def _reviewer_passed_for_issue(
     slug: str,
-    issue_number: Optional[int],
+    issue_number: int | None,
     *,
-    active_tasks: Optional[List[Dict[str, Any]]] = None,
-    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+    active_tasks: list[dict[str, Any]] | None = None,
+    archived_tasks: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Check if the reviewer has approved the PR for an issue."""
     return _role_gate_passed(slug, issue_number, "reviewer", [
@@ -641,10 +641,10 @@ def _reviewer_passed_for_issue(
 
 def _security_passed_for_issue(
     slug: str,
-    issue_number: Optional[int],
+    issue_number: int | None,
     *,
-    active_tasks: Optional[List[Dict[str, Any]]] = None,
-    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+    active_tasks: list[dict[str, Any]] | None = None,
+    archived_tasks: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Check if the security analyst has cleared the PR for an issue.
 
@@ -672,7 +672,7 @@ def _execute_advance(
     handoff_text: str,
     *,
     dry_run: bool = False,
-    pr_number: Optional[int] = None,
+    pr_number: int | None = None,
     **_kwargs: Any,
 ) -> bool:
     """Complete a developer card to advance the chain (CI no longer gates this).
@@ -735,7 +735,7 @@ def _execute_reconcile_merged(
     handoff_text: str,
     *,
     dry_run: bool = False,
-    pr_number: Optional[int] = None,
+    pr_number: int | None = None,
     **_kwargs: Any,
 ) -> bool:
     """Reconcile a developer card whose PR merged outside the pipeline (#957).
@@ -789,8 +789,8 @@ _DOWNSTREAM_REVIEW_ROLES = [
 def _downstream_parents(
     role_suffix: str,
     dev_id: str,
-    role_ids: Dict[str, str],
-) -> Optional[List[str]]:
+    role_ids: dict[str, str],
+) -> list[str] | None:
     """Resolve the parent card(s) for a downstream review role.
 
     Enforces the QA gate by mirroring the primary dispatch path
@@ -821,9 +821,9 @@ def _create_downstream_review_tasks(
     issue_number: int,
     card: dict,
     *,
-    pr_number: Optional[int] = None,
+    pr_number: int | None = None,
     dry_run: bool = False,
-) -> List[str]:
+) -> list[str]:
     """Create qa/reviewer/security/accessibility/docs tasks after a developer card completes.
 
     Each task uses an idempotency key (``qa-{n}``, ``reviewer-{n}``, ``security-{n}``,
@@ -832,7 +832,7 @@ def _create_downstream_review_tasks(
 
     Returns the list of newly-created task ids.
     """
-    created: List[str] = []
+    created: list[str] = []
     tid = card.get("id") or ""
     workspace = card.get("workspace") or ""
 
@@ -849,8 +849,8 @@ def _create_downstream_review_tasks(
     # Idempotency: check which keys already exist on the board, and remember the
     # id of each existing card so an already-created QA gate can still parent the
     # downstream roles (#955).
-    existing_keys: Set[str] = set()
-    key_to_id: Dict[str, str] = {}
+    existing_keys: set[str] = set()
+    key_to_id: dict[str, str] = {}
     for task in kanban.list_tasks(slug):
         ikey = task.get("idempotency_key") or ""
         if ikey:
@@ -862,7 +862,7 @@ def _create_downstream_review_tasks(
     # Map role_suffix → created/recovered card id so the parent chain can be
     # resolved per-role (dev → qa → [reviewer, security, accessibility] → docs),
     # mirroring the primary dispatch path. Pre-seed from already-existing cards.
-    role_ids: Dict[str, str] = {}
+    role_ids: dict[str, str] = {}
     for role_suffix, _assignee in _DOWNSTREAM_REVIEW_ROLES:
         recovered = key_to_id.get(f"{role_suffix}-{issue_number}")
         if recovered:
@@ -950,7 +950,7 @@ def _execute_qa_fix(
     *,
     workdir: str = "",
     dry_run: bool = False,
-    pr_number: Optional[int] = None,
+    pr_number: int | None = None,
     **_kwargs: Any,
 ) -> bool:
     """Create a developer fix card for QA-reported test failures, idempotent per (card, attempt).
@@ -1071,7 +1071,7 @@ def _execute_pm_route(
     workdir: str = "",
     router_profile: str = "project-manager-daedalus",
     dry_run: bool = False,
-    pr_number: Optional[int] = None,
+    pr_number: int | None = None,
     **_kwargs: Any,
 ) -> bool:
     """Create a PM routing card for review findings (changes-requested).
@@ -1183,7 +1183,7 @@ def _execute_legacy_dev_fix_review(
     *,
     workdir: str = "",
     dry_run: bool = False,
-    pr_number: Optional[int] = None,
+    pr_number: int | None = None,
 ) -> bool:
     """Fallback: create a developer fix card directly (old behavior).
 
@@ -1259,7 +1259,7 @@ def _execute_escalate(
     workdir: str = "",
     notify_target: str = "",
     dry_run: bool = False,
-    pr_number: Optional[int] = None,
+    pr_number: int | None = None,
     **_kwargs: Any,
 ) -> bool:
     """Escalate a card that has exceeded max fix attempts.
@@ -1306,7 +1306,6 @@ def _build_decomposed_marker() -> str:
     
     Returns a string like: <!-- daedalus:decomposed:1720000000 -->
     """
-    import time
     timestamp = int(time.time())
     return f"<!-- daedalus:decomposed:{timestamp} -->"
 
@@ -1337,7 +1336,7 @@ _DECOMPOSED_MARKER_RE = re.compile(r'<!--\s*daedalus:decomposed(?::\d+)?\s*-->',
 _LEGACY_DECOMPOSED_MARKER_RE = re.compile(r'<!--\s*daedalus:sub-issues:\[.*?\]\s*-->', re.IGNORECASE)
 
 
-def has_decomposed_marker(text: Optional[str]) -> bool:
+def has_decomposed_marker(text: str | None) -> bool:
     """Return True if *text* contains any decomposed marker (old or new format).
 
     Supports both:
@@ -1363,13 +1362,13 @@ def has_decomposed_marker(text: Optional[str]) -> bool:
     )
 
 
-def _extract_sub_issues_from_body(body: str) -> List[str]:
+def _extract_sub_issues_from_body(body: str) -> list[str]:
     """Return checklist item texts from an epic body (capped at _MAX_SUB_ISSUES)."""
     items = [m.group(1).strip() for m in _CHECKLIST_RE.finditer(body or "")]
     return [i for i in items if i][:_MAX_SUB_ISSUES]
 
 
-def _default_sub_issue_titles(parent_n: int, parent_title: str) -> List[str]:
+def _default_sub_issue_titles(parent_n: int, parent_title: str) -> list[str]:
     """Three default sub-issues for epics without checklist items."""
     return [
         f"Research & Scoping — #{parent_n}: {parent_title}",
@@ -1437,7 +1436,7 @@ def _sub_issue_body(
 # ── Phase 4: source file reading & context injection ────────────────────────
 
 
-def _extract_keywords(text: str, max_keywords: int = 10) -> List[str]:
+def _extract_keywords(text: str, max_keywords: int = 10) -> list[str]:
     """Extract meaningful identifiers from *text*, skipping stop-words."""
     stop_words = {
         "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of",
@@ -1455,7 +1454,7 @@ def _extract_keywords(text: str, max_keywords: int = 10) -> List[str]:
         "own", "same", "so", "just", "new", "add", "update", "fix", "part",
     }
     words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]+\b", text)
-    keywords: List[str] = []
+    keywords: list[str] = []
     for w in words:
         lw = w.lower()
         if len(lw) > 3 and lw not in stop_words and lw not in keywords:
@@ -1496,13 +1495,13 @@ class _MergedTask:
     """Result of merging one or more sub-issue tasks that share the same files."""
     title: str
     scope: str
-    context: "EpicContext"
+    context: EpicContext
 
 
 def _merge_same_file_tasks(
-    titles: List[str],
-    scopes: List[str],
-    contexts: List["EpicContext"],
+    titles: list[str],
+    scopes: list[str],
+    contexts: list[EpicContext],
 ) -> tuple:
     """Consolidate tasks that touch exactly the same set of files into one task.
 
@@ -1519,13 +1518,13 @@ def _merge_same_file_tasks(
         return [], [], []
     if len(contexts) != len(titles):
         return titles, scopes, contexts
-    groups: Dict[Any, List[int]] = {}
+    groups: dict[Any, list[int]] = {}
     for idx, ctx in enumerate(contexts):
         key = frozenset(ctx.file_paths) if ctx.file_paths else ("__nofiles__", idx)
         groups.setdefault(key, []).append(idx)
-    merged_titles: List[str] = []
-    merged_scopes: List[str] = []
-    merged_contexts: List["EpicContext"] = []
+    merged_titles: list[str] = []
+    merged_scopes: list[str] = []
+    merged_contexts: list[EpicContext] = []
     seen: set = set()
     for idx in range(len(titles)):
         ctx = contexts[idx]
@@ -1544,9 +1543,9 @@ def _merge_same_file_tasks(
             g_ctxs = [contexts[i] for i in group_indices]
             combined_title = " + ".join(g_titles)
             combined_scope = "\n".join(g_scopes)
-            seen_fps: List[str] = []
+            seen_fps: list[str] = []
             seen_fps_set: set = set()
-            seen_ids: List[str] = []
+            seen_ids: list[str] = []
             seen_ids_set: set = set()
             for c in g_ctxs:
                 for fp in (c.file_paths or []):
@@ -1570,14 +1569,14 @@ def _merge_same_file_tasks(
 
 # ── Overlap-based blocking chain helpers ─────────────────────────────────────
 
-def detect_file_overlap(contexts: List["EpicContext"]) -> Dict[str, Set[int]]:
+def detect_file_overlap(contexts: list[EpicContext]) -> dict[str, set[int]]:
     """Group sub-issue contexts by shared file paths.
 
     Returns a mapping of ``{file_path: {context_indices}}`` for every file
     that appears in two or more contexts.  Files that appear in only one
     context are omitted (they produce no blocking chain).
     """
-    file_to_indices: Dict[str, Set[int]] = {}
+    file_to_indices: dict[str, set[int]] = {}
     for idx, ctx in enumerate(contexts):
         for fp in (ctx.file_paths or []):
             file_to_indices.setdefault(fp, set()).add(idx)
@@ -1585,10 +1584,10 @@ def detect_file_overlap(contexts: List["EpicContext"]) -> Dict[str, Set[int]]:
 
 
 def build_blocking_edges(
-    overlap: Dict[str, Set[int]],
+    overlap: dict[str, set[int]],
     total_tasks: int,
-    existing: Optional[Dict[int, List[int]]] = None,
-) -> Dict[int, List[int]]:
+    existing: dict[int, list[int]] | None = None,
+) -> dict[int, list[int]]:
     """Build a blocking-edge map from an overlap group dict.
 
     For each file that two or more tasks share, the tasks that touch it are
@@ -1600,7 +1599,7 @@ def build_blocking_edges(
 
     Returns ``{task_index: [blocking_task_indices]}``.
     """
-    edges: Dict[int, List[int]] = {k: list(v) for k, v in (existing or {}).items()}
+    edges: dict[int, list[int]] = {k: list(v) for k, v in (existing or {}).items()}
     for fp, idxs in overlap.items():
         sorted_idxs = sorted(idxs)
         for i in range(1, len(sorted_idxs)):
@@ -1612,7 +1611,7 @@ def build_blocking_edges(
     return edges
 
 
-def _file_paths_overlap(paths_a: List[str], paths_b: List[str]) -> bool:
+def _file_paths_overlap(paths_a: list[str], paths_b: list[str]) -> bool:
     """Return True if paths_a and paths_b share at least one file path."""
     if not paths_a or not paths_b:
         return False
@@ -1621,11 +1620,11 @@ def _file_paths_overlap(paths_a: List[str], paths_b: List[str]) -> bool:
 
 
 def _compute_sub_issue_dependencies(
-    contexts: List["EpicContext"],
+    contexts: list[EpicContext],
     index: int,
-    created_numbers: List[int],
-    existing_deps: Optional[List[int]] = None,
-) -> List[int]:
+    created_numbers: list[int],
+    existing_deps: list[int] | None = None,
+) -> list[int]:
     """Return the depends_on list for the sub-issue at *index*.
 
     Compares the sub-issue at *index* against all prior contexts using direct
@@ -1659,13 +1658,13 @@ def _compute_sub_issue_dependencies(
             if n not in deps:
                 deps.append(n)
         return deps
-    latest_overlapping_n: Optional[int] = None
+    latest_overlapping_n: int | None = None
     for prior_idx, prior_n in enumerate(created_numbers):
         if prior_idx >= len(contexts):
             break
         if _file_paths_overlap(current_ctx.file_paths, contexts[prior_idx].file_paths):
             latest_overlapping_n = prior_n  # keep updating: want the most recent
-    deps: List[int] = list(existing_deps or [])
+    deps: list[int] = list(existing_deps or [])
     if latest_overlapping_n is not None and latest_overlapping_n not in deps:
         deps.append(latest_overlapping_n)
     return deps
@@ -1868,7 +1867,7 @@ def _build_aggregate_context(
     )
 
 
-def _grep_py_definitions(name: str, workdir: str, *, timeout: int = 5) -> List[str]:
+def _grep_py_definitions(name: str, workdir: str, *, timeout: int = 5) -> list[str]:
     """Grep *workdir* for Python files defining ``def name`` or ``class name``.
 
     Returns the matching file paths (one per stdout line), or ``[]`` on any
@@ -1891,8 +1890,8 @@ def identify_relevant_files(
     workdir: str,
     max_files: int = 10,
     max_depth: int = 5,
-    epic_context: "AggregateEpicContext | None" = None,
-) -> tuple[List[Path], dict]:
+    epic_context: AggregateEpicContext | None = None,
+) -> tuple[list[Path], dict]:
     """Identify source files in *workdir* relevant to *scope_text*.
 
     Four strategies, each gated so they only fire when the scope actually
@@ -1910,7 +1909,7 @@ def identify_relevant_files(
         logger.warning("identify_relevant_files: workdir %s does not exist", workdir)
         return ([], {})
 
-    candidates: Set[Path] = set()
+    candidates: set[Path] = set()
     metadata: dict[str, str] = {}
 
     def _add(p: Path, why: str) -> bool:
@@ -2041,7 +2040,7 @@ def identify_relevant_files(
 
 
 def read_source_files(
-    file_paths: List[Path],
+    file_paths: list[Path],
     workdir: str,
     max_size: int = 50_000,
 ) -> dict[str, str]:
@@ -2264,8 +2263,8 @@ def _execute_planner_decompose_inner(
         return True
 
     inherit_labels = [lbl for lbl in parent_labels if lbl and lbl.lower() != "epic"]
-    created_numbers: List[int] = []
-    ready_numbers: List[int] = []
+    created_numbers: list[int] = []
+    ready_numbers: list[int] = []
     for idx, (title, scope) in enumerate(zip(sub_titles, sub_scopes)):
         sub_ctx = per_sub_contexts[idx] if idx < len(per_sub_contexts) else EpicContext()
         # Compute dependencies based on file overlap with previous sub-issues
@@ -2377,7 +2376,7 @@ _ACTION_EXECUTORS = {
 # Matched with startswith on the lowercased reason so prose that merely
 # contains the word ("tests pass") can't false-positive (same rationale as
 # the removed "pass" signal in _parse_handoff).
-_BLOCK_LOOP_PASS_PREFIXES: Dict[str, tuple] = {
+_BLOCK_LOOP_PASS_PREFIXES: dict[str, tuple] = {
     "qa-daedalus": ("qa-passed",),
     "reviewer-daedalus": ("review-approved", "approved", "lgtm"),
     "security-analyst-daedalus": ("security-approved", "security-passed"),
@@ -2389,7 +2388,7 @@ _RESCUE_SKIP_STATUSES = ("done", "complete", "completed", "archived",
                          "cancelled", "blocked")
 
 
-def _latest_block_loop_reason(detail: dict) -> Optional[str]:
+def _latest_block_loop_reason(detail: dict) -> str | None:
     """Reason of the most recent ``block_loop_detected`` event, or None.
 
     ``detail`` is a ``kanban.show_card`` dict; its ``events`` list carries the
@@ -2416,9 +2415,9 @@ def _rescue_block_loop_gate_cards(
     slug: str,
     repo: str,
     *,
-    exclude_ids: Optional[Set[str]] = None,
+    exclude_ids: set[str] | None = None,
     dry_run: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Complete gate cards the framework re-promoted despite a passing verdict.
 
     When ``kanban.complete()`` fails transiently (rate limit) on a gate card
@@ -2446,7 +2445,7 @@ def _rescue_block_loop_gate_cards(
         logger.error("iterate: block-loop rescue — list_tasks failed for %s: %s", slug, e)
         return []
 
-    entries: List[Dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for t in tasks or []:
         tid = str(t.get("id") or "")
         assignee = (t.get("assignee") or "").lower().strip()
@@ -2493,16 +2492,16 @@ def _rescue_block_loop_gate_cards(
 
 def _try_merge_if_gates_pass(
     slug: str,
-    issue_n: Optional[int],
-    pr: Optional[int],
+    issue_n: int | None,
+    pr: int | None,
     provider: Any,
     *,
     merge_method: str,
     skip_qa: bool,
     ci_status: str,
     dry_run: bool = False,
-    active_tasks: Optional[List[Dict[str, Any]]] = None,
-    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+    active_tasks: list[dict[str, Any]] | None = None,
+    archived_tasks: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Merge ``pr`` iff every pipeline gate passes. Returns True only on an actual
     merge; idempotent and safe to call repeatedly.
@@ -2585,13 +2584,13 @@ _CI_RERUN_MARKER_PREFIX = "<!-- daedalus:ci-rerun:"
 _CI_ESCALATED_MARKER_PREFIX = "<!-- daedalus:ci-escalated:"
 
 
-def _ci_rerun_attempts(comments: List[Any], sha: str) -> int:
+def _ci_rerun_attempts(comments: list[Any], sha: str) -> int:
     """Count re-run marker comments already posted for ``sha``."""
     marker = f"{_CI_RERUN_MARKER_PREFIX}{sha}:"
     return sum(1 for c in comments if marker in (getattr(c, "body", "") or ""))
 
 
-def _ci_already_escalated(comments: List[Any], sha: str) -> bool:
+def _ci_already_escalated(comments: list[Any], sha: str) -> bool:
     """True if this SHA has already been escalated — the loop stop."""
     marker = f"{_CI_ESCALATED_MARKER_PREFIX}{sha} -->"
     return any(marker in (getattr(c, "body", "") or "") for c in comments)
@@ -2599,7 +2598,7 @@ def _ci_already_escalated(comments: List[Any], sha: str) -> bool:
 
 def _rerun_or_escalate_red_ci(
     slug: str,
-    issue_n: Optional[int],
+    issue_n: int | None,
     pr: int,
     provider: Any,
     *,
@@ -2686,10 +2685,10 @@ def sweep_deferred_merges(
     slug: str,
     repo: str,
     provider: Any,
-    resolved: Optional[Dict[str, Any]],
+    resolved: dict[str, Any] | None,
     *,
     dry_run: bool = False,
-) -> List[int]:
+) -> list[int]:
     """Retry auto-merge for PRs whose pipeline finished but that weren't merged at
     docs-card completion (#1178).
 
@@ -2716,13 +2715,13 @@ def sweep_deferred_merges(
     # match path. On fetch failure fall back to None → gate helpers self-fetch
     # (prior behaviour) rather than silently seeing zero archived cards.
     try:
-        archived_tasks: Optional[List[Dict[str, Any]]] = kanban.list_tasks(slug, status="archived") or []
+        archived_tasks: list[dict[str, Any]] | None = kanban.list_tasks(slug, status="archived") or []
     except Exception as e:
         logger.error("iterate: deferred-merge sweep failed to list archived tasks: %s", e)
         archived_tasks = None
-    merged: List[int] = []
-    ci_cache: Dict[int, str] = {}
-    seen_issues: Set[int] = set()
+    merged: list[int] = []
+    ci_cache: dict[int, str] = {}
+    seen_issues: set[int] = set()
     # Match DONE documentation cards by ASSIGNEE (title formats vary; idempotency_key
     # is no longer returned by the kanban API). Extract the issue number from the
     # title via the canonical helper.
@@ -2783,10 +2782,10 @@ def run_iterate(
     slug: str,
     repo: str,
     *,
-    resolved: Optional[Dict[str, Any]] = None,
-    provider: Optional[Any] = None,
+    resolved: dict[str, Any] | None = None,
+    provider: Any | None = None,
     dry_run: bool = False,
-) -> tuple[Dict[str, int], List[int], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> tuple[dict[str, int], list[int], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Run the auto-advance routing and self-healing loop.
 
     For every blocked card on the board, classify its state and execute the
@@ -2810,7 +2809,7 @@ def run_iterate(
     Returns:
         (counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards) tuple.
     """
-    counts: Dict[str, int] = {
+    counts: dict[str, int] = {
         ADVANCE: 0,
         QA_FIX: 0,
         PENDING_SIGNAL: 0,
@@ -2821,10 +2820,10 @@ def run_iterate(
         PLANNER_DECOMPOSE: 0,
         RECONCILE_MERGED: 0,
     }
-    advance_prs: List[int] = []  # PR numbers for cards that were advanced
-    pending_signal_cards: List[Dict[str, Any]] = []  # Cards with unrecognized QA/a11y signal
-    qa_failed_cards: List[Dict[str, Any]] = []  # QA cards that created a fix card
-    escalated_cards: List[Dict[str, Any]] = []  # QA cards that hit MAX_FIX_ATTEMPTS
+    advance_prs: list[int] = []  # PR numbers for cards that were advanced
+    pending_signal_cards: list[dict[str, Any]] = []  # Cards with unrecognized QA/a11y signal
+    qa_failed_cards: list[dict[str, Any]] = []  # QA cards that created a fix card
+    escalated_cards: list[dict[str, Any]] = []  # QA cards that hit MAX_FIX_ATTEMPTS
 
     workdir = (resolved or {}).get("workdir", "")
     notify_target = (resolved or {}).get("cron", {}).get("deliver", "")
@@ -2866,11 +2865,11 @@ def run_iterate(
 
     # Collect PR→CI cache so we don't call the provider for the same PR twice.
     # Stores the raw CIStatus string (not bool) so UNKNOWN/PENDING are distinguishable.
-    ci_cache: Dict[int, str] = {}
+    ci_cache: dict[int, str] = {}
 
     # Per-tick escalation dedup: tracks which issue numbers have already been
     # escalated this tick. Maps issue number → first card's tid that escalated.
-    escalated_issues: Dict[int, str] = {}
+    escalated_issues: dict[int, str] = {}
 
     for card in blocked_cards:
         tid = card.get("id")
@@ -2920,8 +2919,8 @@ def run_iterate(
         # cards (the only branch that gates on it) to avoid extra provider
         # calls. Unverifiable (provider lacks the capability or errors) stays
         # None → prior behaviour; only an affirmative "not open" blocks advance.
-        pr_is_open: Optional[bool] = None
-        pr_is_merged: Optional[bool] = None
+        pr_is_open: bool | None = None
+        pr_is_merged: bool | None = None
         if (pr is not None and provider is not None
                 and assignee.lower().strip() == "developer-daedalus"
                 and hasattr(provider, "is_pr_open")):

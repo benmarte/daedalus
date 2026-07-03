@@ -21,7 +21,6 @@ of ``core.util`` — it is usable by both the dashboard and the dispatch script.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Set, Union
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants / thresholds
@@ -92,7 +91,7 @@ def _is_file_path(token: str) -> bool:
     return any(lower.endswith(ext) for ext in _FILE_EXTENSIONS)
 
 
-def extract_file_refs(task_body: Optional[str]) -> List[str]:
+def extract_file_refs(task_body: str | None) -> list[str]:
     """Extract explicit file references from a task body.
 
     Scans for:
@@ -106,8 +105,8 @@ def extract_file_refs(task_body: Optional[str]) -> List[str]:
         return []
 
     text = str(task_body)
-    seen: Set[str] = set()
-    refs: List[str] = []
+    seen: set[str] = set()
+    refs: list[str] = []
 
     # 1. Backtick-quoted / code-span paths
     for m in _BACKTICK_RE.finditer(text):
@@ -131,7 +130,7 @@ def extract_file_refs(task_body: Optional[str]) -> List[str]:
 # Keyword tokenization & normalization
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _split_camel_case(word: str) -> List[str]:
+def _split_camel_case(word: str) -> list[str]:
     """Split a CamelCase or PascalCase word into lower-case parts.
 
     ``FileOverlapDetection`` → ``["file", "overlap", "detection"]``
@@ -178,7 +177,7 @@ def _normalize_keyword(word: str) -> str:
     return w
 
 
-def _tokenize(text: Optional[str]) -> List[str]:
+def _tokenize(text: str | None) -> list[str]:
     """Tokenize text into a list of normalized keywords.
 
     Splits on whitespace and punctuation, splits camelCase, removes stop-words,
@@ -190,7 +189,7 @@ def _tokenize(text: Optional[str]) -> List[str]:
     # Extract word-like tokens (letters, digits, underscores, hyphens, slashes)
     raw_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_\-/]*", str(text))
 
-    tokens: List[str] = []
+    tokens: list[str] = []
     for raw in raw_tokens:
         # Split on kebab/snake/slash boundaries
         parts = _KEBAB_SNAKE_RE.split(raw)
@@ -213,11 +212,11 @@ def _tokenize(text: Optional[str]) -> List[str]:
 # Overlap detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_text(task: Union[str, Dict]) -> str:
+def _get_text(task: str | dict) -> str:
     """Extract the combined title+body text from a task dict or string."""
     if isinstance(task, str):
         return task
-    parts: List[str] = []
+    parts: list[str] = []
     title = task.get("title")
     if title:
         parts.append(str(title))
@@ -249,7 +248,7 @@ def _paths_overlap(path_a: str, path_b: str) -> bool:
         return parts_b[-len(parts_a):] == parts_a
 
 
-def _overlap_coefficient(set_a: Set[str], set_b: Set[str]) -> float:
+def _overlap_coefficient(set_a: set[str], set_b: set[str]) -> float:
     """Compute the overlap coefficient between two sets: |A∩B| / min(|A|,|B|).
 
     This is more suitable than Jaccard for comparing a short task description
@@ -264,9 +263,9 @@ def _overlap_coefficient(set_a: Set[str], set_b: Set[str]) -> float:
 
 
 def detect_file_overlap(
-    task_a: Union[str, Dict],
-    task_b: Union[str, Dict],
-) -> Dict:
+    task_a: str | dict,
+    task_b: str | dict,
+) -> dict:
     """Detect whether two tasks are likely to touch the same file(s).
 
     Parameters
@@ -294,7 +293,7 @@ def detect_file_overlap(
     # ── File-reference overlap ──────────────────────────────────────────────
     refs_a = extract_file_refs(text_a)
     refs_b = extract_file_refs(text_b)
-    matched_files: List[str] = []
+    matched_files: list[str] = []
 
     for ra in refs_a:
         for rb in refs_b:

@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,8 @@ class NotificationPayload:
     title: str
     body: str
     severity: str = "info"
-    context: Dict[str, Any] = field(default_factory=dict)
-    timestamp: Optional[float] = None
+    context: dict[str, Any] = field(default_factory=dict)
+    timestamp: float | None = None
 
     def __post_init__(self):
         """Validate required fields and set defaults."""
@@ -62,7 +62,7 @@ class NotificationPayload:
         if self.severity not in valid_severities:
             self.severity = "info"
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of the payload."""
         from dataclasses import asdict
         return asdict(self)
@@ -74,7 +74,7 @@ def _normalize_severity(severity: str) -> str:
     return severity if severity in valid else "info"
 
 
-def _format_context_lines(context: Dict[str, Any]) -> str:
+def _format_context_lines(context: dict[str, Any]) -> str:
     """Format context dict into readable lines."""
     if not context:
         return ""
@@ -82,7 +82,7 @@ def _format_context_lines(context: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_slack(payload: NotificationPayload) -> Dict[str, Any]:
+def format_slack(payload: NotificationPayload) -> dict[str, Any]:
     """Format notification for Slack Block Kit.
 
     Args:
@@ -162,7 +162,7 @@ def format_slack(payload: NotificationPayload) -> Dict[str, Any]:
     }
 
 
-def format_discord(payload: NotificationPayload) -> Dict[str, Any]:
+def format_discord(payload: NotificationPayload) -> dict[str, Any]:
     """Format notification for Discord webhook.
 
     Args:
@@ -233,7 +233,7 @@ def _severity_to_color_hex(severity: str) -> int:
     return color_map.get(severity, 0x95A5A6)
 
 
-def load_webhook_urls(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, List[str]]:
+def load_webhook_urls(overrides: dict[str, Any] | None = None) -> dict[str, list[str]]:
     """Load webhook URLs from environment variables.
 
     Args:
@@ -269,7 +269,7 @@ def load_webhook_urls(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, L
     return result
 
 
-def _as_list(value: Any) -> List[str]:
+def _as_list(value: Any) -> list[str]:
     """Convert value to list of strings.
     
     Handles strings (split on comma), lists/iterables (flatten), and non-iterables (return []).
@@ -299,7 +299,7 @@ def _as_list(value: Any) -> List[str]:
     return []
 
 
-def _post_json(url: str, payload: Dict[str, Any], timeout: float = DEFAULT_TIMEOUT) -> bool:
+def _post_json(url: str, payload: dict[str, Any], timeout: float = DEFAULT_TIMEOUT) -> bool:
     """Post JSON payload to webhook URL.
 
     Args:
@@ -341,7 +341,7 @@ def _post_json(url: str, payload: Dict[str, Any], timeout: float = DEFAULT_TIMEO
 
 def send_slack(
     payload: NotificationPayload,
-    webhook_urls: Optional[List[str]] = None,
+    webhook_urls: list[str] | None = None,
     timeout: float = DEFAULT_TIMEOUT
 ) -> bool:
     """Send notification to Slack.
@@ -369,7 +369,7 @@ def send_slack(
 
 def send_discord(
     payload: NotificationPayload,
-    webhook_urls: Optional[List[str]] = None,
+    webhook_urls: list[str] | None = None,
     timeout: float = DEFAULT_TIMEOUT
 ) -> bool:
     """Send notification to Discord.
@@ -397,10 +397,10 @@ def send_discord(
 
 def send(
     payload: NotificationPayload,
-    platforms: Optional[List[str]] = None,
-    webhook_urls: Optional[Dict[str, List[str]]] = None,
+    platforms: list[str] | None = None,
+    webhook_urls: dict[str, list[str]] | None = None,
     timeout: float = DEFAULT_TIMEOUT
-) -> Dict[str, bool]:
+) -> dict[str, bool]:
     """Send notification to multiple platforms.
 
     Args:

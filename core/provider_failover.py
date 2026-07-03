@@ -26,7 +26,7 @@ dispatcher as callbacks.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 logger = logging.getLogger("daedalus.provider_failover")
 
@@ -48,7 +48,7 @@ TRIGGER_CLASSES = (
 LAYER_CODING_AGENT = "coding_agent"
 LAYER_BRAIN = "brain"
 
-_FAILOVER_DEFAULTS: Dict[str, Any] = {
+_FAILOVER_DEFAULTS: dict[str, Any] = {
     "max_attempts_per_provider": 2,
     "cooldown_minutes": 30,
     "reset_to_primary": True,
@@ -71,7 +71,7 @@ _CODING_AGENT_EVIDENCE = (
 )
 
 
-def entry_name(entry: Dict[str, Any]) -> str:
+def entry_name(entry: dict[str, Any]) -> str:
     """Canonical provider name of a chain entry (either layer's shape)."""
     return str(entry.get("name") or entry.get("provider") or "").strip()
 
@@ -90,9 +90,9 @@ def layer_for_evidence(evidence: str) -> str:
 
 
 def resolve_failover_config(
-    execution: Optional[Dict[str, Any]],
-    model_cfg: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    execution: dict[str, Any] | None,
+    model_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Resolve the ``failover:`` knobs over built-in defaults.
 
     The block is accepted under both ``execution.failover`` and
@@ -133,9 +133,9 @@ def resolve_failover_config(
 
 
 def resolve_coding_agent_chain(
-    execution: Optional[Dict[str, Any]],
-    defaults: Optional[Dict[str, str]] = None,
-) -> List[Dict[str, str]]:
+    execution: dict[str, Any] | None,
+    defaults: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
     """Ordered coding-agent chain: ``[{name, cmd}, …]`` (primary first).
 
     Reads ``execution.coding_agents``; entries with an unknown ``name`` are
@@ -148,7 +148,7 @@ def resolve_coding_agent_chain(
     """
     dmap = defaults or {}
     raw = (execution or {}).get("coding_agents")
-    chain: List[Dict[str, str]] = []
+    chain: list[dict[str, str]] = []
     if isinstance(raw, (list, tuple)):
         for item in raw:
             if not isinstance(item, dict):
@@ -190,9 +190,9 @@ def resolve_coding_agent_chain(
 
 
 def resolve_model_provider_chain(
-    model_cfg: Optional[Dict[str, Any]],
-    active: Optional[Dict[str, Optional[str]]] = None,
-) -> List[Dict[str, str]]:
+    model_cfg: dict[str, Any] | None,
+    active: dict[str, str | None] | None = None,
+) -> list[dict[str, str]]:
     """Ordered brain chain: ``[{provider, default}, …]`` (primary first).
 
     Reads ``model.providers`` from the resolved per-repo config; entries with
@@ -203,7 +203,7 @@ def resolve_model_provider_chain(
     which case brain failover is disabled.
     """
     raw = (model_cfg or {}).get("providers")
-    chain: List[Dict[str, str]] = []
+    chain: list[dict[str, str]] = []
     if isinstance(raw, (list, tuple)):
         for item in raw:
             if not isinstance(item, dict):
@@ -248,13 +248,13 @@ def resolve_model_provider_chain(
 
 
 def select_provider(
-    chain: List[Dict[str, Any]],
-    attempts: Dict[str, int],
-    cooling: Set[str],
-    cfg: Dict[str, Any],
+    chain: list[dict[str, Any]],
+    attempts: dict[str, int],
+    cooling: set[str],
+    cfg: dict[str, Any],
     *,
     current_index: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Decide which chain entry the next re-dispatch should use.
 
     *attempts* is the per-provider count already spent THIS episode (a
@@ -290,7 +290,7 @@ def select_provider(
     return {"action": "use", "index": idx, "entry": chain[idx]}
 
 
-def validate_failover(resolved: Dict[str, Any]) -> List[str]:
+def validate_failover(resolved: dict[str, Any]) -> list[str]:
     """Validate the failover-related config of a resolved per-repo config.
 
     Returns a list of human-readable errors (empty when valid). Mirrors
@@ -300,7 +300,7 @@ def validate_failover(resolved: Dict[str, Any]) -> List[str]:
     ``coding_agents``/``providers`` or a wholly invalid entry is a config
     mistake worth surfacing.
     """
-    errors: List[str] = []
+    errors: list[str] = []
     execution = resolved.get("execution") or {}
     model_cfg = resolved.get("model") or {}
 

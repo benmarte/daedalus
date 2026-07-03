@@ -11,14 +11,13 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional
 
 logger = logging.getLogger("daedalus.registry")
 
 _DEFAULT_PATH = Path.home() / ".hermes" / "daedalus" / "projects"
 
 
-def registry_path(path: Optional[Path] = None) -> Path:
+def registry_path(path: Path | None = None) -> Path:
     """Return the registry file path.
 
     Default: ``~/.hermes/daedalus/projects``, overridable via the
@@ -34,7 +33,7 @@ def registry_path(path: Optional[Path] = None) -> Path:
     return _DEFAULT_PATH
 
 
-def _read_lines(filepath: Path) -> List[str]:
+def _read_lines(filepath: Path) -> list[str]:
     """Read non-empty, non-comment lines from *filepath*.  Returns empty list on
     any error (missing file, permission, etc.)."""
     try:
@@ -48,7 +47,7 @@ def _read_lines(filepath: Path) -> List[str]:
             if ln.strip() and not ln.strip().startswith("#")]
 
 
-def list_projects(path: Optional[Path] = None) -> List[str]:
+def list_projects(path: Path | None = None) -> list[str]:
     """Return every repo path in the registry.
 
     Blank lines and lines starting with ``#`` are ignored.  Returns ``[]``
@@ -58,7 +57,7 @@ def list_projects(path: Optional[Path] = None) -> List[str]:
     return _read_lines(rp)
 
 
-def add_project(repo_path: str, path: Optional[Path] = None) -> bool:
+def add_project(repo_path: str, path: Path | None = None) -> bool:
     """Append *repo_path* to the registry (idempotent — a duplicate won't be
     added twice).  Creates the parent directory and file if they are missing.
 
@@ -88,7 +87,7 @@ def add_project(repo_path: str, path: Optional[Path] = None) -> bool:
     return True
 
 
-def remove_project(repo_path: str, path: Optional[Path] = None) -> bool:
+def remove_project(repo_path: str, path: Path | None = None) -> bool:
     """Remove *repo_path* from the registry.  Idempotent — a missing entry is
     not an error.
 

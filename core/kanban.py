@@ -17,7 +17,6 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Set
 
 from core.db import connect_wal
 
@@ -47,7 +46,7 @@ def _guard_test_isolation() -> None:
         )
 
 
-def _hk(args: List[str], timeout: int = 60) -> tuple[int, str, str]:
+def _hk(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
     """Run ``hermes kanban <args>``; return (rc, stdout, stderr). Patched in tests."""
     _guard_test_isolation()
     try:
@@ -68,7 +67,7 @@ def _hk(args: List[str], timeout: int = 60) -> tuple[int, str, str]:
 # cleared) after every board mutation so a read never returns stale state within
 # a tick. Non-persistent and NOT thread-safe — the dispatcher is single-process,
 # single-threaded per tick (serialized by the main() FileLock).
-_TICK_CACHE: Optional[dict] = None
+_TICK_CACHE: dict | None = None
 
 
 def enable_tick_cache() -> None:
@@ -118,7 +117,7 @@ def ensure_board(slug: str) -> bool:
 _ISSUE_RE = re.compile(r"#(\d+)")
 
 
-def list_issue_numbers(slug: str) -> Set[int]:
+def list_issue_numbers(slug: str) -> set[int]:
     """Issue numbers that already have a task on the board (parsed from titles).
 
     Uses the structured JSON list (``hermes kanban list --json``) so that task
@@ -128,7 +127,7 @@ def list_issue_numbers(slug: str) -> Set[int]:
     tasks = list_tasks(slug)
     if not tasks:
         return set()
-    nums: Set[int] = set()
+    nums: set[int] = set()
     for task in tasks:
         title = task.get("title") or ""
         if not title:
@@ -138,11 +137,11 @@ def list_issue_numbers(slug: str) -> Set[int]:
     return nums
 
 
-def create_triage(slug: str, issue_number: Optional[int], title: str, body: str,
-                  idempotency_key: Optional[str] = None,
-                  workspace: Optional[str] = None,
+def create_triage(slug: str, issue_number: int | None, title: str, body: str,
+                  idempotency_key: str | None = None,
+                  workspace: str | None = None,
                   goal: bool = False,
-                  goal_max_turns: Optional[int] = None) -> Optional[str]:
+                  goal_max_turns: int | None = None) -> str | None:
     """Create a TRIAGE card for an issue (to be fanned out by decompose()).
 
     Lands in the triage column rather than assigned to one profile, so the
@@ -203,7 +202,7 @@ def decompose(slug: str, task_id: str) -> bool:
     return True
 
 
-def list_blocked(slug: str) -> List[dict]:
+def list_blocked(slug: str) -> list[dict]:
     """Cards currently in the 'blocked' column (full --json dicts)."""
     rc, out, _ = _hk(["--board", slug, "list", "--status", "blocked", "--json"])
     if rc != 0:
@@ -225,7 +224,7 @@ def get_latest_summary(slug: str, task_id: str) -> str:
         return ""
 
 
-def review_handoff_pr(slug: str, task_id: str) -> Optional[int]:
+def review_handoff_pr(slug: str, task_id: str) -> int | None:
     """If task_id is a 'review-required' handoff, return the PR number it opened.
 
     The worker records the handoff (with `PR #<n>`) in its run summary/events, so
@@ -308,7 +307,7 @@ def dispatch(slug: str, max_spawns: int = 5) -> bool:
 # ── iterate helpers ─────────────────────────────────────────────────────────
 
 
-def show_card(slug: str, task_id: str) -> Optional[dict]:
+def show_card(slug: str, task_id: str) -> dict | None:
     """Return full card detail as a parsed JSON dict, or None."""
     rc, out, _ = _hk(["--board", slug, "show", task_id, "--json"])
     if rc != 0:
@@ -327,12 +326,12 @@ def create_task(
     assignee: str = "",
     workspace: str = "",
     idempotency_key: str = "",
-    parents: Optional[List[str]] = None,
-    skills: Optional[List[str]] = None,
+    parents: list[str] | None = None,
+    skills: list[str] | None = None,
     goal: bool = False,
-    goal_max_turns: Optional[int] = None,
-    max_retries: Optional[int] = None,
-) -> Optional[str]:
+    goal_max_turns: int | None = None,
+    max_retries: int | None = None,
+) -> str | None:
     """Create a regular (non-triage) task. Returns task id or None.
 
     ``skills`` attaches named Hermes skills to the task so the worker has them
@@ -469,7 +468,7 @@ def _board_db_path(slug: str) -> str:
     return os.path.join(_home, "kanban", "boards", slug, "kanban.db")
 
 
-def get_body(slug: str, task_id: str) -> Optional[str]:
+def get_body(slug: str, task_id: str) -> str | None:
     """Return a task's body via direct SQLite read, or None on any failure.
 
     There is no ``hermes kanban`` CLI command that prints the raw body, so this
@@ -515,7 +514,7 @@ def edit_body(slug: str, task_id: str, body: str) -> bool:
         return False
 
 
-def diagnostics(slug: str) -> List[dict]:
+def diagnostics(slug: str) -> list[dict]:
     """Run ``hermes kanban diagnostics --json`` and return parsed diagnostics.
 
     Identifies stuck-in-blocked cards and their severity. Degrades gracefully
@@ -536,7 +535,7 @@ def diagnostics(slug: str) -> List[dict]:
         return []
 
 
-def list_tasks(slug: str, status: str = "") -> List[dict]:
+def list_tasks(slug: str, status: str = "") -> list[dict]:
     """List all tasks on a board, optionally filtered by status. Returns parsed JSON list.
 
     When the per-tick cache is enabled (see ``enable_tick_cache``), the parsed
@@ -564,7 +563,7 @@ def list_tasks(slug: str, status: str = "") -> List[dict]:
     return result
 
 
-def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:
+def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> list[str]:
     """Complete pending/in-progress tasks for issue_number, skipping blocked ones.
 
     Used when the validator has blocked an issue — downstream tasks (developer,
@@ -573,7 +572,7 @@ def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:
     """
     tasks = list_tasks(slug)
     pattern = f"#{issue_number}"
-    completed_ids: List[str] = []
+    completed_ids: list[str] = []
     for t in tasks:
         if pattern not in (t.get("title") or ""):
             continue
@@ -586,7 +585,7 @@ def close_non_blocked_issue_tasks(slug: str, issue_number: int) -> List[str]:
     return completed_ids
 
 
-def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_run: bool = False) -> List[str]:
+def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_run: bool = False) -> list[str]:
     """Complete all non-done kanban tasks that reference #issue_number in their title.
     Uses word-boundary regex matching (#957 does not match #9571/#9570).
 
@@ -602,7 +601,7 @@ def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_ru
     """
     tasks = list_tasks(slug)
     pattern = re.compile(rf"(?<!\d)#{issue_number}(?!\d)")
-    completed_ids: List[str] = []
+    completed_ids: list[str] = []
     
     # First pass: complete all non-done tasks whose title or body/handoff references the issue
     for t in tasks:
@@ -630,9 +629,9 @@ def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_ru
     # matched the loop below AND appeared in a parent's children list, producing
     # the N + N*M subprocess explosion that blocked the dispatch tick.
     if summary:
-        card_cache: Dict[str, Optional[dict]] = {}
+        card_cache: dict[str, dict | None] = {}
 
-        def _get_card(task_id: str) -> Optional[dict]:
+        def _get_card(task_id: str) -> dict | None:
             if task_id not in card_cache:
                 card_cache[task_id] = show_card(slug, task_id)
             return card_cache[task_id]

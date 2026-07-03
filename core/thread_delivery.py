@@ -32,7 +32,7 @@ returns ``(ok, anchor)`` — ``anchor`` is the posted message's thread anchor
 from __future__ import annotations
 
 import inspect
-from typing import Callable, List, Optional, Tuple
+from collections.abc import Callable
 
 from core import dispatch_state
 from core.providers.base import DELIVERY_MARKER
@@ -48,7 +48,7 @@ _SKIP_SUBSTRINGS = (
     "<!-- daedalus:follow-up-extracted",
 )
 
-SendFn = Callable[..., Tuple[bool, Optional[str]]]
+SendFn = Callable[..., tuple[bool, str | None]]
 
 
 def _is_agent_comment(body: str) -> bool:
@@ -135,7 +135,7 @@ def deliver_event(
 
 
 def select_comments(provider, issue_number: int,
-                    pr_number: Optional[int] = None) -> List[Tuple[str, str]]:
+                    pr_number: int | None = None) -> list[tuple[str, str]]:
     """Return ``[(event_key, body)]`` for every agent comment worth mirroring.
 
     Scans the issue's comments and (when *pr_number* is set) the linked PR's
@@ -143,7 +143,7 @@ def select_comments(provider, issue_number: int,
     own bookkeeping markers. ``event_key`` embeds the comment's stable id so the
     same comment is mirrored at most once per target.
     """
-    out: List[Tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     if provider is None:
         return out
 

@@ -25,7 +25,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
@@ -419,7 +419,7 @@ def _parse_send_list_output(output: str) -> dict[str, list[str]]:
 
 # ── Kanban helpers (degrade gracefully) ─────────────────────────────────────
 
-def _fetch_project_tasks(slug: str) -> Optional[list[dict[str, Any]]]:
+def _fetch_project_tasks(slug: str) -> list[dict[str, Any]] | None:
     """Fetch all tasks for a board once; callers share this result."""
     if list_tasks is None:
         return None
@@ -430,7 +430,7 @@ def _fetch_project_tasks(slug: str) -> Optional[list[dict[str, Any]]]:
         return None
 
 
-def _kanban_summary(slug: str, tasks: Optional[list[dict[str, Any]]] = None) -> Optional[dict[str, int]]:
+def _kanban_summary(slug: str, tasks: list[dict[str, Any]] | None = None) -> dict[str, int] | None:
     """Return counts of kanban cards by status, or None if the board is unavailable.
 
     Returns an empty dict ``{}`` when the board exists but has no tasks yet —
@@ -450,7 +450,7 @@ def _kanban_summary(slug: str, tasks: Optional[list[dict[str, Any]]] = None) -> 
     return counts
 
 
-def _needs_attention(slug: str, all_tasks: Optional[list[dict[str, Any]]] = None) -> Optional[list[dict[str, str]]]:
+def _needs_attention(slug: str, all_tasks: list[dict[str, Any]] | None = None) -> list[dict[str, str]] | None:
     """Return blocked/gave_up cards with ids and short reasons, or None.
 
     Accepts a pre-fetched ``all_tasks`` list to avoid a redundant list_tasks
@@ -497,7 +497,7 @@ def _project_provider(resolved: dict[str, Any]):
         return None
 
 
-def _open_prs(provider) -> Optional[dict[str, Any]]:
+def _open_prs(provider) -> dict[str, Any] | None:
     """Return open/in-review PRs with counts, numbers, and CI state.
 
     Returns None when no provider is available or the repo has no open PRs.
@@ -668,7 +668,7 @@ def _build_project_entry(proj: dict[str, Any],
     cfg_schedule = (cron_cfg.get("schedule") or "").strip()
     live_schedule = (health.get("schedule") or "").strip()
     schedule = cfg_schedule or live_schedule
-    cron: Optional[dict[str, Any]] = None
+    cron: dict[str, Any] | None = None
     if schedule or health.get("found"):
         cron = {
             "name": cron_name,
@@ -821,7 +821,7 @@ def _write_schedule_to_config(cfg_path: Path, crontab_schedule: str) -> None:
 
 
 def _reconcile_cron(
-    project_name: str, cron_cfg: dict, cfg_path: Optional[Path] = None
+    project_name: str, cron_cfg: dict, cfg_path: Path | None = None
 ) -> dict:
     """Reconcile the real ``hermes cron`` job with the config on save.
 
@@ -1408,7 +1408,6 @@ async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
     repo = resolved.get("repo", "")
     provider = _project_provider(resolved)
     if provider is None:
-        import logging
         logging.getLogger("daedalus.meta").warning(
             "get_meta_labels: no provider for project %r — check vcs config and token", project)
         return {"repo": repo, "labels": []}
@@ -1420,7 +1419,6 @@ async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
         ]
         return {"repo": repo, "labels": labels}
     except Exception as exc:
-        import logging
         logging.getLogger("daedalus.meta").warning(
             "get_meta_labels: list_labels raised for project %r: %s", project, exc)
         return {"repo": repo, "labels": []}
@@ -1450,7 +1448,7 @@ async def get_meta_projects(request: Request, project: str) -> dict[str, Any]:
 
 @meta_router.get("/statuses")
 async def get_meta_statuses(
-    request: Request, project: str, github_project_number: Optional[int] = None
+    request: Request, project: str, github_project_number: int | None = None
 ) -> dict[str, Any]:
     """Return Status field options for the configured board.
 

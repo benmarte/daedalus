@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, Optional
 
 
-def extract_issue_number(text: str, *, prefer_qualified: bool = False) -> Optional[int]:
+def extract_issue_number(text: str, *, prefer_qualified: bool = False) -> int | None:
     """Parse an issue number from free text.
 
     Default mode mirrors the bare ``re.search(r"#(\d+)", text)`` used throughout
@@ -32,7 +31,7 @@ def extract_issue_number(text: str, *, prefer_qualified: bool = False) -> Option
     return int(m.group(1)) if m else None
 
 
-def extract_pr_number_from_summary(text: str) -> Optional[int]:
+def extract_pr_number_from_summary(text: str) -> int | None:
     """Parse a PR number from text, looking for ``PR #<n>`` patterns.
 
     Used by the dispatcher to extract PR numbers from card bodies and summaries.
@@ -77,7 +76,7 @@ def schedule_to_crontab(schedule: str) -> str:
     return schedule.strip()
 
 
-def extract_pr_number_from_summary(text: Optional[str]) -> Optional[int]:
+def extract_pr_number_from_summary(text: str | None) -> int | None:
     """Parse a PR number from a developer card's ``latest_summary`` field.
 
     The canonical format developers produce is::
@@ -106,13 +105,13 @@ def extract_pr_number_from_summary(text: Optional[str]) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def parse_env_file(path: Path) -> Dict[str, str]:
+def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a ``.env`` file into ``{key: value}``. Returns ``{}`` on any error.
 
     Strips surrounding quotes and ignores blank lines and comments.
     """
     try:
-        result: Dict[str, str] = {}
+        result: dict[str, str] = {}
         for line in path.read_text().split("\n"):
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:

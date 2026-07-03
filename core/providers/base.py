@@ -17,7 +17,8 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 logger = logging.getLogger("daedalus.providers")
 
@@ -26,7 +27,7 @@ class ProviderConfigError(Exception):
     """Required provider config (repo identifiers, …) is missing or invalid."""
 
 
-def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
+def resolve_token(resolved: dict[str, Any], default_envs: Sequence[str]) -> str:
     """Resolve an API token at runtime — never from config file values.
 
     Order: env var named by ``vcs.token_env`` → provider default env vars.
@@ -34,7 +35,7 @@ def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
     a missing token must never disable the whole plugin.
     """
     vcs = (resolved or {}).get("vcs") or {}
-    names: List[str] = []
+    names: list[str] = []
     custom = (vcs.get("token_env") or "").strip()
     if custom:
         names.append(custom)
@@ -52,7 +53,7 @@ DELIVERY_MARKER = "<!-- daedalus:slack-delivered -->"
 
 # Labels that Daedalus requires in every VCS repo it manages.
 # Providers create these on first dispatch via ensure_labels().
-REQUIRED_LABELS: List[Dict[str, str]] = [
+REQUIRED_LABELS: list[dict[str, str]] = [
     {
         "name": "epic",
         "color": "7057ff",
@@ -92,11 +93,11 @@ class IssueSummary:
     number: int
     title: str = ""
     body: str = ""
-    labels: List[str] = field(default_factory=list)
+    labels: list[str] = field(default_factory=list)
     state: str = "open"
     url: str = ""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """Dict shape the dispatcher's triage path consumes."""
         return {
             "number": self.number,
@@ -142,11 +143,11 @@ _AC_SECTION_RE = re.compile(
 )
 
 
-def _label_names(labels: Any) -> List[str]:
+def _label_names(labels: Any) -> list[str]:
     """Extract label names from either list-of-dicts or list-of-strings shape."""
     if not labels:
         return []
-    out: List[str] = []
+    out: list[str] = []
     for item in labels:
         if isinstance(item, dict):
             name = item.get("name")
@@ -172,7 +173,7 @@ def _is_single_ac_bug(body: str) -> bool:
     return bool(_AC_SECTION_RE.search(body)) and not _has_sub_issue_checklist(body)
 
 
-def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
+def is_epic(issue: Any, epic_config: dict[str, Any] | None = None) -> bool:
     """Return True if ``issue`` looks epic-sized per the heuristics above.
 
     When ``epic_config`` is provided (from execution.epic_detection), its values
@@ -283,7 +284,7 @@ class FieldOption:
 class FieldDef:
     id: str
     name: str
-    options: List[FieldOption] = field(default_factory=list)
+    options: list[FieldOption] = field(default_factory=list)
 
 
 @dataclass
@@ -305,14 +306,14 @@ _DEPENDS_RE = re.compile(
 _ISSUE_REF_RE = re.compile(r"#(\d+)")
 
 
-def parse_depends_on(body: str) -> List[int]:
+def parse_depends_on(body: str) -> list[int]:
     """Issue numbers referenced by a ``Depends on:``/``Blocked by:`` line.
 
     Order-preserving and de-duplicated; returns ``[]`` when the convention is
     absent. Numbers are returned as declared — the caller is responsible for
     filtering to those that are still open.
     """
-    out: List[int] = []
+    out: list[int] = []
     seen = set()
     for line in _DEPENDS_RE.finditer(body or ""):
         for ref in _ISSUE_REF_RE.findall(line.group(1)):
@@ -368,17 +369,17 @@ class VCSProvider(abc.ABC):
     supports_labels: bool = False
     supports_branches: bool = False
 
-    def __init__(self, resolved: Dict[str, Any]):
+    def __init__(self, resolved: dict[str, Any]):
         self._cfg = resolved or {}
         vcs = self._cfg.get("vcs") or {}
-        self._status_map: Dict[str, str] = {
+        self._status_map: dict[str, str] = {
             **DEFAULT_STATUS_MAP,
             **(vcs.get("status_map") or {}),
         }
         self._log = logging.getLogger(f"daedalus.providers.{self.name}")
         # Populated by enroll_repo(); surfaced in dispatch summary under enrollment_failures.
         # Defined here so getattr(provider, "enrollment_failures", []) is never needed.
-        self.enrollment_failures: List[int] = []
+        self.enrollment_failures: list[int] = []
 
     # ── status mapping ───────────────────────────────────────────────────────
     def status_name(self, canonical: str) -> str:
@@ -388,17 +389,17 @@ class VCSProvider(abc.ABC):
     # ── issues ───────────────────────────────────────────────────────────────
     @abc.abstractmethod
     def list_issues(
-        self, state: str = "open", labels: Optional[List[str]] = None, limit: int = 50
-    ) -> List[IssueSummary]: ...
+        self, state: str = "open", labels: list[str] | None = None, limit: int = 50
+    ) -> list[IssueSummary]: ...
 
     @abc.abstractmethod
     def close_issue(self, issue_number: int) -> bool: ...
 
-    def get_issue_state(self, issue_number: int) -> Optional[str]:
+    def get_issue_state(self, issue_number: int) -> str | None:
         """Return 'open', 'closed', or None if unknown/error. Providers override for efficiency."""
         return None
 
-    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+    def get_issue(self, issue_number: int) -> IssueSummary | None:
         """Fetch a single issue by number. Returns None if not found or on error.
 
         Providers override for direct single-issue fetch; default scans list_issues
@@ -407,8 +408,8 @@ class VCSProvider(abc.ABC):
         return None
 
     def create_issue(
-        self, title: str, body: str, labels: Optional[List[str]] = None
-    ) -> Optional[int]:
+        self, title: str, body: str, labels: list[str] | None = None
+    ) -> int | None:
         """Create a new issue. Returns the issue number on success, None on failure.
 
         Providers that support issue creation override this; default is a no-op.
@@ -427,7 +428,7 @@ class VCSProvider(abc.ABC):
         """
         return False
 
-    def sub_issues_of(self, epic_number: int) -> List[int]:
+    def sub_issues_of(self, epic_number: int) -> list[int]:
         """Return issue numbers that are sub-issues of the given epic.
 
         Base implementation scans all open issues for epic-reference conventions
@@ -445,7 +446,7 @@ class VCSProvider(abc.ABC):
         pattern = _re.compile(
             rf"(?im)^(?:part[\s-]+of(?:[\s-]+epic)?|epic)\s*:?\s*#{epic_number}\b"
         )
-        results: List[int] = []
+        results: list[int] = []
         try:
             all_issues = self.list_issues(state="open")
         except Exception:
@@ -466,7 +467,7 @@ class VCSProvider(abc.ABC):
                     results.append(int(n))
         return results
 
-    def ensure_labels(self) -> List[str]:
+    def ensure_labels(self) -> list[str]:
         """Create required Daedalus labels if missing. Returns newly created names.
 
         Called once per dispatch run so every managed repo always has the labels
@@ -479,8 +480,8 @@ class VCSProvider(abc.ABC):
 
     # ── cross-issue dependencies (ready-gating, issue #139) ──────────────────
     def _depends_on_blockers(
-        self, issue_number: int, *, body: Optional[str] = None
-    ) -> List[int]:
+        self, issue_number: int, *, body: str | None = None
+    ) -> list[int]:
         """Open blockers from the portable ``Depends on:`` body convention.
 
         Fetches the issue body when not supplied, parses the convention, and
@@ -495,7 +496,7 @@ class VCSProvider(abc.ABC):
             body = issue.body if issue else ""
         return [n for n in parse_depends_on(body) if self.get_issue_state(n) == "open"]
 
-    def blockers(self, issue_number: int) -> List[int]:
+    def blockers(self, issue_number: int) -> list[int]:
         """Open issue numbers that block ``issue_number`` (``[]`` when unblocked).
 
         The dispatcher refuses to start new work on an issue while this is
@@ -509,9 +510,9 @@ class VCSProvider(abc.ABC):
 
     # ── pull/merge requests ──────────────────────────────────────────────────
     @abc.abstractmethod
-    def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]: ...
+    def list_prs(self, state: str = "all", limit: int = 50) -> list[PRSummary]: ...
 
-    def find_pr_for_branch(self, branch: str) -> Optional[int]:
+    def find_pr_for_branch(self, branch: str) -> int | None:
         """Open PR number whose head is ``branch``, or None."""
         if not branch:
             return None
@@ -550,9 +551,9 @@ class VCSProvider(abc.ABC):
             for pr in self.list_prs(state="all")
         )
 
-    def _pr_for_issue(self, issue_number: int) -> Optional[PRSummary]:
+    def _pr_for_issue(self, issue_number: int) -> PRSummary | None:
         """Best PR referencing an issue — prefers merged over open."""
-        open_pr: Optional[PRSummary] = None
+        open_pr: PRSummary | None = None
         for pr in self.list_prs(state="all"):
             if not issue_linked_to_pr(pr, issue_number):
                 continue
@@ -562,11 +563,11 @@ class VCSProvider(abc.ABC):
                 open_pr = pr
         return open_pr
 
-    def pr_state_for_issue(self, issue_number: int) -> Optional[str]:
+    def pr_state_for_issue(self, issue_number: int) -> str | None:
         pr = self._pr_for_issue(issue_number)
         return pr.state if pr else None
 
-    def pr_number_for_issue(self, issue_number: int) -> Optional[int]:
+    def pr_number_for_issue(self, issue_number: int) -> int | None:
         pr = self._pr_for_issue(issue_number)
         return pr.number if pr else None
 
@@ -577,7 +578,7 @@ class VCSProvider(abc.ABC):
     def pr_ci_green(self, pr_number: int) -> bool:
         return self.get_pr_ci_status(pr_number) == CIStatus.GREEN
 
-    def get_prs_ci_status(self, pr_numbers: List[int]) -> Dict[int, str]:
+    def get_prs_ci_status(self, pr_numbers: list[int]) -> dict[int, str]:
         """Batch CI-status lookup for multiple PRs.
 
         Default implementation iterates sequentially over
@@ -590,7 +591,7 @@ class VCSProvider(abc.ABC):
         ``CIStatus.UNKNOWN`` so callers always get an entry for every
         requested PR number.
         """
-        result: Dict[int, str] = {}
+        result: dict[int, str] = {}
         for pr in pr_numbers:
             try:
                 result[pr] = self.get_pr_ci_status(pr)
@@ -599,7 +600,7 @@ class VCSProvider(abc.ABC):
                 result[pr] = CIStatus.UNKNOWN
         return result
 
-    def get_pr_head_sha(self, pr_number: int) -> Optional[str]:
+    def get_pr_head_sha(self, pr_number: int) -> str | None:
         """Head commit SHA of a PR — keys the bounded CI-rerun budget (#1199).
         Returns None when unknown; providers that support it override."""
         return None
@@ -614,14 +615,14 @@ class VCSProvider(abc.ABC):
         that support it override and set ``supports_ci_rerun = True``."""
         return False
 
-    def failed_ci_run_url(self, pr_number: int) -> Optional[str]:
+    def failed_ci_run_url(self, pr_number: int) -> str | None:
         """Web URL of the most recent failed CI run for a PR — surfaced in the
         escalation message when CI stays red after the re-run budget is spent
         (#1199). Returns None when unknown; providers override."""
         return None
 
     # ── PR comments / delivery markers ───────────────────────────────────────
-    def list_pr_comments(self, pr_number: int) -> List[Comment]:
+    def list_pr_comments(self, pr_number: int) -> list[Comment]:
         return []
 
     def post_pr_comment(self, pr_number: int, body: str) -> bool:
@@ -631,7 +632,7 @@ class VCSProvider(abc.ABC):
         """Overwrite the PR body. Returns True on success, False if unsupported/failed."""
         return False
 
-    def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
+    def get_pr_files(self, pr_number: int) -> list[dict[str, Any]]:
         """Changed files in a PR. Returns [{filename, additions, deletions, changes, status}].
         Providers that support it override; defaults to [] (safe no-op)."""
         return []
@@ -640,7 +641,7 @@ class VCSProvider(abc.ABC):
         """Post a comment on an issue (distinct from PR comments). Returns True on success."""
         return False
 
-    def get_issue_comments(self, issue_number: int) -> List[Dict[str, Any]]:
+    def get_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
         """Return issue comments as dicts with at least 'body' and 'user' keys.
         Defaults to [] — providers that support it override."""
         return []
@@ -689,7 +690,7 @@ class VCSProvider(abc.ABC):
         """True when this project has a usable board configured."""
         return False
 
-    def board_numbers_with_statuses(self, status_names: List[str]) -> set:
+    def board_numbers_with_statuses(self, status_names: list[str]) -> set:
         """Issue numbers whose board status is in ``status_names`` (one call)."""
         return set()
 
@@ -701,7 +702,7 @@ class VCSProvider(abc.ABC):
         """Create ``status_name`` as a board status option if it doesn't exist yet."""
         return False
 
-    def reconcile_board_status(self, issue_number: int) -> Optional[str]:
+    def reconcile_board_status(self, issue_number: int) -> str | None:
         """Set card status from PR state: open → in_review, merged → done.
 
         Returns the canonical status applied, or None.
@@ -716,14 +717,14 @@ class VCSProvider(abc.ABC):
         return None
 
     # ── meta (dashboard pickers) ─────────────────────────────────────────────
-    def list_branches(self) -> List[str]:
+    def list_branches(self) -> list[str]:
         return []
 
-    def list_labels(self) -> List[LabelDef]:
+    def list_labels(self) -> list[LabelDef]:
         return []
 
-    def list_boards(self) -> List[BoardSummary]:
+    def list_boards(self) -> list[BoardSummary]:
         return []
 
-    def get_board_fields(self, board_id: str) -> List[FieldDef]:
+    def get_board_fields(self, board_id: str) -> list[FieldDef]:
         return []

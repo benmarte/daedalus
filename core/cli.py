@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from typing import List, Tuple
 
 logger = logging.getLogger("daedalus.cli")
 
 
-def hermes_cli(args: List[str], timeout: int = 30) -> Tuple[int, str]:
+def hermes_cli(args: list[str], timeout: int = 30) -> tuple[int, str]:
     """Run ``hermes <args>``. Returns ``(returncode, combined stdout+stderr)``.
 
     Never raises — errors are captured and returned as negative return codes
