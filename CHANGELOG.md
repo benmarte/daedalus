@@ -1,3 +1,5 @@
+## [ci: align CI Python version with development (3.12 vs 3.14)](https://github.com/benmarte/daedalus/issues/1138) — [PR #1223](https://github.com/benmarte/daedalus/pull/1223)
+
 ## [fix: follow-up issue dedup guard bypassed on API error — duplicate follow-up issues created silently](https://github.com/benmarte/daedalus/issues/1111) — [PR #1213](https://github.com/benmarte/daedalus/pull/1213)
 
 ## [feat: QA agent runs full 'pytest -n auto' suite so QA-green matches CI-green](https://github.com/benmarte/daedalus/issues/1201) — [PR #1212](https://github.com/benmarte/daedalus/pull/1212)
