@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core import kanban
-from core.file_overlap import detect_file_overlap as _pairwise_file_overlap
 from core.providers.base import CIStatus, issue_linked_to_pr
 from core.util import extract_issue_number
 from core.util import extract_pr_number_from_summary
@@ -2264,13 +2263,7 @@ def _execute_planner_decompose_inner(
                     parent_n, len(sub_titles), sub_titles)
         return True
 
-    # Compute blocking edges from file overlap analysis
-    blocking_edges = build_blocking_edges(
-        detect_file_overlap(per_sub_contexts),
-        total_tasks=len(per_sub_contexts),
-    )
-
-    inherit_labels = [l for l in parent_labels if l and l.lower() != "epic"]
+    inherit_labels = [lbl for lbl in parent_labels if lbl and lbl.lower() != "epic"]
     created_numbers: List[int] = []
     ready_numbers: List[int] = []
     for idx, (title, scope) in enumerate(zip(sub_titles, sub_scopes)):
@@ -2322,7 +2315,6 @@ def _execute_planner_decompose_inner(
     # Use the new timestamped marker format (<!-- daedalus:decomposed:<ts> -->)
     # so subsequent runs detect it via has_decomposed_marker().
     # Also include the sub-issue list for traceability.
-    marker_numbers = f"[{','.join(str(n) for n in created_numbers)}]"
     provider.post_issue_comment(
         parent_n,
         f"{_build_decomposed_marker()}\n"

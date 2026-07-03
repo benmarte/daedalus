@@ -558,7 +558,7 @@ def test_execute_reconcile_merged_dry_run():
 def test_execute_qa_fix():
     """_execute_qa_fix creates a fix task with idempotency key."""
     with mock.patch.object(kanban, "create_task", return_value="t_fix") as mk_create:
-        with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        with mock.patch.object(kanban, "comment", return_value=True):
             card = {
                 "id": "t_dev",
                 "runs": [{"metadata": {"fix_attempts": 0}}],
@@ -623,7 +623,7 @@ def test_execute_pm_route_empty_profile_fallback():
     check("pm_route empty profile → fallback returns True", ok is True)
     call_kwargs = mk_create.call_args[1]
     check("fallback assignee is developer", call_kwargs["assignee"] == "developer-daedalus")
-    check("fallback does NOT use goal", call_kwargs.get("goal") != True)
+    check("fallback does NOT use goal", not call_kwargs.get("goal"))
 
 
 def test_execute_approve_advance():
@@ -1344,7 +1344,7 @@ def test_create_downstream_happy_path():
         "body": "Implement benmarte/daedalus#19",
         "workspace": "dir:/work",
     }
-    with mock.patch.object(kanban, "list_tasks", return_value=[]) as mk_list:
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
         with mock.patch.object(kanban, "create_task", side_effect=["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"]) as mk_create:
             with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
                 created = iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
@@ -2222,7 +2222,7 @@ def test_escalation_different_issues_independent():
         },
     ]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
-        with mock.patch.object(kanban, "comment", return_value=True) as mk_comment:
+        with mock.patch.object(kanban, "comment", return_value=True):
             with mock.patch.object(kanban, "show_card", return_value={"id": "", "comments": []}):
                 with mock.patch.object(gp, "get_pr_ci_status", return_value="red"):
                     counts, *_ = iterate.run_iterate("slug", "O/R", provider=gp)
