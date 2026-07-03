@@ -37,7 +37,7 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
+    Dev --> QA["🧪 QA\nFull pytest -n auto suite · coverage\nqa-passed / qa-failed"]
     Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
     
     QA --> QAGate{{"🚦 QA Gate\nqa-passed?"}}
@@ -179,8 +179,13 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
      these atomically on the next tick: a triage card is decomposed across all roles with QA gating
      the reviewer/security/accessibility stages.
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR.
-   - **qa** runs the test suite, analyzes coverage, and reports a verdict (`qa-passed` or
-     `qa-failed`). The pipeline advances to reviewer/security/accessibility only after QA passes.
+   - **qa** runs the full test suite exactly as CI does (`pytest tests/ -n auto
+     --timeout=60` in the isolated PR worktree), verifies acceptance criteria,
+     analyzes coverage, and reports a verdict (`qa-passed` or `qa-failed`). The
+     verdict is `qa-passed` only if BOTH the acceptance criteria and the full
+     suite pass; any full-suite failure (even unrelated to the PR) yields
+     `qa-failed`. This ensures QA-green matches CI-green (#1201). The pipeline
+     advances to reviewer/security/accessibility only after QA passes.
    - **reviewer** reviews, **security-analyst** audits, **accessibility** audits the PR for
      WCAG 2.1 AA compliance (only when the issue references UI/frontend work), and
      **documentation** writes a completion report and posts it to the **PR and your chat
@@ -399,7 +404,7 @@ a different perspective.
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. Creates the conditional accessibility task when the issue references UI/frontend work. | No |
 | `planner-daedalus` | Task graph, interface contracts, architecture decisions. **Phase 3:** reviews epic-sized issues and signals readiness with `PLANNING COMPLETE:` or `PLAN:`, triggering automated sub-issue decomposition. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
-| `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Runs the test suite, analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). | No |
+| `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Verifies acceptance criteria, then runs the full test suite exactly as CI does (`pytest tests/ -n auto --timeout=60` in the isolated PR worktree), analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). `qa-passed` requires BOTH the ACs and the full suite to pass (#1201). | No |
 | `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. Runs after QA passes. | No |
 | `security-analyst-daedalus` | Security audit — OWASP, injection, secrets, authn/z. Blocks on risk with severity-rated findings. Runs after QA passes, parallel to reviewer. | No |
 | `accessibility-daedalus` | **Runs after QA passes, parallel to reviewer/security. Conditional — only created for UI/frontend issues.** Audits the PR against WCAG 2.1 AA and posts a findings table. Blocks with `approved` or `changes requested`. | No |
