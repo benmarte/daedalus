@@ -1314,6 +1314,20 @@ Each piece exists because the obvious approach failed:
   looping silently. Configurable via `execution.crash_retry` knobs in
   `templates/daedalus.yaml`. This replaces the old silent-stuck behaviour where
   a crashed agent card sat indefinitely in `running`.
+- **Provider failover chain** (`core/provider_failover.py`, issue #1207) —
+  when a coding agent (Claude Code, Codex, etc.) hits a transient failure
+  (session limit, quota, crash, timeout), the crash-retry reconciler
+  automatically re-dispatches the same card on the next provider in an
+  ordered fallback chain (`execution.coding_agents` in `daedalus.yaml`)
+  instead of retrying the limited provider forever. A provider that spends
+  `max_attempts_per_provider` dispatches on one episode enters a global
+  cooldown and is skipped by every card until the window expires; with
+  `reset_to_primary: true` the primary is preferred again once its cooldown
+  clears. The same pattern applies to the orchestration-brain model
+  (`model.providers` chain) — profiles are resynced to the next provider on
+  a brain-side transient failure and back to the primary when it recovers.
+  Configurable via `execution.failover` and `model.failover` knobs in
+  `templates/daedalus.yaml`.
 - **Orphaned worktree sweep** (`scripts/daedalus_dispatch.py`, issue #1114) —
   agents are instructed to `git worktree remove --force` on cleanup, but a crashed
   or reclaimed agent leaves its worktree behind and they accumulate unboundedly
@@ -1447,7 +1461,9 @@ on its board.
 |------|------------|
 | `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect, orphaned-worktree sweep (issue #1114). Exits non-zero (1) when at least one project ran and every project errored, so cron mail-on-error and CI gates can detect total dispatch failure (issue #1112). Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
-| `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
+| `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys, config fingerprints. |
+| `core/crash_retry.py` | Time-bounded crash retry with stepped backoff, per-card attempt cap, wall-clock cap. Re-queues crashed cards on next dispatch tick (#1205). |
+| `core/provider_failover.py` | Cross-provider coding-agent failover chain resolution. Selects next provider on transient failure, per-provider cooldown, reset-to-primary (#1207). |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
 | `core/notify_templates.py` | Rich markdown notification templates (dispatch summary, doc report envelope, PR-ready, pipeline-failure) with clickable issue/PR links for every Hermes messaging platform. |
 | `core/registry.py` | Project registry read/write — `projects.yaml` CRUD for multi-repo onboarding. |
