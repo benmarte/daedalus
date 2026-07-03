@@ -546,3 +546,204 @@ def test_concurrent_tick_never_double_dispatches(fake, tmp_path):
     fk.crash("t_1", SESSION_LIMIT)
     assert crash_retry.reconcile("p", wd, {}, now=T0 + 1 * MIN, failover=ctx) == []
     assert len(fk.unblocked) == 1
+
+
+# ── dispatcher wiring (delegation rewrite, context, brain reset) ──────────────
+
+from conftest import _load_dispatch  # noqa: E402
+
+disp = _load_dispatch()
+
+ROLE_BODY = (
+    "You are the DEVELOPER for issue org/repo#42: fix thing\n"
+    "Work in the existing git repo.\n"
+)
+
+
+def _delegated_body(agent="claude-code", cmd="claude -p"):
+    return disp._prepend_delegation(
+        ROLE_BODY, agent, cmd, role="developer", issue_number=42, base_branch="dev"
+    )
+
+
+def test_rewrite_delegation_block_swaps_agents():
+    body = _delegated_body()
+    assert "CLAUDE CODE" in body
+    new_block = disp._build_delegation_instructions(
+        "codex", "codex exec --full-auto", role="developer",
+        issue_number=42, base_branch="dev",
+    )
+    out = disp._rewrite_delegation_block(body, new_block)
+    assert out is not None
+    assert "CODEX" in out and "CLAUDE CODE" not in out
+    assert "claude -p" not in out and "codex exec --full-auto" in out
+    assert out.count("You are the DEVELOPER") == 1
+    # /tmp file scoping is preserved (role prefix + issue number)
+    assert "/tmp/dev-42-task.txt" in out
+
+
+def test_rewrite_delegation_block_inserts_and_strips():
+    # no existing block → new block is prepended
+    out = disp._rewrite_delegation_block(ROLE_BODY, "\n⚠️  AGENT DELEGATION — USE X:")
+    assert out.startswith("\n⚠️  AGENT DELEGATION — USE X:")
+    assert out.endswith(ROLE_BODY)
+    # empty block (fallback to hermes) strips delegation entirely
+    out = disp._rewrite_delegation_block(_delegated_body(), "")
+    assert out == ROLE_BODY
+    # unrecognized body shape → refuse
+    assert disp._rewrite_delegation_block("no role marker here", "x") is None
+
+
+def test_apply_coding_agent_failover_rewrites_card_body(monkeypatch):
+    store = {"body": _delegated_body()}
+    monkeypatch.setattr(disp.kanban, "get_body", lambda s, t: store["body"])
+
+    def _edit(s, t, b):
+        store["body"] = b
+        return True
+
+    monkeypatch.setattr(disp.kanban, "edit_body", _edit)
+    monkeypatch.setattr(
+        disp, "_resolve_active_model_provider",
+        lambda: {"model": None, "provider": None},
+    )
+    card = {"id": "t_1", "title": "#42 Developer: fix thing",
+            "assignee": "developer-daedalus"}
+    ok = disp._apply_coding_agent_failover(
+        "p", card, {"name": "codex", "cmd": "codex exec --full-auto"}, {}, "dev"
+    )
+    assert ok is True
+    assert "CODEX" in store["body"] and "CLAUDE CODE" not in store["body"]
+
+
+def test_build_failover_context_and_brain_apply(monkeypatch, tmp_path):
+    wd = str(tmp_path)
+    resync_calls = []
+    monkeypatch.setattr(
+        disp, "_resync_profiles_to_model",
+        lambda workdir, model, provider, old: resync_calls.append(
+            (model, provider, dict(old or {}))
+        ) or 3,
+    )
+    monkeypatch.setattr(
+        disp, "_resolve_active_model_provider",
+        lambda: {"model": "glm-5.2", "provider": "ollama-cloud"},
+    )
+    execution = {
+        "coding_agents": [
+            {"name": "claude-code", "cmd": "claude -p"},
+            {"name": "codex"},
+        ],
+    }
+    resolved = {
+        "model": {
+            "providers": [
+                {"provider": "ollama-cloud", "default": "glm-5.2"},
+                {"provider": "anthropic", "default": "claude-opus-4-8"},
+            ],
+            "failover": {"max_attempts_per_provider": 1},
+        },
+        "vcs": {"target_branch": "dev"},
+    }
+    ctx = disp._build_failover_context("p", resolved, execution, wd)
+    assert [e["name"] for e in ctx["chains"]["coding_agent"]] == [
+        "claude-code", "codex",
+    ]
+    assert ctx["chains"]["coding_agent"][1]["cmd"]  # cmd defaulted
+    assert ctx["cfg"]["max_attempts_per_provider"] == 1
+    assert ctx["current"] == {"coding_agent": "claude-code", "brain": "ollama-cloud"}
+
+    # brain apply resyncs profiles to the fallback and records the index;
+    # old_values reflect the previously ACTIVE entry's model
+    fallback = ctx["chains"]["brain"][1]
+    assert ctx["apply"]["brain"]({}, fallback) is True
+    assert resync_calls == [
+        ("claude-opus-4-8", "anthropic", {"model_default": "glm-5.2", "coding_agent": ""})
+    ]
+    assert dispatch_state.get_brain_active_index(wd) == 1
+    # a context built AFTER the switch reports the fallback as current
+    ctx2 = disp._build_failover_context("p", resolved, execution, wd)
+    assert ctx2["current"]["brain"] == "anthropic"
+
+
+def test_maybe_reset_brain_to_primary(monkeypatch, tmp_path):
+    wd = str(tmp_path)
+    resync_calls = []
+    monkeypatch.setattr(
+        disp, "_resync_profiles_to_model",
+        lambda workdir, model, provider, old: resync_calls.append(provider) or 1,
+    )
+    monkeypatch.setattr(
+        disp, "_resolve_active_model_provider",
+        lambda: {"model": "glm-5.2", "provider": "ollama-cloud"},
+    )
+    resolved = {
+        "model": {
+            "providers": [
+                {"provider": "ollama-cloud", "default": "glm-5.2"},
+                {"provider": "anthropic", "default": "claude-opus-4-8"},
+            ]
+        }
+    }
+    ctx = disp._build_failover_context("p", resolved, {}, wd)
+    dispatch_state.set_brain_active_index(wd, 1)
+
+    # primary still cooling → stay on the fallback
+    import time as _time
+
+    dispatch_state.set_provider_cooldown(
+        wd, "brain:ollama-cloud", _time.time() + 600
+    )
+    disp._maybe_reset_brain_to_primary(wd, ctx, dry_run=False)
+    assert resync_calls == []
+    assert dispatch_state.get_brain_active_index(wd) == 1
+
+    # cooldown expired → resync back to the primary + clear the cooldown
+    dispatch_state.set_provider_cooldown(
+        wd, "brain:ollama-cloud", _time.time() - 1
+    )
+    disp._maybe_reset_brain_to_primary(wd, ctx, dry_run=False)
+    assert resync_calls == ["ollama-cloud"]
+    assert dispatch_state.get_brain_active_index(wd) == 0
+    assert dispatch_state.get_provider_cooldowns(wd) == {}
+
+
+def test_integration_limit_then_fallback_success(fake, monkeypatch, tmp_path):
+    """AC 2 integration: session-limit crash → delegation block rewritten to
+    codex via the real dispatcher context → card re-dispatched → completes."""
+    wd = str(tmp_path)
+    store = {"body": _delegated_body()}
+    monkeypatch.setattr(disp.kanban, "get_body", lambda s, t: store["body"])
+
+    def _edit(s, t, b):
+        store["body"] = b
+        return True
+
+    monkeypatch.setattr(disp.kanban, "edit_body", _edit)
+    monkeypatch.setattr(
+        disp, "_resolve_active_model_provider",
+        lambda: {"model": None, "provider": None},
+    )
+    execution = {
+        "coding_agents": [
+            {"name": "claude-code", "cmd": "claude -p"},
+            {"name": "codex"},
+        ],
+        "failover": {"max_attempts_per_provider": 1},
+    }
+    ctx = disp._build_failover_context(
+        "p", {"vcs": {"target_branch": "dev"}}, execution, wd
+    )
+    fk = fake([_card()])
+
+    acts = crash_retry.reconcile("p", wd, execution, now=T0 + 1 * MIN, failover=ctx)
+    assert [a["action"] for a in acts] == ["retried"]
+    assert acts[0]["provider"] == "codex"
+    assert "CODEX" in store["body"] and "CLAUDE CODE" not in store["body"]
+    assert fk.cards["t_1"]["status"] == "ready"
+    assert any("failover" in c.lower() for c in fk.comments["t_1"])
+
+    # fallback succeeds → card completes → episode + bookkeeping cleared
+    fk.cards["t_1"]["status"] = "done"
+    crash_retry.reconcile("p", wd, execution, now=T0 + 5 * MIN, failover=ctx)
+    assert dispatch_state.get_crash_retry(wd, "t_1") is None

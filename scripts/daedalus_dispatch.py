@@ -54,6 +54,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
 from config import ConfigLoader  # noqa: E402
 from core import crash_retry  # noqa: E402
 from core import dispatch_state  # noqa: E402
+from core import provider_failover  # noqa: E402
 from core import iterate  # noqa: E402
 from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
@@ -757,6 +758,207 @@ def _resolve_coding_agent_max_wait(execution: Dict[str, Any]) -> int:
     except (TypeError, ValueError):
         return _DEFAULT_CODING_AGENT_MAX_WAIT
     return val if val > 0 else _DEFAULT_CODING_AGENT_MAX_WAIT
+
+
+# ── Provider failover (issue #1207) ──────────────────────────────────────────
+# Ordered provider chains (primary first) for the two layers Daedalus consumes
+# AI through: the external coding agent and the orchestration brain. The
+# crash-retry reconciler decides WHEN to fail over (core/crash_retry.py +
+# core/provider_failover.py); these helpers supply the chains and HOW a switch
+# is applied — rewriting a card's delegation block to the fallback coding
+# agent, or resyncing the *-daedalus profiles to the fallback brain provider.
+
+_DELEGATION_MARKER = "⚠️  AGENT DELEGATION — USE"
+_ROLE_BODY_MARKER = "You are the "
+
+
+def _role_from_card(card: Dict[str, Any]) -> str:
+    """Best-effort pipeline role of a kanban card (title prefix, then assignee)."""
+    title = (card.get("title") or "").lower()
+    assignee = (card.get("assignee") or "").lower()
+    for role in _ROLE_TMP_PREFIX:
+        if f"{role}:" in title or role in assignee:
+            return role
+    return "developer"
+
+
+def _rewrite_delegation_block(body: str, block: str) -> Optional[str]:
+    """Replace (or insert) the delegation block in *body* with *block*.
+
+    Handles both compositions ``_prepend_delegation`` produces (block before
+    the role body, or appended after it). An empty *block* strips delegation
+    entirely (fallback agent is hermes — the brain codes directly). Returns
+    None when the body shape is unrecognized — refuse rather than corrupt.
+    """
+    role_idx = body.find(_ROLE_BODY_MARKER)
+    if role_idx == -1:
+        return None
+    marker_idx = body.find(_DELEGATION_MARKER)
+    if marker_idx == -1 or marker_idx < role_idx:
+        rest = body[role_idx:]
+        return (block + "\n\n" + rest) if block else rest
+    head = body[:marker_idx].rstrip("\n")
+    return (head + block + "\n\n") if block else head + "\n"
+
+
+def _apply_coding_agent_failover(
+    slug: str,
+    card: Dict[str, Any],
+    entry: Dict[str, Any],
+    execution: Dict[str, Any],
+    base_branch: str,
+) -> bool:
+    """Rewrite *card*'s delegation block to the fallback coding agent (#1207).
+
+    Applies the same cmd transforms as first-time injection (``--max-turns``,
+    compatible ``--model``) so the fallback runs with the project's knobs.
+    Returns False (logged) on any failure — the reconciler retries next tick.
+    """
+    tid = str(card.get("id") or card.get("task_id") or "")
+    if not tid:
+        return False
+    agent = str(entry.get("name") or "").strip().lower()
+    cmd = str(entry.get("cmd") or "")
+    cmd = _apply_coding_agent_max_turns(agent, cmd, execution)
+    active = _resolve_active_model_provider()
+    if active.get("model"):
+        cmd = _inject_model_into_coding_agent_cmd(cmd, agent, active["model"])
+    body = kanban.get_body(slug, tid)
+    if body is None:
+        logger.warning("failover: cannot read body of card %s — skipped", tid)
+        return False
+    block = ""
+    if agent not in ("none", "hermes"):
+        block = _build_delegation_instructions(
+            agent,
+            cmd,
+            role=_role_from_card(card),
+            issue_number=extract_issue_number(card.get("title") or "") or 0,
+            base_branch=base_branch,
+        )
+    new_body = _rewrite_delegation_block(body, block)
+    if new_body is None:
+        logger.warning(
+            "failover: unrecognized body shape on card %s — skipped", tid
+        )
+        return False
+    return kanban.edit_body(slug, tid, new_body)
+
+
+def _build_failover_context(
+    slug: str,
+    resolved: Dict[str, Any],
+    execution: Dict[str, Any],
+    workdir: str,
+) -> Dict[str, Any]:
+    """Build the cross-provider failover context for ``crash_retry.reconcile``.
+
+    Resolves both chains (legacy single-value keys become one-element chains,
+    disabling failover structurally) and binds the apply callbacks. Cheap when
+    nothing is configured — reconcile treats <2-element chains as no-ops.
+    """
+    model_cfg = resolved.get("model") or {}
+    fcfg = provider_failover.resolve_failover_config(execution, model_cfg)
+    coding_chain = provider_failover.resolve_coding_agent_chain(
+        execution, _CODING_AGENT_DEFAULTS
+    )
+    brain_chain = provider_failover.resolve_model_provider_chain(
+        model_cfg, _resolve_active_model_provider()
+    )
+    base_branch = (resolved.get("vcs") or {}).get("target_branch") or "dev"
+
+    brain_names = [e["provider"] for e in brain_chain]
+    brain_idx = dispatch_state.get_brain_active_index(workdir)
+    if brain_idx >= len(brain_names):
+        brain_idx = 0
+    brain_current = brain_names[brain_idx] if brain_names else ""
+
+    # The active coding agent is the chain's primary; the legacy single-value
+    # key only wins when it names an entry of the chain (it IS the chain in
+    # the back-compat one-element case).
+    coding_current = coding_chain[0]["name"]
+    legacy_agent = _resolve_coding_agent(execution)
+    if any(e["name"] == legacy_agent for e in coding_chain):
+        coding_current = legacy_agent
+
+    def _apply_coding(card: Dict[str, Any], entry: Dict[str, Any]) -> bool:
+        return _apply_coding_agent_failover(
+            slug, card, entry, execution, base_branch
+        )
+
+    def _apply_brain(card: Dict[str, Any], entry: Dict[str, Any]) -> bool:
+        # old_values must reflect the model the profiles are CURRENTLY synced
+        # to (the active chain entry), not the stored global default —
+        # otherwise a failed-over profile looks like a manual override and the
+        # resync back to primary would skip it.
+        prev_idx = dispatch_state.get_brain_active_index(workdir)
+        prev_default = (
+            brain_chain[prev_idx]["default"] if prev_idx < len(brain_chain) else ""
+        ) or (dispatch_state.get_config_values(workdir) or {}).get(
+            "model_default", ""
+        )
+        try:
+            idx = brain_chain.index(entry)
+        except ValueError:
+            idx = 0
+        count = _resync_profiles_to_model(
+            workdir,
+            entry.get("default") or None,
+            entry.get("provider") or None,
+            {"model_default": prev_default, "coding_agent": ""},
+        )
+        dispatch_state.set_brain_active_index(workdir, idx)
+        logger.info(
+            "failover: resynced %d profile(s) to brain provider=%s model=%s",
+            count,
+            entry.get("provider"),
+            entry.get("default"),
+        )
+        return True
+
+    return {
+        "cfg": fcfg,
+        "chains": {"coding_agent": coding_chain, "brain": brain_chain},
+        "apply": {"coding_agent": _apply_coding, "brain": _apply_brain},
+        "current": {
+            "coding_agent": coding_current,
+            "brain": brain_current,
+        },
+    }
+
+
+def _maybe_reset_brain_to_primary(
+    workdir: str, failover_ctx: Dict[str, Any], dry_run: bool
+) -> None:
+    """Restore the primary brain provider once its cooldown expires (#1207).
+
+    Brain failover is global (profiles are resynced for every role), so
+    recovery is a per-tick check rather than per-card: when the profiles are
+    on a fallback entry, ``reset_to_primary`` is set, and the primary's
+    cooldown window has passed, resync back and clear the cooldown.
+    """
+    if dry_run:
+        return
+    fcfg = failover_ctx["cfg"]
+    chain = failover_ctx["chains"]["brain"]
+    if len(chain) < 2 or not fcfg.get("reset_to_primary", True):
+        return
+    if dispatch_state.get_brain_active_index(workdir) <= 0:
+        return
+    primary = chain[0]
+    key = provider_failover.provider_key(
+        provider_failover.LAYER_BRAIN, primary["provider"]
+    )
+    if dispatch_state.get_provider_cooldowns(workdir).get(key, 0) > time.time():
+        return  # still cooling — stay on the fallback
+    if failover_ctx["apply"]["brain"]({}, primary):
+        dispatch_state.clear_provider_cooldown(workdir, key)
+        failover_ctx["current"]["brain"] = primary["provider"]
+        logger.info(
+            "failover: primary brain provider %s recovered — profiles "
+            "resynced back (reset_to_primary)",
+            primary["provider"],
+        )
 
 
 def _resolve_max_dispatch(execution: Dict[str, Any], default: int = 5) -> int:
@@ -4298,13 +4500,19 @@ def _send_crash_retries_exhausted_notification(
     max_attempts = action.get("max_attempts")
     elapsed = action.get("elapsed_minutes")
     last_error = (action.get("summary") or "no failure details")[:300]
+    provider_history = (action.get("provider_history") or "").strip()
     body = (
         "⚠️ **Crash Retries Exhausted**\n\n"
         f"Issue #{issue_n} (card `{task_id}`, {action.get('assignee') or 'unknown'}) "
         f"crashed through {attempts}/{max_attempts} automatic re-dispatches "
         f"over {elapsed} min.\n\n"
         f"**Last failure**: {last_error}\n"
-        "**Status**: hard-blocked (`crash-retries-exhausted`) — manual "
+        + (
+            f"**Per-provider history** (#1207):\n{provider_history}\n"
+            if provider_history
+            else ""
+        )
+        + "**Status**: hard-blocked (`crash-retries-exhausted`) — manual "
         "intervention required\n"
         f"**Recovery**: fix the underlying cause, then `hermes kanban unblock "
         f"{task_id}` (resets the crash-retry counter)."
@@ -4325,6 +4533,11 @@ def _send_crash_retries_exhausted_notification(
                             "attempts": f"{attempts}/{max_attempts}",
                             "elapsed_minutes": str(elapsed),
                             "last_error": last_error,
+                            **(
+                                {"provider_history": provider_history}
+                                if provider_history
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -6902,9 +7115,20 @@ def run(
     # spawns an advisory-only PM consultation.
     crash_actions: List[Dict[str, Any]] = []
     if workdir:
+        # Provider failover (#1207): ordered coding-agent / brain chains let
+        # the reconciler re-dispatch a crashed card on the NEXT provider when
+        # the active one is limited/down, instead of retrying it forever.
+        failover_ctx: Optional[Dict[str, Any]] = None
+        try:
+            failover_ctx = _build_failover_context(
+                slug, resolved, execution, workdir
+            )
+            _maybe_reset_brain_to_primary(workdir, failover_ctx, dry_run)
+        except Exception as exc:  # degrade to plain #1205 retries
+            logger.warning("dispatch: provider-failover context failed: %s", exc)
         try:
             crash_actions = crash_retry.reconcile(
-                slug, workdir, execution, dry_run=dry_run
+                slug, workdir, execution, dry_run=dry_run, failover=failover_ctx
             )
         except Exception as exc:  # never let the reconciler break a dispatch tick
             logger.warning("dispatch: crash-retry reconcile failed: %s", exc)
