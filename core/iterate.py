@@ -2493,6 +2493,114 @@ def _try_merge_if_gates_pass(
     return False
 
 
+# ── bounded CI re-run for transiently-red pipeline-complete PRs (#1199) ───────
+# Max automatic CI re-runs per PR head SHA before we escalate. A persistent red
+# after this many re-runs is a real failure, not a flake, so we stop and notify.
+CI_RERUN_MAX = 2
+# Per-SHA marker comments posted on the PR make the retry idempotent across ticks
+# and same-tick re-invocations (the PR itself is the source of truth). A new head
+# SHA (branch pushed) yields a fresh budget — new code deserves fresh attempts.
+_CI_RERUN_MARKER_PREFIX = "<!-- daedalus:ci-rerun:"
+_CI_ESCALATED_MARKER_PREFIX = "<!-- daedalus:ci-escalated:"
+
+
+def _ci_rerun_attempts(comments: List[Any], sha: str) -> int:
+    """Count re-run marker comments already posted for ``sha``."""
+    marker = f"{_CI_RERUN_MARKER_PREFIX}{sha}:"
+    return sum(1 for c in comments if marker in (getattr(c, "body", "") or ""))
+
+
+def _ci_already_escalated(comments: List[Any], sha: str) -> bool:
+    """True if this SHA has already been escalated — the loop stop."""
+    marker = f"{_CI_ESCALATED_MARKER_PREFIX}{sha} -->"
+    return any(marker in (getattr(c, "body", "") or "") for c in comments)
+
+
+def _rerun_or_escalate_red_ci(
+    slug: str,
+    issue_n: Optional[int],
+    pr: int,
+    provider: Any,
+    *,
+    dry_run: bool = False,
+) -> str:
+    """Handle a pipeline-complete PR whose required CI is genuinely RED (#1199).
+
+    Bounded-retry the failed CI run (``CI_RERUN_MAX`` per head SHA); once the
+    budget is spent and CI is still red, escalate with the failing-run URL
+    instead of looping. Idempotent via per-SHA marker comments on the PR.
+
+    Natural inter-tick backoff: issuing a re-run flips CI to PENDING, so the
+    sweep won't act again until it settles back to RED — no timer needed.
+
+    Returns one of ``"rerun"``, ``"escalated"``, or ``""`` (no-op this tick).
+    """
+    if provider is None or not getattr(provider, "supports_ci_rerun", False):
+        return ""
+    try:
+        sha = provider.get_pr_head_sha(pr)
+    except Exception as e:
+        logger.warning("iterate: CI-rerun: get_pr_head_sha failed for PR #%s: %s", pr, e)
+        return ""
+    if not sha:
+        logger.warning("iterate: CI-rerun: no head SHA for PR #%s — skipping", pr)
+        return ""
+    try:
+        comments = provider.list_pr_comments(pr)
+    except Exception:
+        comments = []
+    if _ci_already_escalated(comments, sha):
+        return ""  # already escalated for this SHA — never loop
+    attempts = _ci_rerun_attempts(comments, sha)
+
+    if attempts < CI_RERUN_MAX:
+        n = attempts + 1
+        if dry_run:
+            logger.info(
+                "[dry-run] would re-run failed CI for PR #%s (attempt %d/%d, sha %s)",
+                pr, n, CI_RERUN_MAX, sha[:8])
+            return "rerun"
+        ok = False
+        try:
+            ok = bool(provider.rerun_failed_ci(pr))
+        except Exception as e:
+            logger.warning("iterate: CI-rerun failed for PR #%s: %s", pr, e)
+        if not ok:
+            logger.warning(
+                "iterate: CI-rerun no-op for PR #%s (attempt %d/%d) — no failed run or API error",
+                pr, n, CI_RERUN_MAX)
+            return ""
+        # Persist the marker only after a successful re-run so a failed request
+        # doesn't silently burn an attempt.
+        provider.post_pr_comment(
+            pr,
+            f"{_CI_RERUN_MARKER_PREFIX}{sha}:{n} -->\n\n"
+            f"♻️ Auto re-ran failed CI (attempt {n}/{CI_RERUN_MAX}) — "
+            f"transient failure suspected; will merge automatically once green.")
+        logger.info(
+            "iterate: re-ran failed CI for PR #%s (issue #%s, attempt %d/%d, sha %s)",
+            pr, issue_n, n, CI_RERUN_MAX, sha[:8])
+        return "rerun"
+
+    # Budget spent and still red → escalate once (no loop).
+    try:
+        run_url = provider.failed_ci_run_url(pr) or ""
+    except Exception:
+        run_url = ""
+    msg = (
+        f"⚠️ ESCALATE: PR #{pr} (issue #{issue_n}) — required CI is still RED after "
+        f"{CI_RERUN_MAX} automatic re-runs. A persistent red is a real failure, not a "
+        f"flake — manual intervention required.")
+    if run_url:
+        msg += f"\n\nFailing run: {run_url}"
+    if dry_run:
+        logger.info("[dry-run] %s", msg)
+        return "escalated"
+    provider.post_pr_comment(pr, f"{_CI_ESCALATED_MARKER_PREFIX}{sha} -->\n\n{msg}")
+    logger.warning("iterate: %s", msg)
+    return "escalated"
+
+
 def sweep_deferred_merges(
     slug: str,
     repo: str,
@@ -2566,6 +2674,13 @@ def sweep_deferred_merges(
             ci_status=ci_cache[pr], dry_run=dry_run,
         ):
             merged.append(pr)
+        elif ci_cache[pr] == CIStatus.RED:
+            # Pipeline-complete PR with a genuinely RED (not pending/unknown)
+            # required CI: bounded-retry the failed run, then escalate (#1199).
+            # A re-run flips CI to PENDING, so the merge path picks it up on a
+            # later tick once it goes green.
+            _rerun_or_escalate_red_ci(
+                slug, issue_n, pr, provider, dry_run=dry_run)
     if merged:
         logger.info("iterate: deferred-merge sweep merged PR(s): %s", merged)
     return merged

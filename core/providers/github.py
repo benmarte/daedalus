@@ -29,6 +29,7 @@ class GitHubProvider(VCSProvider):
     name = "github"
     supports_boards = True
     supports_ci_status = True
+    supports_ci_rerun = True
     supports_pr_comments = True
     supports_labels = True
     supports_branches = True
@@ -267,6 +268,65 @@ class GitHubProvider(VCSProvider):
         ok = {"success", "neutral", "skipped"}
         green = all((c["conclusion"] or "").lower() in ok for c in checks)
         return CIStatus.GREEN if green else CIStatus.RED
+
+    # ── CI re-run (bounded auto-retry of transiently-red CI, #1199) ────────────
+    def get_pr_head_sha(self, pr_number: int) -> Optional[str]:
+        """Head commit SHA of a PR — keys the bounded CI-rerun budget."""
+        try:
+            pr = self._http.get_json(f"/repos/{self.repo}/pulls/{pr_number}")
+        except ProviderError as e:
+            self._log.warning("get_pr_head_sha PR #%s failed: %s", pr_number, e)
+            return None
+        return (((pr or {}).get("head") or {}).get("sha")) or None
+
+    def _latest_failed_run(self, pr_number: int) -> Optional[Dict[str, Any]]:
+        """Most-recent *failed* Actions workflow run for the PR's head commit.
+
+        Returns the raw run dict (has ``id`` and ``html_url``) or None when the
+        SHA is unknown, there are no runs, or none failed.
+        """
+        sha = self.get_pr_head_sha(pr_number)
+        if not sha:
+            return None
+        try:
+            data = self._http.get_json(f"/repos/{self.repo}/actions/runs",
+                                       params={"head_sha": sha})
+        except ProviderError as e:
+            self._log.warning("_latest_failed_run PR #%s failed: %s", pr_number, e)
+            return None
+        runs = (data or {}).get("workflow_runs") or []
+        failed = [r for r in runs
+                  if (r.get("conclusion") or "").lower() in ("failure", "timed_out", "cancelled")]
+        if not failed:
+            return None
+        # Newest first: prefer run_started_at, fall back to created_at, then id.
+        failed.sort(
+            key=lambda r: (r.get("run_started_at") or r.get("created_at") or "", r.get("id") or 0),
+            reverse=True,
+        )
+        return failed[0]
+
+    def rerun_failed_ci(self, pr_number: int) -> bool:
+        """Re-run only the failed jobs of the latest failed workflow run for the
+        PR head (equivalent to ``gh run rerun --failed``)."""
+        run = self._latest_failed_run(pr_number)
+        run_id = (run or {}).get("id")
+        if not run_id:
+            self._log.info("rerun_failed_ci PR #%s: no failed run to re-run", pr_number)
+            return False
+        try:
+            self._http.post_json(
+                f"/repos/{self.repo}/actions/runs/{run_id}/rerun-failed-jobs", {})
+        except ProviderError as e:
+            self._log.warning("rerun_failed_ci PR #%s (run %s) failed: %s", pr_number, run_id, e)
+            return False
+        self._log.info("rerun_failed_ci: re-ran failed jobs for PR #%s (run %s)", pr_number, run_id)
+        return True
+
+    def failed_ci_run_url(self, pr_number: int) -> Optional[str]:
+        """Web URL of the most-recent failed CI run for a PR (for escalation)."""
+        run = self._latest_failed_run(pr_number)
+        return (run or {}).get("html_url") if run else None
 
     # ── PR comments ──────────────────────────────────────────────────────────
     def list_pr_comments(self, pr_number: int) -> List[Comment]:
