@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from core.db import connect_wal
 
@@ -556,8 +556,21 @@ def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_ru
         elif complete(slug, str(tid)):
             completed_ids.append(str(tid))
     
-    # Second pass: walk task trees and complete blocked/review-required children
+    # Second pass: walk task trees and complete blocked/review-required children.
+    # Memoize show_card results within this call so each card is fetched via at
+    # most one subprocess. Previously (#1136) a card was fetched once as a
+    # parent-candidate here and again as a child of another matching task —
+    # children of an issue's cards typically reference the same #issue, so they
+    # matched the loop below AND appeared in a parent's children list, producing
+    # the N + N*M subprocess explosion that blocked the dispatch tick.
     if summary:
+        card_cache: Dict[str, Optional[dict]] = {}
+
+        def _get_card(task_id: str) -> Optional[dict]:
+            if task_id not in card_cache:
+                card_cache[task_id] = show_card(slug, task_id)
+            return card_cache[task_id]
+
         for t in tasks:
             title = t.get("title") or ""
             body = t.get("body") or ""
@@ -566,13 +579,13 @@ def close_issue_tasks(slug: str, issue_number: int, *, summary: str = "", dry_ru
             tid = t.get("id") or t.get("task_id")
             if not tid:
                 continue
-            # Get full card details to find children
-            card = show_card(slug, str(tid))
+            # Get full card details to find children (cached — see above)
+            card = _get_card(str(tid))
             if not card:
                 continue
             children = card.get("children") or []
             for child_id in children:
-                child_card = show_card(slug, child_id)
+                child_card = _get_card(child_id)
                 if not child_card:
                     continue
                 child_task = child_card.get("task", child_card)

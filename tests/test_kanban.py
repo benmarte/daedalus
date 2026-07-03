@@ -319,6 +319,80 @@ def test_close_issue_tasks_dry_run():
     check("complete() NOT called in dry_run", mock_complete.call_count == 0)
 
 
+# ── Test: show_card is memoized — call count does not scale with tree (#1136) ─
+
+
+def test_close_issue_tasks_show_card_memoized_call_count():
+    """#1136: show_card is memoized within close_issue_tasks so each card is
+    fetched via at most one subprocess. The count scales with the number of
+    unique cards, NOT the N + N*M tree walk that blocked the dispatch tick.
+
+    Scenario mirrors production: 3 sibling parent cards for #88, each with 2
+    children that ALSO reference #88 (reviewer/qa cards). Pre-fix, every child
+    was fetched twice — once as a parent-candidate in the second-pass loop and
+    once as a child of its parent — so show_card scaled multiplicatively.
+    """
+    from collections import Counter
+
+    parents = ["t_p1", "t_p2", "t_p3"]
+    children = {
+        "t_p1": ["t_c1a", "t_c1b"],
+        "t_p2": ["t_c2a", "t_c2b"],
+        "t_p3": ["t_c3a", "t_c3b"],
+    }
+    all_children = [c for cs in children.values() for c in cs]
+
+    tasks = [_fake_task(p, f"#88 parent {p}", status="running") for p in parents]
+    tasks += [_fake_task(c, f"#88 child {c}", status="blocked") for c in all_children]
+
+    cards = {}
+    for p in parents:
+        cards[p] = _fake_show_card(p, status="running", children=children[p])
+    for c in all_children:
+        cards[c] = _fake_show_card(
+            c, status="blocked", latest_summary="review-required: needs review"
+        )
+
+    calls: Counter = Counter()
+
+    def mock_show_card(slug, tid):
+        calls[tid] += 1
+        return cards.get(tid)
+
+    def mock_hk(args, timeout=60):
+        if "list" in args and "--json" in args:
+            import json
+            return 0, json.dumps(tasks), ""
+        return 0, "", ""
+
+    with mock.patch("core.kanban._hk", side_effect=mock_hk), \
+         mock.patch("core.kanban.show_card", side_effect=mock_show_card) as mock_show, \
+         mock.patch("core.kanban.complete", return_value=True):
+
+        close_issue_tasks("slug", 88, summary="closed: #88 merged and closed")
+
+    unique_cards = len(parents) + len(all_children)  # 9
+    # Use real ``assert`` (not ``check``) so the invariant is enforced under
+    # pytest AND raises in __main__ mode — ``check`` only tallies counters.
+    #
+    # Core invariant: no card is fetched more than once. Pre-fix, each of the 6
+    # children was fetched twice (once as a parent-candidate in this loop and
+    # once as a child of its parent), so this assertion fails on the old code.
+    over_fetched = {tid: n for tid, n in calls.items() if n > 1}
+    assert not over_fetched, f"cards fetched more than once (N+1 regression): {over_fetched}"
+    # show_card scales with unique card count (9), not N + N*M (15 pre-fix).
+    assert mock_show.call_count == unique_cards, (
+        f"expected {unique_cards} show_card calls (one per unique card), "
+        f"got {mock_show.call_count}"
+    )
+    # Pre-fix this exact tree made 15 calls; memoization must be strictly fewer.
+    assert mock_show.call_count < 15, (
+        f"show_card still scales with tree size: {mock_show.call_count} calls"
+    )
+    check("no card fetched more than once (memoized)", not over_fetched)
+    check("show_card called once per unique card", mock_show.call_count == unique_cards)
+
+
 # ── Test: complete() accepts summary parameter ──────────────────────────────
 
 
@@ -364,6 +438,7 @@ if __name__ == "__main__":
         test_close_issue_tasks_non_review_required_blocked_not_completed,
         test_close_issue_tasks_no_summary_no_child_completion,
         test_close_issue_tasks_dry_run,
+        test_close_issue_tasks_show_card_memoized_call_count,
         test_complete_accepts_summary,
         test_complete_no_summary,
     ]
