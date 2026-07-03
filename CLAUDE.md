@@ -38,6 +38,7 @@ This is a map, not a tutorial — read the linked files for depth.
 | CLI wrapper | `core/cli.py` | `hermes_cli()` subprocess wrapper, never raises |
 | Self-test | `core/dispatch_selftest.py` | Hermetic in-memory pipeline wiring smoke test |
 | Config | `config/__init__.py` | `ConfigLoader` — per-repo YAML deep-merge over `templates/daedalus.yaml` |
+| Agent body templates | `templates/agent_bodies/*.md` | Role prompt-body templates rendered via `string.Template` by `_render_agent_body()` in the dispatcher. 10 templates: planner, validator, pm, downstream, dev, qa, reviewer, security, docs, task_body (#1147). Golden tests in `tests/test_agent_bodies.py` lock rendered output byte-for-byte |
 | Dashboard API | `dashboard/plugin_api.py` (~2000 lines) | FastAPI router at `/api/plugins/daedalus/`. Config, status, project CRUD, cron, meta pickers, lifecycle |
 | Agent comment | `scripts/agent_comment.py` | GitHub PR/issue comment helper. Enforces `**Agent:**` header, uses `urllib` |
 | Watchdog | `scripts/watchdog.py` | Gateway health watchdog — silent-death detection, rate-limited restart |
@@ -223,7 +224,9 @@ daedalus/
 │   ├── provision_roster.sh / setup.sh / uninstall.sh
 │   ├── agent_comment.py / watchdog.py / postinstall.py
 │   └── *.sh                 # Advance, webhook, worktree scripts
-├── templates/daedalus.yaml  # Default config
+├── templates/
+│   ├── daedalus.yaml          # Default config
+│   └── agent_bodies/          # Agent prompt-body templates (#1147)
 ├── tasks/                   # Lessons, plans, specs
 └── tests/                   # 150+ test files
 ```
