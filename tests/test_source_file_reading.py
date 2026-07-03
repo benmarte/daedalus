@@ -128,7 +128,7 @@ def test_read_source_files_size_limit():
         contents = read_source_files(file_paths, str(workdir), max_size=1000)
         
         f_large = str(workdir / "large.txt")
-        assert f_large in contents, f"Expected large file in contents"
+        assert f_large in contents, "Expected large file in contents"
         # Truncated to 1000 bytes
         assert len(contents[f_large]) == 1000, f"Expected 1000 chars, got {len(contents[f_large])}"
         assert contents[str(workdir / "normal.txt")] == "small content"
