@@ -1,0 +1,41 @@
+# Epic Issue #1234 — Ready for Decomposition
+
+This issue was routed to you because it appears too large for a single
+developer session and should be broken into sub-issues.
+
+**Repository:** acme/widgets
+**Title:** Rework the widget subsystem
+**Workdir:** 
+**Branch:** dev
+**Provider:** github
+**URL:** https://github.com/acme/widgets/issues/1234
+
+## Detection Reasons
+
+semantic: decomposition language, checklist (5 items), epic-label
+
+## Your Task
+
+Review the issue below and confirm it is ready for automated decomposition.
+The dispatcher will create sub-issues automatically once you signal completion.
+
+When done, complete your card with:
+
+  `PLANNING COMPLETE: ready for decomposition`
+
+If the issue is NOT suitable for decomposition (e.g. it is already small enough
+or has a blocking dependency), complete with a different summary explaining why
+and the PM will be notified.
+
+---
+
+## Issue Body
+
+We should decompose into smaller pieces.
+
+- [ ] one
+- [ ] two
+- [ ] three
+- [ ] four
+- [ ] five
+
