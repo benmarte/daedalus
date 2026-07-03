@@ -1,3 +1,5 @@
+## [docs: add CLAUDE.md — module map, invariants, and agent-maintainer guide](https://github.com/benmarte/daedalus/issues/1137) — [PR #1221](https://github.com/benmarte/daedalus/pull/1221)
+
 ## [ci: align CI Python version with development (3.12 vs 3.14)](https://github.com/benmarte/daedalus/issues/1138) — [PR #1223](https://github.com/benmarte/daedalus/pull/1223)
 
 ## [fix: follow-up issue dedup guard bypassed on API error — duplicate follow-up issues created silently](https://github.com/benmarte/daedalus/issues/1111) — [PR #1213](https://github.com/benmarte/daedalus/pull/1213)
