@@ -25,6 +25,7 @@ dispatcher as callbacks.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -74,6 +75,29 @@ _CODING_AGENT_EVIDENCE = (
 def entry_name(entry: dict[str, Any]) -> str:
     """Canonical provider name of a chain entry (either layer's shape)."""
     return str(entry.get("name") or entry.get("provider") or "").strip()
+
+
+def _account_hash(cmd: str) -> str:
+    """Short, stable discriminator for a coding-agent account with no explicit
+    ``account`` label — derived from its ``cmd`` (which carries the account's
+    ``CLAUDE_CONFIG_DIR``). Only used to disambiguate a same-name collision."""
+    return hashlib.sha1((cmd or "").encode("utf-8")).hexdigest()[:8]
+
+
+def entry_identity(entry: dict[str, Any]) -> str:
+    """Failover identity of a chain entry — the key used for per-provider
+    attempt counts, global cooldowns, and history (from→to).
+
+    For the brain layer this is just the provider name. For the coding-agent
+    layer it is ``<name>`` unless the entry carries an ``account`` discriminator
+    (multiple accounts of the SAME agent, e.g. two ``claude-code`` entries with
+    different ``CLAUDE_CONFIG_DIR`` — #1227), in which case it is
+    ``<name>:<account>`` so each account has its own attempt tally and cooldown.
+    Entries without an ``account`` keep identity == name (back-compat with the
+    single-account #1207 behavior)."""
+    name = entry_name(entry)
+    account = str(entry.get("account") or "").strip()
+    return f"{name}:{account}" if account else name
 
 
 def provider_key(layer: str, name: str) -> str:
@@ -136,19 +160,32 @@ def resolve_coding_agent_chain(
     execution: dict[str, Any] | None,
     defaults: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """Ordered coding-agent chain: ``[{name, cmd}, …]`` (primary first).
+    """Ordered coding-agent chain: ``[{name, account, cmd}, …]`` (primary first).
 
     Reads ``execution.coding_agents``; entries with an unknown ``name`` are
-    dropped with a warning, duplicates keep the first occurrence, and a
-    missing ``cmd`` falls back to *defaults* (the dispatcher passes its
-    ``_CODING_AGENT_DEFAULTS``). When the list is absent or yields nothing
-    valid, the legacy single-value keys (``coding_agent`` /
-    ``coding_agent_cmd``) are synthesized into a one-element chain — zero
-    config change required (#1207 back-compat).
+    dropped with a warning and a missing ``cmd`` falls back to *defaults* (the
+    dispatcher passes its ``_CODING_AGENT_DEFAULTS``).
+
+    Multiple entries may share the same ``name`` when they are distinct
+    *accounts* of that agent (e.g. two ``claude-code`` entries with different
+    ``CLAUDE_CONFIG_DIR`` in their ``cmd`` — #1227). Dedup is by effective
+    identity ``(name, account or cmd)``, not by name alone, so same-name/
+    different-account entries are all kept; only true duplicates (same name AND
+    same account-or-cmd) collapse to the first occurrence. Each entry carries an
+    ``account`` field: the explicit label when given, else "" for the first
+    occurrence of a name and a short ``cmd`` hash for any later same-name entry
+    so every account gets its own attempt tally / cooldown via
+    :func:`entry_identity`.
+
+    When the list is absent or yields nothing valid, the legacy single-value
+    keys (``coding_agent`` / ``coding_agent_cmd``) are synthesized into a
+    one-element chain — zero config change required (#1207 back-compat).
     """
     dmap = defaults or {}
     raw = (execution or {}).get("coding_agents")
     chain: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()  # (name, account or cmd) dedup keys
+    name_seen: set[str] = set()  # names already kept — later ones need a tag
     if isinstance(raw, (list, tuple)):
         for item in raw:
             if not isinstance(item, dict):
@@ -167,16 +204,25 @@ def resolve_coding_agent_chain(
                     ", ".join(VALID_CODING_AGENTS),
                 )
                 continue
-            if any(e["name"] == name for e in chain):
-                logger.warning(
-                    "provider-failover: duplicate coding_agents entry %r — "
-                    "keeping the first occurrence",
-                    name,
-                )
-                continue
             cmd = item.get("cmd")
             cmd = cmd.strip() if isinstance(cmd, str) else ""
-            chain.append({"name": name, "cmd": cmd or dmap.get(name, "")})
+            cmd = cmd or dmap.get(name, "")
+            account = str(item.get("account") or "").strip()
+            dedup_key = (name, account or cmd)
+            if dedup_key in seen:
+                logger.warning(
+                    "provider-failover: duplicate coding_agents entry %r "
+                    "(account=%r) — keeping the first occurrence",
+                    name,
+                    account or "(from cmd)",
+                )
+                continue
+            seen.add(dedup_key)
+            # Disambiguate a second+ same-name account that gave no explicit
+            # label, so its identity/cooldown key stays distinct from the first.
+            eff_account = account or (_account_hash(cmd) if name in name_seen else "")
+            name_seen.add(name)
+            chain.append({"name": name, "account": eff_account, "cmd": cmd})
     if chain:
         return chain
     # Legacy one-element chain (same validation as _resolve_coding_agent).
@@ -186,7 +232,7 @@ def resolve_coding_agent_chain(
         agent = "hermes"
     cmd = (execution or {}).get("coding_agent_cmd")
     cmd = cmd.strip() if isinstance(cmd, str) else ""
-    return [{"name": agent, "cmd": cmd or dmap.get(agent, "")}]
+    return [{"name": agent, "account": "", "cmd": cmd or dmap.get(agent, "")}]
 
 
 def resolve_model_provider_chain(
@@ -275,7 +321,7 @@ def select_provider(
     (with wrap) only when forced.
     """
     cap = int(cfg["max_attempts_per_provider"])
-    names = [entry_name(e) for e in chain]
+    names = [entry_identity(e) for e in chain]
     open_idxs = [i for i, n in enumerate(names) if int(attempts.get(n, 0)) < cap]
     if not open_idxs:
         return {"action": "exhausted"}

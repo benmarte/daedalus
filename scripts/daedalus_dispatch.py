@@ -953,11 +953,14 @@ def _build_failover_context(
 
     # The active coding agent is the chain's primary; the legacy single-value
     # key only wins when it names an entry of the chain (it IS the chain in
-    # the back-compat one-element case).
-    coding_current = coding_chain[0]["name"]
+    # the back-compat one-element case). Identity, not bare name, so a
+    # multi-account chain (#1227) tracks the specific account.
+    coding_current = provider_failover.entry_identity(coding_chain[0])
     legacy_agent = _resolve_coding_agent(execution)
-    if any(e["name"] == legacy_agent for e in coding_chain):
-        coding_current = legacy_agent
+    for e in coding_chain:
+        if e["name"] == legacy_agent:
+            coding_current = provider_failover.entry_identity(e)
+            break
 
     def _apply_coding(card: Dict[str, Any], entry: Dict[str, Any]) -> bool:
         return _apply_coding_agent_failover(slug, card, entry, execution, base_branch)

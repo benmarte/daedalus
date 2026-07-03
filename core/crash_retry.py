@@ -587,7 +587,7 @@ def _failover_plan(
     chain = (failover.get("chains") or {}).get(layer) or []
     if len(chain) < 2:
         return None
-    names = [provider_failover.entry_name(e) for e in chain]
+    names = [provider_failover.entry_identity(e) for e in chain]
     prov = entry.get("provider") if isinstance(entry.get("provider"), dict) else {}
     cur = str(
         prov.get("name") or (failover.get("current") or {}).get(layer) or names[0]
@@ -691,7 +691,7 @@ def _apply_failover(
         )
         return None
 
-    nxt = provider_failover.entry_name(sel["entry"])
+    nxt = provider_failover.entry_identity(sel["entry"])
     if nxt != cur:
         apply_fn = plan.get("apply")
         ok = True
