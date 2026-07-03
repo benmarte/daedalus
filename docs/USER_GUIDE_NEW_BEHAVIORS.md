@@ -1045,6 +1045,8 @@ python scripts/daedalus_dispatch.py --history 25
 
 `--dry-run` is most useful when diagnosing unexpected dispatch behavior or previewing changes before a real run. `--self-test` is intended for CI pipelines — it runs fast, needs no credentials, and exits non-zero on any failed assertion. `--history` lets you audit recent dispatches without starting a full tick.
 
+**Exit code behavior (issue #1112):** A normal dispatch tick returns exit code **0** on success (including partial failure — at least one project ran cleanly — and zero-project ticks where nothing ran). It returns exit code **1** when at least one project ran and **every** project errored, so cron mail-on-error, CI status gates, and wrapper scripts can detect a total dispatch failure (e.g. misconfigured provider, broken auth). `--self-test` and `--history` keep their own exit codes.
+
 **Prerequisites:**  
 - `--dry-run` and `--history` require valid cron/environment setup (they use the same code path as a real tick, just with mutations gated out).  
 - `--self-test` requires no external credentials or GitHub access.

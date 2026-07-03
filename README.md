@@ -1343,6 +1343,15 @@ Each piece exists because the obvious approach failed:
   (name + workdir), so operators can see *why* the summary was degraded instead of guessing.
   Behaviour is otherwise unchanged: the summary still renders (degraded) and the rest of dispatch
   continues normally.
+- **Non-zero exit code on total dispatch failure** (`scripts/daedalus_dispatch.py`, issue #1112) —
+  `_main_inner()` previously returned exit code 0 on every path (its own docstring said "Always
+  returns 0 — errors are logged + summarized, never via exit code"), so cron mail-on-error, CI
+  status gates, and wrapper scripts always saw success even when every project run in a tick
+  errored (misconfigured provider, broken auth, total kanban failure). The dispatcher now tracks
+  a per-project run tally (`n_ok` / `n_err`) across both the single-repo path and the registry
+  sweep, and returns exit code **1** when at least one project ran and **every** one errored.
+  Partial success (>=1 project ran cleanly) and zero-project ticks (empty registry / unresolved
+  repo) still return 0. `--self-test` and `--history` keep their own exit codes.
 - **Fetch limit raised to 100** — the original page limit of 20 silently truncated
   boards with more than 20 open issues: validator sweep missed work, merged-PR
   archival missed completions, and the board looked healthy while issues rotted in
@@ -1408,7 +1417,7 @@ on its board.
 
 | Path | What it is |
 |------|------------|
-| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
+| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect. Exits non-zero (1) when at least one project ran and every project errored, so cron mail-on-error and CI gates can detect total dispatch failure (issue #1112). Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
