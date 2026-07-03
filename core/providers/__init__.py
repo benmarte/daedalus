@@ -12,7 +12,7 @@ Extensible: future trackers (Jira, Linear, Gitea, Bitbucket, …) call
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Type
+from typing import Any
 
 from .base import (CIStatus, Comment, DELIVERY_MARKER, IssueSummary, LabelDef,
                    PRSummary, ProviderConfigError, VCSProvider)
@@ -23,7 +23,7 @@ from .gitlab import GitLabProvider
 
 logger = logging.getLogger("daedalus.providers")
 
-PROVIDER_REGISTRY: Dict[str, Type[VCSProvider]] = {}
+PROVIDER_REGISTRY: dict[str, type[VCSProvider]] = {}
 
 _ALIASES = {
     "github": "github",
@@ -34,7 +34,7 @@ _ALIASES = {
 }
 
 
-def register_provider(name: str, cls: Type[VCSProvider]) -> None:
+def register_provider(name: str, cls: type[VCSProvider]) -> None:
     PROVIDER_REGISTRY[_canonical(name)] = cls
 
 
@@ -48,13 +48,13 @@ register_provider("gitlab", GitLabProvider)
 register_provider("azuredevops", AzureDevOpsProvider)
 
 
-def provider_name(resolved: Dict[str, Any]) -> str:
+def provider_name(resolved: dict[str, Any]) -> str:
     """Canonical provider name for a resolved project config (default github)."""
     vcs = (resolved or {}).get("vcs") or {}
     return _canonical(vcs.get("provider") or "github")
 
 
-def get_provider(resolved: Dict[str, Any]) -> Optional[VCSProvider]:
+def get_provider(resolved: dict[str, Any]) -> VCSProvider | None:
     """Build the configured provider, or None (logged) when unusable."""
     name = provider_name(resolved)
     cls = PROVIDER_REGISTRY.get(name)

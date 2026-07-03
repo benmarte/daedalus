@@ -14,12 +14,11 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
 
-def parse_workspace(workspace: Optional[str]) -> str:
+def parse_workspace(workspace: str | None) -> str:
     """Parse a workspace string into a plain path.
 
     Strips prefixes like 'dir:' or 'worktree:' and returns the bare path.
@@ -45,7 +44,7 @@ def format_workspace(path: str) -> str:
 
 def copy_workspace_for_downstream(
     workspace: str,
-    downstream_dir: Union[str, Path],
+    downstream_dir: str | Path,
     use_symlink: bool = True,
 ) -> str:
     """Create an isolated copy of the workspace for a downstream agent.

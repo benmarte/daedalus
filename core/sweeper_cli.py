@@ -7,11 +7,10 @@ integration). Usage:
 """
 
 import argparse
-from typing import List, Optional
 from core import sweeper
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sweeper",
         description="Sweep stale blocked cards from a kanban board"
@@ -36,7 +35,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run(argv: Optional[List[str]] = None) -> int:
+def run(argv: list[str] | None = None) -> int:
     """Execute the sweeper CLI. Returns 0 on success, 1 on failure."""
     args = parse_args(argv)
     stale_ids = sweeper.sweep_stale_blocked(

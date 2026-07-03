@@ -8,7 +8,7 @@ metadata:read, projects:write (boards only).
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .base import (BoardSummary, CIStatus, Comment, FieldDef, FieldOption,
                    IssueSummary, LabelDef, PRSummary, ProviderConfigError,
@@ -34,7 +34,7 @@ class GitHubProvider(VCSProvider):
     supports_labels = True
     supports_branches = True
 
-    def __init__(self, resolved: Dict[str, Any]):
+    def __init__(self, resolved: dict[str, Any]):
         super().__init__(resolved)
         repo = (self._cfg.get("repo") or "").strip()
         if "/" not in repo:
@@ -52,15 +52,15 @@ class GitHubProvider(VCSProvider):
         self._http = HTTPClient(API_URL, headers, token=token,
                                  verify_ssl=(self._cfg.get("vcs") or {}).get("verify_ssl", True))
         self._board_number = (self._cfg.get("tracking") or {}).get("github_project_number")
-        self._board_meta: Optional[Dict[str, Any]] = None   # project_id/status_field_id/options
-        self._board_items: Optional[List[Dict[str, Any]]] = None
+        self._board_meta: dict[str, Any] | None = None   # project_id/status_field_id/options
+        self._board_items: list[dict[str, Any]] | None = None
         # Issue numbers whose board enrollment failed (node id never resolved).
         # Surfaced in the dispatch summary under ``enrollment_failures``.
-        self.enrollment_failures: List[int] = []
+        self.enrollment_failures: list[int] = []
 
     # ── issues ───────────────────────────────────────────────────────────────
-    def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
-                    limit: int = 50) -> List[IssueSummary]:
+    def list_issues(self, state: str = "open", labels: list[str] | None = None,
+                    limit: int = 50) -> list[IssueSummary]:
         """ANY-label semantics: one call per label, deduped (gh-CLI parity).
 
         ``limit`` is the page size for each request; all pages are fetched until
@@ -71,9 +71,9 @@ class GitHubProvider(VCSProvider):
         """
         per_page = min(limit, 100)
         label_sets = [[lb] for lb in (labels or []) if lb] or [[]]
-        seen: Dict[int, IssueSummary] = {}
+        seen: dict[int, IssueSummary] = {}
         for ls in label_sets:
-            params: Dict[str, Any] = {"state": state, "per_page": per_page}
+            params: dict[str, Any] = {"state": state, "per_page": per_page}
             if ls:
                 params["labels"] = ",".join(ls)
             try:
@@ -111,8 +111,8 @@ class GitHubProvider(VCSProvider):
         return True
 
     def create_issue(self, title: str, body: str,
-                     labels: Optional[List[str]] = None) -> Optional[int]:
-        payload: Dict[str, Any] = {"title": title, "body": body}
+                     labels: list[str] | None = None) -> int | None:
+        payload: dict[str, Any] = {"title": title, "body": body}
         if labels:
             payload["labels"] = labels
         try:
@@ -125,7 +125,7 @@ class GitHubProvider(VCSProvider):
             self._log.warning("create_issue failed: %s", e)
         return None
 
-    def get_issue_state(self, issue_number: int) -> Optional[str]:
+    def get_issue_state(self, issue_number: int) -> str | None:
         try:
             data = self._http.get_json(f"/repos/{self.repo}/issues/{issue_number}")
             return (data.get("state") or "open").lower()
@@ -134,7 +134,7 @@ class GitHubProvider(VCSProvider):
                 return "closed"  # deleted or transferred issue — treat as closed
             return None
 
-    def get_issue(self, issue_number: int) -> Optional["IssueSummary"]:
+    def get_issue(self, issue_number: int) -> IssueSummary | None:
         try:
             data = self._http.get_json(f"/repos/{self.repo}/issues/{issue_number}")
         except ProviderError as e:
@@ -152,7 +152,7 @@ class GitHubProvider(VCSProvider):
             url=data.get("html_url") or "",
         )
 
-    def blockers(self, issue_number: int) -> List[int]:
+    def blockers(self, issue_number: int) -> list[int]:
         """Open blockers via native issue dependencies
         (``GET …/issues/{n}/dependencies/blocked_by``, GA Aug 2025) merged with
         the portable ``Depends on:`` body fallback.
@@ -164,7 +164,7 @@ class GitHubProvider(VCSProvider):
         that degrades silently to the body fallback (logged only on other
         errors, so the common no-feature case stays quiet).
         """
-        out: List[int] = []
+        out: list[int] = []
         try:
             deps = self._http.get_json(
                 f"/repos/{self.repo}/issues/{issue_number}/dependencies/blocked_by",
@@ -187,7 +187,7 @@ class GitHubProvider(VCSProvider):
                 out.append(n)
         return out
 
-    def get_issue_comments(self, issue_number: int) -> List[Dict[str, Any]]:
+    def get_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
         try:
             return self._http.get_json(
                 f"/repos/{self.repo}/issues/{issue_number}/comments",
@@ -198,7 +198,7 @@ class GitHubProvider(VCSProvider):
             return []
 
     # ── pull requests ────────────────────────────────────────────────────────
-    def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
+    def list_prs(self, state: str = "all", limit: int = 50) -> list[PRSummary]:
         rest_state = "all" if state == "merged" else state
         try:
             data = self._http.get_json(f"/repos/{self.repo}/pulls",
@@ -206,7 +206,7 @@ class GitHubProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("list_prs failed: %s", e)
             return []
-        out: List[PRSummary] = []
+        out: list[PRSummary] = []
         for pr in data or []:
             st = (pr.get("state") or "").lower()
             if st == "closed" and pr.get("merged_at"):
@@ -239,7 +239,7 @@ class GitHubProvider(VCSProvider):
             sha = ((pr or {}).get("head") or {}).get("sha") or ""
             if not sha:
                 return CIStatus.UNKNOWN
-            checks: List[Dict[str, Optional[str]]] = []
+            checks: list[dict[str, str | None]] = []
             runs = self._http.get_json(f"/repos/{self.repo}/commits/{sha}/check-runs")
             for r in (runs or {}).get("check_runs") or []:
                 checks.append({"name": r.get("name") or "", "status": r.get("status") or "",
@@ -270,7 +270,7 @@ class GitHubProvider(VCSProvider):
         return CIStatus.GREEN if green else CIStatus.RED
 
     # ── batch CI status (single GraphQL round-trip, #1143) ──────────────────────
-    def get_prs_ci_status(self, pr_numbers: List[int]) -> Dict[int, str]:
+    def get_prs_ci_status(self, pr_numbers: list[int]) -> dict[int, str]:
         """Batch CI-status lookup for multiple PRs via a single GraphQL query.
 
         Falls back to the sequential base implementation when the list is
@@ -305,7 +305,7 @@ class GitHubProvider(VCSProvider):
         nodes = (((data or {}).get("repository") or {}).get("pullRequests") or {}).get("nodes") or []
         # GraphQL errors → fall back to sequential for the missing PRs.
         got: set = set()
-        result: Dict[int, str] = {}
+        result: dict[int, str] = {}
         for node in nodes:
             num = node.get("number")
             if num is None:
@@ -325,7 +325,7 @@ class GitHubProvider(VCSProvider):
         return result
 
     @staticmethod
-    def _graphql_rollup_to_status(node: Dict[str, Any]) -> str:
+    def _graphql_rollup_to_status(node: dict[str, Any]) -> str:
         """Map a GraphQL ``statusCheckRollup.state`` value to ``CIStatus``.
 
         The rollup field lives at two possible locations depending on the
@@ -333,7 +333,7 @@ class GitHubProvider(VCSProvider):
         ``commits.nodes[].commit.statusCheckRollup``. We check both for
         robustness.
         """
-        def _state(d: Optional[Dict[str, Any]]) -> Optional[str]:
+        def _state(d: dict[str, Any] | None) -> str | None:
             if not d:
                 return None
             rollup = d.get("statusCheckRollup")
@@ -362,7 +362,7 @@ class GitHubProvider(VCSProvider):
         return mapping.get(state, CIStatus.UNKNOWN)
 
     # ── CI re-run (bounded auto-retry of transiently-red CI, #1199) ────────────
-    def get_pr_head_sha(self, pr_number: int) -> Optional[str]:
+    def get_pr_head_sha(self, pr_number: int) -> str | None:
         """Head commit SHA of a PR — keys the bounded CI-rerun budget."""
         try:
             pr = self._http.get_json(f"/repos/{self.repo}/pulls/{pr_number}")
@@ -371,7 +371,7 @@ class GitHubProvider(VCSProvider):
             return None
         return (((pr or {}).get("head") or {}).get("sha")) or None
 
-    def _latest_failed_run(self, pr_number: int) -> Optional[Dict[str, Any]]:
+    def _latest_failed_run(self, pr_number: int) -> dict[str, Any] | None:
         """Most-recent *failed* Actions workflow run for the PR's head commit.
 
         Returns the raw run dict (has ``id`` and ``html_url``) or None when the
@@ -415,13 +415,13 @@ class GitHubProvider(VCSProvider):
         self._log.info("rerun_failed_ci: re-ran failed jobs for PR #%s (run %s)", pr_number, run_id)
         return True
 
-    def failed_ci_run_url(self, pr_number: int) -> Optional[str]:
+    def failed_ci_run_url(self, pr_number: int) -> str | None:
         """Web URL of the most-recent failed CI run for a PR (for escalation)."""
         run = self._latest_failed_run(pr_number)
         return (run or {}).get("html_url") if run else None
 
     # ── PR comments ──────────────────────────────────────────────────────────
-    def list_pr_comments(self, pr_number: int) -> List[Comment]:
+    def list_pr_comments(self, pr_number: int) -> list[Comment]:
         try:
             data = self._http.get_paginated(f"/repos/{self.repo}/issues/{pr_number}/comments",
                                             style="link_header", max_pages=3)
@@ -485,7 +485,7 @@ class GitHubProvider(VCSProvider):
             self._log.warning("merge_pr PR #%s failed: %s", pr_number, e)
             return False
 
-    def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
+    def get_pr_files(self, pr_number: int) -> list[dict[str, Any]]:
         """Changed files in a PR via GET /pulls/{n}/files (paginated)."""
         try:
             data = self._http.get_paginated(
@@ -536,10 +536,10 @@ class GitHubProvider(VCSProvider):
         labels = getattr(issue, "labels", None) or []
         return any((n or "").strip().lower() == target for n in labels)
 
-    def ensure_labels(self) -> List[str]:
+    def ensure_labels(self) -> list[str]:
         """Create required Daedalus labels in this repo if they don't exist yet."""
         from .base import REQUIRED_LABELS
-        created: List[str] = []
+        created: list[str] = []
         for ldef in REQUIRED_LABELS:
             try:
                 self._http.post_json(
@@ -576,7 +576,7 @@ class GitHubProvider(VCSProvider):
             except Exception:
                 old_content = ""
         new_content = entry.rstrip("\n") + "\n\n" + old_content
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "message": "docs: update CHANGELOG.md [skip ci]",
             "content": _b64.b64encode(new_content.encode()).decode(),
             "branch": base_branch,
@@ -595,7 +595,7 @@ class GitHubProvider(VCSProvider):
         return True
 
     # ── GraphQL (Projects v2) ────────────────────────────────────────────────
-    def _graphql(self, query: str, variables: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
         try:
             data = self._http.post_json(GRAPHQL_PATH, {"query": query, "variables": variables})
         except ProviderError as e:
@@ -607,7 +607,7 @@ class GitHubProvider(VCSProvider):
             return None
         return data.get("data")
 
-    def list_boards(self) -> List[BoardSummary]:
+    def list_boards(self) -> list[BoardSummary]:
         q = """query($owner:String!,$name:String!){ repository(owner:$owner, name:$name){
                  projectsV2(first:20){
                    nodes{ id number title } } } }"""
@@ -616,7 +616,7 @@ class GitHubProvider(VCSProvider):
         return [BoardSummary(id=n.get("id") or "", number=n.get("number") or 0,
                              title=n.get("title") or "") for n in nodes if n]
 
-    def get_board_fields(self, board_id: str) -> List[FieldDef]:
+    def get_board_fields(self, board_id: str) -> list[FieldDef]:
         """``board_id`` is the project *number* (dashboard passes tracking config)."""
         try:
             number = int(board_id)
@@ -632,7 +632,7 @@ class GitHubProvider(VCSProvider):
                                   "name": self.repo.split("/", 1)[1], "number": number})
         nodes = (((((data or {}).get("repository") or {}).get("projectV2") or {})
                   .get("fields") or {}).get("nodes") or [])
-        out: List[FieldDef] = []
+        out: list[FieldDef] = []
         for f in nodes:
             if not f or not f.get("id"):
                 continue
@@ -647,7 +647,7 @@ class GitHubProvider(VCSProvider):
     def board_configured(self) -> bool:
         return bool(self._board_number)
 
-    def _load_board_meta(self) -> Optional[Dict[str, Any]]:
+    def _load_board_meta(self) -> dict[str, Any] | None:
         if self._board_meta is not None:
             return self._board_meta or None
         project_id = None
@@ -674,7 +674,7 @@ class GitHubProvider(VCSProvider):
         return self._board_meta
 
     @staticmethod
-    def _status_of(node: Dict[str, Any]) -> str:
+    def _status_of(node: dict[str, Any]) -> str:
         """Extract the Status single-select value name from a project item node.
 
         Defined once and reused by both the listing scan (``_items``) and the
@@ -682,7 +682,7 @@ class GitHubProvider(VCSProvider):
         """
         return ((node or {}).get("fieldValueByName") or {}).get("name") or ""
 
-    def _items(self) -> List[Dict[str, Any]]:
+    def _items(self) -> list[dict[str, Any]]:
         if self._board_items is not None:
             return self._board_items
         q = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){ repository(owner:$owner, name:$name){
@@ -693,7 +693,7 @@ class GitHubProvider(VCSProvider):
                        content{ ... on Issue { number } }
                        fieldValueByName(name:"Status"){
                          ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }"""
-        items: List[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         cursor = None
         max_pages = 50  # safety cap (~5000 items); real boards never hit this
         for page_num in range(1, max_pages + 1):
@@ -724,7 +724,7 @@ class GitHubProvider(VCSProvider):
         self._board_items = items
         return items
 
-    def _board_item_for_issue(self, issue_number: int) -> Optional[Dict[str, Any]]:
+    def _board_item_for_issue(self, issue_number: int) -> dict[str, Any] | None:
         """Resolve an issue's project item directly via its projectItems edge.
 
         Fallback for when the board listing misses an enrolled item (page-error
@@ -766,7 +766,7 @@ class GitHubProvider(VCSProvider):
                               issue_number, max_pages)
         return None
 
-    def _resolve_board_item(self, issue_number: int) -> Optional[Dict[str, Any]]:
+    def _resolve_board_item(self, issue_number: int) -> dict[str, Any] | None:
         """Resolve an issue's project item, preferring the cached listing.
 
         Scans the (possibly-cached) board listing first, then falls back to the
@@ -783,7 +783,7 @@ class GitHubProvider(VCSProvider):
     def invalidate_board_cache(self) -> None:
         self._board_items = None
 
-    def board_numbers_with_statuses(self, status_names: List[str]) -> set:
+    def board_numbers_with_statuses(self, status_names: list[str]) -> set:
         if not self.board_configured():
             return set()
         targets = {s.lower() for s in status_names}
@@ -833,7 +833,7 @@ class GitHubProvider(VCSProvider):
         self._board_meta = None  # clear cache so next call reloads with the new option
         return True
 
-    def _resolve_issue_node_id(self, issue_number: int) -> Optional[str]:
+    def _resolve_issue_node_id(self, issue_number: int) -> str | None:
         """Resolve an issue's GraphQL node id, retrying with exponential backoff.
 
         Newly-created issues sometimes haven't propagated through GitHub's
@@ -859,7 +859,7 @@ class GitHubProvider(VCSProvider):
                 issue_number, attempt, attempts)
         return None
 
-    def _board_add_item(self, issue_number: int) -> Optional[str]:
+    def _board_add_item(self, issue_number: int) -> str | None:
         """Enroll an issue into the project via addProjectV2ItemById.
 
         Returns the project item ID, or None if already present or on failure.
@@ -972,7 +972,7 @@ class GitHubProvider(VCSProvider):
         return self.repo
 
     # ── meta ─────────────────────────────────────────────────────────────────
-    def list_branches(self) -> List[str]:
+    def list_branches(self) -> list[str]:
         try:
             data = self._http.get_paginated(f"/repos/{self.repo}/branches",
                                             style="link_header", max_pages=2)
@@ -981,7 +981,7 @@ class GitHubProvider(VCSProvider):
             return []
         return [b.get("name") or "" for b in data or [] if b.get("name")]
 
-    def list_labels(self) -> List[LabelDef]:
+    def list_labels(self) -> list[LabelDef]:
         try:
             data = self._http.get_paginated(f"/repos/{self.repo}/labels",
                                             style="link_header", max_pages=2)

@@ -19,7 +19,7 @@ Two sub-concerns are handled here:
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 # ── low-level helpers ─────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ def _pr_link(n: int, provider=None) -> str:
     return _link(f"PR #{n}", url)
 
 
-def extract_issue_number(text: str) -> Optional[int]:
+def extract_issue_number(text: str) -> int | None:
     """Try to find the first ``Issue #<n>`` or ``#<n>`` reference in text."""
     m = re.search(r"[Ii]ssue\s+#(\d+)", text)
     if m:
@@ -126,7 +126,7 @@ Expected result: <what should happen after following the steps>
 # daedalus.yaml.  Supported placeholders: {role}, {profile}, {issue}, {pr}.
 DEFAULT_COMMENT_HEADER_TEMPLATE = "**Agent: {role}**"
 
-_ROLE_LABELS: Dict[str, str] = {
+_ROLE_LABELS: dict[str, str] = {
     "validator": "validator",
     "pm": "project-manager",
     "developer": "developer",
@@ -141,8 +141,8 @@ def render_agent_header(
     role: str,
     *,
     profile: str = "",
-    issue: Optional[int] = None,
-    pr: Optional[int] = None,
+    issue: int | None = None,
+    pr: int | None = None,
     template: str = DEFAULT_COMMENT_HEADER_TEMPLATE,
 ) -> str:
     """Return a one-line attribution header for an agent comment.
@@ -181,7 +181,7 @@ def render_thread_root(name: str, issue_number: int, issue_title: str,
     )
 
 
-def render_thread_comment(issue_number: int, pr_number: Optional[int],
+def render_thread_comment(issue_number: int, pr_number: int | None,
                           comment_body: str, *, issue_url: str = "",
                           pr_url: str = "") -> str:
     """Thread reply wrapping a mirrored agent issue/PR comment verbatim."""
@@ -209,7 +209,7 @@ def render_thread_pr_event(event: str, pr_number: int, pr_title: str = "",
 
 def render_dispatch_summary(
     name: str,
-    summary: Dict[str, Any],
+    summary: dict[str, Any],
     provider=None,
     *,
     dry_run: bool = False,
@@ -244,7 +244,7 @@ def render_dispatch_summary(
     issues_seen = summary.get("issues_seen", 0)
     dry_badge = " _(dry-run)_" if dry_run else ""
 
-    lines: List[str] = [
+    lines: list[str] = [
         f"## 🤖 Daedalus — **{name}**{dry_badge}",
         "",
         f"**Mode:** {mode} | **Issues seen:** {issues_seen}",
@@ -307,8 +307,8 @@ def render_dispatch_summary(
 
 
 def render_all_summaries(
-    summaries: Dict[str, Dict[str, Any]],
-    providers: Optional[Dict[str, Any]] = None,
+    summaries: dict[str, dict[str, Any]],
+    providers: dict[str, Any] | None = None,
     *,
     dry_run: bool = False,
 ) -> str:
@@ -336,7 +336,7 @@ def render_doc_report_notification(
     pr_url: str,
     report_body: str,
     *,
-    issue_number: Optional[int] = None,
+    issue_number: int | None = None,
     issue_url: str = "",
 ) -> str:
     """Wrap a documentation agent's PR comment in a rich notification envelope.
@@ -368,8 +368,8 @@ def render_doc_report_notification(
 def render_pipeline_failure(
     name: str,
     repo: str,
-    issue_number: Optional[int] = None,
-    pr_number: Optional[int] = None,
+    issue_number: int | None = None,
+    pr_number: int | None = None,
     error: str = "",
     provider=None,
 ) -> str:
@@ -419,7 +419,7 @@ def render_pr_ready(
     pr_url: str,
     pr_title: str,
     base_branch: str,
-    issue_number: Optional[int] = None,
+    issue_number: int | None = None,
     issue_url: str = "",
 ) -> str:
     """Notification when a PR is ready for human review."""

@@ -14,14 +14,14 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 def _state_path(workdir: str) -> Path:
     return Path(workdir) / ".hermes" / "daedalus_dispatch_state.json"
 
 
-def _load(workdir: str) -> Dict[str, Any]:
+def _load(workdir: str) -> dict[str, Any]:
     p = _state_path(workdir)
     if not p.exists():
         return {}
@@ -31,7 +31,7 @@ def _load(workdir: str) -> Dict[str, Any]:
         return {}
 
 
-def _save(workdir: str, state: Dict[str, Any]) -> None:
+def _save(workdir: str, state: dict[str, Any]) -> None:
     p = _state_path(workdir)
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
@@ -65,7 +65,7 @@ def record_dispatch(workdir: str, issue_number: int) -> None:
     _save(workdir, state)
 
 
-def get_dispatch_age_hours(workdir: str, issue_number: int) -> Optional[float]:
+def get_dispatch_age_hours(workdir: str, issue_number: int) -> float | None:
     """Return hours since *issue_number* was dispatched, or *None* if unknown.
 
     Returns *None* (not an error) when the issue has never been dispatched or
@@ -103,7 +103,7 @@ def clear_dispatch(workdir: str, issue_number: int) -> None:
 # only resolves a thread within the channel that produced it.
 
 
-def _issue_entry(state: Dict[str, Any], issue_number: int) -> Dict[str, Any]:
+def _issue_entry(state: dict[str, Any], issue_number: int) -> dict[str, Any]:
     """Return (creating if needed) the mutable issue entry for *issue_number*."""
     issues = state.setdefault("issues", {})
     entry = issues.setdefault(str(issue_number), {})
@@ -113,7 +113,7 @@ def _issue_entry(state: Dict[str, Any], issue_number: int) -> Dict[str, Any]:
     return entry
 
 
-def get_thread_anchor(workdir: str, issue_number: int, target: str) -> Optional[str]:
+def get_thread_anchor(workdir: str, issue_number: int, target: str) -> str | None:
     """Return the stored thread anchor for *target* on *issue_number*, or *None*."""
     entry = _load(workdir).get("issues", {}).get(str(issue_number))
     if not isinstance(entry, dict):
@@ -137,7 +137,7 @@ def set_thread_anchor(workdir: str, issue_number: int, target: str, anchor: str)
     _save(workdir, state)
 
 
-def get_thread_anchors(workdir: str, issue_number: int) -> Dict[str, str]:
+def get_thread_anchors(workdir: str, issue_number: int) -> dict[str, str]:
     """Return the full ``{target: anchor}`` map for *issue_number* (may be empty)."""
     entry = _load(workdir).get("issues", {}).get(str(issue_number))
     if not isinstance(entry, dict):
@@ -187,7 +187,7 @@ def mark_thread_event(workdir: str, issue_number: int, target: str, event_key: s
 # spent (at most one re-dispatch per card per tick).
 
 
-def get_crash_retry(workdir: str, task_id: str) -> Optional[Dict[str, Any]]:
+def get_crash_retry(workdir: str, task_id: str) -> dict[str, Any] | None:
     """Return the crash-retry entry for *task_id*, or *None* if absent/malformed."""
     table = _load(workdir).get("crash_retry")
     if not isinstance(table, dict):
@@ -196,7 +196,7 @@ def get_crash_retry(workdir: str, task_id: str) -> Optional[Dict[str, Any]]:
     return dict(entry) if isinstance(entry, dict) else None
 
 
-def set_crash_retry(workdir: str, task_id: str, entry: Dict[str, Any]) -> None:
+def set_crash_retry(workdir: str, task_id: str, entry: dict[str, Any]) -> None:
     """Persist *entry* as the crash-retry record for *task_id*."""
     state = _load(workdir)
     table = state.setdefault("crash_retry", {})
@@ -215,7 +215,7 @@ def clear_crash_retry(workdir: str, task_id: str) -> None:
         _save(workdir, state)
 
 
-def all_crash_retry(workdir: str) -> Dict[str, Dict[str, Any]]:
+def all_crash_retry(workdir: str) -> dict[str, dict[str, Any]]:
     """Return the full ``{task_id: entry}`` crash-retry map (may be empty)."""
     table = _load(workdir).get("crash_retry")
     if not isinstance(table, dict):
@@ -238,7 +238,7 @@ def all_crash_retry(workdir: str) -> Dict[str, Dict[str, Any]]:
 #                         primary once its cooldown expires (reset_to_primary).
 
 
-def _failover_section(state: Dict[str, Any]) -> Dict[str, Any]:
+def _failover_section(state: dict[str, Any]) -> dict[str, Any]:
     section = state.setdefault("provider_failover", {})
     if not isinstance(section, dict):
         section = {}
@@ -246,7 +246,7 @@ def _failover_section(state: Dict[str, Any]) -> Dict[str, Any]:
     return section
 
 
-def get_provider_cooldowns(workdir: str) -> Dict[str, float]:
+def get_provider_cooldowns(workdir: str) -> dict[str, float]:
     """Return the ``{"<layer>:<name>": until_ts}`` cooldown map (may be empty)."""
     section = _load(workdir).get("provider_failover")
     if not isinstance(section, dict):
@@ -254,7 +254,7 @@ def get_provider_cooldowns(workdir: str) -> Dict[str, float]:
     cooldowns = section.get("cooldowns")
     if not isinstance(cooldowns, dict):
         return {}
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     for key, ts in cooldowns.items():
         if isinstance(ts, (int, float)):
             out[str(key)] = float(ts)
@@ -326,7 +326,7 @@ def record_review(workdir: str, pr_number: int, reviewer: str, sha: str) -> None
     _save(workdir, state)
 
 
-def get_review_sha(workdir: str, pr_number: int, reviewer: str) -> Optional[str]:
+def get_review_sha(workdir: str, pr_number: int, reviewer: str) -> str | None:
     """Return the commit SHA at which *reviewer* last reviewed *pr_number*, or *None*."""
     state = _load(workdir)
     return state.get("reviews", {}).get(str(pr_number), {}).get(reviewer)
@@ -340,7 +340,7 @@ def get_review_sha(workdir: str, pr_number: int, reviewer: str) -> Optional[str]
 # can detect when either value has changed (e.g. to trigger re-injection of the
 # ``--model`` flag or re-evaluation of delegation blocks).
 
-def compute_config_fingerprint(coding_agent: Optional[str], model_default: Optional[str]) -> str:
+def compute_config_fingerprint(coding_agent: str | None, model_default: str | None) -> str:
     """Return a deterministic SHA-256 hex digest of *coding_agent* and *model_default*.
 
     Both values are coerced to strings (``None`` → ``""``) and encoded as a
@@ -363,7 +363,7 @@ def set_config_fingerprint(workdir: str, fingerprint: str) -> None:
     _save(workdir, state)
 
 
-def get_config_fingerprint(workdir: str) -> Optional[str]:
+def get_config_fingerprint(workdir: str) -> str | None:
     """Return the stored config fingerprint for *workdir*, or *None* if unset."""
     state = _load(workdir)
     fp = state.get("config_fingerprint")
@@ -385,7 +385,7 @@ def set_resync_fingerprint(workdir: str, fingerprint: str) -> None:
     _save(workdir, state)
 
 
-def get_resync_fingerprint(workdir: str) -> Optional[str]:
+def get_resync_fingerprint(workdir: str) -> str | None:
     """Return the stored resync fingerprint for *workdir*, or *None* if unset."""
     state = _load(workdir)
     fp = state.get("resync_fingerprint")
@@ -400,7 +400,7 @@ def get_resync_fingerprint(workdir: str) -> Optional[str]:
 # between ticks even if the fingerprint hasn't changed (e.g. if the fingerprint
 # is the same but the individual values did).
 
-def set_config_values(workdir: str, coding_agent: Optional[str], model_default: Optional[str]) -> None:
+def set_config_values(workdir: str, coding_agent: str | None, model_default: str | None) -> None:
     """Persist the resolved coding_agent and model.default for *workdir*.
 
     Used by the resync logic to compare last-resynced values against current
@@ -414,7 +414,7 @@ def set_config_values(workdir: str, coding_agent: Optional[str], model_default: 
     _save(workdir, state)
 
 
-def get_config_values(workdir: str) -> Optional[Dict[str, str]]:
+def get_config_values(workdir: str) -> dict[str, str] | None:
     """Return the stored config values for *workdir*, or *None* if unset.
 
     Returns a dict with keys "coding_agent" and "model_default". Both values

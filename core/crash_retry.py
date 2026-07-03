@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core import dispatch_state, kanban, provider_failover
 from core.util import extract_issue_number
@@ -113,7 +113,7 @@ _NON_CRASH_PREFIXES = (
 
 _DEFAULT_BACKOFF_MINUTES = [0, 15, 30, 60, 120]
 
-_DEFAULTS: Dict[str, Any] = {
+_DEFAULTS: dict[str, Any] = {
     "crash_retry_enabled": True,
     "max_crash_retries": 5,
     "crash_retry_backoff_minutes": _DEFAULT_BACKOFF_MINUTES,
@@ -127,7 +127,7 @@ def _has_non_crash_prefix(s: str) -> bool:
     return s.startswith(_NON_CRASH_PREFIXES)
 
 
-def classify(evidence: str) -> Optional[str]:
+def classify(evidence: str) -> str | None:
     """Return the trigger class of *evidence*, or None when not crash-class.
 
     Trigger classes (#1207): ``session_limit`` | ``quota_exceeded`` |
@@ -156,7 +156,7 @@ def classify(evidence: str) -> Optional[str]:
     return None
 
 
-def resolve_config(execution: Dict[str, Any]) -> Dict[str, Any]:
+def resolve_config(execution: dict[str, Any]) -> dict[str, Any]:
     """Resolve the crash-retry knobs from ``execution:`` over built-in defaults.
 
     Flat keys mirroring the existing retry-cap settings (``max_pm_retries``
@@ -195,7 +195,7 @@ def resolve_config(execution: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _backoff_seconds(attempts: int, cfg: Dict[str, Any]) -> float:
+def _backoff_seconds(attempts: int, cfg: dict[str, Any]) -> float:
     """Seconds to wait before attempt ``attempts + 1`` (stepped schedule).
 
     ``attempts`` completed retries index into the schedule; past the end the
@@ -207,7 +207,7 @@ def _backoff_seconds(attempts: int, cfg: Dict[str, Any]) -> float:
     return float(minutes) * 60.0
 
 
-def _card_evidence(slug: str, card: Dict[str, Any]) -> str:
+def _card_evidence(slug: str, card: dict[str, Any]) -> str:
     """Best-effort crash evidence: block summary + last_failure_error.
 
     ``list --json`` never populates summary/last_summary, so fall back to
@@ -227,7 +227,7 @@ def _card_evidence(slug: str, card: Dict[str, Any]) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
-def _gave_up_evidence_from_events(slug: str, task_id: str) -> Optional[str]:
+def _gave_up_evidence_from_events(slug: str, task_id: str) -> str | None:
     """Crash evidence from the card's event log, or None if not crash-class.
 
     The Hermes-core breaker does NOT leave a crash summary: it flips the card
@@ -279,7 +279,7 @@ def _already_escalated_on_card(slug: str, task_id: str) -> bool:
     )
 
 
-def is_crash_class(slug: str, card: Dict[str, Any], evidence: str = "") -> bool:
+def is_crash_class(slug: str, card: dict[str, Any], evidence: str = "") -> bool:
     """True when *card* is owned by the crash-retry reconciler.
 
     Used by the team-blockers / validator-blocks handlers to route crash-class
@@ -297,12 +297,12 @@ def is_crash_class(slug: str, card: Dict[str, Any], evidence: str = "") -> bool:
 def reconcile(
     slug: str,
     workdir: str,
-    execution: Dict[str, Any],
+    execution: dict[str, Any],
     *,
-    now: Optional[float] = None,
+    now: float | None = None,
     dry_run: bool = False,
-    failover: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    failover: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Retry / escalate crashed cards; return the actions taken this tick.
 
     Each returned action is a dict with ``task_id``, ``issue``, ``action``
@@ -343,7 +343,7 @@ def reconcile(
     if not cfg["crash_retry_enabled"]:
         return []
     ts = time.time() if now is None else float(now)
-    actions: List[Dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
 
     try:
         tasks = kanban.list_tasks(slug)
@@ -374,13 +374,13 @@ def reconcile(
 def _reconcile_card(
     slug: str,
     workdir: str,
-    cfg: Dict[str, Any],
-    card: Dict[str, Any],
+    cfg: dict[str, Any],
+    card: dict[str, Any],
     ts: float,
     dry_run: bool,
     candidate_ids: set,
-    failover: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
+    failover: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Apply the retry policy to one card. Returns an action dict or None."""
     status = (card.get("status") or "").lower()
     if status not in ("blocked", "gave_up"):
@@ -488,7 +488,7 @@ def _reconcile_card(
     # runs on; cap-exhausted providers cool down and the card moves to the
     # next one. May decide to wait (all candidates cooling) or escalate
     # (whole chain exhausted).
-    provider_state: Optional[Dict[str, Any]] = None
+    provider_state: dict[str, Any] | None = None
     provider_name = ""
     if plan:
         outcome = _apply_failover(slug, workdir, tid, card, plan, trigger, ts)
@@ -516,7 +516,7 @@ def _reconcile_card(
     # Persist the attempt BEFORE unblocking: a crash mid-tick cannot lose the
     # count, and a concurrent tick reading the state mid-flight sees the
     # attempt as spent and stays in backoff.
-    new_entry: Dict[str, Any] = {
+    new_entry: dict[str, Any] = {
         "first_crash_ts": first_ts,
         "attempts": attempt_n,
         "last_attempt_ts": ts,
@@ -566,11 +566,11 @@ def _reconcile_card(
 
 
 def _failover_plan(
-    failover: Optional[Dict[str, Any]],
+    failover: dict[str, Any] | None,
     trigger: str,
     evidence: str,
-    entry: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+    entry: dict[str, Any],
+) -> dict[str, Any] | None:
     """Build the per-card failover plan, or None when failover doesn't apply.
 
     Applies only when a context was supplied, the trigger is enabled in
@@ -616,7 +616,7 @@ def _failover_plan(
     }
 
 
-def _provider_snapshot(plan: Dict[str, Any]) -> Dict[str, Any]:
+def _provider_snapshot(plan: dict[str, Any]) -> dict[str, Any]:
     """Current provider bookkeeping of *plan*, for persistence / diagnostics."""
     return {
         "layer": plan["layer"],
@@ -630,8 +630,8 @@ def _apply_failover(
     slug: str,
     workdir: str,
     tid: str,
-    card: Dict[str, Any],
-    plan: Dict[str, Any],
+    card: dict[str, Any],
+    plan: dict[str, Any],
     trigger: str,
     ts: float,
 ):
@@ -746,16 +746,16 @@ def _escalate(
     slug: str,
     workdir: str,
     tid: str,
-    entry: Dict[str, Any],
-    card: Dict[str, Any],
+    entry: dict[str, Any],
+    card: dict[str, Any],
     evidence: str,
     attempts: int,
     max_attempts: int,
     elapsed_min: float,
-    issue_n: Optional[int],
+    issue_n: int | None,
     ts: float,
     dry_run: bool,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Exhausted retries → real hard block + diagnostics + notify action."""
     if dry_run:
         logger.info(
@@ -833,7 +833,7 @@ def _render_provider_history(provider: Any) -> str:
     """
     if not isinstance(provider, dict):
         return ""
-    lines: List[str] = []
+    lines: list[str] = []
     attempts = provider.get("attempts")
     if isinstance(attempts, dict) and attempts:
         tally = ", ".join(f"{k}: {v} attempt(s)" for k, v in attempts.items())

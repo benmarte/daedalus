@@ -36,7 +36,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
 
 from core.webhook_normalizer import normalize, verify_signature
 
@@ -65,7 +65,7 @@ def infer_provider(payload: dict) -> str:
     return "unknown"
 
 
-def headers_from_env(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+def headers_from_env(environ: dict[str, str] | None = None) -> dict[str, str]:
     """Reconstruct HTTP headers from CGI-style ``HTTP_*`` environment variables.
 
     A reverse proxy / CGI receiver exposes ``X-Hub-Signature-256`` as
@@ -73,7 +73,7 @@ def headers_from_env(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]
     title-cased header name that ``verify_signature`` looks up.
     """
     environ = os.environ if environ is None else environ
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
     for key, val in environ.items():
         if key.startswith("HTTP_") and len(key) > 5:
             name = "-".join(part.capitalize() for part in key[5:].split("_"))
@@ -83,8 +83,8 @@ def headers_from_env(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]
 
 def resolve_webhook_secret(
     config_loader=None,
-    list_projects: Optional[Callable[[], list]] = None,
-) -> Optional[str]:
+    list_projects: Callable[[], list] | None = None,
+) -> str | None:
     """Resolve the HMAC secret from ``vcs.webhook_secret_env`` across projects.
 
     The ready hook is a single global subscription, so there is no repo context
@@ -124,7 +124,7 @@ def resolve_webhook_secret(
 def resolve_scope(
     ev,
     config_loader=None,
-    list_projects: Optional[Callable[[], list]] = None,
+    list_projects: Callable[[], list] | None = None,
 ) -> str:
     """Resolve the local repo path a Ready event scopes to (issue #137).
 
@@ -155,7 +155,7 @@ def resolve_scope(
     return "ALL"
 
 
-def warn_no_secret_once(marker: Optional[Path] = None) -> None:
+def warn_no_secret_once(marker: Path | None = None) -> None:
     """Emit a single warning that signature verification is disabled.
 
     Uses a filesystem marker so the warning fires once per deployment rather
@@ -183,13 +183,13 @@ def warn_no_secret_once(marker: Optional[Path] = None) -> None:
 
 def handle_ready_event(
     raw_body: bytes,
-    headers: Optional[Dict[str, str]],
+    headers: dict[str, str] | None,
     *,
-    secret: Optional[str],
+    secret: str | None,
     normalize_fn: Callable = normalize,
     verify_fn: Callable = verify_signature,
-    resolve_scope_fn: Optional[Callable] = None,
-    on_missing_secret: Optional[Callable[[], None]] = None,
+    resolve_scope_fn: Callable | None = None,
+    on_missing_secret: Callable[[], None] | None = None,
 ) -> dict:
     """Decide what to do with one inbound webhook body. Pure — never dispatches.
 
@@ -231,7 +231,7 @@ def handle_ready_event(
     return {"status": "dispatched", "scope": scope}
 
 
-def _run_dispatch(scope: Optional[str]) -> None:
+def _run_dispatch(scope: str | None) -> None:
     """Fire daedalus-cron.sh in the background, optionally scoped to a repo."""
     cron = str(Path.home() / ".hermes" / "scripts" / "daedalus-cron.sh")
     cmd = ["bash", cron]
