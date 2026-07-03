@@ -275,7 +275,7 @@ def test_get_projects_degrade_gracefully_no_kanban(client):
 
 
 def test_get_projects_open_prs_mocked(client):
-    """open_prs returns mocked PR data with ci_status field."""
+    """open_prs returns mocked PR data with ci_status field from a single batch call."""
     mock_pr_data = [
         {"number": 42, "title": "Fix auth", "headRefName": "fix/auth", "state": "open"},
         {"number": 43, "title": "Add rate limit", "headRefName": "feat/rate-limit", "state": "open"},
@@ -287,7 +287,7 @@ def test_get_projects_open_prs_mocked(client):
         mock.MagicMock(number=p["number"], title=p["title"],
                        head_branch=p["headRefName"]) for p in mock_pr_data
     ]
-    fake_provider.get_pr_ci_status.side_effect = ["green", "red"]
+    fake_provider.get_pr_ci_status_batch.return_value = {42: "green", 43: "red"}
 
     with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
         mock_list.return_value = []
@@ -305,6 +305,64 @@ def test_get_projects_open_prs_mocked(client):
     assert prs["prs"][0]["ci_status"] == "green"
     assert prs["prs"][1]["number"] == 43
     assert prs["prs"][1]["ci_status"] == "red"
+    # Single batch call instead of N per-PR calls
+    fake_provider.get_pr_ci_status_batch.assert_called_once_with([42, 43])
+    fake_provider.get_pr_ci_status.assert_not_called()
+
+
+def test_get_projects_open_prs_batch_partial_failure(client):
+    """PRs missing from the batch result show ci_status None (unknown/pending)."""
+    mock_pr_data = [
+        {"number": 10, "title": "PR A", "headRefName": "fix/a", "state": "open"},
+        {"number": 20, "title": "PR B", "headRefName": "fix/b", "state": "open"},
+        {"number": 30, "title": "PR C", "headRefName": "fix/c", "state": "open"},
+    ]
+
+    fake_provider = mock.MagicMock()
+    fake_provider.supports_ci_status = True
+    fake_provider.list_prs.return_value = [
+        mock.MagicMock(number=p["number"], title=p["title"],
+                       head_branch=p["headRefName"]) for p in mock_pr_data
+    ]
+    # Only PR 20 returned — PRs 10 and 30 are missing (partial failure)
+    fake_provider.get_pr_ci_status_batch.return_value = {20: "green"}
+
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        with mock.patch("dashboard.plugin_api.get_provider",
+                        return_value=fake_provider):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+
+    prs = data[0]["open_prs"]
+    assert prs["count"] == 3
+    statuses = {pr["number"]: pr["ci_status"] for pr in prs["prs"]}
+    assert statuses[20] == "green"
+    assert statuses[10] is None
+    assert statuses[30] is None
+
+
+def test_get_projects_open_prs_batch_provider_raises(client):
+    """When the batch call raises, all PRs get ci_status None (graceful degradation)."""
+    fake_provider = mock.MagicMock()
+    fake_provider.supports_ci_status = True
+    fake_provider.list_prs.return_value = [
+        mock.MagicMock(number=50, title="PR X", head_branch="fix/x")
+    ]
+    fake_provider.get_pr_ci_status_batch.side_effect = RuntimeError("API down")
+
+    with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+        mock_list.return_value = []
+        with mock.patch("dashboard.plugin_api.get_provider",
+                        return_value=fake_provider):
+            resp = client.get("/api/plugins/daedalus/projects")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+
+    prs = data[0]["open_prs"]
+    assert prs["count"] == 1
+    assert prs["prs"][0]["ci_status"] is None
 
 
 def test_get_projects_graceful_degradation_when_sources_return_nothing(client):

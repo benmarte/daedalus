@@ -565,15 +565,18 @@ def _open_prs(provider) -> Optional[dict[str, Any]]:
         return None
     if not prs:
         return None
+    # Batch CI status: one provider call for all PRs instead of N per-PR calls.
+    pr_numbers: list[int] = [int(pr.number) for pr in prs if pr.number is not None]
+    ci_batch: dict[int, str] = {}
+    if pr_numbers and getattr(provider, "supports_ci_status", False):
+        try:
+            ci_batch = provider.get_pr_ci_status_batch(pr_numbers) or {}
+        except Exception as exc:
+            logger.warning("vcs: get_pr_ci_status_batch failed for %d PRs: %s", len(pr_numbers), exc)
+            ci_batch = {}
     pr_list: list[dict[str, Any]] = []
     for pr in prs:
-        ci_status = None
-        if pr.number is not None and provider.supports_ci_status:
-            try:
-                ci_status = provider.get_pr_ci_status(int(pr.number))
-            except Exception as exc:
-                logger.warning("vcs: get_pr_ci_status failed for PR #%s: %s", pr.number, exc)
-                ci_status = None
+        ci_status = ci_batch.get(int(pr.number)) if pr.number is not None else None
         pr_list.append({
             "number": pr.number,
             "title": pr.title,
