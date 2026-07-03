@@ -1,3 +1,5 @@
+## [feat: QA agent should skip local test suite when CI is already green on the PR](https://github.com/benmarte/daedalus/issues/1118) — [PR #1225](https://github.com/benmarte/daedalus/pull/1225)
+
 ## [perf: batch PR CI status lookups in dashboard open-PRs list](https://github.com/benmarte/daedalus/issues/1143) — [PR #1219](https://github.com/benmarte/daedalus/pull/1219)
 
 ## [docs: add CLAUDE.md — module map, invariants, and agent-maintainer guide](https://github.com/benmarte/daedalus/issues/1137) — [PR #1221](https://github.com/benmarte/daedalus/pull/1221)
