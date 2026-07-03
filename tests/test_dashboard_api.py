@@ -306,6 +306,11 @@ def test_get_projects_open_prs_mocked(client):
     assert prs["prs"][0]["ci_status"] == "green"
     assert prs["prs"][1]["number"] == 43
     assert prs["prs"][1]["ci_status"] == "red"
+    # ── batch verification (#1143) ────────────────────────────────────────
+    # One batch call — not one per PR.
+    fake_provider.get_prs_ci_status.assert_called_once_with([42, 43])
+    # The sequential per-PR method must NOT be called on the success path.
+    fake_provider.get_pr_ci_status.assert_not_called()
 
 
 def test_get_projects_open_prs_batch_fallback_to_sequential(client):
