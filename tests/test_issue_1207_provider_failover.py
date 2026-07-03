@@ -505,7 +505,7 @@ def test_single_element_chain_reproduces_1205_behavior(fake, tmp_path):
     """Back-compat: a one-element chain (legacy config) never rotates and the
     flat #1205 caps govern escalation."""
     wd = str(tmp_path)
-    fk = fake([_card()])
+    fake([_card()])
     applied: List[tuple] = []
     ctx = _ctx(applied, coding=[{"name": "claude-code", "cmd": "claude -p"}])
     acts = crash_retry.reconcile("p", wd, {}, now=T0 + 1 * MIN, failover=ctx)

@@ -1481,7 +1481,9 @@ async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
     if not provider.supports_labels:
         return {"repo": repo, "labels": []}
     try:
-        labels = [{"name": l.name, "color": l.color} for l in provider.list_labels()]
+        labels = [
+            {"name": lbl.name, "color": lbl.color} for lbl in provider.list_labels()
+        ]
         return {"repo": repo, "labels": labels}
     except Exception as exc:
         import logging
