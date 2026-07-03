@@ -1309,6 +1309,20 @@ Each piece exists because the obvious approach failed:
   looping silently. Configurable via `execution.crash_retry` knobs in
   `templates/daedalus.yaml`. This replaces the old silent-stuck behaviour where
   a crashed agent card sat indefinitely in `running`.
+- **Orphaned worktree sweep** (`scripts/daedalus_dispatch.py`, issue #1114) —
+  agents are instructed to `git worktree remove --force` on cleanup, but a crashed
+  or reclaimed agent leaves its worktree behind and they accumulate unboundedly
+  (25+ orphans had accumulated under `.worktrees/`). `_sweep_orphan_worktrees()`
+  runs once per dispatch tick (right after `kanban.ensure_board`): it enumerates
+  registered worktrees via `git worktree list --porcelain`, attributes each to an
+  issue number (branch `fix/issue-<N>`, falling back to a `dev-<N>`/`issue-<N>`
+  directory name), and removes any whose issue has no active (non-terminal) kanban
+  task via `git worktree remove --force`, then prunes stale metadata. The main
+  worktree and unattributable entries (detached QA trees, scratch branches) are
+  always skipped. Every removal is individually wrapped — a failed remove (locked
+  worktree, permission error) is logged at WARNING and skipped; the tick never
+  aborts. If the kanban board cannot be read, the sweep aborts without removing
+  anything (never sweeps blind). The function never raises.
 - **Tier promotion** — epic decomposition produces multiple sub-issues, but marking
   all of them `Ready` at once overwhelms the validator pipeline and bypasses dependency
   semantics. Instead, sub-issues with no declared blockers get the `Ready` label on
@@ -1426,7 +1440,7 @@ on its board.
 
 | Path | What it is |
 |------|------------|
-| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect. Exits non-zero (1) when at least one project ran and every project errored, so cron mail-on-error and CI gates can detect total dispatch failure (issue #1112). Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
+| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect, orphaned-worktree sweep (issue #1114). Exits non-zero (1) when at least one project ran and every project errored, so cron mail-on-error and CI gates can detect total dispatch failure (issue #1112). Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
