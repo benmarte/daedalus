@@ -4506,7 +4506,7 @@ def _check_confirmed_validators(
     _issue_fetch_cache: Dict[int, Any] = {}
     _gh_outcome_cache: Dict[int, str] = {}
     # Shared across all advancement functions in one tick when passed from run() (#1115).
-    _closed_issue_cache: Dict[int, bool] = (
+    _closed_issue_cache: Dict[int, Optional[bool]] = (
         closed_issue_cache if closed_issue_cache is not None else {}
     )
 
@@ -4537,10 +4537,14 @@ def _check_confirmed_validators(
             n_nr = extract_issue_number(task.get("title") or "")
             if n_nr is None:
                 continue
-            # Skip stale tasks for already-closed issues (issue #1115).
-            if _is_issue_closed_cached(provider, n_nr, _closed_issue_cache):
+            # Skip stale tasks for closed/unknown issues (issues #1115, #1120).
+            if (
+                _is_issue_closed_cached(provider, n_nr, _closed_issue_cache)
+                is not False
+            ):
                 logger.debug(
-                    "dispatch: skipping done validator task for closed issue #%s", n_nr
+                    "dispatch: skipping done validator task for closed/unknown issue #%s",
+                    n_nr,
                 )
                 continue
             if summary.startswith("escalate:"):
@@ -5073,10 +5077,11 @@ def _check_confirmed_validators(
         n = extract_issue_number(task.get("title") or "")
         if n is None:
             continue
-        # Skip CONFIRMED cards for already-closed issues (issue #1115).
-        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
+        # Skip CONFIRMED cards for closed/unknown issues (issues #1115, #1120).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache) is not False:
             logger.debug(
-                "dispatch: skipping CONFIRMED validator task for closed issue #%s", n
+                "dispatch: skipping CONFIRMED validator task for closed/unknown issue #%s",
+                n,
             )
             continue
         pm_state, stale_count = _pm_task_state(slug, n, p["pm"])
@@ -5244,7 +5249,7 @@ def _check_completed_planner(
 
     p = profiles or _DEFAULT_PROFILES
     triggered: List[int] = []
-    _closed_issue_cache: Dict[int, bool] = (
+    _closed_issue_cache: Dict[int, Optional[bool]] = (
         closed_issue_cache if closed_issue_cache is not None else {}
     )
     for task in kanban.list_tasks(slug, status="done"):
@@ -5269,9 +5274,11 @@ def _check_completed_planner(
         n = extract_issue_number(task.get("title") or "")
         if n is None:
             continue
-        # Skip done planner tasks for already-closed issues (issue #1115).
-        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
-            logger.debug("dispatch: skipping done planner task for closed issue #%s", n)
+        # Skip done planner tasks for closed/unknown issues (issues #1115, #1120).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache) is not False:
+            logger.debug(
+                "dispatch: skipping done planner task for closed/unknown issue #%s", n
+            )
             continue
         logger.info("dispatch: planner PLANNING COMPLETE #%s — triggering decompose", n)
         # Use a minimal body with ONLY the bare issue number so that
@@ -5361,6 +5368,7 @@ def _check_planner_not_suitable(
     *,
     dry_run: bool = False,
     provider=None,
+    closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
 ) -> List[int]:
     """Reroute a planner card signaling 'NOT SUITABLE FOR DECOMPOSITION'.
 
@@ -5389,6 +5397,9 @@ def _check_planner_not_suitable(
     rs = role_skills or {}
     triggered: List[int] = []
     processed_ids: set = set()
+    _closed_issue_cache: Dict[int, Optional[bool]] = (
+        closed_issue_cache if closed_issue_cache is not None else {}
+    )
 
     # Scan both done and blocked cards. The done cards are the normal path;
     # blocked cards are defense in depth (soul says "always complete", but the
@@ -5427,6 +5438,17 @@ def _check_planner_not_suitable(
                 logger.debug(
                     "dispatch: planner NOT SUITABLE #%s — no issue number in title, skipping",
                     task.get("title", "<untitled>"),
+                )
+                continue
+
+            # Skip planner-NOT-SUITABLE cards for closed/unknown issues so the
+            # dispatcher stops spawning validators for already-closed issues
+            # (issue #1120 — the guard PR #1117 added to the other 5 scans but
+            # missed here). ``None`` (rate-limited/unknown) is treated as skip.
+            if _is_issue_closed_cached(provider, n, _closed_issue_cache) is not False:
+                logger.debug(
+                    "dispatch: skipping planner NOT SUITABLE task for closed/unknown issue #%s",
+                    n,
                 )
                 continue
 
@@ -5578,17 +5600,35 @@ def _fetch_issue_with_retry(provider, n: int):
 
 
 def _is_issue_closed_cached(
-    provider, issue_number: int, cache: Dict[int, bool]
-) -> bool:
-    """Return True if the GitHub issue is closed. Memoizes per-tick to avoid redundant API calls.
+    provider, issue_number: int, cache: Dict[int, Optional[bool]]
+) -> Optional[bool]:
+    """Three-state closed-issue check, memoized per-tick to avoid redundant API calls.
 
-    Uses ``provider.get_issue_state`` when available; fails open (returns False)
-    if the provider does not support the method so tests without a full provider
-    are not affected.
+    Returns:
+        ``True``  — the GitHub issue is confirmed closed.
+        ``False`` — the issue is confirmed open (or no provider/method is
+                    available, so we fail open for tests without a full provider).
+        ``None``  — the state is *unknown*: ``provider.get_issue_state`` raised
+                    (e.g. a 403 rate-limit error). Callers MUST treat ``None`` as
+                    "skip / do not process" rather than "open", otherwise the
+                    stale scan keeps processing under rate limit and reinforces
+                    the very rate limiting that defeats this guard (issue #1120).
+
+    Callers should therefore gate on ``is not False`` (skip when closed *or*
+    unknown) rather than the plain truthiness of the return value.
     """
     if issue_number not in cache:
         if provider is not None and hasattr(provider, "get_issue_state"):
-            cache[issue_number] = provider.get_issue_state(issue_number) == "closed"
+            try:
+                cache[issue_number] = provider.get_issue_state(issue_number) == "closed"
+            except Exception as exc:  # rate limit / transient API error
+                logger.warning(
+                    "dispatch: get_issue_state(#%s) failed (%s) — treating state as "
+                    "unknown and skipping to avoid reinforcing rate limiting (#1120)",
+                    issue_number,
+                    exc,
+                )
+                cache[issue_number] = None
         else:
             cache[issue_number] = False
     return cache[issue_number]
@@ -5625,7 +5665,7 @@ def _check_completed_pm(
     rs = role_skills or {}
     ra = role_agents or {}
     triggered: List[int] = []
-    _closed_issue_cache: Dict[int, bool] = (
+    _closed_issue_cache: Dict[int, Optional[bool]] = (
         closed_issue_cache if closed_issue_cache is not None else {}
     )
     for task in kanban.list_tasks(slug, status="done"):
@@ -5664,9 +5704,11 @@ def _check_completed_pm(
         n = extract_issue_number(task.get("title") or "")
         if n is None:
             continue
-        # Skip done PM tasks for already-closed issues (issue #1115).
-        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
-            logger.debug("dispatch: skipping done PM task for closed issue #%s", n)
+        # Skip done PM tasks for closed/unknown issues (issues #1115, #1120).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache) is not False:
+            logger.debug(
+                "dispatch: skipping done PM task for closed/unknown issue #%s", n
+            )
             continue
         if _has_downstream_tasks(
             slug, n, validator_profile=p["validator"], pm_profile=p["pm"]
@@ -5887,7 +5929,7 @@ def _check_completed_developer(
     rs = role_skills or {}
     ra = role_agents or {}
     triggered: List[int] = []
-    _closed_issue_cache: Dict[int, bool] = (
+    _closed_issue_cache: Dict[int, Optional[bool]] = (
         closed_issue_cache if closed_issue_cache is not None else {}
     )
     for task in kanban.list_tasks(slug, status="done"):
@@ -5902,10 +5944,10 @@ def _check_completed_developer(
         n = extract_issue_number(task.get("title") or "")
         if n is None:
             continue
-        # Skip done developer tasks for already-closed issues (issue #1115).
-        if _is_issue_closed_cached(provider, n, _closed_issue_cache):
+        # Skip done developer tasks for closed/unknown issues (issues #1115, #1120).
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache) is not False:
             logger.debug(
-                "dispatch: skipping done developer task for closed issue #%s", n
+                "dispatch: skipping done developer task for closed/unknown issue #%s", n
             )
             continue
         # Check if there's already a running developer task for this issue
@@ -6873,7 +6915,7 @@ def run(
 
     # Single per-tick closed-issue cache shared across all advancement functions
     # so each unique issue number requires at most one get_issue_state() call (#1115).
-    _tick_closed_cache: Dict[int, bool] = {}
+    _tick_closed_cache: Dict[int, Optional[bool]] = {}
 
     confirmed_triggered = _check_confirmed_validators(
         slug,
@@ -6924,6 +6966,7 @@ def run(
         notify_targets=_sec_targets,
         dry_run=dry_run,
         provider=provider,
+        closed_issue_cache=_tick_closed_cache,
     )
     if planner_not_suitable_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
