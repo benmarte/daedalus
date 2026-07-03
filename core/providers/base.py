@@ -363,6 +363,7 @@ class VCSProvider(abc.ABC):
     name: str = "base"
     supports_boards: bool = False
     supports_ci_status: bool = False
+    supports_ci_rerun: bool = False
     supports_pr_comments: bool = False
     supports_labels: bool = False
     supports_branches: bool = False
@@ -575,6 +576,27 @@ class VCSProvider(abc.ABC):
 
     def pr_ci_green(self, pr_number: int) -> bool:
         return self.get_pr_ci_status(pr_number) == CIStatus.GREEN
+
+    def get_pr_head_sha(self, pr_number: int) -> Optional[str]:
+        """Head commit SHA of a PR — keys the bounded CI-rerun budget (#1199).
+        Returns None when unknown; providers that support it override."""
+        return None
+
+    def rerun_failed_ci(self, pr_number: int) -> bool:
+        """Re-run only the failed CI jobs for a PR's head commit (#1199).
+
+        Used by the deferred-merge sweep to clear a *transiently* red CI on an
+        otherwise pipeline-complete PR. Returns True if a re-run was issued,
+        False if there was nothing to re-run or the request failed. Default is a
+        no-op so callers can invoke it without checking provider type; providers
+        that support it override and set ``supports_ci_rerun = True``."""
+        return False
+
+    def failed_ci_run_url(self, pr_number: int) -> Optional[str]:
+        """Web URL of the most recent failed CI run for a PR — surfaced in the
+        escalation message when CI stays red after the re-run budget is spent
+        (#1199). Returns None when unknown; providers override."""
+        return None
 
     # ── PR comments / delivery markers ───────────────────────────────────────
     def list_pr_comments(self, pr_number: int) -> List[Comment]:

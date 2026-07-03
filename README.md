@@ -1280,6 +1280,20 @@ Each piece exists because the obvious approach failed:
   `no findings` for security). If either gate has not passed, the merge is skipped with a
   warning log. A `skip-qa` label bypasses both gates (preserving the pre-existing skip-qa
   behaviour per issue #1074 non-regression).
+- **Bounded CI re-run for deferred-merge PRs** (`core/iterate.py`, issue #1199) —
+  the deferred-merge sweep (`sweep_deferred_merges`) re-checks all gates every tick
+  and merges once they pass, but a transiently-red CI check (e.g. a flaky test under
+  `pytest -n auto`) permanently stranded otherwise-mergeable PRs — nothing triggered
+  a re-run. For a pipeline-complete PR whose required CI is genuinely **RED** (not
+  PENDING/UNKNOWN), the sweep now bounded-retries the failed CI run via a new
+  `rerun_failed_ci()` provider capability, capped at **N=2 re-runs per PR head SHA**.
+  Attempts are tracked idempotently by per-SHA marker comments on the PR
+  (`<!-- daedalus:ci-rerun:<sha>:<n> -->`), so same-tick re-invocation never exceeds
+  the budget; a new head SHA (branch pushed) grants a fresh budget. After the budget
+  is spent and CI is still red, the sweep **escalates** — posts a PR comment with the
+  failing-run URL (`<!-- daedalus:ci-escalated:<sha> -->`) and logs a warning instead
+  of looping. Natural inter-tick backoff: issuing a re-run flips CI to PENDING, so
+  the sweep won't act again until it settles back to RED — no timer needed.
 - **Tier promotion** — epic decomposition produces multiple sub-issues, but marking
   all of them `Ready` at once overwhelms the validator pipeline and bypasses dependency
   semantics. Instead, sub-issues with no declared blockers get the `Ready` label on
