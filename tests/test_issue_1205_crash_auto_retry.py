@@ -77,16 +77,29 @@ def fake(monkeypatch):
     return _make
 
 
-def _card(tid="t_1", status="blocked", summary="", title="developer: #42 fix thing",
-          assignee="developer-daedalus", **extra):
-    return {"id": tid, "status": status, "summary": summary,
-            "title": title, "assignee": assignee, **extra}
+def _card(
+    tid="t_1",
+    status="blocked",
+    summary="",
+    title="developer: #42 fix thing",
+    assignee="developer-daedalus",
+    **extra,
+):
+    return {
+        "id": tid,
+        "status": status,
+        "summary": summary,
+        "title": title,
+        "assignee": assignee,
+        **extra,
+    }
 
 
 CRASH = "coding-agent-failed: CODING_AGENT_DIED — see stderr above"
 
 
 # ── classification ────────────────────────────────────────────────────────────
+
 
 @pytest.mark.parametrize(
     "evidence,expected",
@@ -113,6 +126,7 @@ def test_classify(evidence, expected):
 
 # ── config resolver ───────────────────────────────────────────────────────────
 
+
 def test_resolve_config_defaults():
     cfg = crash_retry.resolve_config({})
     assert cfg["crash_retry_enabled"] is True
@@ -122,7 +136,13 @@ def test_resolve_config_defaults():
     assert cfg["crash_retry_window_hours"] == 6
     # copies — mutating the result must not corrupt the defaults
     cfg["crash_retry_backoff_minutes"].append(999)
-    assert crash_retry.resolve_config({})["crash_retry_backoff_minutes"] == [0, 15, 30, 60, 120]
+    assert crash_retry.resolve_config({})["crash_retry_backoff_minutes"] == [
+        0,
+        15,
+        30,
+        60,
+        120,
+    ]
 
 
 def test_resolve_config_overrides_and_fallbacks():
@@ -158,11 +178,17 @@ def test_disabled_reconciler_is_noop(fake, tmp_path):
 
 # ── state persistence ─────────────────────────────────────────────────────────
 
+
 def test_state_roundtrip(tmp_path):
     wd = str(tmp_path)
     assert dispatch_state.get_crash_retry(wd, "t_x") is None
-    entry = {"first_crash_ts": T0, "attempts": 2, "last_attempt_ts": T0,
-             "escalated": False, "class": "crash"}
+    entry = {
+        "first_crash_ts": T0,
+        "attempts": 2,
+        "last_attempt_ts": T0,
+        "escalated": False,
+        "class": "crash",
+    }
     dispatch_state.set_crash_retry(wd, "t_x", entry)
     assert dispatch_state.get_crash_retry(wd, "t_x") == entry
     assert dispatch_state.all_crash_retry(wd) == {"t_x": entry}
@@ -181,6 +207,7 @@ def test_state_tolerates_malformed_table(tmp_path):
 
 
 # ── (a) crash → retried on next tick ─────────────────────────────────────────
+
 
 def test_crash_blocked_card_retried_next_tick(fake, tmp_path):
     fk = fake([_card(summary=CRASH)])
@@ -210,9 +237,18 @@ def test_blocked_card_classified_via_last_failure_error(fake, tmp_path):
 def test_breaker_blocked_card_detected_via_gave_up_event(fake, tmp_path):
     """Primary incident case: the hermes-core breaker blocks the card with an
     EMPTY summary — the crash only exists as a ``gave_up`` task event."""
-    fk = fake([_card(summary="",
-                     events=[{"type": "blocked"}, {"type": "unblocked"},
-                             {"type": "gave_up", "error": "pid not alive (run 2484)"}])])
+    fk = fake(
+        [
+            _card(
+                summary="",
+                events=[
+                    {"type": "blocked"},
+                    {"type": "unblocked"},
+                    {"type": "gave_up", "error": "pid not alive (run 2484)"},
+                ],
+            )
+        ]
+    )
     actions = crash_retry.reconcile("board", str(tmp_path), {}, now=T0)
     assert [a["action"] for a in actions] == ["retried"]
     assert "pid not alive" in fk.unblocked[0][1]
@@ -221,10 +257,18 @@ def test_breaker_blocked_card_detected_via_gave_up_event(fake, tmp_path):
 def test_blocked_event_after_gave_up_is_not_crash_class(fake, tmp_path):
     """A worker/human block AFTER the breaker episode owns the card — the most
     recent lifecycle event is ``blocked``, so the reconciler must not touch it."""
-    fk = fake([_card(summary="",
-                     events=[{"type": "gave_up", "error": "pid not alive"},
-                             {"type": "unblocked"},
-                             {"type": "blocked", "reason": "human hold"}])])
+    fk = fake(
+        [
+            _card(
+                summary="",
+                events=[
+                    {"type": "gave_up", "error": "pid not alive"},
+                    {"type": "unblocked"},
+                    {"type": "blocked", "reason": "human hold"},
+                ],
+            )
+        ]
+    )
     actions = crash_retry.reconcile("board", str(tmp_path), {}, now=T0)
     assert actions == [] and fk.unblocked == []
 
@@ -253,7 +297,9 @@ def test_non_crash_blocks_never_auto_unblocked(fake, tmp_path):
 def test_backoff_schedule_gates_next_retry(fake, tmp_path):
     wd = str(tmp_path)
     fk = fake([_card(summary=CRASH)])
-    crash_retry.reconcile("board", wd, {}, now=T0)  # attempt 1 (schedule[0]=0 → immediate)
+    crash_retry.reconcile(
+        "board", wd, {}, now=T0
+    )  # attempt 1 (schedule[0]=0 → immediate)
     fk.cards["t_1"]["status"] = "blocked"  # crashed again right away
     actions = crash_retry.reconcile("board", wd, {}, now=T0 + 5 * MIN)
     assert actions == [] and len(fk.unblocked) == 1  # inside the 15-min step
@@ -265,13 +311,20 @@ def test_backoff_schedule_gates_next_retry(fake, tmp_path):
 
 # ── (b) cooldown resets the counter ───────────────────────────────────────────
 
+
 def test_cooldown_resets_episode(fake, tmp_path):
     wd = str(tmp_path)
     fake([_card(summary=CRASH)])
     dispatch_state.set_crash_retry(
-        wd, "t_1",
-        {"first_crash_ts": T0 - 5 * HOUR, "attempts": 4,
-         "last_attempt_ts": T0 - 3 * HOUR, "escalated": False, "class": "crash"},
+        wd,
+        "t_1",
+        {
+            "first_crash_ts": T0 - 5 * HOUR,
+            "attempts": 4,
+            "last_attempt_ts": T0 - 3 * HOUR,
+            "escalated": False,
+            "class": "crash",
+        },
     )
     actions = crash_retry.reconcile("board", wd, {}, now=T0)
     assert [a["action"] for a in actions] == ["retried"]
@@ -282,13 +335,20 @@ def test_cooldown_resets_episode(fake, tmp_path):
 
 # ── (c) exhaustion → escalate once with diagnostics, no loop ─────────────────
 
+
 def test_attempt_cap_escalates_once_with_diagnostics(fake, tmp_path):
     wd = str(tmp_path)
     fk = fake([_card(summary=CRASH)])
     dispatch_state.set_crash_retry(
-        wd, "t_1",
-        {"first_crash_ts": T0 - HOUR, "attempts": 5,
-         "last_attempt_ts": T0 - 20 * MIN, "escalated": False, "class": "crash"},
+        wd,
+        "t_1",
+        {
+            "first_crash_ts": T0 - HOUR,
+            "attempts": 5,
+            "last_attempt_ts": T0 - 20 * MIN,
+            "escalated": False,
+            "class": "crash",
+        },
     )
     actions = crash_retry.reconcile("board", wd, {}, now=T0)
     assert [a["action"] for a in actions] == ["escalated"]
@@ -310,9 +370,15 @@ def test_wall_clock_window_escalates(fake, tmp_path):
     wd = str(tmp_path)
     fk = fake([_card(summary=CRASH)])
     dispatch_state.set_crash_retry(
-        wd, "t_1",
-        {"first_crash_ts": T0 - 7 * HOUR, "attempts": 2,
-         "last_attempt_ts": T0 - 90 * MIN, "escalated": False, "class": "crash"},
+        wd,
+        "t_1",
+        {
+            "first_crash_ts": T0 - 7 * HOUR,
+            "attempts": 2,
+            "last_attempt_ts": T0 - 90 * MIN,
+            "escalated": False,
+            "class": "crash",
+        },
     )
     actions = crash_retry.reconcile("board", wd, {}, now=T0)
     assert [a["action"] for a in actions] == ["escalated"]
@@ -324,9 +390,15 @@ def test_escalation_marker_on_card_survives_state_loss(fake, tmp_path):
     fk = fake([_card(summary=CRASH)])
     fk.comments["t_1"] = [crash_retry.ESCALATED_MARKER + "\nolder escalation"]
     dispatch_state.set_crash_retry(
-        wd, "t_1",
-        {"first_crash_ts": T0 - HOUR, "attempts": 5,
-         "last_attempt_ts": T0 - 20 * MIN, "escalated": False, "class": "crash"},
+        wd,
+        "t_1",
+        {
+            "first_crash_ts": T0 - HOUR,
+            "attempts": 5,
+            "last_attempt_ts": T0 - 20 * MIN,
+            "escalated": False,
+            "class": "crash",
+        },
     )
     actions = crash_retry.reconcile("board", wd, {}, now=T0)
     assert actions == []  # dedup — no double notification
@@ -335,6 +407,7 @@ def test_escalation_marker_on_card_survives_state_loss(fake, tmp_path):
 
 
 # ── (d) success mid-retry clears the episode ──────────────────────────────────
+
 
 def test_recovered_card_clears_state(fake, tmp_path):
     wd = str(tmp_path)
@@ -350,9 +423,15 @@ def test_manual_unblock_of_escalated_card_resets_counter(fake, tmp_path):
     wd = str(tmp_path)
     fk = fake([_card(summary=CRASH)])
     dispatch_state.set_crash_retry(
-        wd, "t_1",
-        {"first_crash_ts": T0, "attempts": 5, "last_attempt_ts": T0,
-         "escalated": True, "class": "crash"},
+        wd,
+        "t_1",
+        {
+            "first_crash_ts": T0,
+            "attempts": 5,
+            "last_attempt_ts": T0,
+            "escalated": True,
+            "class": "crash",
+        },
     )
     fk.cards["t_1"]["status"] = "ready"  # human ran `hermes kanban unblock`
     crash_retry.reconcile("board", wd, {}, now=T0 + MIN)
@@ -360,6 +439,7 @@ def test_manual_unblock_of_escalated_card_resets_counter(fake, tmp_path):
 
 
 # ── (e) idempotency / no duplicate workers ────────────────────────────────────
+
 
 def test_two_ticks_same_instant_single_redispatch(fake, tmp_path):
     wd = str(tmp_path)
@@ -416,25 +496,41 @@ disp = _load_dispatch()
 
 
 def _blocked_card(tid, assignee, summary, title):
-    return {"id": tid, "assignee": assignee, "summary": summary,
-            "last_summary": summary, "title": title, "status": "blocked"}
+    return {
+        "id": tid,
+        "assignee": assignee,
+        "summary": summary,
+        "last_summary": summary,
+        "title": title,
+        "status": "blocked",
+    }
 
 
 def test_team_blockers_skip_crash_class_summary():
     """Crash-class blocks get a REAL re-dispatch from the reconciler — the
     advisory-only PM consultation must not be created for them."""
     card = _blocked_card(
-        "t_c1", "developer-daedalus",
+        "t_c1",
+        "developer-daedalus",
         "coding-agent-failed: CODING_AGENT_DIED — see stderr above",
         "#75 Developer: fix bug",
     )
     issue = {"number": 75, "title": "fix bug", "body": ""}
-    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
-         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
-         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
-         mock.patch.object(disp.kanban, "create_task") as mk_create:
+    with (
+        mock.patch.object(disp.kanban, "list_blocked", return_value=[card]),
+        mock.patch.object(
+            disp.kanban, "get_latest_summary", return_value=card["summary"]
+        ),
+        mock.patch.object(disp.kanban, "list_tasks", return_value=[]),
+        mock.patch.object(disp.kanban, "create_task") as mk_create,
+    ):
         triggered = disp._check_team_blockers(
-            "slug", "org/repo", {75: issue}, "/w", "dev", "github",
+            "slug",
+            "org/repo",
+            {75: issue},
+            "/w",
+            "dev",
+            "github",
         )
     assert mk_create.call_count == 0 and triggered == []
 
@@ -442,34 +538,60 @@ def test_team_blockers_skip_crash_class_summary():
 def test_team_blockers_skip_breaker_gave_up_event_card():
     """Breaker-blocked card (empty summary, gave_up event) is crash-class."""
     card = _blocked_card("t_c2", "developer-daedalus", "", "#76 Developer: fix bug")
-    shown = {**card, "events": [{"type": "gave_up", "error": "pid not alive"}],
-             "comments": []}
+    shown = {
+        **card,
+        "events": [{"type": "gave_up", "error": "pid not alive"}],
+        "comments": [],
+    }
     issue = {"number": 76, "title": "fix bug", "body": ""}
-    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
-         mock.patch.object(disp.kanban, "get_latest_summary", return_value=""), \
-         mock.patch.object(disp.kanban, "show_card", return_value=shown), \
-         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
-         mock.patch.object(disp.kanban, "create_task") as mk_create:
+    with (
+        mock.patch.object(disp.kanban, "list_blocked", return_value=[card]),
+        mock.patch.object(disp.kanban, "get_latest_summary", return_value=""),
+        mock.patch.object(disp.kanban, "show_card", return_value=shown),
+        mock.patch.object(disp.kanban, "list_tasks", return_value=[]),
+        mock.patch.object(disp.kanban, "create_task") as mk_create,
+    ):
         triggered = disp._check_team_blockers(
-            "slug", "org/repo", {76: issue}, "/w", "dev", "github",
+            "slug",
+            "org/repo",
+            {76: issue},
+            "/w",
+            "dev",
+            "github",
         )
     assert mk_create.call_count == 0 and triggered == []
 
 
 def test_team_blockers_still_consult_for_genuine_blocker():
     card = _blocked_card(
-        "t_c3", "developer-daedalus",
+        "t_c3",
+        "developer-daedalus",
         "cannot determine VCS provider credentials",
         "#77 Developer: fix auth bug",
     )
     issue = {"number": 77, "title": "fix auth bug", "body": ""}
-    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
-         mock.patch.object(disp.kanban, "get_latest_summary", return_value=card["summary"]), \
-         mock.patch.object(disp.kanban, "show_card", return_value={**card, "events": [], "comments": []}), \
-         mock.patch.object(disp.kanban, "list_tasks", return_value=[]), \
-         mock.patch.object(disp.kanban, "create_task", return_value="t_consult") as mk_create:
+    with (
+        mock.patch.object(disp.kanban, "list_blocked", return_value=[card]),
+        mock.patch.object(
+            disp.kanban, "get_latest_summary", return_value=card["summary"]
+        ),
+        mock.patch.object(
+            disp.kanban,
+            "show_card",
+            return_value={**card, "events": [], "comments": []},
+        ),
+        mock.patch.object(disp.kanban, "list_tasks", return_value=[]),
+        mock.patch.object(
+            disp.kanban, "create_task", return_value="t_consult"
+        ) as mk_create,
+    ):
         triggered = disp._check_team_blockers(
-            "slug", "org/repo", {77: issue}, "/w", "dev", "github",
+            "slug",
+            "org/repo",
+            {77: issue},
+            "/w",
+            "dev",
+            "github",
         )
     assert mk_create.call_count == 1 and triggered == [77]
 
@@ -478,14 +600,17 @@ def test_enforce_validator_blocks_skips_crash_class():
     """An infrastructure crash is not a validator verdict — no board 'Blocked'
     enforcement, no downstream cancellation."""
     card = _blocked_card(
-        "t_v1", "validator-daedalus",
+        "t_v1",
+        "validator-daedalus",
         "coding-agent-failed: CODING_AGENT_TIMEOUT — see stderr above",
         "#78 Validator: confirm bug",
     )
     provider = mock.Mock()
     provider.board_configured.return_value = True
-    with mock.patch.object(disp.kanban, "list_blocked", return_value=[card]), \
-         mock.patch.object(disp.kanban, "close_non_blocked_issue_tasks") as mk_close:
+    with (
+        mock.patch.object(disp.kanban, "list_blocked", return_value=[card]),
+        mock.patch.object(disp.kanban, "close_non_blocked_issue_tasks") as mk_close,
+    ):
         enforced = disp._enforce_validator_blocks("slug", provider, {78})
     assert enforced == []
     provider.board_set_status.assert_not_called()
@@ -493,16 +618,26 @@ def test_enforce_validator_blocks_skips_crash_class():
 
 
 def test_crash_notification_falls_back_to_retry_cap_targets():
-    action = {"action": "escalated", "task_id": "t_1", "issue": 42, "attempt": 5,
-              "max_attempts": 5, "elapsed_minutes": 90.0,
-              "summary": "pid not alive", "title": "#42", "assignee": "developer-daedalus"}
+    action = {
+        "action": "escalated",
+        "task_id": "t_1",
+        "issue": 42,
+        "attempt": 5,
+        "max_attempts": 5,
+        "elapsed_minutes": 90.0,
+        "summary": "pid not alive",
+        "title": "#42",
+        "assignee": "developer-daedalus",
+    }
 
     def _targets(resolved, event):
         return {"retry-cap-exhausted": ["slack:C123"]}.get(event, [])
 
-    with mock.patch.object(disp, "_notify_targets", side_effect=_targets), \
-         mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as mk_send, \
-         mock.patch.object(disp, "send_webhook_notification"):
+    with (
+        mock.patch.object(disp, "_notify_targets", side_effect=_targets),
+        mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as mk_send,
+        mock.patch.object(disp, "send_webhook_notification"),
+    ):
         disp._send_crash_retries_exhausted_notification(
             action=action, resolved={}, dry_run=False
         )
@@ -514,12 +649,22 @@ def test_crash_notification_falls_back_to_retry_cap_targets():
 
 
 def test_crash_notification_dry_run_sends_nothing():
-    action = {"action": "escalated", "task_id": "t_1", "issue": 42, "attempt": 5,
-              "max_attempts": 5, "elapsed_minutes": 90.0, "summary": "x",
-              "title": "#42", "assignee": "developer-daedalus"}
-    with mock.patch.object(disp, "_notify_targets", return_value=["slack:C123"]), \
-         mock.patch.object(disp, "_hermes_send") as mk_send, \
-         mock.patch.object(disp, "send_webhook_notification") as mk_hook:
+    action = {
+        "action": "escalated",
+        "task_id": "t_1",
+        "issue": 42,
+        "attempt": 5,
+        "max_attempts": 5,
+        "elapsed_minutes": 90.0,
+        "summary": "x",
+        "title": "#42",
+        "assignee": "developer-daedalus",
+    }
+    with (
+        mock.patch.object(disp, "_notify_targets", return_value=["slack:C123"]),
+        mock.patch.object(disp, "_hermes_send") as mk_send,
+        mock.patch.object(disp, "send_webhook_notification") as mk_hook,
+    ):
         disp._send_crash_retries_exhausted_notification(
             action=action, resolved={}, dry_run=True
         )
@@ -533,14 +678,22 @@ def test_notify_events_include_crash_retries_exhausted():
 
 # ── incident reproduction (card t_34adae1f, 2026-07-02) ──────────────────────
 
+
 def test_incident_two_fast_crashes_auto_recover_without_manual_unblock(fake, tmp_path):
     """2 crashes within a minute exhaust hermes-core's failure_limit=2 and the
     breaker parks the card (gave_up). The next dispatch tick must auto-unblock
     it — the 46-minute manual-unblock strand from the incident must not recur."""
     wd = str(tmp_path)
-    fk = fake([_card(tid="t_34adae1f", status="gave_up",
-                     summary="run 2484 crashed (pid not alive)",
-                     title="developer: #1198 fix dispatch")])
+    fk = fake(
+        [
+            _card(
+                tid="t_34adae1f",
+                status="gave_up",
+                summary="run 2484 crashed (pid not alive)",
+                title="developer: #1198 fix dispatch",
+            )
+        ]
+    )
     # Tick 1 (cron or on_session_end): auto re-dispatch, no human involved.
     actions = crash_retry.reconcile("board", wd, {}, now=T0)
     assert [a["action"] for a in actions] == ["retried"]

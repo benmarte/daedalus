@@ -120,7 +120,11 @@ def resolve_config(execution: Dict[str, Any]) -> Dict[str, Any]:
         return out
     if "crash_retry_enabled" in raw:
         out["crash_retry_enabled"] = bool(raw["crash_retry_enabled"])
-    for key in ("max_crash_retries", "crash_retry_cooldown_minutes", "crash_retry_window_hours"):
+    for key in (
+        "max_crash_retries",
+        "crash_retry_cooldown_minutes",
+        "crash_retry_window_hours",
+    ):
         if key not in raw:
             continue
         try:
@@ -160,7 +164,9 @@ def _card_evidence(slug: str, card: Dict[str, Any]) -> str:
     handler).
     """
     parts = [
-        str(card.get("summary") or card.get("last_summary") or card.get("result") or ""),
+        str(
+            card.get("summary") or card.get("last_summary") or card.get("result") or ""
+        ),
         str(card.get("last_failure_error") or ""),
     ]
     if not any(parts):
@@ -277,11 +283,14 @@ def reconcile(
     candidate_ids: set = set()
     for card in tasks:
         try:
-            action = _reconcile_card(slug, workdir, cfg, card, ts, dry_run, candidate_ids)
+            action = _reconcile_card(
+                slug, workdir, cfg, card, ts, dry_run, candidate_ids
+            )
         except Exception as exc:
             logger.warning(
                 "crash-retry: card %s failed: %s — skipping until next tick",
-                card.get("id"), exc,
+                card.get("id"),
+                exc,
             )
             continue
         if action:
@@ -335,7 +344,8 @@ def _reconcile_card(
     if entry and ts - last_ts > cfg["crash_retry_cooldown_minutes"] * 60:
         logger.info(
             "crash-retry: %s cooldown elapsed (%.0f min quiet) — resetting episode",
-            tid, (ts - last_ts) / 60,
+            tid,
+            (ts - last_ts) / 60,
         )
         entry, attempts, first_ts, last_ts = {}, 0, ts, ts
 
@@ -350,8 +360,18 @@ def _reconcile_card(
     )
     if exhausted:
         return _escalate(
-            slug, workdir, tid, entry, card, evidence,
-            attempts, max_attempts, elapsed_min, issue_n, ts, dry_run,
+            slug,
+            workdir,
+            tid,
+            entry,
+            card,
+            evidence,
+            attempts,
+            max_attempts,
+            elapsed_min,
+            issue_n,
+            ts,
+            dry_run,
         )
 
     # Backoff: attempt n+1 is allowed only after schedule[n] minutes.
@@ -359,7 +379,11 @@ def _reconcile_card(
     if attempts > 0 and ts - last_ts < wait:
         logger.debug(
             "crash-retry: %s in backoff — %.0fs of %.0fs elapsed (attempt %d/%d)",
-            tid, ts - last_ts, wait, attempts, max_attempts,
+            tid,
+            ts - last_ts,
+            wait,
+            attempts,
+            max_attempts,
         )
         return None
 
@@ -368,14 +392,19 @@ def _reconcile_card(
         logger.info(
             "[dry-run] crash-retry: would unblock %s (#%s) — attempt %d/%d, "
             "%.0f min since first crash",
-            tid, issue_n, attempt_n, max_attempts, elapsed_min,
+            tid,
+            issue_n,
+            attempt_n,
+            max_attempts,
+            elapsed_min,
         )
         return None
     # Persist the attempt BEFORE unblocking: a crash mid-tick cannot lose the
     # count, and a concurrent tick reading the state mid-flight sees the
     # attempt as spent and stays in backoff.
     dispatch_state.set_crash_retry(
-        workdir, tid,
+        workdir,
+        tid,
         {
             "first_crash_ts": first_ts,
             "attempts": attempt_n,
@@ -393,12 +422,18 @@ def _reconcile_card(
         logger.warning(
             "crash-retry: unblock failed for %s (#%s) — attempt %d recorded, "
             "will back off and retry next tick",
-            tid, issue_n, attempt_n,
+            tid,
+            issue_n,
+            attempt_n,
         )
         return None
     logger.info(
         "crash-retry: unblocked %s (#%s) — attempt %d/%d, %.0f min since first crash",
-        tid, issue_n, attempt_n, max_attempts, elapsed_min,
+        tid,
+        issue_n,
+        attempt_n,
+        max_attempts,
+        elapsed_min,
     )
     return {
         "action": "retried",
@@ -432,7 +467,11 @@ def _escalate(
         logger.info(
             "[dry-run] crash-retry: would escalate %s (#%s) — %d/%d attempts "
             "over %.0f min exhausted",
-            tid, issue_n, attempts, max_attempts, elapsed_min,
+            tid,
+            issue_n,
+            attempts,
+            max_attempts,
+            elapsed_min,
         )
         return None
     entry.update(
@@ -469,7 +508,12 @@ def _escalate(
     logger.warning(
         "crash-retry: ESCALATED %s (#%s) — %d/%d attempts over %.0f min "
         "exhausted — human unblock required (last error: %s)",
-        tid, issue_n, attempts, max_attempts, elapsed_min, last_error[:200],
+        tid,
+        issue_n,
+        attempts,
+        max_attempts,
+        elapsed_min,
+        last_error[:200],
     )
     return {
         "action": "escalated",
