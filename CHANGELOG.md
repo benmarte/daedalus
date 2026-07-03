@@ -1,3 +1,5 @@
+## [feat: QA agent runs full 'pytest -n auto' suite so QA-green matches CI-green](https://github.com/benmarte/daedalus/issues/1201) — [PR #1212](https://github.com/benmarte/daedalus/pull/1212)
+
 ## [feat: auto-merge sweep re-runs failed CI (bounded) for pipeline-complete PRs, then escalates](https://github.com/benmarte/daedalus/issues/1199) — [PR #1208](https://github.com/benmarte/daedalus/pull/1208)
 
 ## [fix: advance-hook resolver crashes (ModuleNotFoundError: core) — pipeline never advances autonomously](https://github.com/benmarte/daedalus/issues/1202) — [PR #1204](https://github.com/benmarte/daedalus/pull/1204)
