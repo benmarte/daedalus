@@ -1,3 +1,5 @@
+## [feat: auto-merge sweep re-runs failed CI (bounded) for pipeline-complete PRs, then escalates](https://github.com/benmarte/daedalus/issues/1199) — [PR #1208](https://github.com/benmarte/daedalus/pull/1208)
+
 ## [fix: advance-hook resolver crashes (ModuleNotFoundError: core) — pipeline never advances autonomously](https://github.com/benmarte/daedalus/issues/1202) — [PR #1204](https://github.com/benmarte/daedalus/pull/1204)
 
 ## [fix: CHANGELOG.md prepend causes merge conflicts between concurrent PRs](https://github.com/benmarte/daedalus/issues/1179) — [PR #1197](https://github.com/benmarte/daedalus/pull/1197)
