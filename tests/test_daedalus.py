@@ -1713,6 +1713,19 @@ def test_dispatch_lock_isolated_per_worker():
         disp._MUTEX_LOCK_PATH != real_default,
     )
 
+    # Issue #1201 follow-up to #1198: under xdist the lock must embed THIS
+    # worker's id. PYTEST_XDIST_WORKER is not yet exported when conftest is
+    # imported, so an import-time fallback silently gave every worker the
+    # shared "master" lock — reintroducing the cross-worker contention flake.
+    # Hard assert (not check): a shared lock only flakes intermittently, so a
+    # soft-tally FAIL line would scroll by unnoticed.
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker:
+        assert override and worker in Path(override).name, (
+            f"dispatch lock {override!r} does not embed xdist worker id "
+            f"{worker!r} — workers are sharing one lock (issue #1198 flake)"
+        )
+
 
 def test_deliver_doc_reports_multi_target():
     """_deliver_doc_reports fans a report out to every configured target."""
