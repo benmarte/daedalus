@@ -144,6 +144,21 @@ execution:
   #   - "*.secrets"
   #   - "secrets.*"
 
+  # ── Crash retry (issue #1205) ──────────────────────────────────────────────
+  # A card whose worker CRASHED (agent process died, session/usage limit,
+  # provider connection error) is automatically unblocked and re-dispatched on
+  # the next dispatch trigger, with a stepped backoff, instead of stranding
+  # until a manual `hermes kanban unblock`. The episode counter resets after a
+  # quiet cooldown window; once the attempt cap OR the wall-clock window is
+  # exhausted the card hard-blocks (`crash-retries-exhausted:`) and a
+  # `crash-retries-exhausted` notification fires (falls back to
+  # `retry-cap-exhausted` targets). Defaults shown:
+  # crash_retry_enabled: true
+  # max_crash_retries: 5
+  # crash_retry_backoff_minutes: [0, 15, 30, 60, 120]
+  # crash_retry_cooldown_minutes: 120
+  # crash_retry_window_hours: 6
+
   # Custom Hermes profile names and skills per pipeline role.
   # Override any role to route tasks to your own agent profiles instead of the
   # built-in daedalus profiles.  Only the keys you specify are overridden;
