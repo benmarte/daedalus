@@ -121,6 +121,15 @@ CRASH = "coding-agent-failed: CODING_AGENT_DIED — see stderr above"
         ("qa-failed: 3 tests failing", None),
         ("qa-deferred: waiting on sub-issue PRs", None),
         ("ESCALATE: security finding", None),
+        # #1207 review fix: pipeline-owned prefixes must return None even when
+        # the text contains generic quota/rate-limit markers that would
+        # otherwise classify as quota_exceeded.
+        ("qa-failed: rate limit tests failing", None),
+        ("review-required: quota exceeded in tests", None),
+        ("escalate: rate limit issue", None),
+        ("qa-deferred: waiting on sub-issue PRs", None),
+        ("awaiting-fix: t_abc123", None),
+        ("awaiting-pr — no PR yet", None),
         ("", None),
         (None, None),
         # #1211: non-crash prefixes suppress crash classification even when a
