@@ -1,3 +1,5 @@
+## [perf: cache kanban list_tasks per dispatch tick](https://github.com/benmarte/daedalus/issues/1142) — [PR #1238](https://github.com/benmarte/daedalus/pull/1238)
+
 ## [perf: cache notification platform probes with a short TTL](https://github.com/benmarte/daedalus/issues/1144) — [PR #1232](https://github.com/benmarte/daedalus/pull/1232)
 
 ## [perf: pass pre-fetched task list into QA/reviewer/security gate checks](https://github.com/benmarte/daedalus/issues/1135) — [PR #1234](https://github.com/benmarte/daedalus/pull/1234)
