@@ -37,7 +37,7 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA\nFull pytest -n auto suite · coverage\nqa-passed / qa-failed"]
+    Dev --> QA["🧪 QA\nCI-gate → skip local suite if green\nAC check · diff review\nqa-passed / qa-failed"]
     Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
     
     QA --> QAGate{{"🚦 QA Gate\nqa-passed?"}}
@@ -179,11 +179,16 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
      these atomically on the next tick: a triage card is decomposed across all roles with QA gating
      the reviewer/security/accessibility stages.
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR.
-   - **qa** runs the full test suite exactly as CI does (`pytest tests/ -n auto
-     --timeout=60` in the isolated PR worktree), verifies acceptance criteria,
-     analyzes coverage, and reports a verdict (`qa-passed` or `qa-failed`). The
-     verdict is `qa-passed` only if BOTH the acceptance criteria and the full
-     suite pass; any full-suite failure (even unrelated to the PR) yields
+   - **qa** checks CI status first via a **CI-gate** (#1118): if all checks are
+     green on the PR head commit, QA skips the local full-suite run entirely
+     (saving ~10–20 min) and goes straight to acceptance-criteria verification
+     and diff review. If CI is pending, failing, or has no checks, QA falls back
+     to running the full suite locally exactly as CI does (`pytest tests/ -n auto
+     --timeout=60` in the isolated PR worktree). If QA pushes new tests, the old
+     CI-green is stale and those tests are run locally (targeted). The verdict is
+     `qa-passed` only if BOTH the acceptance criteria AND the suite pass — where
+     "suite passes" means CI is green on the PR head OR the local full suite
+     passed; any full-suite failure (even unrelated to the PR) yields
      `qa-failed`. This ensures QA-green matches CI-green (#1201). The pipeline
      advances to reviewer/security/accessibility only after QA passes.
    - **reviewer** reviews, **security-analyst** audits, **accessibility** audits the PR for
@@ -1309,6 +1314,20 @@ Each piece exists because the obvious approach failed:
   looping silently. Configurable via `execution.crash_retry` knobs in
   `templates/daedalus.yaml`. This replaces the old silent-stuck behaviour where
   a crashed agent card sat indefinitely in `running`.
+- **Provider failover chain** (`core/provider_failover.py`, issue #1207) —
+  when a coding agent (Claude Code, Codex, etc.) hits a transient failure
+  (session limit, quota, crash, timeout), the crash-retry reconciler
+  automatically re-dispatches the same card on the next provider in an
+  ordered fallback chain (`execution.coding_agents` in `daedalus.yaml`)
+  instead of retrying the limited provider forever. A provider that spends
+  `max_attempts_per_provider` dispatches on one episode enters a global
+  cooldown and is skipped by every card until the window expires; with
+  `reset_to_primary: true` the primary is preferred again once its cooldown
+  clears. The same pattern applies to the orchestration-brain model
+  (`model.providers` chain) — profiles are resynced to the next provider on
+  a brain-side transient failure and back to the primary when it recovers.
+  Configurable via `execution.failover` and `model.failover` knobs in
+  `templates/daedalus.yaml`.
 - **Orphaned worktree sweep** (`scripts/daedalus_dispatch.py`, issue #1114) —
   agents are instructed to `git worktree remove --force` on cleanup, but a crashed
   or reclaimed agent leaves its worktree behind and they accumulate unboundedly
@@ -1442,7 +1461,9 @@ on its board.
 |------|------------|
 | `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect, orphaned-worktree sweep (issue #1114). Exits non-zero (1) when at least one project ran and every project errored, so cron mail-on-error and CI gates can detect total dispatch failure (issue #1112). Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
-| `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
+| `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys, config fingerprints. |
+| `core/crash_retry.py` | Time-bounded crash retry with stepped backoff, per-card attempt cap, wall-clock cap. Re-queues crashed cards on next dispatch tick (#1205). |
+| `core/provider_failover.py` | Cross-provider coding-agent failover chain resolution. Selects next provider on transient failure, per-provider cooldown, reset-to-primary (#1207). |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
 | `core/notify_templates.py` | Rich markdown notification templates (dispatch summary, doc report envelope, PR-ready, pipeline-failure) with clickable issue/PR links for every Hermes messaging platform. |
 | `core/registry.py` | Project registry read/write — `projects.yaml` CRUD for multi-repo onboarding. |

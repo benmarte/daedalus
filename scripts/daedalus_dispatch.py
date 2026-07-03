@@ -838,9 +838,7 @@ def _apply_coding_agent_failover(
         )
     new_body = _rewrite_delegation_block(body, block)
     if new_body is None:
-        logger.warning(
-            "failover: unrecognized body shape on card %s — skipped", tid
-        )
+        logger.warning("failover: unrecognized body shape on card %s — skipped", tid)
         return False
     return kanban.edit_body(slug, tid, new_body)
 
@@ -882,9 +880,7 @@ def _build_failover_context(
         coding_current = legacy_agent
 
     def _apply_coding(card: Dict[str, Any], entry: Dict[str, Any]) -> bool:
-        return _apply_coding_agent_failover(
-            slug, card, entry, execution, base_branch
-        )
+        return _apply_coding_agent_failover(slug, card, entry, execution, base_branch)
 
     def _apply_brain(card: Dict[str, Any], entry: Dict[str, Any]) -> bool:
         # old_values must reflect the model the profiles are CURRENTLY synced
@@ -894,9 +890,7 @@ def _build_failover_context(
         prev_idx = dispatch_state.get_brain_active_index(workdir)
         prev_default = (
             brain_chain[prev_idx]["default"] if prev_idx < len(brain_chain) else ""
-        ) or (dispatch_state.get_config_values(workdir) or {}).get(
-            "model_default", ""
-        )
+        ) or (dispatch_state.get_config_values(workdir) or {}).get("model_default", "")
         try:
             idx = brain_chain.index(entry)
         except ValueError:
@@ -2790,33 +2784,60 @@ def _qa_task_body(
             f"⛔ If NO open PR can be resolved for issue #{n}, the developer's work is "
             f"incomplete — do NOT validate the shared tree. Block immediately with "
             f"'qa-failed: no PR — developer work incomplete' and stop.\n\n"
-            f"### 2. Check out the PR in an isolated worktree\n"
-            f"From {workdir}, create a throwaway worktree pinned to the PR head — do NOT "
+            f"### 2. Check CI status on the PR (CI-gate — issue #1118)\n"
+            f"Before creating a worktree, inspect the PR's CI on its current head commit:\n"
+            f"  gh pr view <P> --json statusCheckRollup,headRefOid\n"
+            f"CI is GREEN when EVERY check conclusion is in {{SUCCESS, NEUTRAL, SKIPPED}}, "
+            f"at least one check is SUCCESS, and NO check is PENDING/QUEUED/IN_PROGRESS. "
+            f"The rollup must be for the PR's current headRefOid (never trust green from an "
+            f"older commit).\n"
+            f"  • CI GREEN → SKIP the local full test suite entirely. CI already ran the same "
+            f"2661-test suite on this exact commit; re-running it locally is pure duplication. "
+            f"Your verdict is anchored to CI's actual SUCCESS (strictly stronger than a local "
+            f"re-run) plus the acceptance-criteria check below.\n"
+            f"  • CI PENDING / no checks configured / empty rollup → fall back to the local "
+            f"full suite (step 4b).\n"
+            f"  • CI FAILING → do NOT skip; run tests locally to understand the failure (step "
+            f"4b), then 'qa-failed: <failing test(s)>'.\n\n"
+            f"### 3. Check out the PR in an isolated worktree\n"
+            f"You still need the worktree for diff review and acceptance-criteria verification "
+            f"(even when CI is green — you just won't run the full suite in it). From {workdir}, "
+            f"create a throwaway worktree pinned to the PR head — do NOT "
             f"`git stash`, `git checkout`, or otherwise mutate the shared tree (it would "
             f"clobber a concurrent developer's live edits):\n"
             f"  WT=$(mktemp -d)\n"
             f"  git -C {workdir} fetch origin pull/<P>/head\n"
             f'  git -C {workdir} worktree add "$WT" FETCH_HEAD\n'
             f"Run all subsequent steps with $WT as the working directory.\n\n"
-            f"### 3. Verify the PR\n"
+            f"### 4. Verify the PR\n"
             f"⛔ Do ALL of this yourself in THIS session. Do NOT invoke slash-command skills "
             f"(/test) and do NOT spawn subagents or use the Task/Agent tool — nested agents "
             f"can't be tracked by the orchestrator and hang the run.\n"
-            f"Read the PR diff and issue #{n}. First verify the issue's acceptance criteria "
-            f"inside $WT. Write any missing tests yourself (failing test first, then make it "
-            f"pass); commit & push them to the PR branch from $WT.\n"
-            f"Then run the FULL test suite inside $WT exactly as CI does, so your verdict "
-            f"matches CI's (issue #1201 — a false qa-passed strands the PR when CI goes red):\n"
+            f"4a. ALWAYS (regardless of CI state): Read the PR diff and issue #{n}. Verify the "
+            f"issue's acceptance criteria inside $WT and review the diff for logic errors CI "
+            f"cannot catch. Write any missing tests yourself (failing test first, then make it "
+            f"pass); commit & push them to the PR branch from $WT. "
+            f"⛔ If you push new commits, the earlier CI-green rollup is now STALE — do not "
+            f"trust it for the code you just added. Run your newly-added tests locally, "
+            f"targeted (e.g. `python3 -m pytest <new_test_files>`), to confirm they pass.\n"
+            f"4b. ONLY when CI is NOT green (pending / failing / no checks): run the FULL test "
+            f"suite inside $WT exactly as CI does, so your verdict matches CI's (issue #1201 — "
+            f"a false qa-passed strands the PR when CI goes red):\n"
             f"  python3 -m pip install --quiet pytest pytest-xdist pytest-timeout\n"
             f"  python3 -m pytest tests/ -n auto --timeout=60\n"
-            f"(install the deps inside $WT so `-n auto` is available)\n\n"
-            f"### 4. Always clean up the worktree\n"
+            f"(install the deps inside $WT so `-n auto` is available)\n"
+            f"When CI is GREEN, SKIP step 4b entirely — CI's SUCCESS on this commit is your "
+            f"suite result.\n\n"
+            f"### 5. Always clean up the worktree\n"
             f"Whether tests pass or fail, remove the worktree before finishing:\n"
             f'  git -C {workdir} worktree remove --force "$WT"\n\n'
-            f"### 5. Report\n"
+            f"### 6. Report\n"
             f"Post a QA summary comment on the PR (not the issue), using the PR number: {comment_howto}\n"
-            f"### 6. Complete your kanban card\n"
-            f"   - BOTH the acceptance criteria AND the full suite pass: "
+            f"State in the comment whether the suite result came from CI-green (skipped local "
+            f"run) or from a local full-suite run.\n"
+            f"### 7. Complete your kanban card\n"
+            f"   - BOTH the acceptance criteria AND the suite pass — where 'suite passes' means "
+            f"CI is GREEN on the PR head (step 2) OR the local full suite passed (step 4b): "
             f"summary 'qa-passed: PR #<P>'\n"
             f"   - Either fails — including a full-suite failure unrelated to the PR: "
             f"block with 'qa-failed: <reason, naming the failing test(s)>' — developer will fix\n"
@@ -7120,9 +7141,7 @@ def run(
         # the active one is limited/down, instead of retrying it forever.
         failover_ctx: Optional[Dict[str, Any]] = None
         try:
-            failover_ctx = _build_failover_context(
-                slug, resolved, execution, workdir
-            )
+            failover_ctx = _build_failover_context(slug, resolved, execution, workdir)
             _maybe_reset_brain_to_primary(workdir, failover_ctx, dry_run)
         except Exception as exc:  # degrade to plain #1205 retries
             logger.warning("dispatch: provider-failover context failed: %s", exc)
