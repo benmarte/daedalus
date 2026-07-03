@@ -3558,8 +3558,18 @@ def _extract_follow_ups_from_pr_comment(
                     "follow-up already exists as open issue, skipping: %r", issue_title
                 )
                 continue
-        except Exception:
-            pass  # dedup is best-effort
+        except Exception as exc:
+            # #1111: a failed dedup query means we cannot verify this title is
+            # unique. Skip creation instead of blindly making a potential
+            # duplicate, and log a warning so the bypass is never silent.
+            logger.warning(
+                "follow-up dedup query failed for PR #%s (%s) — skipping "
+                "creation of %r to avoid a silent duplicate (#1111)",
+                pr_number,
+                exc,
+                issue_title,
+            )
+            continue
 
         issue_body = (
             f"_Auto-extracted by Daedalus from PR #{pr_number} reviewer/QA comment._\n\n"

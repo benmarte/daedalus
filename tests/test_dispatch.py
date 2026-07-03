@@ -152,6 +152,42 @@ def test_extract_follow_ups_idempotency():
     check("idempotency: no new issues added to created list", 101 not in created)
 
 
+def test_extract_follow_ups_dedup_failure_skips_creation():
+    """#1111: a failed dedup query skips creation and logs a warning.
+
+    A transient list_issues error must NOT silently fall through to
+    create_issue (which would make a potential duplicate). Instead the item
+    is skipped and a warning is logged.
+    """
+    reviewer_body = """## Follow-up items
+
+1. Wire walkAncestorChain into PREVIOUS dropdowns
+"""
+    comments = [_make_comment(reviewer_body, "reviewer-daedalus")]
+
+    provider = mock.Mock()
+    provider.list_pr_comments.return_value = comments
+    provider.list_issues.side_effect = RuntimeError("API rate limit exceeded")
+    provider.create_issue.return_value = 999
+    provider.pr_url.return_value = "https://github.com/org/repo/pull/13"
+
+    with mock.patch.object(disp.kanban, "create_triage", return_value="t_x") as mk_triage, \
+            mock.patch.object(disp.logger, "warning") as mk_warn:
+        created = disp._extract_follow_ups_from_pr_comment(
+            "slug", "org/repo", provider, 13, "/tmp",
+            ["reviewer-daedalus", "qa-daedalus"],
+            ["enhancement", "follow-up"],
+            "project-manager-daedalus",
+            [],
+        )
+
+    check("dedup failure → no issue created", created == [])
+    check("dedup failure → create_issue never called", provider.create_issue.call_count == 0)
+    check("dedup failure → no triage card created", mk_triage.call_count == 0)
+    warned = any("#1111" in str(c.args[0]) for c in mk_warn.call_args_list)
+    check("dedup failure → warning logged", warned)
+
+
 def test_extract_follow_ups_qa_comment():
     """QA comments (qa-daedalus) are also processed."""
     qa_body = """## Action Items
@@ -2370,6 +2406,7 @@ if __name__ == "__main__":
         test_parse_follow_ups_custom_patterns,
         test_extract_follow_ups_reviewer_comment,
         test_extract_follow_ups_idempotency,
+        test_extract_follow_ups_dedup_failure_skips_creation,
         test_extract_follow_ups_qa_comment,
         test_extract_follow_ups_none_found,
         test_extract_follow_ups_disabled_in_config,
