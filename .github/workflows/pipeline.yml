@@ -30,9 +30,9 @@ jobs:
     # Only react to our own pipeline labels / relevant PR + CI events — ignore noise.
     if: >-
       (github.event_name == 'issues' && startsWith(github.event.label.name, 'pipeline:')) ||
-      (github.event_name == 'pull_request') ||
-      (github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+      (github.event_name == 'pull_request' && contains(join(github.event.pull_request.labels.*.name, ','), 'pipeline:')) ||
+      (github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success' && startsWith(github.event.check_suite.head_branch, 'fix/issue-')) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(join(github.event.issue.labels.*.name, ','), 'pipeline:'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
