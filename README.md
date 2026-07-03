@@ -1511,35 +1511,18 @@ The `/meta/*` endpoints power the dashboard's dropdown selectors when editing
 project config. All config reads pass through `_strip_secrets()` to ensure
 tokens are never echoed back to the UI.
 
-### Authentication (#1130)
+### Authentication
 
-Every route under `/api/plugins/daedalus/` is gated by a shared-secret
-dependency (`require_dashboard_auth`). The gate is **fail-closed by default**:
-if no secret is configured and the explicit opt-in is unset, all requests are
-rejected with **HTTP 403**.
+The daedalus dashboard plugin API is mounted under `/api/plugins/daedalus/*`
+in the Hermes dashboard host. Authentication is handled entirely by the
+**Hermes host's global `/api/` auth middleware**, which gates every plugin
+route with the session token — the plugin does not implement its own auth layer
+(see issue #1233 for the rationale behind removing the former plugin-level
+`require_dashboard_auth` gate).
 
-| Env var | Purpose |
-|---------|---------|
-| `DAEDALUS_DASHBOARD_TOKEN` | Daedalus-specific shared secret. When set, requests must present it. |
-| `HERMES_DASHBOARD_SESSION_TOKEN` | The value the Hermes dashboard host injects into the SPA. Honored automatically — no frontend change required. |
-| `DAEDALUS_DASHBOARD_AUTH_DISABLED` | Set to `1` for local dev only. Allows unauthenticated access and logs a loud once-per-process warning. **Never use in production.** |
-
-**Credential extraction** — the gate accepts either `X-Hermes-Session-Token`
-(Hermes dashboard SDK) or `Authorization: Bearer <token>` (standard OAuth
-header). Comparison is constant-time via `hmac.compare_digest`.
-
-**Behavior matrix:**
-
-| State | No token presented | Wrong token | Correct token |
-|-------|-------------------|-------------|---------------|
-| Secret configured | 401 | 401 | 200 |
-| No secret, no opt-in | 403 | 403 | 403 |
-| No secret, `AUTH_DISABLED=1` | 200 | 200 | 200 |
-
-When a secret is configured, a missing/malformed/mismatched credential raises
-**HTTP 401**. When no secret is configured and `DAEDALUS_DASHBOARD_AUTH_DISABLED`
-is not set, the request is rejected with **HTTP 403** regardless of the
-presented credential — the API is closed by default.
+For deployments where the Hermes host runs in loopback/tunnel mode or is
+gated by OAuth/password, all plugin routes are already covered. No
+daedalus-specific token configuration is needed.
 
 ---
 
