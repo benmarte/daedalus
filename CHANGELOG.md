@@ -1,3 +1,5 @@
+## [perf: cache notification platform probes with a short TTL](https://github.com/benmarte/daedalus/issues/1144) — [PR #1232](https://github.com/benmarte/daedalus/pull/1232)
+
 ## [perf: pass pre-fetched task list into QA/reviewer/security gate checks](https://github.com/benmarte/daedalus/issues/1135) — [PR #1234](https://github.com/benmarte/daedalus/pull/1234)
 
 ## [feat: QA agent should skip local test suite when CI is already green on the PR](https://github.com/benmarte/daedalus/issues/1118) — [PR #1225](https://github.com/benmarte/daedalus/pull/1225)
