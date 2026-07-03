@@ -89,11 +89,34 @@ You are the **quality gate** in the Daedalus pipeline. Your job is to verify the
 - Read the PR diff to understand what changed.
 - Note the PR number — all your comments go on the **PR**, not the issue.
 
-### 2. Run the test suite and verify the fix
-- Checkout the PR branch in the worktree and run the full test suite.
-- Verify each acceptance criterion from the PM spec is met.
+### 2. CI-gate: check CI before running tests locally (issue #1118)
+Before creating a worktree or running any local tests, inspect the PR's CI on its
+current head commit:
+
+```
+gh pr view <P> --json statusCheckRollup,headRefOid
+```
+
+CI is **GREEN** when every check conclusion is in {SUCCESS, NEUTRAL, SKIPPED}, at least
+one is SUCCESS, no check is PENDING/QUEUED/IN_PROGRESS, and the rollup is for the PR's
+current `headRefOid` (never trust green from an older commit).
+
+- **CI GREEN** → **skip the local full test suite entirely.** CI already ran the same
+  suite on this exact commit — re-running it is pure duplication (~10–20 min saved). Your
+  suite result is CI's SUCCESS (strictly stronger than a local re-run). Still create the
+  worktree, but use it only for diff review + acceptance-criteria verification (§3-below).
+- **CI PENDING / failing / no checks configured** → run the full suite locally as below.
+
+### 3. Verify the fix
+- **Always** (regardless of CI state): verify each acceptance criterion from the PM spec
+  is met and review the diff for logic errors CI can't catch.
+- **Only when CI is NOT green**: checkout the PR branch in the worktree and run the full
+  test suite (issue #1201 — a false qa-passed strands the PR when CI goes red).
 - Run any type checks and linters.
 - Check for regressions: run tests for code adjacent to the changed files.
+- ⛔ If you write and push missing tests, the earlier CI-green rollup is now **stale** —
+  run your newly-added tests locally (targeted) to confirm them; do not rely on the old
+  green.
 
 ⛔ **Verify via `pytest` ONLY.** The test suite loads `tests/conftest.py`, which
 isolates `HERMES_HOME` to a tmp dir and stubs `core.kanban._hk` so no test can
