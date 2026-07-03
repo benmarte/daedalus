@@ -60,32 +60,98 @@ def test_coding_agent_chain_from_list():
     }
     chain = provider_failover.resolve_coding_agent_chain(execution, AGENT_DEFAULTS)
     assert chain == [
-        {"name": "claude-code", "cmd": "CLAUDE_CONFIG_DIR=$HOME/.c claude -p"},
-        {"name": "codex", "cmd": "codex exec --full-auto"},  # cmd defaulted
+        {"name": "claude-code", "account": "",
+         "cmd": "CLAUDE_CONFIG_DIR=$HOME/.c claude -p"},
+        {"name": "codex", "account": "", "cmd": "codex exec --full-auto"},  # defaulted
     ]
 
 
 def test_coding_agent_chain_drops_invalid_and_duplicate_entries():
+    # A true duplicate = same name AND same account-or-cmd; only it is dropped.
     execution = {
         "coding_agents": [
             {"name": "not-a-real-agent"},
             "just-a-string",
             {"name": "codex", "cmd": "codex exec --full-auto"},
-            {"name": "codex", "cmd": "different"},
+            {"name": "codex", "cmd": "codex exec --full-auto"},  # exact dup → dropped
         ]
     }
     chain = provider_failover.resolve_coding_agent_chain(execution, AGENT_DEFAULTS)
-    assert chain == [{"name": "codex", "cmd": "codex exec --full-auto"}]
+    assert chain == [{"name": "codex", "account": "", "cmd": "codex exec --full-auto"}]
 
 
 def test_coding_agent_chain_legacy_single_value_backcompat():
     execution = {"coding_agent": "claude-code", "coding_agent_cmd": "claude -p -x"}
     chain = provider_failover.resolve_coding_agent_chain(execution, AGENT_DEFAULTS)
-    assert chain == [{"name": "claude-code", "cmd": "claude -p -x"}]
+    assert chain == [{"name": "claude-code", "account": "", "cmd": "claude -p -x"}]
     # nothing configured at all → hermes one-element chain (dispatcher default)
     assert provider_failover.resolve_coding_agent_chain({}, AGENT_DEFAULTS) == [
-        {"name": "hermes", "cmd": ""}
+        {"name": "hermes", "account": "", "cmd": ""}
     ]
+
+
+# ── multiple accounts of the same coding agent (#1227) ────────────────────────
+
+
+def test_coding_agent_chain_keeps_multiple_accounts_of_same_agent():
+    """Two claude-code entries with distinct accounts are BOTH kept, each with
+    its own failover identity — the core #1227 behavior."""
+    execution = {
+        "coding_agents": [
+            {"name": "claude-code", "account": "rizq",
+             "cmd": "CLAUDE_CONFIG_DIR=$HOME/.claude-rizq claude -p"},
+            {"name": "claude-code", "account": "personal",
+             "cmd": "CLAUDE_CONFIG_DIR=$HOME/.claude claude -p"},
+            {"name": "codex", "cmd": "codex exec --full-auto"},
+        ]
+    }
+    chain = provider_failover.resolve_coding_agent_chain(execution, AGENT_DEFAULTS)
+    assert [(e["name"], e["account"]) for e in chain] == [
+        ("claude-code", "rizq"),
+        ("claude-code", "personal"),
+        ("codex", ""),
+    ]
+    ids = [provider_failover.entry_identity(e) for e in chain]
+    assert ids == ["claude-code:rizq", "claude-code:personal", "codex"]
+    assert len(set(ids)) == 3  # distinct identities → independent cooldowns
+
+
+def test_coding_agent_chain_same_name_no_account_synthesizes_discriminator():
+    """Same name, no explicit account, different cmd → both kept; the first
+    keeps the bare name (back-compat), later ones get a cmd-derived tag so
+    identities stay distinct."""
+    execution = {
+        "coding_agents": [
+            {"name": "claude-code", "cmd": "CLAUDE_CONFIG_DIR=$HOME/.a claude -p"},
+            {"name": "claude-code", "cmd": "CLAUDE_CONFIG_DIR=$HOME/.b claude -p"},
+        ]
+    }
+    chain = provider_failover.resolve_coding_agent_chain(execution, AGENT_DEFAULTS)
+    assert len(chain) == 2
+    ids = [provider_failover.entry_identity(e) for e in chain]
+    assert ids[0] == "claude-code"  # first occurrence keeps the bare name
+    assert ids[1].startswith("claude-code:") and ids[1] != "claude-code"
+    assert len(set(ids)) == 2
+
+
+def test_coding_agent_chain_exact_account_duplicate_dropped():
+    execution = {
+        "coding_agents": [
+            {"name": "claude-code", "account": "rizq", "cmd": "a"},
+            {"name": "claude-code", "account": "rizq", "cmd": "b"},  # same acct → dup
+        ]
+    }
+    chain = provider_failover.resolve_coding_agent_chain(execution, AGENT_DEFAULTS)
+    assert chain == [{"name": "claude-code", "account": "rizq", "cmd": "a"}]
+
+
+def test_entry_identity_brain_and_coding_shapes():
+    assert provider_failover.entry_identity({"provider": "anthropic"}) == "anthropic"
+    assert provider_failover.entry_identity({"name": "codex"}) == "codex"
+    assert (
+        provider_failover.entry_identity({"name": "claude-code", "account": "rizq"})
+        == "claude-code:rizq"
+    )
 
 
 def test_model_provider_chain_from_list_and_fallback():
@@ -421,6 +487,42 @@ def test_session_limit_fails_over_to_next_coding_agent_full_timeline(
         == []
     )
     assert len(fk.unblocked) == 3  # exactly one dispatch per allowed retry
+
+
+def test_session_limit_fails_over_between_accounts_of_same_agent(fake, tmp_path):
+    """#1227 integration: a session limit on account A (claude-code:rizq) auto-
+    re-dispatches the SAME card on account B (claude-code:personal) — no manual
+    CLAUDE_CONFIG_DIR swap — and each account carries its own cooldown key."""
+    wd = str(tmp_path)
+    fk = fake([_card()])
+    switched: List[str] = []
+    ctx = _ctx([], cap=1)  # fail over on the first retry
+    ctx["chains"]["coding_agent"] = [
+        {"name": "claude-code", "account": "rizq",
+         "cmd": "CLAUDE_CONFIG_DIR=$HOME/.claude-rizq claude -p"},
+        {"name": "claude-code", "account": "personal",
+         "cmd": "CLAUDE_CONFIG_DIR=$HOME/.claude claude -p"},
+    ]
+    ctx["current"]["coding_agent"] = "claude-code:rizq"
+
+    def _apply(card, entry):
+        switched.append(provider_failover.entry_identity(entry))
+        return True
+
+    ctx["apply"]["coding_agent"] = _apply
+
+    acts = crash_retry.reconcile("p", wd, {}, now=T0 + 1 * MIN, failover=ctx)
+    assert [a["action"] for a in acts] == ["retried"]
+    assert acts[0]["provider"] == "claude-code:personal"
+    assert switched == ["claude-code:personal"]  # same agent, next account
+    # per-account cooldown: only the limited account cools down
+    cooldowns = dispatch_state.get_provider_cooldowns(wd)
+    assert "coding_agent:claude-code:rizq" in cooldowns
+    assert "coding_agent:claude-code:personal" not in cooldowns
+    assert any(
+        "claude-code:rizq" in c and "claude-code:personal" in c
+        for c in fk.comments["t_1"]
+    )
 
 
 def test_brain_api_connection_error_fails_over_to_next_provider(fake, tmp_path):

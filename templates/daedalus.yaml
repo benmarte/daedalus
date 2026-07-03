@@ -284,13 +284,28 @@ execution:
   # the same set as `coding_agent` (hermes | claude-code | codex | opencode);
   # `cmd` defaults per agent when omitted.
   #
+  # Multiple ACCOUNTS of the SAME agent (#1227): you may list several entries
+  # with the same `name` as long as they are distinct accounts — e.g. two
+  # `claude-code` entries with different `CLAUDE_CONFIG_DIR` in their `cmd`.
+  # Give each an optional `account:` label (used in failover comments and for
+  # the per-account cooldown key); when omitted, the account is derived from
+  # the `cmd`. A session-limited account (`You've hit your session limit`) then
+  # auto-fails over to the next account with no manual swap. Entries are deduped
+  # by (name, account-or-cmd), so only exact duplicates are dropped.
+  #
   # Back-compat: when `coding_agents` is absent, the single-value
   # `coding_agent` / `coding_agent_cmd` keys above are treated as a
   # one-element chain — failover is simply disabled, no config change needed.
   #
   # coding_agents:
+  #   # Two accounts of the same agent, tried in order on a session limit:
   #   - name: claude-code
+  #     account: rizq
+  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude-rizq claude --dangerously-skip-permissions --setting-sources project -p'
+  #   - name: claude-code
+  #     account: personal
   #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --setting-sources project -p'
+  #   # …then a different agent as the last resort:
   #   - name: codex
   #     cmd: 'codex exec --full-auto'
 
