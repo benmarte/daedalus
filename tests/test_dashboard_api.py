@@ -2368,6 +2368,66 @@ class TestRegistryNameResolution:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# #1145 — batched cron health: exactly one cron list fetch per get_projects
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCronHealthBatched:
+    """get_projects must fetch the cron list once, never per-project (#1145)."""
+
+    def test_get_projects_fetches_cron_list_once_for_many_projects(self, client):
+        """N>1 projects → exactly one ``hermes cron list --all`` invocation."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repos = []
+            for i in range(3):
+                repo = Path(tmpdir) / f"proj{i}"
+                hermes_dir = repo / ".hermes"
+                hermes_dir.mkdir(parents=True)
+                cfg = {
+                    "name": f"proj{i}",
+                    "repo": f"org/proj{i}",
+                    "workdir": str(repo),
+                }
+                (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
+                repos.append(str(repo))
+
+            list_all_calls = []
+
+            def fake_cron_cli(args):
+                if args[:2] == ["list", "--all"]:
+                    list_all_calls.append(args)
+                return (0, "[]")
+
+            with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+                mock_registry.list_projects.return_value = repos
+                with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
+                    mock_list.return_value = []
+                    with mock.patch(
+                        "dashboard.plugin_api._cron_cli", side_effect=fake_cron_cli
+                    ):
+                        resp = client.get("/api/plugins/daedalus/projects")
+                        assert resp.status_code == 200, resp.text
+
+            # Exactly one full cron-list fetch regardless of the 3 projects.
+            assert len(list_all_calls) == 1, (
+                f"expected 1 cron list fetch, got {len(list_all_calls)}"
+            )
+
+    def test_singular_cron_health_helper_removed(self):
+        """The per-project ``_cron_health`` helper must no longer exist (#1145)."""
+        import dashboard.plugin_api as api
+
+        assert not hasattr(api, "_cron_health"), (
+            "singular _cron_health helper should be removed to prevent "
+            "reintroducing the O(N) per-project fetch pattern"
+        )
+        # The batched helper stays.
+        assert hasattr(api, "_cron_health_all")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Authentication removed — the Hermes host gates all /api/ routes (#1231)
 # ═══════════════════════════════════════════════════════════════════════════════
 
