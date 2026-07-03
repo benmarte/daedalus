@@ -516,7 +516,14 @@ _ROLE_ASSIGNEE_PREFIX: Dict[str, str] = {
 }
 
 
-def _role_cards_for_issue(slug: str, issue_number: int, role: str) -> List[Dict[str, Any]]:
+def _role_cards_for_issue(
+    slug: str,
+    issue_number: int,
+    role: str,
+    *,
+    active_tasks: Optional[List[Dict[str, Any]]] = None,
+    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     """Return the kanban cards for a given (role, issue), matched by assignee.
 
     Matches the assignee profile prefix (stable) plus the issue reference in the
@@ -529,6 +536,12 @@ def _role_cards_for_issue(slug: str, issue_number: int, role: str) -> List[Dict[
     evaluated "not passed" → auto-merge stranded the PR (observed on #1141). So when
     the active list has no match, fall back to archived cards, where the verdict
     still lives.
+
+    ``active_tasks``/``archived_tasks`` accept pre-fetched card lists so a caller
+    scanning many issues in one tick can fetch each board list once and thread it
+    through, instead of paying an active (+ archived) ``list_tasks`` subprocess per
+    issue (#1135). Either defaulting to ``None`` preserves the self-fetch path used
+    by existing call sites.
     """
     prefix = _ROLE_ASSIGNEE_PREFIX.get(role, role + "-")
     pat = re.compile(rf"#{issue_number}(?!\d)")
@@ -540,14 +553,19 @@ def _role_cards_for_issue(slug: str, issue_number: int, role: str) -> List[Dict[
             and pat.search(t.get("title") or "")
         ]
 
-    try:
-        found = _match(kanban.list_tasks(slug))
-    except Exception as e:
-        logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
-        found = []
+    if active_tasks is not None:
+        found = _match(active_tasks)
+    else:
+        try:
+            found = _match(kanban.list_tasks(slug))
+        except Exception as e:
+            logger.error("iterate: failed to list tasks for board %s: %s", slug, e)
+            found = []
     if found:
         return found
     # Fall back to archived cards — a done gate card may have already archived.
+    if archived_tasks is not None:
+        return _match(archived_tasks)
     try:
         return _match(kanban.list_tasks(slug, status="archived"))
     except Exception as e:
@@ -556,16 +574,28 @@ def _role_cards_for_issue(slug: str, issue_number: int, role: str) -> List[Dict[
 
 
 def _role_gate_passed(
-    slug: str, issue_number: Optional[int], role: str, approval_signals: List[str]
+    slug: str,
+    issue_number: Optional[int],
+    role: str,
+    approval_signals: List[str],
+    *,
+    active_tasks: Optional[List[Dict[str, Any]]] = None,
+    archived_tasks: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """True if ANY card for (role, issue) has an approval signal in its summary.
 
     Scans all matching cards (there may be retries) and passes if any one's
     latest_summary contains an approval signal.
+
+    ``active_tasks``/``archived_tasks`` are threaded to ``_role_cards_for_issue``
+    so a per-issue gate check reuses a once-per-tick board snapshot (#1135).
     """
     if issue_number is None:
         return False
-    cards = _role_cards_for_issue(slug, issue_number, role)
+    cards = _role_cards_for_issue(
+        slug, issue_number, role,
+        active_tasks=active_tasks, archived_tasks=archived_tasks,
+    )
     if not cards:
         logger.debug("iterate: no %s card found for issue #%s", role, issue_number)
         return False
@@ -581,20 +611,41 @@ def _role_gate_passed(
     return False
 
 
-def _qa_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
+def _qa_passed_for_issue(
+    slug: str,
+    issue_number: Optional[int],
+    *,
+    active_tasks: Optional[List[Dict[str, Any]]] = None,
+    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     """Check if QA has passed for an issue (QA card summary contains 'qa-passed')."""
-    return _role_gate_passed(slug, issue_number, "qa", ["qa-passed"])
+    return _role_gate_passed(
+        slug, issue_number, "qa", ["qa-passed"],
+        active_tasks=active_tasks, archived_tasks=archived_tasks,
+    )
 
 
-def _reviewer_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
+def _reviewer_passed_for_issue(
+    slug: str,
+    issue_number: Optional[int],
+    *,
+    active_tasks: Optional[List[Dict[str, Any]]] = None,
+    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     """Check if the reviewer has approved the PR for an issue."""
     return _role_gate_passed(slug, issue_number, "reviewer", [
         "approved", "review-approved", "lgtm", "sign-off", "signoff",
         "looks good", "no findings", ":+1:",
-    ])
+    ], active_tasks=active_tasks, archived_tasks=archived_tasks)
 
 
-def _security_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
+def _security_passed_for_issue(
+    slug: str,
+    issue_number: Optional[int],
+    *,
+    active_tasks: Optional[List[Dict[str, Any]]] = None,
+    archived_tasks: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     """Check if the security analyst has cleared the PR for an issue.
 
     The security agent's documented pass signal is ``security: cleared`` (its
@@ -608,7 +659,7 @@ def _security_passed_for_issue(slug: str, issue_number: Optional[int]) -> bool:
         "security-approved", "security approved",
         "security-passed", "security passed",
         "no findings", "approved",
-    ])
+    ], active_tasks=active_tasks, archived_tasks=archived_tasks)
 
 
 # ── action executors ────────────────────────────────────────────────────────
@@ -2429,6 +2480,8 @@ def _try_merge_if_gates_pass(
     skip_qa: bool,
     ci_status: str,
     dry_run: bool = False,
+    active_tasks: Optional[List[Dict[str, Any]]] = None,
+    archived_tasks: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """Merge ``pr`` iff every pipeline gate passes. Returns True only on an actual
     merge; idempotent and safe to call repeatedly.
@@ -2441,21 +2494,28 @@ def _try_merge_if_gates_pass(
 
     Gates (all bypassed by the ``skip-qa`` label, per #1074): QA passed, reviewer
     approved, security cleared, CI green, and the PR not already merged.
+
+    ``active_tasks``/``archived_tasks`` let the deferred-merge sweep pass a
+    once-per-tick board snapshot so the three gate checks don't each re-run
+    ``list_tasks`` per PR (#1135). Both default to ``None`` (self-fetch).
     """
     if pr is None or provider is None:
         return False
-    if not skip_qa and not _qa_passed_for_issue(slug, issue_n):
+    if not skip_qa and not _qa_passed_for_issue(
+            slug, issue_n, active_tasks=active_tasks, archived_tasks=archived_tasks):
         logger.warning(
             "iterate: Skipping merge: QA has not passed for PR #%s (issue #%s).", pr, issue_n)
         return False
     if skip_qa:
         logger.info(
             "iterate: skip-qa label present on PR #%s — bypassing QA/reviewer/security gates", pr)
-    if not skip_qa and not _reviewer_passed_for_issue(slug, issue_n):
+    if not skip_qa and not _reviewer_passed_for_issue(
+            slug, issue_n, active_tasks=active_tasks, archived_tasks=archived_tasks):
         logger.warning(
             "iterate: Skipping merge: reviewer has not approved PR #%s (issue #%s).", pr, issue_n)
         return False
-    if not skip_qa and not _security_passed_for_issue(slug, issue_n):
+    if not skip_qa and not _security_passed_for_issue(
+            slug, issue_n, active_tasks=active_tasks, archived_tasks=archived_tasks):
         logger.warning(
             "iterate: Skipping merge: security has not cleared PR #%s (issue #%s).", pr, issue_n)
         return False
@@ -2628,6 +2688,17 @@ def sweep_deferred_merges(
     except Exception as e:
         logger.error("iterate: deferred-merge sweep failed to list tasks: %s", e)
         return []
+    # Pre-fetch the archived list once too, so the per-PR gate checks
+    # (_qa/_reviewer/_security_passed_for_issue) reuse both board snapshots
+    # instead of each re-running list_tasks (active + archived) per PR (#1135).
+    # Done gate cards archive quickly, so the archived list is the common
+    # match path. On fetch failure fall back to None → gate helpers self-fetch
+    # (prior behaviour) rather than silently seeing zero archived cards.
+    try:
+        archived_tasks: Optional[List[Dict[str, Any]]] = kanban.list_tasks(slug, status="archived") or []
+    except Exception as e:
+        logger.error("iterate: deferred-merge sweep failed to list archived tasks: %s", e)
+        archived_tasks = None
     merged: List[int] = []
     ci_cache: Dict[int, str] = {}
     seen_issues: Set[int] = set()
@@ -2672,6 +2743,7 @@ def sweep_deferred_merges(
             slug, issue_n, pr, provider,
             merge_method=merge_method, skip_qa=skip_qa,
             ci_status=ci_cache[pr], dry_run=dry_run,
+            active_tasks=tasks, archived_tasks=archived_tasks,
         ):
             merged.append(pr)
         elif ci_cache[pr] == CIStatus.RED:
