@@ -207,7 +207,7 @@ When the planner agent completes its kanban card but concludes the parent issue 
 **Defense-in-depth extension (fix for issue #969).** The previous implementation (`_check_planner_not_suitable()`) only scanned cards with `status="done"`. If the planner blocked its card — emitting the signal as a block reason instead of a completion summary — the handler was blind to it, and the issue stayed stuck In Progress forever. The handler now iterates **both `done` and `blocked` planner cards**, matching the signal on either status. Duplicate routing is prevented by the `planner-fallback-validator-{n}` idempotency key (only one validator per issue across both scans). The handler also emits diagnostic `info`/`debug` logs at every skip point (empty summary, non-matching pattern, missing issue, out-of-scope issue number) so silent failure modes from issue #969 no longer recur.
 
 **How you interact with it:**  
-No manual intervention required. If the planner determines an issue doesn't need decomposition, the system automatically reassigns it to the validator for normal pipeline processing. The parent issue will not get stuck — it will continue through the standard flow, even if the planner incorrectly blocks its card instead of completing it.
+No manual intervention required. If the planner determines an issue doesn't need decomposition, the system automatically reassigns it to the validator for normal pipeline processing. The parent issue will not get stuck — it will continue through the standard flow, even if the planner incorrectly blocks its card instead of completing it. The handler also skips issues that have been closed since they were routed (three-state closed-issue guard from issue #1120), so it never creates validator tasks for issues already resolved.
 
 **Prerequisites:**  
 - The parent issue must have been routed to the planner (via epic detection or manual assignment).
@@ -1044,6 +1044,8 @@ python scripts/daedalus_dispatch.py --history 25
 ```
 
 `--dry-run` is most useful when diagnosing unexpected dispatch behavior or previewing changes before a real run. `--self-test` is intended for CI pipelines — it runs fast, needs no credentials, and exits non-zero on any failed assertion. `--history` lets you audit recent dispatches without starting a full tick.
+
+**Exit code behavior (issue #1112):** A normal dispatch tick returns exit code **0** on success (including partial failure — at least one project ran cleanly — and zero-project ticks where nothing ran). It returns exit code **1** when at least one project ran and **every** project errored, so cron mail-on-error, CI status gates, and wrapper scripts can detect a total dispatch failure (e.g. misconfigured provider, broken auth). `--self-test` and `--history` keep their own exit codes.
 
 **Prerequisites:**  
 - `--dry-run` and `--history` require valid cron/environment setup (they use the same code path as a real tick, just with mutations gated out).  

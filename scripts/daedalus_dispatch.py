@@ -8572,6 +8572,20 @@ def main() -> int:
             pass  # best-effort cleanup on shutdown
 
 
+def _sweep_exit_code(n_ok: int, n_err: int) -> int:
+    """Exit code for a dispatch sweep (issue #1112).
+
+    Returns 1 only when at least one project ran and *every* one errored, so
+    cron mail-on-error, CI status gates, and wrapper scripts can detect a total
+    dispatch failure. Partial success (>=1 project ran cleanly) returns 0 —
+    partial failure is normal operation — and a zero-project tick (empty
+    registry / unresolved repo) returns 0 because nothing failed to run.
+    """
+    if n_err > 0 and n_ok == 0:
+        return 1
+    return 0
+
+
 def _main_inner(argv: Optional[List[str]] = None) -> int:
     """Cron / single-repo entrypoint.
 
@@ -8585,7 +8599,10 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
     resolving each via ConfigLoader, calling run(), and aggregating per-repo
     summaries into a human Slack message.
 
-    Always returns 0 (errors are logged + summarized, never via exit code).
+    Returns 0 on success (including partial failure and no-op ticks) and 1 when
+    at least one project ran and every project errored, so cron mail-on-error /
+    CI gates can detect a total dispatch failure (issue #1112). --self-test and
+    --history keep their own exit codes.
     """
     import argparse
 
@@ -8652,6 +8669,10 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
 
     loader = ConfigLoader()
     summaries: Dict[str, Dict[str, Any]] = {}
+    # Per-project run tally: exit non-zero only when >=1 project ran and all
+    # errored (issue #1112). Incremented in both dispatch paths below.
+    n_ok = 0
+    n_err = 0
 
     # Scope resolution (issue #137): an explicit --repo (path or VCS slug) wins;
     # otherwise auto-scope to the registered project containing cwd (cron
@@ -8688,13 +8709,15 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
                 dry_run=dry_run,
                 max_dispatch=_resolve_max_dispatch(resolved.get("execution") or {}),
             )
+            n_ok += 1
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
+            n_err += 1
         if not dry_run:
             _append_history(summaries[name], project=name, resolved=resolved)
         if _notify_project_summary(name, summaries[name], resolved, dry_run=dry_run):
-            return 0
+            return _sweep_exit_code(n_ok, n_err)
         try:
             _single_provider = providers.get_provider(resolved)
         except Exception:
@@ -8704,7 +8727,7 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
         )
         if msg:
             print(msg)
-        return 0
+        return _sweep_exit_code(n_ok, n_err)
 
     # -- registry sweep ------------------------------------------------------
     repo_paths = registry.list_projects()
@@ -8731,9 +8754,11 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
                 dry_run=dry_run,
                 max_dispatch=_resolve_max_dispatch(resolved.get("execution") or {}),
             )
+            n_ok += 1
         except Exception as e:
             logger.error("dispatch: run failed for %s: %s", name, e)
             summaries[name] = {"error": str(e)}
+            n_err += 1
         if not dry_run:
             _append_history(summaries[name], project=name, resolved=resolved)
 
@@ -8755,7 +8780,7 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
     msg = _human_summary(legacy, dry_run=dry_run, provider_map=legacy_providers)
     if msg:
         print(msg)
-    return 0
+    return _sweep_exit_code(n_ok, n_err)
 
 
 if __name__ == "__main__":

@@ -1343,6 +1343,15 @@ Each piece exists because the obvious approach failed:
   (name + workdir), so operators can see *why* the summary was degraded instead of guessing.
   Behaviour is otherwise unchanged: the summary still renders (degraded) and the rest of dispatch
   continues normally.
+- **Non-zero exit code on total dispatch failure** (`scripts/daedalus_dispatch.py`, issue #1112) —
+  `_main_inner()` previously returned exit code 0 on every path (its own docstring said "Always
+  returns 0 — errors are logged + summarized, never via exit code"), so cron mail-on-error, CI
+  status gates, and wrapper scripts always saw success even when every project run in a tick
+  errored (misconfigured provider, broken auth, total kanban failure). The dispatcher now tracks
+  a per-project run tally (`n_ok` / `n_err`) across both the single-repo path and the registry
+  sweep, and returns exit code **1** when at least one project ran and **every** one errored.
+  Partial success (>=1 project ran cleanly) and zero-project ticks (empty registry / unresolved
+  repo) still return 0. `--self-test` and `--history` keep their own exit codes.
 - **Fetch limit raised to 100** — the original page limit of 20 silently truncated
   boards with more than 20 open issues: validator sweep missed work, merged-PR
   archival missed completions, and the board looked healthy while issues rotted in
@@ -1351,6 +1360,15 @@ Each piece exists because the obvious approach failed:
   and an agent stuck `blocked` (waiting for input) used to share a code path; a
   dead-code branch let `stop:` fall through and leave the card blocked. Separate
   paths — `stop:` auto-closes, `blocked` PM-consults — prevent the regression.
+- **Closed-issue guard gaps** (`scripts/daedalus_dispatch.py`, issue #1120) — the
+  closed-issue skip guard added in #1117 had two gaps: `_check_planner_not_suitable()`
+  was missing the guard entirely (kept creating validator tasks for closed issues), and
+  `_is_issue_closed_cached()` returned `False` ("open") on a 403 rate-limit error, causing
+  a self-reinforcing rate-limit loop. The guard is now three-state: `True` (closed),
+  `False` (confirmed open, or no provider → fail-open for provider-less tests), `None`
+  (unknown — `get_issue_state` raised). All 6 call sites gate on `is not False`, so closed
+  **and** unknown/rate-limited issues are skipped rather than processed. The `None` result
+  is cached so a rate-limited tick makes at most one API call per issue.
 - **`issues_map` miss fallback** — a freshly-created issue can race with the
   dispatcher's sweep such that the sweep has the issue's number but not its body.
   A one-shot `get_issue()` retry on transient failure prevents a single API flake
@@ -1408,7 +1426,7 @@ on its board.
 
 | Path | What it is |
 |------|------------|
-| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
+| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect. Exits non-zero (1) when at least one project ran and every project errored, so cron mail-on-error and CI gates can detect total dispatch failure (issue #1112). Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
 | `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
