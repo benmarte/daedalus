@@ -1,0 +1,59 @@
+name: Claude Pipeline
+
+# Event-driven Daedalus-style pipeline. Each run advances ONE stage and sets the
+# next label; the label change re-fires this workflow, so stages self-chain.
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [opened, synchronize, labeled, ready_for_review]
+  check_suite:
+    types: [completed]
+  issue_comment:
+    types: [created]
+
+# Serialize per issue/PR so two runs can't fight over the same card
+# (the analog of Daedalus `max_dispatch: 1`).
+concurrency:
+  group: pipeline-${{ github.event.issue.number || github.event.pull_request.number || github.event.check_suite.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  checks: read
+  id-token: write
+
+jobs:
+  pipeline:
+    # Only react to our own pipeline labels / relevant PR + CI events — ignore noise.
+    if: >-
+      (github.event_name == 'issues' && startsWith(github.event.label.name, 'pipeline:')) ||
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run pipeline orchestrator
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Subscription auth (no per-token API billing). Generate with
+          # `claude setup-token` and store as a repo secret. Swap for
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} to use the API.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # (github_token omitted → the action uses the default GITHUB_TOKEN)
+          # The orchestrator command reads labels and delegates to a subagent.
+          prompt: |
+            /pipeline-tick
+            REPO=${{ github.repository }}
+            EVENT=${{ github.event_name }}.${{ github.event.action }}
+            NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}
+            BASE=dev
+          claude_args: |
+            --allowedTools "Bash,Read,Edit,Write,Grep,Glob,Task,WebFetch"

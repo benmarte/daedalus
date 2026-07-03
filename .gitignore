@@ -42,7 +42,11 @@ dashboard/dist/*.map
 
 # ── Tooling artifacts ────────────────────────────────────────────────────────
 .playwright-mcp/
-.claude/
+# Ignore local .claude state, but track the committed pipeline config
+# (subagents + slash commands) that the GitHub Actions pipeline depends on.
+.claude/*
+!.claude/agents/
+!.claude/commands/
 
 # ── Local runtime state ──────────────────────────────────────────────────────
 kanban.db
