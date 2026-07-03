@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 # When the dashboard host runs, it adds the plugin dir to sys.path so
 # relative imports work. Fall back to absolute import for testing.
 try:
-    from config import ConfigLoader, deep_merge, validate_vcs
+    from config import ConfigLoader, deep_merge, validate_failover, validate_vcs
 except ImportError:
     import sys
 
@@ -43,6 +43,7 @@ except ImportError:
         sys.path.insert(0, str(_repo_root))
     from config import ConfigLoader  # type: ignore[no-redef]
     from config import deep_merge  # type: ignore[no-redef]
+    from config import validate_failover  # type: ignore[no-redef]
     from config import validate_vcs  # type: ignore[no-redef]
 
 # Core helpers (degrade gracefully — never raise on missing data).
@@ -1110,6 +1111,7 @@ async def create_project(request: Request) -> dict[str, Any]:
         if cron_cfg.get("notifications") is not None:
             errors += _validate_notifications(cron_cfg["notifications"])
         errors += validate_vcs(cfg)
+        errors += validate_failover(cfg)
         if errors:
             raise HTTPException(status_code=422, detail={"errors": errors})
 
@@ -1479,7 +1481,9 @@ async def get_meta_labels(request: Request, project: str) -> dict[str, Any]:
     if not provider.supports_labels:
         return {"repo": repo, "labels": []}
     try:
-        labels = [{"name": l.name, "color": l.color} for l in provider.list_labels()]
+        labels = [
+            {"name": lbl.name, "color": lbl.color} for lbl in provider.list_labels()
+        ]
         return {"repo": repo, "labels": labels}
     except Exception as exc:
         import logging

@@ -275,6 +275,63 @@ execution:
   #
   # coding_agent_max_wait: 3600
 
+  # ── Provider failover chain (issue #1207) ──────────────────────────────────
+  # Ordered coding-agent chain: the FIRST entry is the primary, the rest are
+  # fallbacks. When the active agent fails on a transient trigger (session /
+  # usage limit, quota, crash, timeout — see `failover.triggers` below), the
+  # crash-retry reconciler (#1205) automatically re-dispatches the SAME card on
+  # the next entry instead of retrying the limited provider forever. Names are
+  # the same set as `coding_agent` (hermes | claude-code | codex | opencode);
+  # `cmd` defaults per agent when omitted.
+  #
+  # Back-compat: when `coding_agents` is absent, the single-value
+  # `coding_agent` / `coding_agent_cmd` keys above are treated as a
+  # one-element chain — failover is simply disabled, no config change needed.
+  #
+  # coding_agents:
+  #   - name: claude-code
+  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p'
+  #   - name: codex
+  #     cmd: 'codex exec --full-auto'
+
+  # Failover tuning (also accepted under `model.failover`; execution wins on
+  # conflict). A provider that spends `max_attempts_per_provider` dispatches
+  # on one episode enters a global cooldown and is skipped — by EVERY card —
+  # until the window expires; with `reset_to_primary` the primary is preferred
+  # again as soon as it recovers. Only the listed trigger classes rotate
+  # providers; deterministic task failures (agent ran but produced no PR)
+  # never do. When the whole chain is exhausted the card hard-blocks and the
+  # `crash-retries-exhausted` notification includes the per-provider history.
+  # Defaults shown:
+  #
+  # failover:
+  #   max_attempts_per_provider: 2
+  #   cooldown_minutes: 30
+  #   reset_to_primary: true
+  #   triggers: [session_limit, quota_exceeded, crash, timeout, api_connection_error]
+
+# ── Orchestration-brain model providers (issue #1207) ─────────────────────────
+# Ordered fallback chain for the Hermes model that DRIVES each pipeline role
+# (independent from the coding agent above). On a brain-side transient failure
+# (e.g. an ollama `APIConnectionError`), the *-daedalus profiles are resynced
+# to the next provider; with `failover.reset_to_primary` they are resynced
+# back once the primary's cooldown expires. Profiles with an explicit manual
+# model override are never touched (same rule as the normal model resync).
+#
+# Back-compat: when `providers` is absent, the global Hermes model config
+# (~/.hermes/config.yaml `model.default` / `model.provider`) is treated as a
+# one-element chain — no config change needed.
+#
+# Credentials come from `~/.hermes/.env`, never from this file. Each provider
+# needs its own key, e.g.: anthropic → ANTHROPIC_API_KEY, openrouter →
+# OPENROUTER_API_KEY, ollama-cloud → OLLAMA_API_KEY.
+#
+# model:
+#   providers:
+#     - {provider: ollama-cloud, default: glm-5.2}
+#     - {provider: anthropic,    default: claude-opus-4-8}
+#   # failover: {...}            # same knobs as execution.failover above
+
 # ── Dev mode ────────────────────────────────────────────────────────────────
 # Redirect the installed plugin's dispatcher to a local development checkout so
 # edits take effect immediately without `hermes plugins update daedalus`.

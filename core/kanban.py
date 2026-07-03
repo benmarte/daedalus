@@ -412,6 +412,57 @@ def rename_task(slug: str, task_id: str, new_title: str) -> bool:
         return False
 
 
+def _board_db_path(slug: str) -> str:
+    """Path to the board's SQLite database (honours HERMES_HOME — see rename_task)."""
+    _home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return os.path.join(_home, "kanban", "boards", slug, "kanban.db")
+
+
+def get_body(slug: str, task_id: str) -> Optional[str]:
+    """Return a task's body via direct SQLite read, or None on any failure.
+
+    There is no ``hermes kanban`` CLI command that prints the raw body, so this
+    reads the board database directly (same pattern as ``rename_task``).
+    """
+    db_path = _board_db_path(slug)
+    if not os.path.exists(db_path):
+        logger.warning("kanban: get_body: DB not found for board %r", slug)
+        return None
+    try:
+        conn = connect_wal(db_path)
+        row = conn.execute(
+            "SELECT body FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        conn.close()
+        return row[0] if row and row[0] is not None else None
+    except Exception as exc:
+        logger.warning("kanban: get_body %s failed: %s", task_id, exc)
+        return None
+
+
+def edit_body(slug: str, task_id: str, body: str) -> bool:
+    """Rewrite a task's body via direct SQLite write. Returns True on success.
+
+    Used by the provider-failover path (issue #1207) to swap the injected
+    ``⚠️ AGENT DELEGATION`` block to the fallback coding agent before the card
+    is re-dispatched — ``hermes kanban edit`` only touches result/summary, so
+    this writes the board database directly (same pattern as ``rename_task``).
+    """
+    db_path = _board_db_path(slug)
+    if not os.path.exists(db_path):
+        logger.warning("kanban: edit_body: DB not found for board %r", slug)
+        return False
+    try:
+        conn = connect_wal(db_path)
+        cur = conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+    except Exception as exc:
+        logger.warning("kanban: edit_body %s failed: %s", task_id, exc)
+        return False
+
+
 def diagnostics(slug: str) -> List[dict]:
     """Run ``hermes kanban diagnostics --json`` and return parsed diagnostics.
 

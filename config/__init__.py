@@ -98,6 +98,20 @@ def validate_vcs(resolved: dict) -> list[str]:
     return errors
 
 
+def validate_failover(resolved: dict) -> list[str]:
+    """Validate the provider-failover config of a resolved per-repo config.
+
+    Covers ``execution.coding_agents``, ``model.providers`` and the
+    ``failover`` block (issue #1207). Returns a list of human-readable errors
+    (empty when valid) — absence of every key is valid (single-provider
+    back-compat). Delegates to :mod:`core.provider_failover` (imported lazily
+    so this package stays importable standalone).
+    """
+    from core.provider_failover import validate_failover as _validate
+
+    return _validate(resolved)
+
+
 # ---------------------------------------------------------------------------
 # ConfigLoader
 # ---------------------------------------------------------------------------
