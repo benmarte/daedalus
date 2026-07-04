@@ -220,6 +220,29 @@ def test_dist_fail_includes_fix_hint():
     assert "npm run build" in msg
 
 
+# ── space-in-filename safety (splitlines vs split) ────────────────────────────
+
+def test_space_in_src_filename_classifies_correctly():
+    """A src filename with a space must not be split into two non-matching tokens.
+
+    git diff --name-only emits one path per line; the stdin reader must use
+    splitlines(), not split(), so 'dashboard/src/My Component.jsx' is kept
+    intact and still classifies as src=True, triggering FAIL when dist+manifest
+    are absent.
+    """
+    # classify_files receives the full path — verify startswith() matches it
+    c = classify_files(["dashboard/src/My Component.jsx"])
+    assert c["src"] is True, (
+        "Filename with space not recognised as src — "
+        "the full unsplit path must reach classify_files"
+    )
+
+    # End-to-end: src-only (with space) must still produce exit 1
+    code, msg = check_drift(["dashboard/src/My Component.jsx"])
+    assert code == 1
+    assert "FAIL" in msg
+
+
 # ── workflow YAML structure guard ─────────────────────────────────────────────
 
 def test_workflow_yaml_parses():

@@ -64,6 +64,11 @@ jobs:
 
       - name: Check dashboard src/dist/manifest drift
         if: github.event_name == 'pull_request'
+        # Fails if dashboard/src or build.js changes without matching dist+manifest,
+        # or if dist/manifest are edited without a src change (hand-edit guard).
+        # Metadata-only manifest edits (label/tab): run the build and commit the
+        # (unchanged-hash or rebuilt) dist alongside — CI requires the trio to
+        # move together; there is no bypass. See scripts/check_dist_drift.py.
         run: |
           changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
           if [ -z "$changed" ]; then

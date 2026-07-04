@@ -24,6 +24,12 @@ no           | no           | yes              | FAIL   (hand-edited manifest)
 "dist changed" means any file under dashboard/dist/.
 "manifest changed" means dashboard/manifest.json exactly.
 
+Metadata-only manifest edits (label/tab fields that build.js does not own):
+    These also require a rebuild commit. Run:
+        cd dashboard && npm install && npm run build
+    and commit the (unchanged-hash or rebuilt) dist alongside the manifest.
+    CI requires the trio to move together; there is no bypass.
+
 Exit codes:
     0  Pass or skip (no relevant drift, or all three areas updated together)
     1  Fail (drift detected — PR should not merge until fixed)
@@ -94,13 +100,17 @@ def check_drift(changed_files: list[str]) -> tuple[int, str]:
             "  cd dashboard && npm install && npm run build"
         )
 
-    # manifest changed alone — hand-edited manifest (or accidental edit).
+    # manifest changed alone — hand-edited manifest (or metadata-only edit).
+    # Even label/tab metadata changes (not owned by build.js) require the trio:
+    # run `cd dashboard && npm install && npm run build` and commit the
+    # (unchanged-hash or rebuilt) dist alongside. No bypass exists.
     if c["manifest"]:
         return 1, (
             "dist-drift: FAIL — dashboard/manifest.json changed without "
             "dashboard/src/ or dist/ changes.\n"
-            "Do not hand-edit the manifest. It is updated automatically by the build:\n"
-            "  cd dashboard && npm install && npm run build"
+            "Even metadata-only edits (label/tab) require committing dist/ alongside.\n"
+            "Run: cd dashboard && npm install && npm run build\n"
+            "Then commit dashboard/dist/ and dashboard/manifest.json together."
         )
 
     # Unreachable given the exhaustive table above, but be safe.
@@ -111,9 +121,12 @@ def check_drift(changed_files: list[str]) -> tuple[int, str]:
 
 def main() -> int:
     # Accept files from positional args; also read stdin if it is piped.
+    # splitlines() preserves filenames with spaces; split() would break them
+    # into non-matching tokens, causing the drift check to silently skip files.
     args = sys.argv[1:]
     if not sys.stdin.isatty():
-        args = sys.stdin.read().split() + args
+        stdin_lines = [ln.strip() for ln in sys.stdin.read().splitlines()]
+        args = [ln for ln in stdin_lines if ln] + args
 
     # De-duplicate and strip blanks.
     files = list(dict.fromkeys(f for f in args if f))
