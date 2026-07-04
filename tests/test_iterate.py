@@ -419,10 +419,14 @@ def test_parse_handoff_pass_substring_no_false_positive():
 
 
 def test_parse_handoff_prefixed_approval_signals():
-    """#956: Role-prefixed approval signals are detected (backward compat)."""
+    """#956: Role-prefixed approval signals are detected (backward compat).
+
+    Note: "a11y-passed" was removed from approve_signals (#1258) — no SOUL emits
+    it. The accessibility gate uses its own startswith check in _a11y_executor and
+    never routes through _parse_handoff's approve_signals list.
+    """
     prefixes = [
         "qa-passed: regression suite green",
-        "a11y-passed: wcag 2.1 AA compliant",
         "security-approved: no vulnerabilities found",
         "security-passed: review complete",
     ]
