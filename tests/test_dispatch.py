@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import conftest  # noqa: E402
-from conftest import _load_dispatch, check  # noqa: E402,F401
+from conftest import _load_dispatch, check, kanban_as  # noqa: E402,F401
 
 disp = _load_dispatch()
 
@@ -3107,7 +3107,7 @@ def test_get_task_summary_uses_inline_summary():
 def test_get_task_summary_falls_back_to_show_card():
     fake = mock.Mock()
     fake.show_card.return_value = {"latest_summary": "CONFIRMED: ok"}
-    with mock.patch.object(disp, "kanban", fake):
+    with kanban_as(disp.kanban, fake):
         out = disp._get_task_summary({"id": "t1"}, "slug")
     assert out == "CONFIRMED: ok"
     fake.show_card.assert_called_once_with("slug", "t1")
@@ -3149,7 +3149,7 @@ def test_check_confirmed_validators_stop_reaches_dedicated_handler():
     provider = mock.Mock()
     provider.close_issue.return_value = True
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -3190,7 +3190,7 @@ def test_check_confirmed_validators_stop_idempotent_already_closed():
     provider = mock.Mock()
     provider.close_issue.return_value = True  # would succeed but must not be called
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -3219,7 +3219,7 @@ def test_check_confirmed_validators_blocked_still_creates_pm_consultation():
     fake_kanban.create_task.return_value = "t_pm_consult"
 
     # No provider — blocked handler doesn't need one
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -3277,7 +3277,7 @@ def test_check_confirmed_validators_second_block_creates_new_consultation():
     fake_kanban.create_task.return_value = "t_consult2"
 
     with (
-        mock.patch.object(disp, "kanban", fake_kanban),
+        kanban_as(disp.kanban, fake_kanban),
         mock.patch.object(disp, "_hermes_send", return_value=(True, None)) as send,
     ):
         triggered = disp._check_confirmed_validators(
@@ -3327,7 +3327,7 @@ def test_check_confirmed_validators_third_block_increments_again():
     fake_kanban.list_tasks.side_effect = _list_tasks
     fake_kanban.create_task.return_value = "c2"
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -3365,7 +3365,7 @@ def test_check_confirmed_validators_block_skips_when_consultation_active():
     fake_kanban = mock.Mock()
     fake_kanban.list_tasks.side_effect = _list_tasks
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -3393,7 +3393,7 @@ def test_check_confirmed_validators_stop_no_provider_skips_close():
     fake_kanban = mock.Mock()
     fake_kanban.list_tasks.side_effect = [[done_card], []]
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",

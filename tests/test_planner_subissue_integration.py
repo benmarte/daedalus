@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.iterate import _execute_planner_decompose  # noqa: E402
+from core import kanban as _core_kanban  # noqa: E402
+from conftest import kanban_as  # noqa: E402
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -179,7 +181,7 @@ def test_integration_source_available_creates_file_specific_subissues(
     provider = _FakeProvider(parent_issue, created_numbers=[200, 201])
 
     # Stub kanban so triage/decompose/complete don't hit real DB
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=42, body=parent_body),
@@ -251,7 +253,7 @@ def test_integration_source_available_acceptance_criteria_reference_files(
     )
     provider = _FakeProvider(parent_issue, created_numbers=[300])
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=55, body=parent_body),
@@ -300,7 +302,7 @@ def test_integration_source_available_multiple_files_per_subissue(
     )
     provider = _FakeProvider(parent_issue, created_numbers=[400])
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=77, body=parent_body),
@@ -347,7 +349,7 @@ def test_integration_source_unavailable_fallback_to_generic_criteria(tmp_path):
     empty_workdir = str(tmp_path / "empty")
     Path(empty_workdir).mkdir(parents=True, exist_ok=True)
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=99, body=parent_body),
@@ -404,7 +406,7 @@ def test_integration_source_unavailable_workdir_missing(tmp_path):
     # Workdir points to non-existent path
     missing_workdir = str(tmp_path / "does" / "not" / "exist")
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=88, body=parent_body),
@@ -437,7 +439,7 @@ def test_integration_source_unavailable_empty_workdir_string():
     )
     provider = _FakeProvider(parent_issue, created_numbers=[700, 701])
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=77, body=parent_body),
@@ -475,7 +477,7 @@ def test_integration_correct_number_of_subissues_from_checklist(tmp_path):
     empty_workdir = str(tmp_path / "empty")
     Path(empty_workdir).mkdir(parents=True, exist_ok=True)
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=11, body=parent_body),
@@ -506,7 +508,7 @@ def test_integration_default_titles_when_no_checklist(tmp_path):
     empty_workdir = str(tmp_path / "empty")
     Path(empty_workdir).mkdir(parents=True, exist_ok=True)
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=22, body=parent_body),
@@ -545,7 +547,7 @@ def test_integration_idempotency_marker_posted(tmp_path):
     empty_workdir = str(tmp_path / "empty")
     Path(empty_workdir).mkdir(parents=True, exist_ok=True)
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=33, body=parent_body),
@@ -581,7 +583,7 @@ def test_integration_epic_label_applied_to_parent(tmp_path):
     empty_workdir = str(tmp_path / "empty")
     Path(empty_workdir).mkdir(parents=True, exist_ok=True)
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=44, body=parent_body),
@@ -632,7 +634,7 @@ def test_integration_large_source_files_keep_sub_issue_bodies_under_github_limit
     )
     provider = _FakeProvider(parent_issue, created_numbers=[900, 901])
 
-    with mock.patch("core.iterate.kanban", _make_kanban_stub()):
+    with kanban_as(_core_kanban, _make_kanban_stub()):
         ok = _execute_planner_decompose(
             "test",
             _make_card(issue_n=899, body=parent_body),

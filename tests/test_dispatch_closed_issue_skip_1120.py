@@ -23,7 +23,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from conftest import _load_dispatch  # noqa: E402
+from conftest import _load_dispatch, kanban_as  # noqa: E402
 from test_dispatch_closed_issue_skip_1115 import (  # noqa: E402
     _make_done_card,
     _provider_with_state,
@@ -131,7 +131,7 @@ def test_confirmed_validators_skips_on_rate_limit():
 
     provider = _provider_raising(RuntimeError("403 API rate limit exceeded"))
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",

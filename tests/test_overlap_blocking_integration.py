@@ -27,7 +27,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from conftest import FakeKanban, FakeProvider  # noqa: E402
+from conftest import FakeKanban, FakeProvider, kanban_as  # noqa: E402
+from core import kanban as _core_kanban  # noqa: E402
 from core.iterate import _execute_planner_decompose  # noqa: E402
 from core.providers.base import parse_depends_on  # noqa: E402
 
@@ -123,7 +124,7 @@ def _run_decompose(parent_body: str, created_numbers: list, workdir: str):
     card = _make_card(parent_n, parent_body)
 
     fk = FakeKanban()
-    with mock.patch("core.iterate.kanban", fk):
+    with kanban_as(_core_kanban, fk):
         ok = _execute_planner_decompose(
             SLUG, card, REPO, "PLANNING COMPLETE",
             workdir=workdir, provider=provider,
