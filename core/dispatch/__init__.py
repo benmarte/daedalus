@@ -11,6 +11,9 @@ cluster of helpers:
   bodies            — agent body template engine and delegation helpers (PR 2/4)
   validator_comment — GitHub comment scanners for validator/PM outcome fallback (PR 2/4)
   housekeeping      — issue fetch, follow-up extraction, orphan/worktree sweepers (PR 2/4)
+  stages            — stage-check auxiliary helpers: consultation markers,
+                      downstream probe, planner-fallback key, validator
+                      block enforcement (PR 3/4)
   # NOTE: notifications.py not created — those functions call _hermes_send/_notify_targets
   # which are sibling-patched by tests via disp.*; they stay in daedalus_dispatch.py
 
