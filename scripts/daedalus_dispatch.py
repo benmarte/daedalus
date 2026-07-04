@@ -2836,6 +2836,15 @@ def _retry_cap_marker_for_role(role: str) -> str:
 
 _RETRY_CAP_NOTIFICATION_MARKER = "RETRY_CAP_NOTIFICATION_SENT"
 
+# Stamped on a blocked team-member card once its PM consultation has completed,
+# preventing re-creation of the same consultation on subsequent ticks (#1125 F4).
+# Format: <!-- daedalus:consult-resolved:{issue_number} -->
+_CONSULT_RESOLVED_MARKER_TMPL = "<!-- daedalus:consult-resolved:{n} -->"
+# Prefix used to identify any consult-resolved comment during scanning.
+_CONSULT_RESOLVED_MARKER_PREFIX = "<!-- daedalus:consult-resolved:"
+# Comment posted on the PM consultation task body to link back to the blocked card.
+_BLOCKER_CARD_COMMENT_PREFIX = "blocker-card: "
+
 
 def _validator_github_comment_outcome(
     provider,
@@ -3493,6 +3502,88 @@ def _has_active_pm_consultation(
             continue  # epic #1008: terminal consultations do not block new ones
         return True
     return False
+
+
+def _is_consult_resolved(slug: str, card_id: str, issue_n: int) -> bool:
+    """Return True if the blocked card has a consult-resolved stamp for this issue.
+
+    Fetches the card via ``kanban.show_card`` and checks its comments for the
+    ``<!-- daedalus:consult-resolved:{n} -->`` marker.  Returns False when the
+    card cannot be fetched or the marker is absent.
+    """
+    marker = _CONSULT_RESOLVED_MARKER_TMPL.format(n=issue_n)
+    card = kanban.show_card(slug, card_id)
+    if not card:
+        return False
+    for c in card.get("comments") or []:
+        if (c.get("body") or "").strip() == marker:
+            return True
+    return False
+
+
+def _stamp_resolved_consultations(
+    slug: str,
+    pm_profile: str = "project-manager-daedalus",
+) -> int:
+    """Stamp blocked cards whose PM consultations have completed with CLARIFIED/ESCALATED.
+
+    Scans done PM consultation tasks (title starts with ``consult:``) for a
+    ``blocker-card: <id>`` comment (posted at consult-creation time) and, for
+    those whose summary begins with ``clarified:`` or ``escalated:``, stamps the
+    original blocked card with a ``consult-resolved:`` marker so that
+    ``_check_team_blockers`` skips re-creation on subsequent ticks (#1125 F4).
+
+    Returns the count of newly-stamped blocked cards.
+    """
+    resolved_prefixes = ("clarified:", "escalated:")
+    stamped = 0
+    for t in kanban.list_tasks(slug, status="done"):
+        title = (t.get("title") or "").lower()
+        if not title.startswith("consult:"):
+            continue
+        if (t.get("assignee") or "").strip() != pm_profile:
+            continue
+        cid = str(t.get("id") or "")
+        if not cid:
+            continue
+        card_data = kanban.show_card(slug, cid)
+        if not card_data:
+            continue
+        summary = (
+            card_data.get("summary") or card_data.get("latest_summary") or ""
+        ).lower()
+        if not any(summary.startswith(p) for p in resolved_prefixes):
+            continue
+        issue_n = extract_issue_number(t.get("title") or "")
+        if issue_n is None:
+            continue
+        marker = _CONSULT_RESOLVED_MARKER_TMPL.format(n=issue_n)
+        # Locate the blocked-card reference stored as a comment at creation time.
+        for c in card_data.get("comments") or []:
+            body = (c.get("body") or "").strip()
+            if not body.startswith(_BLOCKER_CARD_COMMENT_PREFIX):
+                continue
+            blocked_card_id = body[len(_BLOCKER_CARD_COMMENT_PREFIX):]
+            if not blocked_card_id:
+                continue
+            # Idempotent: only stamp if the marker is not already there.
+            blocked_card = kanban.show_card(slug, blocked_card_id)
+            if not blocked_card:
+                continue
+            already = any(
+                (cc.get("body") or "").strip() == marker
+                for cc in blocked_card.get("comments") or []
+            )
+            if not already:
+                kanban.comment(slug, blocked_card_id, marker)
+                logger.info(
+                    "dispatch: consult-resolved #%s stamped on card %s",
+                    issue_n,
+                    blocked_card_id,
+                )
+                stamped += 1
+            break  # one blocker-card comment per consult task
+    return stamped
 
 
 # ── follow-up extraction ─────────────────────────────────────────────────────
@@ -6781,6 +6872,16 @@ def _check_team_blockers(
             continue
         if _has_active_pm_consultation(slug, n, p["pm"]):
             continue  # PM consultation already open for this issue
+        # (#1125 F4) Skip if a completed consultation has already resolved this
+        # blocker.  The consult-resolved marker is stamped on the blocked card by
+        # _stamp_resolved_consultations (runs each tick before this function).
+        if _is_consult_resolved(slug, card["id"], n):
+            logger.debug(
+                "dispatch: consult-resolved marker on %s for #%s — skipping re-creation",
+                card["id"],
+                n,
+            )
+            continue
         issue = issues_map.get(n)
         if not issue and provider is not None:
             fetched = _fetch_issue_with_retry(provider, n)
@@ -6821,6 +6922,10 @@ def _check_team_blockers(
             idempotency_key=consult_key,
         )
         if cid:
+            # Store the blocked card ID so _stamp_resolved_consultations can
+            # find it once the PM completes and stamp the blocked card with a
+            # consult-resolved marker (#1125 F4).
+            kanban.comment(slug, cid, f"{_BLOCKER_CARD_COMMENT_PREFIX}{card['id']}")
             logger.info(
                 "dispatch: team blocked #%s — PM consultation task %s created", n, cid
             )
@@ -7579,6 +7684,13 @@ def _run_tick(
     )
     if follow_up_count and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    # (#1125 F4) Stamp blocked cards whose PM consultations completed with
+    # CLARIFIED/ESCALATED so _check_team_blockers skips re-creating the same
+    # consultation.  Must run before _check_team_blockers each tick.
+    _pm_profile = (profiles or _DEFAULT_PROFILES).get("pm", _DEFAULT_PROFILES["pm"])
+    if not dry_run:
+        _stamp_resolved_consultations(slug, _pm_profile)
 
     blocker_triggered = _check_team_blockers(
         slug,
