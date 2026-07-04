@@ -48,8 +48,45 @@ jobs:
       - name: Mypy (scoped packages)
         run: python3 -m mypy core/dispatch/ core/iterate/ core/util.py core/db.py config/
 
+  dist-drift:
+    # Guard against dashboard src/dist/manifest drift on pull requests.
+    # On push to main/dev the job skips cleanly — no base ref to diff against.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so git diff origin/<base>...HEAD resolves correctly.
+          fetch-depth: 0
+
+      - name: Fetch PR base branch
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin ${{ github.base_ref }}
+
+      - name: Check dashboard src/dist/manifest drift
+        if: github.event_name == 'pull_request'
+        # Fails if dashboard/src or build.js changes without matching dist+manifest,
+        # or if dist/manifest are edited without a src change (hand-edit guard).
+        # Metadata-only manifest edits (label/tab): run the build and commit the
+        # (unchanged-hash or rebuilt) dist alongside — CI requires the trio to
+        # move together; there is no bypass. See scripts/check_dist_drift.py.
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          if [ -z "$changed" ]; then
+            echo "dist-drift: skip — no changed files"
+            exit 0
+          fi
+          echo "Changed files:"
+          echo "$changed"
+          echo "---"
+          echo "$changed" | python3 scripts/check_dist_drift.py
+
+      - name: Skip (non-PR event)
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "dist-drift: skip — non-PR event, nothing to diff"
+
   ci-complete:
-    needs: [test, lint, typecheck]
+    needs: [test, lint, typecheck, dist-drift]
     runs-on: ubuntu-latest
     steps:
       - run: echo "all required checks passed"
