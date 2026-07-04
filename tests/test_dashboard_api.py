@@ -2479,39 +2479,39 @@ _EXPECTED_ROUTER_ENDPOINTS = frozenset({
 })
 
 
-def _collect_router_endpoints(router) -> frozenset:
-    """Flatten a router into a ``{(path, sorted-methods)}`` set.
+def _endpoint_set() -> frozenset:
+    """Return the ``{(path, sorted-methods)}`` surface of the unified router.
 
-    ``router.routes`` is not guaranteed to hold only ``APIRoute`` objects — some
-    Starlette/FastAPI versions surface included-router / mount entries (e.g.
-    ``_IncludedRouter``) that carry a nested ``.routes`` list but no ``.path``.
-    Recurse into anything without a ``.path`` so nested endpoints are still
-    captured, and skip entries that expose neither.
+    Reading ``router.routes`` directly is version-fragile — some FastAPI /
+    Starlette versions wrap sub-routers in internal ``_IncludedRouter`` objects
+    with no ``.path``. Mounting the router on a fresh ``FastAPI`` app forces it
+    to FLATTEN every included router into concrete ``APIRoute`` objects, which
+    is stable across versions. Filter to ``APIRoute`` so Starlette's built-in
+    mounts (docs, openapi, etc.) are excluded.
     """
-    endpoints: set = set()
-    for route in getattr(router, "routes", ()) or ():
-        path = getattr(route, "path", None)
-        if path is None:
-            nested = getattr(route, "routes", None)
-            if nested is not None:
-                endpoints |= _collect_router_endpoints(route)
-            continue
-        methods = tuple(sorted(getattr(route, "methods", None) or ()))
-        endpoints.add((path, methods))
-    return frozenset(endpoints)
+    from fastapi import FastAPI
+    from fastapi.routing import APIRoute
+
+    from dashboard.plugin_api import router
+
+    app = FastAPI()
+    app.include_router(router)
+    return frozenset(
+        (r.path, tuple(sorted(r.methods)))
+        for r in app.routes
+        if isinstance(r, APIRoute)
+    )
 
 
 def test_router_path_snapshot_unchanged():
     """The full set of router paths + methods is frozen (issue #1155).
 
-    Enumerate ``router.routes`` (robust to included-router / mount entries that
-    lack ``.path``) and assert the (path, methods) surface exactly matches the
-    pre-refactor snapshot — proving the helper extraction is behaviour-neutral
-    at the HTTP layer.
+    Enumerate the FLATTENED app routes and assert the (path, methods) surface
+    exactly matches the pre-refactor snapshot — proving the helper extraction
+    is behaviour-neutral at the HTTP layer.
     """
-    from dashboard.plugin_api import router
-
-    actual = _collect_router_endpoints(router)
+    actual = _endpoint_set()
+    assert actual, "no APIRoute endpoints discovered — enumeration is broken"
     assert actual == _EXPECTED_ROUTER_ENDPOINTS, (
         "router endpoint surface changed:\n"
         f"  added:   {sorted(actual - _EXPECTED_ROUTER_ENDPOINTS)}\n"
