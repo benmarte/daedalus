@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from conftest import FakeKanban, _load_dispatch  # noqa: E402
+from conftest import FakeKanban, FakeProvider, _load_dispatch  # noqa: E402
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -249,3 +249,52 @@ def test_f5_guard_allows_canonical_reviewer_prefix():
 
     assert count == 0
     assert len(fk.archived) == 0
+
+
+# ── closed-issue skip: _is_issue_closed_cached protection (#1258) ─────────────
+
+
+def test_guard_skips_legacy_done_card_for_closed_issue():
+    """Legacy-format done card for a CLOSED issue: guard skips entirely.
+
+    The closed-issue skip (_is_issue_closed_cached) is the only protection that
+    prevents stale legacy done cards on completed issues from being re-archived
+    and re-blocked on every tick.  This test documents that invariant.
+    """
+    disp = _load_dispatch()
+    fk = FakeKanban()
+    # "reviewed: approved" is a legacy format — not a canonical prefix.
+    _seed_done(fk, "reviewer-daedalus", 42, "reviewed: approved — LGTM")
+    fp = FakeProvider(closed_issues={42})
+
+    count = _run_guard(disp, fk, provider=fp)
+
+    assert count == 0, "Guard must skip done cards for closed issues"
+    assert len(fk.archived) == 0, "No archive on closed-issue skip"
+    assert len(fk.created) == 0, "No replacement card on closed-issue skip"
+    assert len(fk.blocked_calls) == 0, "No block on closed-issue skip"
+
+
+def test_guard_fires_for_legacy_done_card_on_open_issue():
+    """Legacy-format done card for an OPEN issue: guard archives + creates blocked card.
+
+    Documents the intentional migration behavior: cards that pre-date the canonical
+    prefix convention and belong to open (unresolved) issues must still be caught
+    and surfaced as coding-agent-failed blocks so they don't silently stall the
+    pipeline.
+    """
+    disp = _load_dispatch()
+    fk = FakeKanban()
+    task_id = _seed_done(fk, "reviewer-daedalus", 42, "reviewed: approved — LGTM")
+    fp = FakeProvider(closed_issues=set())  # issue #42 is open
+
+    count = _run_guard(disp, fk, provider=fp)
+
+    assert count == 1, "Guard must fire for legacy done card on an open issue"
+    assert task_id in fk.archived, "Original card must be archived"
+    assert len(fk.created) == 1, "One replacement blocked card must be created"
+    assert len(fk.blocked_calls) == 1, "Replacement card must be blocked"
+    _, reason = fk.blocked_calls[0]
+    assert reason.startswith("coding-agent-failed:"), (
+        f"Expected 'coding-agent-failed:' prefix, got: {reason!r}"
+    )

@@ -87,7 +87,6 @@ def _parse_handoff(handoff_text: str) -> dict[str, Any]:
         "no findings",
         ":+1:",
         "qa-passed",          # qa: "qa-passed: PR #N verified"
-        "a11y-passed",        # accessibility: "a11y-approved: …" (contains "a11y-passed" is rare; keep for completeness)
         "security-approved",  # security: "security-approved: PR #N"
         "security-passed",
         # The security agent's documented pass signal is 'security: cleared'
