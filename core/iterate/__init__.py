@@ -306,6 +306,9 @@ def run_iterate(
     merge_method = str(execution.get("merge_method", "squash")).lower()
     # Phase-2 (#1170): ground-truth verification gate.  Default OFF.
     _verify_outcomes = bool(execution.get("verify_outcomes", False))
+    # Phase-3 (#1170): prefix_fallback flag.  Default TRUE (current behaviour).
+    _protocol = (resolved or {}).get("protocol") or {}
+    _prefix_fallback = bool(_protocol.get("prefix_fallback", True))
 
     blocked_cards = kanban.list_blocked(slug)
 
@@ -424,7 +427,8 @@ def run_iterate(
                                   pr_is_merged=pr_is_merged,
                                   skip_qa=skip_qa,
                                   max_fix_attempts=max_fix_attempts,
-                                  _source_collector=_outcome_sources)
+                                  _source_collector=_outcome_sources,
+                                  prefix_fallback=_prefix_fallback)
 
         # ── Phase-2 ground-truth verification (#1170) ─────────────────────
         # Only runs when:

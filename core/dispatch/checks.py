@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 from core import kanban
 from core.dispatch.bodies import _pm_consultation_body, _resolve_howtos
+from core.iterate.outcomes import parse as _parse_outcome
+from core.iterate.classify import _ASSIGNEE_TO_ROLE as _ASSIGNEE_TO_ROLE_MAP
 from core.dispatch.dedup import (
     _RETRY_CAP_MARKER,
     _has_notified_block as _has_notified_block_impl,
@@ -2564,6 +2566,7 @@ def _guard_prefix_on_done(
     dry_run: bool = False,
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
     provider=None,
+    prefix_fallback: bool = True,
 ) -> int:
     """Mechanical backstop: archive done cards that lack the expected role prefix (#1125 F5).
 
@@ -2583,6 +2586,17 @@ def _guard_prefix_on_done(
     tick so the guard does not re-fire.  The ``idempotency_key`` on the new
     card prevents a duplicate even on concurrent ticks that both see the same
     done card before either archive completes.
+
+    When ``prefix_fallback=True`` (default — Phase-1/2 soak behaviour):
+      A well-formed completion is one whose summary starts with a recognised
+      role prefix.  A valid JSON outcome record is NOT required.
+
+    When ``prefix_fallback=False`` (Phase-3 flip — JSON primary):
+      A well-formed completion MUST carry a valid :class:`~core.iterate.outcomes.OutcomeRecord`
+      whose ``role`` matches the card's assignee.  A prefix line alone no
+      longer satisfies the guard — agents that only wrote the legacy prefix (no
+      JSON) are treated as non-compliant and are archived+recreated.
+      Driven by ``protocol.prefix_fallback: false`` (#1170 Phase 3).
 
     Returns: count of guards triggered.
     """
@@ -2608,9 +2622,19 @@ def _guard_prefix_on_done(
         summary_raw = _get_task_summary(task, slug)
         summary_check = (summary_raw or "").lower().lstrip()
 
-        # Well-formed completion: summary starts with a recognised prefix.
-        if any(summary_check.startswith(pf.lower()) for pf in expected_prefixes):
-            continue
+        # Well-formed completion check depends on protocol.prefix_fallback.
+        if prefix_fallback:
+            # Phase-1/2 (default): prefix line satisfies the guard.
+            if any(summary_check.startswith(pf.lower()) for pf in expected_prefixes):
+                continue
+        else:
+            # Phase-3 (JSON primary): a valid outcome record is required.
+            # A prefix line alone is NOT sufficient; the agent must also have
+            # written the structured JSON block with a matching role.
+            _rec = _parse_outcome(summary_raw or "")
+            _expected_role = _ASSIGNEE_TO_ROLE_MAP.get(assignee)
+            if _rec is not None and _expected_role and _rec.role == _expected_role:
+                continue
 
         n = extract_issue_number(task.get("title") or "")
         if n is None:

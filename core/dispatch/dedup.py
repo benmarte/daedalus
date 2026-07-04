@@ -54,6 +54,7 @@ def _has_notified_block(
     *,
     role: str = "",
     workdir: str = "",
+    prefix_fallback: bool = True,
 ) -> bool:
     """Return True if we already sent ``marker``'s notification for this issue.
 
@@ -72,6 +73,12 @@ def _has_notified_block(
     Phase 2 (#1170): when *workdir* is supplied, check ``dispatch_state``
     FIRST before scanning kanban comments.  On a comment-scan hit (fallback),
     backfill the state record for future ticks (lazy migration).
+
+    Phase 3 (#1170): when ``prefix_fallback=False`` AND *workdir* is supplied,
+    the comment-scan fallback is skipped entirely — ``dispatch_state`` is
+    authoritative.  Marker comments are still WRITTEN (see :func:`_mark_notified_block`)
+    for human visibility; only the READ path changes.  When *workdir* is empty
+    the flag has no effect (comment-scan is the only available path).
     """
     # ── Phase 2 dual-read: state-first, comment-scan fallback ─────────────────
     if workdir:
@@ -91,6 +98,12 @@ def _has_notified_block(
             )
 
     # ── Comment-scan fallback (original behaviour) ─────────────────────────────
+    # Phase 3: when prefix_fallback=False and workdir is set, dispatch_state is
+    # authoritative — skip the comment scan entirely (read-path only; write
+    # path is unchanged so comments continue to appear for human visibility).
+    if workdir and not prefix_fallback:
+        return False
+
     # Determine which marker strings to look for.
     markers_to_check = {marker}
     if role:

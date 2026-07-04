@@ -593,8 +593,8 @@ def test_mismatch_then_truthful_claim_advances(monkeypatch, tmp_path):
         mk.create_task.return_value = "next-task-id"
         run_iterate("slug", "org/repo", resolved=resolved, provider=p2)
 
-    check("tick2: advance executor ran (card completed or next stage created)",
-          len(advance_calls) > 0 or True)  # verify didn't block it — passes is the key assertion
+    check("tick2: advance executor ran (card completed)",
+          len(advance_calls) > 0)  # verify passed → executor ran → kanban.complete called
 
 
 def test_mismatch_verify_count_in_telemetry(monkeypatch, tmp_path):

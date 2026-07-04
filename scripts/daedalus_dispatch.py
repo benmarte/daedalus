@@ -2677,6 +2677,9 @@ def _run_tick(
     repo = resolved.get("repo", "")
     filters = (resolved.get("issues") or {}).get("filters", {})
     execution = resolved.get("execution") or {}
+    # Phase-3 (#1170): prefix_fallback flag — default true (current behaviour).
+    _protocol = resolved.get("protocol") or {}
+    _prefix_fallback = bool(_protocol.get("prefix_fallback", True))
     iterations = int(
         execution.get("max_lifecycle_iterations", 3)
     )  # self-improving loop cap (configurable)
@@ -3227,6 +3230,7 @@ def _run_tick(
         dry_run=dry_run,
         closed_issue_cache=_tick_closed_cache,
         provider=provider,
+        prefix_fallback=_prefix_fallback,
     )
     if guard_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
