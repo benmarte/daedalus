@@ -199,13 +199,20 @@ execution:
 #               comment-scan fallback is skipped entirely — dispatch_state is
 #               the authoritative source.  Marker comments are still WRITTEN
 #               for human visibility; only the read path changes.
+#               NOTE: Fork 3 is currently inert — no existing check-function
+#               call site passes workdir to _has_notified_block or
+#               _is_consult_resolved, so comment-scan remains the operative
+#               read path regardless of this flag.  Threading workdir into
+#               those call sites is deferred as a separate follow-up; there
+#               is therefore no state-warmup precondition before flipping.
 #
 # Flip criteria:
 #   Inspect the `_outcome_json` and `_outcome_prefix` counters in the dispatch
 #   history JSONL (workdir/.hermes/daedalus/history.jsonl).  When _outcome_json
 #   accounts for ≥95% of all completions across at least 7 consecutive days of
 #   production ticks with no regressions, it is safe to set prefix_fallback: false.
-#   Point at issue #1170 for the full soak checklist.
+#   Fork 3 (marker-read optimisation) requires the separate workdir-threading
+#   follow-up before it takes effect.  Point at issue #1170 for the full checklist.
 #
 protocol:
   # prefix_fallback: true

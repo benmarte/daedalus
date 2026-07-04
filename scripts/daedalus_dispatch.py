@@ -2678,8 +2678,11 @@ def _run_tick(
     filters = (resolved.get("issues") or {}).get("filters", {})
     execution = resolved.get("execution") or {}
     # Phase-3 (#1170): prefix_fallback flag — default true (current behaviour).
+    # Treat None (e.g. `protocol: {prefix_fallback: null}` in YAML) as True so
+    # a null value is never silently coerced to False via bool(None).
     _protocol = resolved.get("protocol") or {}
-    _prefix_fallback = bool(_protocol.get("prefix_fallback", True))
+    _pf_raw = _protocol.get("prefix_fallback", True)
+    _prefix_fallback = True if _pf_raw is None else bool(_pf_raw)
     iterations = int(
         execution.get("max_lifecycle_iterations", 3)
     )  # self-improving loop cap (configurable)

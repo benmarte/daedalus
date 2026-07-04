@@ -141,8 +141,8 @@ Validator → PM → Developer → QA → Reviewer + Security-Analyst + Accessib
 ### Protocol migration (structured outcomes — issue #1170)
 - **Phase 1/2 (active):** agents dual-write a legacy prefix line AND a structured JSON outcome block; the dispatcher reads JSON first and falls back to prefix. Telemetry: `_outcome_json` / `_outcome_prefix` counters in dispatch history JSONL.
 - **`protocol.prefix_fallback: true`** (default — zero behaviour change): JSON-first with prefix fallback. All existing behaviour byte-unchanged.
-- **`protocol.prefix_fallback: false`** (flip after soak): JSON is required. A card with no valid JSON record routes to `PENDING_SIGNAL` (hold); `_guard_prefix_on_done` requires a valid record; marker reads skip comment-scan and rely on `dispatch_state` exclusively.
-- **Flip criteria:** `_outcome_json` ≥ 95% across ≥ 7 consecutive production days with no regressions. See `templates/daedalus.yaml` `protocol:` section for the full checklist.
+- **`protocol.prefix_fallback: false`** (flip after soak): JSON is required. A card with no valid JSON record routes to `PENDING_SIGNAL` (hold); `_guard_prefix_on_done` requires a valid record; marker reads skip comment-scan when `workdir` is threaded through (currently inert — no existing call site passes `workdir` to `_has_notified_block`/`_is_consult_resolved`; threading deferred as follow-up, so marker reads remain comment-scan-backed regardless).
+- **Flip criteria:** `_outcome_json` ≥ 95% across ≥ 7 consecutive production days with no regressions. Fork 3 marker-read optimisation requires the separate `workdir`-threading follow-up; there is no state-warmup precondition for flipping the flag. See `templates/daedalus.yaml` `protocol:` section.
 - Full design in issue #1170.
 
 ---
