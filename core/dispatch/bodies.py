@@ -13,6 +13,10 @@ live kanban board, delegation stack, or mutable dispatcher globals:
                              consumed by _build_delegation_instructions in the
                              dispatcher; extracted here because they carry no
                              mutable-global dependency)
+  delegation body helpers  — _DELEGATION_MARKER, _ROLE_BODY_MARKER, _ROLE_TMP_PREFIX,
+                             _role_from_card, _inner_task_body, _rewrite_delegation_block
+                             (pure string-inspection helpers for body structure and
+                             marker detection; no kanban, no mutable globals) (PR 4/4)
   _resolve_howtos          — assembles the dict each role body requests
   _pm_consultation_body    — PM consultation body builder (calls _resolve_howtos +
                              _unpack_issue; no kanban, no mutable globals)
@@ -20,7 +24,7 @@ live kanban board, delegation stack, or mutable dispatcher globals:
 Functions that call _build_delegation_instructions or read _CODING_AGENT_MAX_WAIT
 (a mutable dispatcher global) STAY in scripts/daedalus_dispatch.py.
 
-Moved from scripts/daedalus_dispatch.py (issue #1153 PR 2/4).
+Moved from scripts/daedalus_dispatch.py (issue #1153 PR 2/4, PR 4/4).
 The dispatcher re-exports every symbol so the public surface is unchanged.
 """
 
@@ -29,7 +33,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from string import Template
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from core.dispatch.resolvers import _unpack_issue  # noqa: E402
 
@@ -420,3 +424,82 @@ def _pm_consultation_body(
         f"If this blocker cannot be resolved without human input (requires legal, compliance, "
         f"or C-level sign-off), complete your card with 'ESCALATED: ' and explain why.\n"
     )
+
+
+# ── Delegation body helpers (PR 4/4) ─────────────────────────────────────────
+# Pure string-inspection helpers for body structure and marker detection.
+# These carry no kanban dependency and no mutable dispatcher globals, so they
+# sit here alongside the other delegation building blocks.
+#
+# _build_delegation_instructions, _prepend_delegation, _apply_coding_agent_failover,
+# and _build_failover_context STAY in scripts/daedalus_dispatch.py because they read
+# _CODING_AGENT_MAX_WAIT (mutable dispatcher global) or call _build_delegation_instructions
+# (creating a circular import if moved).
+
+# Sentinel string that begins every agent-delegation block injected into task bodies.
+_DELEGATION_MARKER = "⚠️  AGENT DELEGATION — USE"
+
+# Sentinel string present at the start of every role task body ("You are the ...").
+_ROLE_BODY_MARKER = "You are the "
+
+# Per-role tmp-file prefix used by _build_delegation_instructions when naming the
+# /tmp/<pfx>-<issue>-{task,out,err}.txt files for a spawned coding agent.
+_ROLE_TMP_PREFIX: Dict[str, str] = {
+    "pm": "pm",
+    "developer": "dev",
+    "validator": "validator",
+    "qa": "qa",
+    "reviewer": "rev",
+    "security": "sec",
+    "documentation": "docs",
+    "accessibility": "a11y",
+    "planner": "planner",
+}
+
+
+def _role_from_card(card: Dict[str, Any]) -> str:
+    """Best-effort pipeline role of a kanban card (title prefix, then assignee)."""
+    title = (card.get("title") or "").lower()
+    assignee = (card.get("assignee") or "").lower()
+    for role in _ROLE_TMP_PREFIX:
+        if f"{role}:" in title or role in assignee:
+            return role
+    return "developer"
+
+
+def _inner_task_body(body: str) -> str:
+    """Extract the inner coding-agent prompt from a full card body (#1241).
+
+    Mirrors the copy instruction in the delegation block's step 1: block-first
+    bodies yield everything below the ``_INNER_BODY_SEPARATOR`` line; body-first
+    bodies (appended block) yield everything above the ``_DELEGATION_MARKER``
+    line. A body without a delegation block is returned unchanged. This is the
+    single place the boundary contract is encoded — golden tests assert the
+    result never contains the delegation wrapper.
+    """
+    marker_idx = body.find(_DELEGATION_MARKER)
+    if marker_idx == -1:
+        return body
+    sep_idx = body.find(_INNER_BODY_SEPARATOR)
+    if sep_idx > marker_idx:  # block first — inner body sits below the separator
+        return body[sep_idx + len(_INNER_BODY_SEPARATOR):].lstrip("\n")
+    return body[:marker_idx].rstrip("\n")  # body first — block appended after it
+
+
+def _rewrite_delegation_block(body: str, block: str) -> Optional[str]:
+    """Replace (or insert) the delegation block in *body* with *block*.
+
+    Handles both compositions ``_prepend_delegation`` produces (block before
+    the role body, or appended after it). An empty *block* strips delegation
+    entirely (fallback agent is hermes — the brain codes directly). Returns
+    None when the body shape is unrecognized — refuse rather than corrupt.
+    """
+    role_idx = body.find(_ROLE_BODY_MARKER)
+    if role_idx == -1:
+        return None
+    marker_idx = body.find(_DELEGATION_MARKER)
+    if marker_idx == -1 or marker_idx < role_idx:
+        rest = body[role_idx:]
+        return (block + "\n\n" + rest) if block else rest
+    head = body[:marker_idx].rstrip("\n")
+    return (head + block + "\n\n") if block else head + "\n"

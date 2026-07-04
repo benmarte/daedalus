@@ -11,6 +11,60 @@ Each tick, for the project whose workdir matches the cwd:
 
 The ONLY agent-driven part is the code each kanban worker writes. All board and
 status bookkeeping happens here, in code, so it can never be skipped.
+
+── Architecture (after issue #1153 refactor, PR 1/4–PR 4/4) ─────────────────
+
+This file is now a THIN ORCHESTRATOR. Stateless helpers have been progressively
+extracted into the ``core/dispatch/`` package to make the codebase navigable
+without losing the single-module public surface that tests rely on:
+
+  core/dispatch/resolvers.py     — pure config/execution-dict extractors, repo
+                                   path resolution
+  core/dispatch/dedup.py         — kanban comment-marker deduplication helpers
+  core/dispatch/history.py       — dispatch history JSONL I/O
+  core/dispatch/delivery.py      — hermes-send wrappers, notification delivery
+  core/dispatch/bodies.py        — agent task-body constants, template engine,
+                                   delegation building blocks, body-inspection
+                                   helpers (_DELEGATION_MARKER, _role_from_card,
+                                   _inner_task_body, _rewrite_delegation_block)
+  core/dispatch/validator_comment.py — GitHub comment scanners for validator/PM
+  core/dispatch/housekeeping.py  — issue fetch, follow-up, orphan/worktree sweep
+  core/dispatch/stages.py        — stage-check auxiliaries: consultation markers,
+                                   downstream probe, planner-fallback key,
+                                   validator block enforcement
+  core/dispatch/cli_helpers.py   — CLI-layer utilities (_sweep_exit_code)
+
+Every moved symbol is re-exported here (see ``# noqa: F401`` imports below) so
+the public surface and all test monkeypatching against this ``disp`` module are
+unchanged.
+
+What INTENTIONALLY STAYS here (follow-up issue #1262 tracks the unlock):
+
+  _check_completed_* family, _get_task_summary, and their call paths — these
+  are tested by replacing the kanban module wholesale; a spec-loaded dispatcher
+  cannot be imported back from core/dispatch, so moving them would break the
+  test isolation model.  Two independent agents verified this on PR #1261.
+
+  _validate_profiles — internally calls _hermes_profile_exists; tests rebind
+  ``disp._hermes_profile_exists`` to stub it.  If moved to resolvers.py, the
+  internal call would resolve against resolvers._hermes_profile_exists and the
+  test stub would be silently bypassed.
+
+  _build_delegation_instructions, _prepend_delegation — read _CODING_AGENT_MAX_WAIT
+  (a mutable module global set at import time); extracting them would sever the
+  mutable-global link without adding value.
+
+  _apply_coding_agent_failover, _build_failover_context — call
+  _build_delegation_instructions, creating a circular import if moved.
+
+  run(), _run_tick(), main(), _main_inner() — the orchestration core.
+
+  _maybe_redirect_dev_mode — uses ``__file__`` to compare paths; semantics
+  change if moved to a sub-module.
+
+  Rerun-contention helpers (_rerun_marker_path, _drain_rerun_requests, …) —
+  _drain_rerun_requests calls _main_inner(), so the group cannot move without a
+  cycle; splitting the group would fracture cohesion.
 """
 
 from __future__ import annotations
@@ -212,6 +266,17 @@ from core.dispatch.stages import (  # noqa: F401, E402
     _is_consult_resolved,
     _stamp_resolved_consultations,
 )
+from core.dispatch.bodies import (  # noqa: F401, E402
+    _DELEGATION_MARKER,
+    _ROLE_BODY_MARKER,
+    _ROLE_TMP_PREFIX,
+    _inner_task_body,
+    _rewrite_delegation_block,
+    _role_from_card,
+)
+from core.dispatch.cli_helpers import (  # noqa: F401, E402
+    _sweep_exit_code,
+)
 # ── End leaf-module re-exports ────────────────────────────────────────────────
 
 logger = logging.getLogger("daedalus.dispatch")
@@ -291,17 +356,7 @@ _TH: Dict[str, float] = _THRESHOLD_DEFAULTS.copy()
 
 
 
-_ROLE_TMP_PREFIX: Dict[str, str] = {
-    "pm": "pm",
-    "developer": "dev",
-    "validator": "validator",
-    "qa": "qa",
-    "reviewer": "rev",
-    "security": "sec",
-    "documentation": "docs",
-    "accessibility": "a11y",
-    "planner": "planner",
-}
+# _ROLE_TMP_PREFIX → moved to core/dispatch/bodies.py (issue #1153 PR 4/4)
 
 # Shared instruction injected after every role's wait step. If the guarded wait
 # (see ``_wait_for_agent_cmd``) reports the agent died or timed out, the worker
@@ -490,56 +545,8 @@ def _prepend_delegation(
 # is applied — rewriting a card's delegation block to the fallback coding
 # agent, or resyncing the *-daedalus profiles to the fallback brain provider.
 
-_DELEGATION_MARKER = "⚠️  AGENT DELEGATION — USE"
-_ROLE_BODY_MARKER = "You are the "
-
-
-def _role_from_card(card: Dict[str, Any]) -> str:
-    """Best-effort pipeline role of a kanban card (title prefix, then assignee)."""
-    title = (card.get("title") or "").lower()
-    assignee = (card.get("assignee") or "").lower()
-    for role in _ROLE_TMP_PREFIX:
-        if f"{role}:" in title or role in assignee:
-            return role
-    return "developer"
-
-
-def _inner_task_body(body: str) -> str:
-    """Extract the inner coding-agent prompt from a full card body (#1241).
-
-    Mirrors the copy instruction in the delegation block's step 1: block-first
-    bodies yield everything below the ``_INNER_BODY_SEPARATOR`` line; body-first
-    bodies (appended block) yield everything above the ``_DELEGATION_MARKER``
-    line. A body without a delegation block is returned unchanged. This is the
-    single place the boundary contract is encoded — golden tests assert the
-    result never contains the delegation wrapper.
-    """
-    marker_idx = body.find(_DELEGATION_MARKER)
-    if marker_idx == -1:
-        return body
-    sep_idx = body.find(_INNER_BODY_SEPARATOR)
-    if sep_idx > marker_idx:  # block first — inner body sits below the separator
-        return body[sep_idx + len(_INNER_BODY_SEPARATOR):].lstrip("\n")
-    return body[:marker_idx].rstrip("\n")  # body first — block appended after it
-
-
-def _rewrite_delegation_block(body: str, block: str) -> Optional[str]:
-    """Replace (or insert) the delegation block in *body* with *block*.
-
-    Handles both compositions ``_prepend_delegation`` produces (block before
-    the role body, or appended after it). An empty *block* strips delegation
-    entirely (fallback agent is hermes — the brain codes directly). Returns
-    None when the body shape is unrecognized — refuse rather than corrupt.
-    """
-    role_idx = body.find(_ROLE_BODY_MARKER)
-    if role_idx == -1:
-        return None
-    marker_idx = body.find(_DELEGATION_MARKER)
-    if marker_idx == -1 or marker_idx < role_idx:
-        rest = body[role_idx:]
-        return (block + "\n\n" + rest) if block else rest
-    head = body[:marker_idx].rstrip("\n")
-    return (head + block + "\n\n") if block else head + "\n"
+# _DELEGATION_MARKER, _ROLE_BODY_MARKER → moved to core/dispatch/bodies.py (issue #1153 PR 4/4)
+# _role_from_card, _inner_task_body, _rewrite_delegation_block → moved to core/dispatch/bodies.py (PR 4/4)
 
 
 def _apply_coding_agent_failover(
@@ -694,6 +701,11 @@ def _validate_profiles(
 
     The check is a plain filesystem lookup — no subprocess calls, no external
     I/O — so it is safe in the hot path but only invoked once per dispatch tick.
+
+    NOTE: stays in daedalus_dispatch.py (not extracted to core/dispatch/resolvers)
+    because tests rebind ``disp._hermes_profile_exists`` to stub it; moving this
+    function to resolvers.py would sever that rebinding since internal calls would
+    resolve against resolvers._hermes_profile_exists instead.
     """
     missing: Dict[str, str] = {}
     for role, name in profiles.items():
@@ -6763,18 +6775,7 @@ def main() -> int:
             pass  # best-effort cleanup on shutdown
 
 
-def _sweep_exit_code(n_ok: int, n_err: int) -> int:
-    """Exit code for a dispatch sweep (issue #1112).
-
-    Returns 1 only when at least one project ran and *every* one errored, so
-    cron mail-on-error, CI status gates, and wrapper scripts can detect a total
-    dispatch failure. Partial success (>=1 project ran cleanly) returns 0 —
-    partial failure is normal operation — and a zero-project tick (empty
-    registry / unresolved repo) returns 0 because nothing failed to run.
-    """
-    if n_err > 0 and n_ok == 0:
-        return 1
-    return 0
+# _sweep_exit_code → moved to core/dispatch/cli_helpers.py (issue #1153 PR 4/4)
 
 
 def _main_inner(argv: Optional[List[str]] = None) -> int:
