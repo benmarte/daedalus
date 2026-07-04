@@ -12,15 +12,23 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
    write_file("/tmp/dev-<issue_number>-task.txt", "<full task body>")
    ```
-3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
+3. Run daedalus-delegate.sh synchronously — ONE terminal call; the shell waits while bash drives the lifecycle (no LLM polling turns):
    ```
-   terminal("cat /tmp/dev-<issue_number>-task.txt | <command from delegation block> > /tmp/dev-<issue_number>-out.txt 2>&1", background=True)
+   terminal("bash ~/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh \
+     --task-file /tmp/dev-<issue_number>-task.txt \
+     --cmd '<command from delegation block>' \
+     --card <your_kanban_card_id> \
+     --board <board_slug> \
+     --out /tmp/dev-<issue_number>-out.txt")
    ```
-4. Wait for the agent to open a PR. Poll every 2 minutes until a PR appears:
-   ```
-   terminal("gh pr list --repo benmarte/daedalus --state open --limit 5")
-   ```
-5. Once a PR is found, verify it with `terminal("gh pr view <pr_number>")`.
+   The wrapper: spawns the agent, polls PID liveness every 5s in bash, sends heartbeats every 5 minutes,
+   honours a `.done` push-marker if the inner agent writes one, enforces the max-wait timeout. It emits a
+   `DELEGATE_RESULT: {...}` line to stdout and exits with the agent's exit code (or 124 on timeout).
+4. Read the result — parse the `DELEGATE_RESULT` line and the out file:
+   - `{"status":"ok","exit":0,...}` — inner agent succeeded; look for `PR URL:` / `PR number:` in the out file.
+   - `{"status":"failed","exit":N,...}` — inner agent exited non-zero; block with `coding-agent-failed: exited with code <N>`.
+   - `{"status":"timeout",...}` — agent exceeded max-wait; block with `coding-agent-failed: CODING_AGENT_TIMEOUT`.
+5. If a PR was opened (status ok), confirm with `terminal("gh pr view <pr_number>")`.
 6. Block YOUR kanban card with `review-required: PR #<pr_number> — <branch>`.
 ⛔ **DO NOT write any code yourself. DO NOT open any PR yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
