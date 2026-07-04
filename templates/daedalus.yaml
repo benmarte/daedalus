@@ -121,6 +121,12 @@ execution:
   # constrained hosts to avoid OOM-killing parallel coding agents (issue #141).
   # max_dispatch: 5
 
+  # How many developer/reviewer/security fix cycles run before a card escalates
+  # for manual intervention (self-healing CI-fix and review-fix loops). Raise it
+  # for flaky suites that need more retry headroom, or lower it to fail fast.
+  # Falls back to 3 when unset, non-numeric, or <= 0. (default: 3)
+  # max_fix_attempts: 3
+
   # Iterations per agent (how many back-and-forth steps each agent gets).
   # iterations: 5
 

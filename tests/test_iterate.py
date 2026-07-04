@@ -112,6 +112,48 @@ def test_classify_blocked_dev_escalate():
     check("dev over max (green CI) → escalate too", result2 == iterate.ESCALATE)
 
 
+def test_classify_blocked_honors_custom_max_fix_attempts():
+    """The escalation cap is configurable via the max_fix_attempts param (#1125 F3)."""
+    # With a raised cap, fix_attempts=3 (the old hardcoded limit) no longer escalates.
+    not_yet = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42",
+        ci_green=True,
+        fix_attempts=3,
+        max_fix_attempts=5,
+    )
+    check("raised cap → 3 attempts still advances", not_yet == iterate.ADVANCE)
+
+    # At the raised cap it escalates.
+    at_cap = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42",
+        ci_green=True,
+        fix_attempts=5,
+        max_fix_attempts=5,
+    )
+    check("raised cap → at cap escalates", at_cap == iterate.ESCALATE)
+
+    # A lowered cap escalates earlier than the default of 3.
+    reviewer_low = iterate.classify_blocked(
+        "reviewer-daedalus",
+        "changes requested: fix findings",
+        ci_green=True,
+        fix_attempts=1,
+        max_fix_attempts=1,
+    )
+    check("lowered cap → reviewer escalates at 1", reviewer_low == iterate.ESCALATE)
+
+    # Default (unspecified) preserves the historical cap of 3.
+    default_cap = iterate.classify_blocked(
+        "developer-daedalus",
+        "review-required: PR #42",
+        ci_green=True,
+        fix_attempts=3,
+    )
+    check("default cap unchanged at 3", default_cap == iterate.ESCALATE)
+
+
 def test_classify_blocked_dev_no_pr():
     """Developer + no PR in handoff → pm_route (was: silent drop, now routes to PM)."""
     result = iterate.classify_blocked(
@@ -2319,6 +2361,7 @@ if __name__ == "__main__":
         test_classify_blocked_dev_red,
         test_classify_blocked_dev_advance_all_ci_states,
         test_classify_blocked_dev_escalate,
+        test_classify_blocked_honors_custom_max_fix_attempts,
         test_classify_blocked_dev_no_pr,
         test_classify_blocked_dev_pr_merged_reconciles,
         test_classify_blocked_dev_pr_merged_precedes_not_open,
