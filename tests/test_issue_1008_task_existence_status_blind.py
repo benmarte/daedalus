@@ -27,6 +27,7 @@ from conftest import (  # noqa: E402
     PIPELINE_ROLES,
     FakeKanban,
     _load_dispatch,
+    kanban_as,
 )
 
 
@@ -49,40 +50,39 @@ class TestHasDownstreamTasksStatusBlind:
     def test_ignores_each_terminal_state(self, disp):
         for terminal in TERMINAL_STATES:
             fk = FakeKanban()
-            disp.kanban = fk
             fk.seed(
                 assignee=PIPELINE_ROLES["developer"],
                 title=f"#100801 Developer: stale",
                 status=terminal,
                 summary="prior attempt",
             )
-            assert disp._has_downstream_tasks(
-                SLUG, 100801,
-                validator_profile=PIPELINE_ROLES["validator"],
-                pm_profile=PIPELINE_ROLES["pm"],
-                planner_profile="planner-daedalus",
-            ) is False, f"should ignore downstream task in terminal state {terminal!r}"
+            with kanban_as(disp.kanban, fk):
+                assert disp._has_downstream_tasks(
+                    SLUG, 100801,
+                    validator_profile=PIPELINE_ROLES["validator"],
+                    pm_profile=PIPELINE_ROLES["pm"],
+                    planner_profile="planner-daedalus",
+                ) is False, f"should ignore downstream task in terminal state {terminal!r}"
 
     def test_active_downstream_detected(self, disp):
         for active in ACTIVE_STATES:
             fk = FakeKanban()
-            disp.kanban = fk
             fk.seed(
                 assignee=PIPELINE_ROLES["developer"],
                 title=f"#100802 Developer: active",
                 status=active,
                 summary="",
             )
-            assert disp._has_downstream_tasks(
-                SLUG, 100802,
-                validator_profile=PIPELINE_ROLES["validator"],
-                pm_profile=PIPELINE_ROLES["pm"],
-                planner_profile="planner-daedalus",
-            ) is True, f"should see downstream task in active state {active!r}"
+            with kanban_as(disp.kanban, fk):
+                assert disp._has_downstream_tasks(
+                    SLUG, 100802,
+                    validator_profile=PIPELINE_ROLES["validator"],
+                    pm_profile=PIPELINE_ROLES["pm"],
+                    planner_profile="planner-daedalus",
+                ) is True, f"should see downstream task in active state {active!r}"
 
     def test_mix_terminal_and_active(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
         # All terminals
         for i, ts in enumerate(TERMINAL_STATES):
             fk.seed(
@@ -98,22 +98,23 @@ class TestHasDownstreamTasksStatusBlind:
             status="running",
             summary="",
         )
-        assert disp._has_downstream_tasks(
-            SLUG, 100803,
-            validator_profile=PIPELINE_ROLES["validator"],
-            pm_profile=PIPELINE_ROLES["pm"],
-            planner_profile="planner-daedalus",
-        ) is True
+        with kanban_as(disp.kanban, fk):
+            assert disp._has_downstream_tasks(
+                SLUG, 100803,
+                validator_profile=PIPELINE_ROLES["validator"],
+                pm_profile=PIPELINE_ROLES["pm"],
+                planner_profile="planner-daedalus",
+            ) is True
 
     def test_empty_returns_false(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
-        assert disp._has_downstream_tasks(
-            SLUG, 100804,
-            validator_profile=PIPELINE_ROLES["validator"],
-            pm_profile=PIPELINE_ROLES["pm"],
-            planner_profile="planner-daedalus",
-        ) is False
+        with kanban_as(disp.kanban, fk):
+            assert disp._has_downstream_tasks(
+                SLUG, 100804,
+                validator_profile=PIPELINE_ROLES["validator"],
+                pm_profile=PIPELINE_ROLES["pm"],
+                planner_profile="planner-daedalus",
+            ) is False
 
 
 # ── _has_active_pm_consultation ─────────────────────────────────────────────
@@ -125,34 +126,33 @@ class TestHasActivePmConsultationStatusBlind:
     def test_ignores_each_terminal_state(self, disp):
         for terminal in TERMINAL_STATES:
             fk = FakeKanban()
-            disp.kanban = fk
             fk.seed(
                 assignee=PIPELINE_ROLES["pm"],
                 title=f"Consult: #{100810} Some question",
                 status=terminal,
                 summary="prior consultation finished",
             )
-            assert disp._has_active_pm_consultation(
-                SLUG, 100810, pm_profile=PIPELINE_ROLES["pm"],
-            ) is False, f"should ignore consultation in terminal state {terminal!r}"
+            with kanban_as(disp.kanban, fk):
+                assert disp._has_active_pm_consultation(
+                    SLUG, 100810, pm_profile=PIPELINE_ROLES["pm"],
+                ) is False, f"should ignore consultation in terminal state {terminal!r}"
 
     def test_detects_each_active_state(self, disp):
         for active in ACTIVE_STATES:
             fk = FakeKanban()
-            disp.kanban = fk
             fk.seed(
                 assignee=PIPELINE_ROLES["pm"],
                 title=f"Consult: #{100811} Open question",
                 status=active,
                 summary="",
             )
-            assert disp._has_active_pm_consultation(
-                SLUG, 100811, pm_profile=PIPELINE_ROLES["pm"],
-            ) is True, f"should detect consultation in active state {active!r}"
+            with kanban_as(disp.kanban, fk):
+                assert disp._has_active_pm_consultation(
+                    SLUG, 100811, pm_profile=PIPELINE_ROLES["pm"],
+                ) is True, f"should detect consultation in active state {active!r}"
 
     def test_mix_terminal_and_active(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
         for i, ts in enumerate(TERMINAL_STATES):
             fk.seed(
                 assignee=PIPELINE_ROLES["pm"],
@@ -166,42 +166,43 @@ class TestHasActivePmConsultationStatusBlind:
             status="running",
             summary="",
         )
-        assert disp._has_active_pm_consultation(
-            SLUG, 100812, pm_profile=PIPELINE_ROLES["pm"],
-        ) is True
+        with kanban_as(disp.kanban, fk):
+            assert disp._has_active_pm_consultation(
+                SLUG, 100812, pm_profile=PIPELINE_ROLES["pm"],
+            ) is True
 
     def test_empty_returns_false(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
-        assert disp._has_active_pm_consultation(
-            SLUG, 100813, pm_profile=PIPELINE_ROLES["pm"],
-        ) is False
+        with kanban_as(disp.kanban, fk):
+            assert disp._has_active_pm_consultation(
+                SLUG, 100813, pm_profile=PIPELINE_ROLES["pm"],
+            ) is False
 
     def test_non_consultation_pm_tasks_ignored(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
         fk.seed(
             assignee=PIPELINE_ROLES["pm"],
             title=f"#{100814} Regular PM spec task",
             status="running",
             summary="",
         )
-        assert disp._has_active_pm_consultation(
-            SLUG, 100814, pm_profile=PIPELINE_ROLES["pm"],
-        ) is False
+        with kanban_as(disp.kanban, fk):
+            assert disp._has_active_pm_consultation(
+                SLUG, 100814, pm_profile=PIPELINE_ROLES["pm"],
+            ) is False
 
     def test_other_assignee_consults_ignored(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
         fk.seed(
             assignee="some-other-agent",
             title=f"Consult: #{100815} someone else's consult",
             status="running",
             summary="",
         )
-        assert disp._has_active_pm_consultation(
-            SLUG, 100815, pm_profile=PIPELINE_ROLES["pm"],
-        ) is False
+        with kanban_as(disp.kanban, fk):
+            assert disp._has_active_pm_consultation(
+                SLUG, 100815, pm_profile=PIPELINE_ROLES["pm"],
+            ) is False
 
 
 # ── _count_active_issue_tasks ────────────────────────────────────────────────
@@ -213,32 +214,31 @@ class TestCountActiveIssueTasksStatusBlind:
     def test_ignores_each_terminal_state(self, disp):
         for terminal in TERMINAL_STATES:
             fk = FakeKanban()
-            disp.kanban = fk
             fk.seed(
                 assignee=PIPELINE_ROLES["developer"],
                 title=f"#{100820} Developer: done task",
                 status=terminal,
                 summary="",
             )
-            count = disp._count_active_issue_tasks(SLUG, 100820)
+            with kanban_as(disp.kanban, fk):
+                count = disp._count_active_issue_tasks(SLUG, 100820)
             assert count == 0, f"terminal state {terminal!r} should not count active"
 
     def test_counts_each_active_state(self, disp):
         for active in ACTIVE_STATES:
             fk = FakeKanban()
-            disp.kanban = fk
             fk.seed(
                 assignee=PIPELINE_ROLES["developer"],
                 title=f"#{100821} Developer: active task",
                 status=active,
                 summary="",
             )
-            count = disp._count_active_issue_tasks(SLUG, 100821)
+            with kanban_as(disp.kanban, fk):
+                count = disp._count_active_issue_tasks(SLUG, 100821)
             assert count == 1, f"active state {active!r} should count"
 
     def test_mixed_terminal_and_active(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
         # 5 terminals
         for i, ts in enumerate(TERMINAL_STATES):
             fk.seed(
@@ -260,21 +260,22 @@ class TestCountActiveIssueTasksStatusBlind:
             status="ready",
             summary="",
         )
-        count = disp._count_active_issue_tasks(SLUG, 100822)
+        with kanban_as(disp.kanban, fk):
+            count = disp._count_active_issue_tasks(SLUG, 100822)
         assert count == 2, f"expected 2 active; got {count}"
 
     def test_empty_board_returns_zero(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
-        assert disp._count_active_issue_tasks(SLUG, 100823) == 0
+        with kanban_as(disp.kanban, fk):
+            assert disp._count_active_issue_tasks(SLUG, 100823) == 0
 
     def test_issue_number_isolation(self, disp):
         fk = FakeKanban()
-        disp.kanban = fk
         fk.seed(
             assignee=PIPELINE_ROLES["developer"],
             title=f"#999 Developer: unrelated active",
             status="running",
             summary="",
         )
-        assert disp._count_active_issue_tasks(SLUG, 100824) == 0
+        with kanban_as(disp.kanban, fk):
+            assert disp._count_active_issue_tasks(SLUG, 100824) == 0

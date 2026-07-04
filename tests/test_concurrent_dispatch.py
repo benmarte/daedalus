@@ -26,7 +26,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from conftest import FakeKanban, _load_dispatch  # noqa: E402
+from conftest import FakeKanban, _load_dispatch, kanban_as  # noqa: E402
 
 
 # ── 1. Process-level FileLock mutex ──────────────────────────────────────────
@@ -110,11 +110,8 @@ class TestConcurrentRunIdempotency:
 
     def test_concurrent_create_task_produces_one_task_each(self):
         """Two threads calling create_task for the same keys dedupe via idemp keys."""
-        disp = _load_dispatch()
-
         # Shared FakeKanban — mirrors the real DB's idempotency behaviour.
         fk = FakeKanban()
-        disp.kanban = fk
         slug = "proj-concurrent-idemp"
 
         # Simulate two concurrent dispatch threads racing to create the same
@@ -166,7 +163,6 @@ class TestStatusBlindGuardConcurrency:
         """Concurrent complete + has_downstream_tasks → no ghost block."""
         disp = _load_dispatch()
         fk = FakeKanban()
-        disp.kanban = fk
         slug = "proj-concurrent-guard"
 
         issue_n = 9002
@@ -196,12 +192,13 @@ class TestStatusBlindGuardConcurrency:
                 )
                 observations.append(result)
 
-        tc = threading.Thread(target=completer)
-        tq = threading.Thread(target=querier)
-        tc.start()
-        tq.start()
-        tc.join(timeout=2)
-        tq.join(timeout=2)
+        with kanban_as(disp.kanban, fk):
+            tc = threading.Thread(target=completer)
+            tq = threading.Thread(target=querier)
+            tc.start()
+            tq.start()
+            tc.join(timeout=2)
+            tq.join(timeout=2)
 
         # Once the task is completed (after a few iterations), no subsequent
         # observation should report True (status-blind guard kicks in).
@@ -269,7 +266,6 @@ def test_concurrent_count_active_tasks_with_terminal():
     """_count_active_issue_tasks is correct while tasks transition in-flight."""
     disp = _load_dispatch()
     fk = FakeKanban()
-    disp.kanban = fk
     slug = "proj-concurrent-count"
     issue_n = 9003
 
@@ -279,18 +275,20 @@ def test_concurrent_count_active_tasks_with_terminal():
         fk.seed(assignee="qa-daedalus", title=f"#{issue_n} QA", status="todo"),
         fk.seed(assignee="reviewer-daedalus", title=f"#{issue_n} Reviewer", status="blocked"),
     ]
-    assert disp._count_active_issue_tasks(slug, issue_n) == 3
 
-    # Concurrently complete one from another thread and count from this one.
-    def completer() -> None:
-        fk.complete(slug, tids[0], summary="merged")
+    with kanban_as(disp.kanban, fk):
+        assert disp._count_active_issue_tasks(slug, issue_n) == 3
 
-    tc = threading.Thread(target=completer)
-    tc.start()
-    tc.join(timeout=2)
+        # Concurrently complete one from another thread and count from this one.
+        def completer() -> None:
+            fk.complete(slug, tids[0], summary="merged")
 
-    # One task moved to done → terminal → should not count.
-    assert disp._count_active_issue_tasks(slug, issue_n) == 2
+        tc = threading.Thread(target=completer)
+        tc.start()
+        tc.join(timeout=2)
+
+        # One task moved to done → terminal → should not count.
+        assert disp._count_active_issue_tasks(slug, issue_n) == 2
 
 
 if __name__ == "__main__":
