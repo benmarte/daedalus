@@ -252,6 +252,30 @@ protocol:
   # crash_retry_cooldown_minutes: 120
   # crash_retry_window_hours: 6
 
+  # ── Native per-task bounds (issue #1289) ───────────────────────────────────
+  # OFF by default. When enabled, every dispatcher-created role card carries
+  # Hermes-native circuit breakers so a crashed or runaway worker self-bounds
+  # without help from the daedalus crash-retry reconciler:
+  #   * --max-retries N  — consecutive-failure breaker (Hermes parks the card
+  #     after N straight worker failures). Defaults to 2 (= kanban.failure_limit).
+  #     This is DISTINCT from the CI/review fix-loop (MAX_FIX_ATTEMPTS = 3): the
+  #     breaker retries a card whose WORKER died; the fix-loop retries a card
+  #     whose ARTIFACT failed review.
+  #   * --max-runtime <dur> — wall-clock cap after which Hermes
+  #     SIGTERM->SIGKILL->requeues the card. Short roles use the default; the
+  #     developer role gets a generous cap because it edits code + runs tests.
+  # With native_bounds ON, native --max-runtime requeue is authoritative for
+  # wall-clock timeouts, so crash_retry SKIPS timeout-class cards (no
+  # double-handling of CODING_AGENT_TIMEOUT); other crash classes (session
+  # limit, quota, generic crash) still flow through crash_retry unchanged.
+  # NOTE: goal-mode (--goal judge-LLM adjudication) is a separate follow-up and
+  # is NOT configured here. Defaults shown:
+  # native_bounds: false
+  # native_max_retries: 2
+  # native_max_runtime: "30m"
+  # native_bounds_by_role:
+  #   developer: {max_runtime: "1h"}
+
   # Custom Hermes profile names and skills per pipeline role.
   # Override any role to route tasks to your own agent profiles instead of the
   # built-in daedalus profiles.  Only the keys you specify are overridden;

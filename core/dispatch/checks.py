@@ -18,6 +18,7 @@ import types as _types
 from typing import Any, Dict, List, Optional
 
 from core import kanban
+from core import native_bounds
 from core.dispatch.bodies import _pm_consultation_body, _resolve_howtos
 from core.iterate.outcomes import parse as _parse_outcome
 from core.iterate.outcomes import parse_dict as _parse_outcome_dict
@@ -642,6 +643,7 @@ def _check_confirmed_validators(
     provider=None,
     resolved: Optional[Dict[str, Any]] = None,
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
+    bounds: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
     create a PM task to write the spec + acceptance criteria.
@@ -1254,6 +1256,7 @@ def _check_confirmed_validators(
                 idempotency_key=retry_key,
                 workspace=f"dir:{workdir}" if workdir else "",
                 skills=rs.get("validator") or None,
+                **native_bounds.bounds_kwargs(bounds, "validator"),
             )
             if vid:
                 logger.warning(
@@ -1415,6 +1418,7 @@ def _check_confirmed_validators(
             idempotency_key=ikey,
             workspace=f"dir:{workdir}" if workdir else "",
             skills=rs.get("pm") or None,
+            **native_bounds.bounds_kwargs(bounds, "pm"),
         )
         if vid:
             logger.info(
@@ -1442,6 +1446,7 @@ def _retry_or_escalate_planner_stall(
     resolved: Optional[Dict[str, Any]],
     closed_issue_cache: Dict[int, Optional[bool]],
     dry_run: bool,
+    bounds: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Retry a silently-stalled planner card or escalate at the cap (#1125 F2).
 
@@ -1618,6 +1623,7 @@ def _retry_or_escalate_planner_stall(
         idempotency_key=retry_key,
         workspace=f"dir:{workdir}" if workdir else "",
         skills=role_skills.get("planner") or None,
+        **native_bounds.bounds_kwargs(bounds, "planner"),
     )
     if pid:
         logger.warning(
@@ -1646,6 +1652,7 @@ def _check_completed_planner(
     role_skills: Optional[Dict[str, str]] = None,
     epic_config: Optional[Dict[str, Any]] = None,
     resolved: Optional[Dict[str, Any]] = None,
+    bounds: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-3 epic trigger: planner PLANNING COMPLETE → create sub-issues + triage cards.
 
@@ -1721,6 +1728,7 @@ def _check_completed_planner(
                     resolved=resolved,
                     closed_issue_cache=_closed_issue_cache,
                     dry_run=dry_run,
+                    bounds=bounds,
                 )
                 if stalled_n is not None:
                     triggered.append(stalled_n)
@@ -1776,6 +1784,7 @@ def _check_planner_not_suitable(
     dry_run: bool = False,
     provider=None,
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
+    bounds: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Reroute a planner card signaling 'NOT SUITABLE FOR DECOMPOSITION'.
 
@@ -1917,6 +1926,7 @@ def _check_planner_not_suitable(
                 idempotency_key=ikey,
                 workspace=f"dir:{workdir}" if workdir else "",
                 skills=rs.get("validator") or None,
+                **native_bounds.bounds_kwargs(bounds, "validator"),
             )
             if vid:
                 logger.info(
@@ -2016,6 +2026,7 @@ def _check_completed_pm(
     dry_run: bool = False,
     provider=None,
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
+    bounds: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
     create the downstream triage (Developer + Reviewer + Security + Docs).
@@ -2146,6 +2157,7 @@ def _check_completed_pm(
                 idempotency_key=f"security-{n}",
                 workspace=workspace_arg,
                 skills=rs.get("security") or None,
+                **native_bounds.bounds_kwargs(bounds, "security"),
             )
             created_ids["security"] = sec_id
 
@@ -2170,6 +2182,7 @@ def _check_completed_pm(
                 idempotency_key=f"developer-{n}",
                 workspace=workspace_arg,
                 skills=rs.get("developer") or None,
+                **native_bounds.bounds_kwargs(bounds, "developer"),
             )
             created_ids["developer"] = dev_id
 
@@ -2190,6 +2203,7 @@ def _check_completed_pm(
             workspace=workspace_arg,
             parents=[dev_id] if dev_id else None,
             skills=rs.get("qa") or None,
+            **native_bounds.bounds_kwargs(bounds, "qa"),
         )
         created_ids["qa"] = qa_id
 
@@ -2210,6 +2224,7 @@ def _check_completed_pm(
             workspace=workspace_arg,
             parents=[qa_id] if qa_id else None,
             skills=rs.get("reviewer") or None,
+            **native_bounds.bounds_kwargs(bounds, "reviewer"),
         )
         created_ids["reviewer"] = rev_id
 
@@ -2231,6 +2246,7 @@ def _check_completed_pm(
                 workspace=workspace_arg,
                 parents=[qa_id] if qa_id else None,
                 skills=rs.get("security") or None,
+                **native_bounds.bounds_kwargs(bounds, "security"),
             )
             created_ids["security"] = sec_id
 
@@ -2261,6 +2277,7 @@ def _check_completed_pm(
             workspace=workspace_arg,
             parents=docs_parents or None,
             skills=rs.get("documentation") or None,
+            **native_bounds.bounds_kwargs(bounds, "documentation"),
         )
 
         logger.info(
@@ -2294,6 +2311,7 @@ def _check_completed_developer(
     provider=None,
     resolved: Optional[Dict[str, Any]] = None,
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
+    bounds: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-4 retry: when a developer task completes with no PR in its summary,
     retry up to ``max_developer_retries`` times before surfacing a cap-exhausted
@@ -2519,6 +2537,7 @@ def _check_completed_developer(
             idempotency_key=retry_key,
             workspace=workspace_arg,
             skills=rs.get("developer") or None,
+            **native_bounds.bounds_kwargs(bounds, "developer"),
         )
         if dev_id:
             logger.warning(

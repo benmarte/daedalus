@@ -103,6 +103,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
 
 from config import ConfigLoader  # noqa: E402
 from core import crash_retry  # noqa: E402
+from core import native_bounds  # noqa: E402
 from core import dispatch_state  # noqa: E402
 from core import provider_failover  # noqa: E402
 from core import iterate  # noqa: E402
@@ -2677,6 +2678,11 @@ def _run_tick(
     repo = resolved.get("repo", "")
     filters = (resolved.get("issues") or {}).get("filters", {})
     execution = resolved.get("execution") or {}
+    # Native per-task retry/runtime bounds (#1289) — resolved once per tick and
+    # threaded into every role create_task call site. When
+    # execution.native_bounds is off (default) bounds["enabled"] is False and
+    # bounds_kwargs() emits nothing, so CLI args stay byte-identical.
+    bounds = native_bounds.resolve_bounds(execution)
     # Phase-3 (#1170): prefix_fallback flag — default true (current behaviour).
     # Treat None (e.g. `protocol: {prefix_fallback: null}` in YAML) as True so
     # a null value is never silently coerced to False via bool(None).
@@ -2935,7 +2941,12 @@ def _run_tick(
             logger.warning("dispatch: provider-failover context failed: %s", exc)
         try:
             crash_actions = crash_retry.reconcile(
-                slug, workdir, execution, dry_run=dry_run, failover=failover_ctx
+                slug,
+                workdir,
+                execution,
+                dry_run=dry_run,
+                failover=failover_ctx,
+                native_bounds=bounds["enabled"],
             )
         except Exception as exc:  # never let the reconciler break a dispatch tick
             logger.warning("dispatch: crash-retry reconcile failed: %s", exc)
@@ -3136,6 +3147,7 @@ def _run_tick(
         provider=provider,
         resolved=resolved,
         closed_issue_cache=_tick_closed_cache,
+        bounds=bounds,
     )
     if confirmed_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -3153,6 +3165,7 @@ def _run_tick(
         role_skills=role_skills,
         epic_config=epic_config,
         resolved=resolved,
+        bounds=bounds,
     )
     if planner_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -3172,6 +3185,7 @@ def _run_tick(
         dry_run=dry_run,
         provider=provider,
         closed_issue_cache=_tick_closed_cache,
+        bounds=bounds,
     )
     if planner_not_suitable_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -3195,6 +3209,7 @@ def _run_tick(
         dry_run=dry_run,
         provider=provider,
         closed_issue_cache=_tick_closed_cache,
+        bounds=bounds,
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -3221,6 +3236,7 @@ def _run_tick(
         provider=provider,
         resolved=resolved,
         closed_issue_cache=_tick_closed_cache,
+        bounds=bounds,
     )
     if dev_retry_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -3577,6 +3593,7 @@ def _run_tick(
                     idempotency_key=planner_key,
                     workspace=f"dir:{workdir}" if workdir else "",
                     skills=role_skills.get("planner") or None,
+                    **native_bounds.bounds_kwargs(bounds, "planner"),
                 )
         else:
             # Phase 1: dispatch ONLY the validator. The dispatcher creates developer/
@@ -3632,6 +3649,7 @@ def _run_tick(
                     idempotency_key=validator_key,
                     workspace=f"dir:{workdir}" if workdir else "",
                     skills=role_skills.get("validator") or None,
+                    **native_bounds.bounds_kwargs(bounds, "validator"),
                 )
         if vid:
             created.append(n)

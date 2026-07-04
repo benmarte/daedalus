@@ -302,6 +302,7 @@ def reconcile(
     now: float | None = None,
     dry_run: bool = False,
     failover: dict[str, Any] | None = None,
+    native_bounds: bool = False,
 ) -> list[dict[str, Any]]:
     """Retry / escalate crashed cards; return the actions taken this tick.
 
@@ -336,6 +337,14 @@ def reconcile(
     chain entry is exhausted. ``failover=None`` (or a one-element chain)
     reproduces the pre-#1207 behavior exactly.
 
+    *native_bounds* (issue #1289) is the resolved ``execution.native_bounds``
+    master switch. When True, native ``--max-runtime`` requeue is authoritative
+    for wall-clock timeouts, so this reconciler SKIPS ``timeout``-class cards to
+    avoid double-handling a ``CODING_AGENT_TIMEOUT`` that Hermes already
+    requeued. Every other crash class (session_limit, quota_exceeded,
+    api_connection_error, crash) is unaffected. With the flag off (default) the
+    behaviour is byte-identical to pre-#1289.
+
     Never raises: kanban/state failures are logged and the card is skipped
     (it will be reconsidered next tick).
     """
@@ -355,7 +364,15 @@ def reconcile(
     for card in tasks:
         try:
             action = _reconcile_card(
-                slug, workdir, cfg, card, ts, dry_run, candidate_ids, failover
+                slug,
+                workdir,
+                cfg,
+                card,
+                ts,
+                dry_run,
+                candidate_ids,
+                failover,
+                native_bounds,
             )
         except Exception as exc:
             logger.warning(
@@ -380,6 +397,7 @@ def _reconcile_card(
     dry_run: bool,
     candidate_ids: set,
     failover: dict[str, Any] | None = None,
+    native_bounds: bool = False,
 ) -> dict[str, Any] | None:
     """Apply the retry policy to one card. Returns an action dict or None."""
     status = (card.get("status") or "").lower()
@@ -400,6 +418,19 @@ def _reconcile_card(
         if event_evidence is None:
             return None  # non-crash block — owned by iterate / PM consultation
         evidence = event_evidence
+    # Native-bounds de-dup (#1289): with execution.native_bounds enabled, the
+    # Hermes ``--max-runtime`` requeue is authoritative for wall-clock timeouts.
+    # Skip ``timeout``-class cards so this reconciler does not double-handle a
+    # ``CODING_AGENT_TIMEOUT`` that Hermes already requeued. Returning before
+    # candidate_ids.add() leaves the card entirely to native requeue (any stale
+    # episode is cleared by _cleanup_recovered). Other crash classes unaffected.
+    if native_bounds and classify(evidence) == "timeout":
+        logger.debug(
+            "crash-retry: %s is timeout-class and native_bounds is on — "
+            "native --max-runtime requeue owns it, skipping",
+            tid,
+        )
+        return None
     candidate_ids.add(tid)
 
     entry = dispatch_state.get_crash_retry(workdir, tid) or {}
