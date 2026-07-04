@@ -110,4 +110,9 @@ async def sync_profiles_model_endpoint(request: Request) -> dict[str, Any]:
         target_provider=target_provider,
     )
 
-    return {"ok": True, "updated": updated, "profiles": updated_list}
+    # Include the synced-to model name so the UI can show "Synced N profile(s) to <model>".
+    synced_model = target_model or ""
+    if not synced_model and _get_global_model is not None:
+        synced_model, _ = _get_global_model()
+
+    return {"ok": True, "updated": updated, "profiles": updated_list, "model": synced_model}
