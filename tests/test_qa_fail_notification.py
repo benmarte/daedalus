@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import core.iterate as iterate
-from conftest import FakeKanban, FakeProvider
+from conftest import FakeKanban, FakeProvider  # noqa: F401 (FakeKanban kept for compat)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -56,9 +56,7 @@ class TestRunIterateQaFailedCards:
     def test_qa_failed_summary_returned_in_fourth_slot(self):
         """qa-daedalus card with 'qa-failed' → qa_failed_cards contains it."""
         card = _qa_card()
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.create_task", return_value="t_fix"),
@@ -82,9 +80,7 @@ class TestRunIterateQaFailedCards:
         provider._ci = "red"
         provider._open_prs = {77}
         card = _dev_card(pr=77)
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.complete", return_value=True),
@@ -97,9 +93,7 @@ class TestRunIterateQaFailedCards:
     def test_qa_failed_not_appended_when_create_task_fails(self):
         """When create_task returns None (kanban down), qa_failed_cards stays empty."""
         card = _qa_card()
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.create_task", return_value=None),
@@ -124,9 +118,7 @@ class TestRunIterateQaFailedCards:
             "latest_summary": "qa-passed: PR #50 all green",
             "body": "Issue #30",
         }
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.complete", return_value=True),
@@ -356,11 +348,9 @@ class TestNotifyQaFailed:
     def test_escalated_cards_populated_in_fifth_slot(self):
         """run_iterate 5th slot: escalated card when fix_attempts file counter is at MAX."""
         card = _qa_card()
-        fk = FakeKanban()
         # Pass a workdir so the file-counter check runs; mock it to return MAX_FIX_ATTEMPTS.
         resolved = {"workdir": "/tmp/fake-workdir"}
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.create_task", return_value="t_esc"),

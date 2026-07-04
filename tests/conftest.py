@@ -15,6 +15,7 @@ fixture wires a single shared ``FakeKanban`` into both the dispatcher and the
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import sys
@@ -407,6 +408,57 @@ class FakeKanban:
 
     def comments_on(self, task_id: str) -> List[str]:
         return [body for (tid, body) in self.comments if tid == task_id]
+
+
+# ── method-level kanban patch helper ──────────────────────────────────────────
+
+
+@contextlib.contextmanager
+def kanban_as(kanban_mod: Any, fk: "FakeKanban"):
+    """Patch all FakeKanban API methods onto *kanban_mod* at method level.
+
+    Use instead of whole-module rebinding (``disp.kanban = fk`` or
+    ``iterate.kanban = fk``). The module's ``kanban`` name binding stays in
+    place; only the individual methods are swapped for the duration of the
+    ``with`` block.  ``mock.patch.object`` auto-restores originals on exit so
+    patches never leak across tests.
+
+    Usage::
+
+        fk = FakeKanban()
+        fk.seed(assignee=..., title=..., status=...)
+        with kanban_as(disp.kanban, fk):
+            result = disp._has_downstream_tasks(slug, n, ...)
+        assert result is False
+    """
+    import unittest.mock as mock
+
+    _METHODS = [
+        "list_tasks",
+        "list_blocked",
+        "get_latest_summary",
+        "show_card",
+        "create_task",
+        "complete",
+        "block_task",
+        "unblock_task",
+        "comment",
+        "archive_task",
+        "create_triage",
+        "decompose",
+    ]
+    patches = [
+        mock.patch.object(kanban_mod, m, side_effect=getattr(fk, m))
+        for m in _METHODS
+        if hasattr(kanban_mod, m)
+    ]
+    for p in patches:
+        p.start()
+    try:
+        yield fk
+    finally:
+        for p in patches:
+            p.stop()
 
 
 # ── in-memory VCS provider double ─────────────────────────────────────────────

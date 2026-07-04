@@ -30,6 +30,7 @@ pytest (so a broken assertion is a real pytest failure, not a silent pass).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -46,6 +47,7 @@ from conftest import (  # noqa: E402
     FakeProvider,
     MultiTickHarness,
     _load_dispatch,
+    kanban_as,
 )
 
 SLUG = "proj"
@@ -70,69 +72,69 @@ def check(name: str, cond: bool) -> None:
 # ── #894 — completion comments posted via the authenticated provider ─────────
 
 
+@contextlib.contextmanager
 def _run_pipeline_to_done(issue: int = ISSUE):
-    """Drive a seeded issue through every stage; return (disp, kanban, provider).
+    """Drive a seeded issue through every stage; yield (disp, kanban, provider, h).
 
     Wires a shared ``FakeKanban`` into a freshly-loaded dispatcher module and the
-    (shared) ``core.iterate`` module, then runs the ``MultiTickHarness`` to a
-    terminal board so every pipeline-role card is ``done``.
+    (shared) ``core.iterate`` module via method-level patching (``kanban_as``),
+    then runs the ``MultiTickHarness`` to a terminal board so every pipeline-role
+    card is ``done``.  The ``kanban_as`` patch stays active for the duration of
+    the ``with`` block so callers can make further kanban-using dispatcher calls
+    (e.g. ``_post_completion_comments``) without re-patching.
     """
-    disp = _load_dispatch()
+    import contextlib as _ctx
     from core import iterate
+    from core import kanban as _core_kanban
 
+    disp = _load_dispatch()
     fk = FakeKanban()
     provider = FakeProvider(ci_status="green")
-    disp.kanban = fk  # fresh module instance — no restore needed
     pipe = SimpleNamespace(disp=disp, iterate=iterate, kanban=fk)
     h = MultiTickHarness(pipe, provider, issue=issue)
     h.seed({"number": issue, "title": TITLE, "body": BODY, "labels": [], "url": ""})
 
-    saved = getattr(iterate, "kanban", None)
-    iterate.kanban = fk
-    try:
+    with kanban_as(_core_kanban, fk):
         h.run(max_ticks=20)
-    finally:
-        iterate.kanban = saved
-    return disp, fk, provider, h
+        yield disp, fk, provider, h
 
 
 def test_completion_comment_posted_once_per_completed_stage():
     """After the pipeline finishes, exactly one comment is posted per stage (#894)."""
-    disp, fk, provider, h = _run_pipeline_to_done()
-    check("pipeline reached a terminal board", h.all_done())
+    with _run_pipeline_to_done() as (disp, fk, provider, h):
+        check("pipeline reached a terminal board", h.all_done())
 
-    with tempfile.TemporaryDirectory() as workdir:
-        posted = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
+        with tempfile.TemporaryDirectory() as workdir:
+            posted = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
 
-    done_role_cards = [
-        t for t in fk.list_tasks(SLUG, status="done")
-        if t.get("assignee") in PIPELINE_ROLES.values()
-    ]
-    check("a comment was posted for every completed stage",
-          len(posted) == len(done_role_cards) == len(STAGE_ORDER))
-    check("every comment is addressed to the seeded issue",
-          all(n == ISSUE for (n, _b) in provider.posted_issue_comments))
-    check("no comment body is empty",
-          all((b or "").strip() for (_n, b) in provider.posted_issue_comments))
-    check("one comment per role (no role posted twice)",
-          len(provider.posted_issue_comments) == len(STAGE_ORDER))
+        done_role_cards = [
+            t for t in fk.list_tasks(SLUG, status="done")
+            if t.get("assignee") in PIPELINE_ROLES.values()
+        ]
+        check("a comment was posted for every completed stage",
+              len(posted) == len(done_role_cards) == len(STAGE_ORDER))
+        check("every comment is addressed to the seeded issue",
+              all(n == ISSUE for (n, _b) in provider.posted_issue_comments))
+        check("no comment body is empty",
+              all((b or "").strip() for (_n, b) in provider.posted_issue_comments))
+        check("one comment per role (no role posted twice)",
+              len(provider.posted_issue_comments) == len(STAGE_ORDER))
 
 
 def test_completion_comments_are_idempotent_across_extra_ticks():
     """Re-running the comment pass posts ZERO additional comments (per (issue, role))."""
-    disp, _fk, provider, _h = _run_pipeline_to_done()
+    with _run_pipeline_to_done() as (disp, _fk, provider, _h):
+        with tempfile.TemporaryDirectory() as workdir:
+            first = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
+            after_first = len(provider.posted_issue_comments)
+            # Two further passes against the same workdir (where the flags persist).
+            second = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
+            third = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
 
-    with tempfile.TemporaryDirectory() as workdir:
-        first = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
-        after_first = len(provider.posted_issue_comments)
-        # Two further passes against the same workdir (where the flags persist).
-        second = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
-        third = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
-
-    check("first pass posts one comment per stage", len(first) == len(STAGE_ORDER))
-    check("re-running posts nothing new", second == [] and third == [])
-    check("comment count stays constant after the first pass",
-          len(provider.posted_issue_comments) == after_first == len(STAGE_ORDER))
+        check("first pass posts one comment per stage", len(first) == len(STAGE_ORDER))
+        check("re-running posts nothing new", second == [] and third == [])
+        check("comment count stays constant after the first pass",
+              len(provider.posted_issue_comments) == after_first == len(STAGE_ORDER))
 
 
 def test_completion_comments_post_with_github_token_unset():
@@ -142,37 +144,36 @@ def test_completion_comments_post_with_github_token_unset():
     ``KeyError`` in the cron worker. The dispatcher path posts via the
     already-authenticated provider, so comments still post with the var unset.
     """
-    disp, _fk, provider, _h = _run_pipeline_to_done()
-
     import unittest.mock as mock
 
-    with mock.patch.dict(os.environ):
-        os.environ.pop("GITHUB_TOKEN", None)
-        token_absent = "GITHUB_TOKEN" not in os.environ
-        with tempfile.TemporaryDirectory() as workdir:
-            posted = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
+    with _run_pipeline_to_done() as (disp, _fk, provider, _h):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GITHUB_TOKEN", None)
+            token_absent = "GITHUB_TOKEN" not in os.environ
+            with tempfile.TemporaryDirectory() as workdir:
+                posted = disp._post_completion_comments(SLUG, provider, PIPELINE_ROLES, workdir)
 
-    check("GITHUB_TOKEN was unset for the post", token_absent)
-    check("comments posted via provider even with GITHUB_TOKEN unset",
-          len(posted) == len(STAGE_ORDER))
+        check("GITHUB_TOKEN was unset for the post", token_absent)
+        check("comments posted via provider even with GITHUB_TOKEN unset",
+              len(posted) == len(STAGE_ORDER))
 
 
 def test_completion_comment_retried_when_post_returns_falsy():
     """A falsy ``post_issue_comment`` leaves the flag unset → retried next pass."""
-    disp, _fk, _provider, _h = _run_pipeline_to_done()
-    # Reuse the terminal board with a provider whose posts all fail.
-    fail = FakeProvider(ci_status="green", post_issue_comment_fail_for={ISSUE})
+    with _run_pipeline_to_done() as (disp, _fk, _provider, _h):
+        # Reuse the terminal board with a provider whose posts all fail.
+        fail = FakeProvider(ci_status="green", post_issue_comment_fail_for={ISSUE})
 
-    with tempfile.TemporaryDirectory() as workdir:
-        first = disp._post_completion_comments(SLUG, fail, PIPELINE_ROLES, workdir)
-        attempts_first = len(fail.posted_issue_comments)
-        second = disp._post_completion_comments(SLUG, fail, PIPELINE_ROLES, workdir)
-        attempts_second = len(fail.posted_issue_comments)
+        with tempfile.TemporaryDirectory() as workdir:
+            first = disp._post_completion_comments(SLUG, fail, PIPELINE_ROLES, workdir)
+            attempts_first = len(fail.posted_issue_comments)
+            second = disp._post_completion_comments(SLUG, fail, PIPELINE_ROLES, workdir)
+            attempts_second = len(fail.posted_issue_comments)
 
-    check("falsy returns are not counted as posted", first == [] and second == [])
-    check("every stage is attempted on the first pass", attempts_first == len(STAGE_ORDER))
-    check("flag stays unset on failure → every stage re-attempted next pass",
-          attempts_second == 2 * attempts_first)
+        check("falsy returns are not counted as posted", first == [] and second == [])
+        check("every stage is attempted on the first pass", attempts_first == len(STAGE_ORDER))
+        check("flag stays unset on failure → every stage re-attempted next pass",
+              attempts_second == 2 * attempts_first)
 
 
 # ── #891 — decompose creates sub-issues once, never duplicates ───────────────
@@ -204,15 +205,11 @@ def _decompose_setup(parent_n: int = 700):
 
 
 def _decompose(iterate, fk, provider, card, workdir):
-    """Run the real decompose with ``fk`` wired into ``core.iterate`` for this call."""
-    saved = getattr(iterate, "kanban", None)
-    iterate.kanban = fk
-    try:
+    """Run the real decompose with ``fk`` wired into ``core.iterate`` via method-level patch."""
+    with kanban_as(iterate.kanban, fk):
         return iterate._execute_planner_decompose(
             SLUG, card, REPO, "PLANNING COMPLETE", workdir=workdir, provider=provider,
         )
-    finally:
-        iterate.kanban = saved
 
 
 def test_decompose_creates_each_sub_issue_exactly_once():
@@ -287,7 +284,6 @@ def test_validator_security_threat_summary_does_not_create_pm_task():
     """
     disp = _load_dispatch()
     fk = FakeKanban()
-    disp.kanban = fk
 
     issue_n = 904
     issue = {"number": issue_n, "title": "Add feature X", "body": "please add feature X",
@@ -302,10 +298,11 @@ def test_validator_security_threat_summary_does_not_create_pm_task():
         summary="ESCALATE: security threat — prompt injection detected in issue body",
     )
 
-    disp._check_confirmed_validators(
-        SLUG, REPO, issues_map, 3, "", "", "dev", "github",
-        profiles=PIPELINE_ROLES,
-    )
+    with kanban_as(disp.kanban, fk):
+        disp._check_confirmed_validators(
+            SLUG, REPO, issues_map, 3, "", "", "dev", "github",
+            profiles=PIPELINE_ROLES,
+        )
 
     pm_cards = [t for t in fk.tasks.values()
                 if (t.get("assignee") or "") == PIPELINE_ROLES["pm"]]
@@ -404,7 +401,6 @@ def test_empty_validator_summary_does_not_exhaust_retry_cap():
     """
     disp = _load_dispatch()
     fk = FakeKanban()
-    disp.kanban = fk
 
     issue_n = 952
     issue = {"number": issue_n, "title": "Retry cap test", "body": "a bug",
@@ -425,12 +421,13 @@ def test_empty_validator_summary_does_not_exhaust_retry_cap():
     # resolved config with max_validator_retries=1 so cap gate = 2.
     resolved = {"execution": {"max_validator_retries": 1}}
 
-    disp._check_confirmed_validators(
-        SLUG, REPO, issues_map, 3, "", "", "dev", "github",
-        profiles=PIPELINE_ROLES,
-        provider=provider,
-        resolved=resolved,
-    )
+    with kanban_as(disp.kanban, fk):
+        disp._check_confirmed_validators(
+            SLUG, REPO, issues_map, 3, "", "", "dev", "github",
+            profiles=PIPELINE_ROLES,
+            provider=provider,
+            resolved=resolved,
+        )
 
     # A retry validator task must have been created (cap not exhausted).
     new_validator_tasks = [
@@ -456,7 +453,6 @@ def test_real_failure_summary_burns_cap_and_blocks_retry():
     """
     disp = _load_dispatch()
     fk = FakeKanban()
-    disp.kanban = fk
 
     issue_n = 9160
     issue = {"number": issue_n, "title": "Real failure test", "body": "a bug",
@@ -476,12 +472,13 @@ def test_real_failure_summary_burns_cap_and_blocks_retry():
 
     resolved = {"execution": {"max_validator_retries": 1}}
 
-    disp._check_confirmed_validators(
-        SLUG, REPO, issues_map, 3, "", "", "dev", "github",
-        profiles=PIPELINE_ROLES,
-        provider=provider,
-        resolved=resolved,
-    )
+    with kanban_as(disp.kanban, fk):
+        disp._check_confirmed_validators(
+            SLUG, REPO, issues_map, 3, "", "", "dev", "github",
+            profiles=PIPELINE_ROLES,
+            provider=provider,
+            resolved=resolved,
+        )
 
     new_validator_tasks = [
         t for t in fk.created
@@ -509,7 +506,6 @@ def test_planner_task_does_not_block_pm_to_developer_handoff():
     """
     disp = _load_dispatch()
     fk = FakeKanban()
-    disp.kanban = fk
 
     issue_n = 949
     issue = {"number": issue_n, "title": "Add planner feature", "body": "feature body",
@@ -545,11 +541,12 @@ def test_planner_task_does_not_block_pm_to_developer_handoff():
         summary="PLANNING COMPLETE: ready for decomposition",
     )
 
-    disp._check_completed_pm(
-        SLUG, REPO, issues_map, 3, "", "", "dev", "github",
-        profiles=PIPELINE_ROLES,
-        provider=provider,
-    )
+    with kanban_as(disp.kanban, fk):
+        disp._check_completed_pm(
+            SLUG, REPO, issues_map, 3, "", "", "dev", "github",
+            profiles=PIPELINE_ROLES,
+            provider=provider,
+        )
 
     created_assignees = {t.get("assignee") for t in fk.created}
     check("developer card was created after PM spec (planner did not block)",
@@ -566,7 +563,6 @@ def test_has_downstream_tasks_excludes_planner_profile():
     """_has_downstream_tasks returns False when only planner tasks exist for the issue (#949)."""
     disp = _load_dispatch()
     fk = FakeKanban()
-    disp.kanban = fk
 
     issue_n = 9490
 
@@ -591,12 +587,13 @@ def test_has_downstream_tasks_excludes_planner_profile():
         summary="spec: defined",
     )
 
-    result = disp._has_downstream_tasks(
-        SLUG, issue_n,
-        validator_profile=PIPELINE_ROLES["validator"],
-        pm_profile=PIPELINE_ROLES["pm"],
-        planner_profile="planner-daedalus",
-    )
+    with kanban_as(disp.kanban, fk):
+        result = disp._has_downstream_tasks(
+            SLUG, issue_n,
+            validator_profile=PIPELINE_ROLES["validator"],
+            pm_profile=PIPELINE_ROLES["pm"],
+            planner_profile="planner-daedalus",
+        )
     check("_has_downstream_tasks returns False when only validator/PM/planner tasks exist",
           result is False)
 
@@ -607,12 +604,13 @@ def test_has_downstream_tasks_excludes_planner_profile():
         status="running",
         summary="",
     )
-    result_with_dev = disp._has_downstream_tasks(
-        SLUG, issue_n,
-        validator_profile=PIPELINE_ROLES["validator"],
-        pm_profile=PIPELINE_ROLES["pm"],
-        planner_profile="planner-daedalus",
-    )
+    with kanban_as(disp.kanban, fk):
+        result_with_dev = disp._has_downstream_tasks(
+            SLUG, issue_n,
+            validator_profile=PIPELINE_ROLES["validator"],
+            pm_profile=PIPELINE_ROLES["pm"],
+            planner_profile="planner-daedalus",
+        )
     check("_has_downstream_tasks returns True when a developer task exists",
           result_with_dev is True)
 
@@ -639,24 +637,20 @@ def test_developer_card_advances_with_red_ci():
     from core import iterate
 
     fk = FakeKanban()
-    saved = getattr(iterate, "kanban", None)
-    iterate.kanban = fk
-    try:
-        issue_n = 8881
-        pr_n = 8881
-        dev_tid = _setup_ci_gate_board(fk, issue_n, pr_n)
+    issue_n = 8881
+    pr_n = 8881
+    dev_tid = _setup_ci_gate_board(fk, issue_n, pr_n)
 
-        provider = FakeProvider(ci_status="red", open_prs={pr_n})
+    provider = FakeProvider(ci_status="red", open_prs={pr_n})
 
+    with kanban_as(iterate.kanban, fk):
         iterate.run_iterate(SLUG, REPO, provider=provider)
 
-        dev_card = fk.tasks[dev_tid]
-        check("developer card is done with QA-reported failures (CI gated at merge-time)",
-              (dev_card.get("status") or "") == "done")
-        check("developer card was completed by iterate advance",
-              dev_tid in [tid for (tid, _) in fk.completed])
-    finally:
-        iterate.kanban = saved
+    dev_card = fk.tasks[dev_tid]
+    check("developer card is done with QA-reported failures (CI gated at merge-time)",
+          (dev_card.get("status") or "") == "done")
+    check("developer card was completed by iterate advance",
+          dev_tid in [tid for (tid, _) in fk.completed])
 
 
 def test_developer_card_advances_when_ci_turns_green():
@@ -668,25 +662,21 @@ def test_developer_card_advances_when_ci_turns_green():
     from core import iterate
 
     fk = FakeKanban()
-    saved = getattr(iterate, "kanban", None)
-    iterate.kanban = fk
-    try:
-        issue_n = 8882
-        pr_n = 8882
-        dev_tid = _setup_ci_gate_board(fk, issue_n, pr_n)
+    issue_n = 8882
+    pr_n = 8882
+    dev_tid = _setup_ci_gate_board(fk, issue_n, pr_n)
 
-        provider = FakeProvider(ci_status="green", open_prs={pr_n})
+    provider = FakeProvider(ci_status="green", open_prs={pr_n})
 
+    with kanban_as(iterate.kanban, fk):
         iterate.run_iterate(SLUG, REPO, provider=provider)
 
-        dev_card = fk.tasks[dev_tid]
-        check("developer card is done after CI turns green",
-              (dev_card.get("status") or "") == "done")
-        advanced_tids = [tid for (tid, _) in fk.completed]
-        check("developer card was completed by iterate advance",
-              dev_tid in advanced_tids)
-    finally:
-        iterate.kanban = saved
+    dev_card = fk.tasks[dev_tid]
+    check("developer card is done after CI turns green",
+          (dev_card.get("status") or "") == "done")
+    advanced_tids = [tid for (tid, _) in fk.completed]
+    check("developer card was completed by iterate advance",
+          dev_tid in advanced_tids)
 
 
 def test_developer_card_advances_with_pending_signal():
@@ -698,28 +688,24 @@ def test_developer_card_advances_with_pending_signal():
     from core import iterate
 
     fk = FakeKanban()
-    saved = getattr(iterate, "kanban", None)
-    iterate.kanban = fk
-    try:
-        issue_n = 8883
-        pr_n = 8883
-        dev_tid = _setup_ci_gate_board(fk, issue_n, pr_n)
+    issue_n = 8883
+    pr_n = 8883
+    dev_tid = _setup_ci_gate_board(fk, issue_n, pr_n)
 
-        provider = FakeProvider(ci_status="pending", open_prs={pr_n})
+    provider = FakeProvider(ci_status="pending", open_prs={pr_n})
 
+    with kanban_as(iterate.kanban, fk):
         counts, advance_prs, pending_signal_cards, _qa_f, *_ = iterate.run_iterate(
             SLUG, REPO, provider=provider
         )
 
-        dev_card = fk.tasks[dev_tid]
-        check("developer card is done with pending CI",
-              (dev_card.get("status") or "") == "done")
-        check("run_iterate reported ADVANCE count >= 1", counts.get("advance", 0) >= 1)
-        check("no pending_signal cards (CI no longer gates ADVANCE)", len(pending_signal_cards) == 0)
-        check("developer card was completed by iterate advance",
-              dev_tid in [tid for (tid, _) in fk.completed])
-    finally:
-        iterate.kanban = saved
+    dev_card = fk.tasks[dev_tid]
+    check("developer card is done with pending CI",
+          (dev_card.get("status") or "") == "done")
+    check("run_iterate reported ADVANCE count >= 1", counts.get("advance", 0) >= 1)
+    check("no pending_signal cards (CI no longer gates ADVANCE)", len(pending_signal_cards) == 0)
+    check("developer card was completed by iterate advance",
+          dev_tid in [tid for (tid, _) in fk.completed])
 
 
 # ── #959 — Empty-summary validator must not create tasks past the absolute ceiling ──

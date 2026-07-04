@@ -19,7 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from conftest import _load_dispatch
+from conftest import _load_dispatch, kanban_as
 
 disp = _load_dispatch()
 
@@ -99,7 +99,7 @@ def test_check_confirmed_validators_skips_non_confirmed_closed_issue():
 
     provider = _provider_with_state(200, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -133,7 +133,7 @@ def test_check_confirmed_validators_skips_blocked_closed_issue():
 
     provider = _provider_with_state(201, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -168,7 +168,7 @@ def test_check_confirmed_validators_processes_non_confirmed_open_issue():
 
     provider = _provider_with_state(202, "open")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -204,7 +204,7 @@ def test_check_confirmed_validators_skips_confirmed_closed_issue():
 
     provider = _provider_with_state(203, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -236,7 +236,7 @@ def test_check_confirmed_validators_processes_confirmed_open_issue():
 
     provider = _provider_with_state(204, "open")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -271,7 +271,7 @@ def test_check_confirmed_validators_caches_closed_state_per_tick():
 
     provider = _provider_with_state(205, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         disp._check_confirmed_validators(
             "slug",
             "org/repo",
@@ -305,7 +305,7 @@ def test_check_completed_planner_skips_closed_issue():
 
     provider = _provider_with_state(300, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_completed_planner(
             "slug",
             "/workdir",
@@ -326,7 +326,7 @@ def test_check_completed_planner_processes_open_issue():
     provider = _provider_with_state(301, "open")
 
     with (
-        mock.patch.object(disp, "kanban", fake_kanban),
+        kanban_as(disp.kanban, fake_kanban),
         mock.patch("core.iterate._execute_planner_decompose", return_value=True),
     ):
         triggered = disp._check_completed_planner(
@@ -354,7 +354,7 @@ def test_check_completed_pm_skips_closed_issue():
 
     provider = _provider_with_state(400, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_completed_pm(
             "slug",
             "org/repo",
@@ -384,7 +384,7 @@ def test_check_completed_pm_processes_open_issue():
     provider = _provider_with_state(401, "open")
 
     with (
-        mock.patch.object(disp, "kanban", fake_kanban),
+        kanban_as(disp.kanban, fake_kanban),
         mock.patch.object(disp, "_has_downstream_tasks", return_value=False),
     ):
         triggered = disp._check_completed_pm(
@@ -417,7 +417,7 @@ def test_check_completed_pm_caches_closed_state():
 
     provider = _provider_with_state(402, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         disp._check_completed_pm(
             "slug",
             "org/repo",
@@ -452,7 +452,7 @@ def test_shared_cache_across_functions():
     provider = _provider_with_state(600, "closed")
     shared_cache: dict = {}
 
-    with mock.patch.object(disp, "kanban", pm_kanban):
+    with kanban_as(disp.kanban, pm_kanban):
         disp._check_completed_pm(
             "slug",
             "org/repo",
@@ -469,7 +469,7 @@ def test_shared_cache_across_functions():
     assert provider.get_issue_state.call_count == 1
     assert shared_cache == {600: True}
 
-    with mock.patch.object(disp, "kanban", planner_kanban):
+    with kanban_as(disp.kanban, planner_kanban):
         disp._check_completed_planner(
             "slug",
             "/workdir",
@@ -499,7 +499,7 @@ def test_check_completed_developer_skips_closed_issue():
 
     provider = _provider_with_state(500, "closed")
 
-    with mock.patch.object(disp, "kanban", fake_kanban):
+    with kanban_as(disp.kanban, fake_kanban):
         triggered = disp._check_completed_developer(
             "slug",
             "org/repo",
@@ -531,7 +531,7 @@ def test_check_completed_developer_processes_open_issue():
     provider = _provider_with_state(501, "open")
 
     with (
-        mock.patch.object(disp, "kanban", fake_kanban),
+        kanban_as(disp.kanban, fake_kanban),
         mock.patch.object(disp, "_developer_task_state", return_value=("stale", 1)),
     ):
         triggered = disp._check_completed_developer(

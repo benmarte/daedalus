@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tests.conftest import kanban_as  # noqa: E402
+
 
 class TestQAPassedForIssue:
     """Test the _qa_passed_for_issue helper function."""
@@ -588,54 +590,52 @@ class TestAutoMergeCIGateIntegration:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9100
-            pr_n = 9100
+        issue_n = 9100
+        pr_n = 9100
 
-            docs_tid = fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        docs_tid = fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
+        with kanban_as(iterate.kanban, fk):
             # Tick 1: CI is pending — card should stay blocked, no merge
             provider_pending = FakeProvider(ci_status="pending", open_prs={pr_n})
             iterate.run_iterate(
@@ -661,8 +661,6 @@ class TestAutoMergeCIGateIntegration:
             assert provider_green.merged[0][0] == pr_n, (
                 f"Tick 2: should merge PR #{pr_n}, got #{provider_green.merged[0][0]}"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_ci_gate_end_to_end_red_ci_blocks_merge(self):
         """Full pipeline: docs card with CI red → card stays blocked, no merge."""
@@ -670,35 +668,33 @@ class TestAutoMergeCIGateIntegration:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9101
-            pr_n = 9101
+        issue_n = 9101
+        pr_n = 9101
 
-            docs_tid = fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        docs_tid = fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            provider_red = FakeProvider(ci_status="red", open_prs={pr_n})
+        provider_red = FakeProvider(ci_status="red", open_prs={pr_n})
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider_red,
@@ -709,8 +705,6 @@ class TestAutoMergeCIGateIntegration:
             assert fk.tasks[docs_tid].get("status") == "blocked", (
                 "Docs card should stay blocked when CI is red (not completed)"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_ci_gate_end_to_end_green_ci_merges(self):
         """Full pipeline: docs card with CI green → card completes and merge fires."""
@@ -718,55 +712,53 @@ class TestAutoMergeCIGateIntegration:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9102
-            pr_n = 9102
+        issue_n = 9102
+        pr_n = 9102
 
-            fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            provider_green = FakeProvider(ci_status="green", open_prs={pr_n})
+        provider_green = FakeProvider(ci_status="green", open_prs={pr_n})
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider_green,
@@ -777,8 +769,6 @@ class TestAutoMergeCIGateIntegration:
             assert provider_green.merged[0][0] == pr_n, (
                 f"Should merge PR #{pr_n}, got #{provider_green.merged[0][0]}"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_ci_gate_no_ci_support_treated_as_green(self):
         """Provider without CI status support → UNKNOWN treated as green (no block).
@@ -789,59 +779,57 @@ class TestAutoMergeCIGateIntegration:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9103
-            pr_n = 9103
+        issue_n = 9103
+        pr_n = 9103
 
-            fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            provider = FakeProvider(
-                ci_status="unknown",
-                open_prs={pr_n},
-                supports_ci_status=False,
-            )
+        provider = FakeProvider(
+            ci_status="unknown",
+            open_prs={pr_n},
+            supports_ci_status=False,
+        )
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider,
@@ -849,8 +837,6 @@ class TestAutoMergeCIGateIntegration:
             assert len(provider.merged) > 0, (
                 "Auto-merge should fire when provider has no CI support (UNKNOWN → green)"
             )
-        finally:
-            iterate.kanban = saved
 
 
 class TestCronTickMergeTrigger:
@@ -880,60 +866,58 @@ class TestCronTickMergeTrigger:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9200
-            pr_n = 9200
+        issue_n = 9200
+        pr_n = 9200
 
-            fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            # PR is already merged — provider reports is_pr_merged=True
-            provider = FakeProvider(
-                ci_status="green",
-                open_prs=set(),      # PR is not open (it's merged)
-                merged_prs={pr_n},   # PR is merged
-            )
+        # PR is already merged — provider reports is_pr_merged=True
+        provider = FakeProvider(
+            ci_status="green",
+            open_prs=set(),      # PR is not open (it's merged)
+            merged_prs={pr_n},   # PR is merged
+        )
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider,
@@ -941,8 +925,6 @@ class TestCronTickMergeTrigger:
             assert len(provider.merged) == 0, (
                 "Auto-merge must NOT be called when PR is already merged (idempotency)"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_reviewer_gate_blocks_merge(self):
         """Merge must NOT fire when reviewer has not approved the PR.
@@ -955,58 +937,56 @@ class TestCronTickMergeTrigger:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9201
-            pr_n = 9201
+        issue_n = 9201
+        pr_n = 9201
 
-            fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            # QA passed
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        # QA passed
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            # Reviewer has NOT approved — blocked with changes-requested
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-changes-requested: PR #{pr_n}",
-                summary=f"review-changes-requested: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        # Reviewer has NOT approved — blocked with changes-requested
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-changes-requested: PR #{pr_n}",
+            summary=f"review-changes-requested: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            # Security passed
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        # Security passed
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider,
@@ -1014,8 +994,6 @@ class TestCronTickMergeTrigger:
             assert len(provider.merged) == 0, (
                 "Auto-merge must NOT fire when reviewer has not approved"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_security_gate_blocks_merge(self):
         """Merge must NOT fire when security has not approved the PR."""
@@ -1023,58 +1001,56 @@ class TestCronTickMergeTrigger:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9202
-            pr_n = 9202
+        issue_n = 9202
+        pr_n = 9202
 
-            fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            # QA passed
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        # QA passed
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            # Reviewer approved
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        # Reviewer approved
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            # Security has NOT approved — still pending
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-pending: PR #{pr_n}",
-                summary=f"security-pending: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        # Security has NOT approved — still pending
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-pending: PR #{pr_n}",
+            summary=f"security-pending: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider,
@@ -1082,8 +1058,6 @@ class TestCronTickMergeTrigger:
             assert len(provider.merged) == 0, (
                 "Auto-merge must NOT fire when security has not approved"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_all_gates_passed_merges(self):
         """Merge fires when QA, reviewer, AND security have all passed."""
@@ -1091,58 +1065,56 @@ class TestCronTickMergeTrigger:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9203
-            pr_n = 9203
+        issue_n = 9203
+        pr_n = 9203
 
-            fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            # QA passed
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        # QA passed
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            # Reviewer approved
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        # Reviewer approved
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            # Security approved
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        # Security approved
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider,
@@ -1151,8 +1123,6 @@ class TestCronTickMergeTrigger:
                 "Auto-merge should fire when QA, reviewer, and security have all passed"
             )
             assert provider.merged[0][0] == pr_n
-        finally:
-            iterate.kanban = saved
 
     def test_ci_passed_before_docs_no_deferred_path(self):
         """CI green before docs completes → normal merge path, no deferral.
@@ -1166,56 +1136,54 @@ class TestCronTickMergeTrigger:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9204
-            pr_n = 9204
+        issue_n = 9204
+        pr_n = 9204
 
-            docs_tid = fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        docs_tid = fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
-            # CI is already green — merge should fire on this tick (no deferral)
-            provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        # CI is already green — merge should fire on this tick (no deferral)
+        provider = FakeProvider(ci_status="green", open_prs={pr_n})
+        with kanban_as(iterate.kanban, fk):
             iterate.run_iterate(
                 'test-board', 'test/repo',
                 resolved=resolved, provider=provider,
@@ -1227,8 +1195,6 @@ class TestCronTickMergeTrigger:
             assert fk.tasks[docs_tid].get("status") == "done", (
                 "Docs card should be completed when CI is green (not deferred)"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_idempotent_no_double_merge(self):
         """Re-running cron after merge does not double-merge or error.
@@ -1241,54 +1207,52 @@ class TestCronTickMergeTrigger:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9205
-            pr_n = 9205
+        issue_n = 9205
+        pr_n = 9205
 
-            docs_tid = fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        docs_tid = fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
+        with kanban_as(iterate.kanban, fk):
             # Tick 1: CI green → merge fires, docs card completed
             provider1 = FakeProvider(ci_status="green", open_prs={pr_n})
             iterate.run_iterate(
@@ -1307,8 +1271,6 @@ class TestCronTickMergeTrigger:
             assert len(provider2.merged) == 0, (
                 "Tick 2: must NOT re-merge — docs card is already done"
             )
-        finally:
-            iterate.kanban = saved
 
     def test_deferred_merge_audit_logging(self):
         """Deferred merge path logs the transition for auditability.
@@ -1323,8 +1285,6 @@ class TestCronTickMergeTrigger:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
 
         # Capture log messages
         log_messages = []
@@ -1386,19 +1346,20 @@ class TestCronTickMergeTrigger:
                 'execution': {'auto_merge': True, 'merge_method': 'squash'},
             }
 
-            # Tick 1: CI pending → deferred (should log deferral)
-            provider_pending = FakeProvider(ci_status="pending", open_prs={pr_n})
-            iterate.run_iterate(
-                'test-board', 'test/repo',
-                resolved=resolved, provider=provider_pending,
-            )
+            with kanban_as(iterate.kanban, fk):
+                # Tick 1: CI pending → deferred (should log deferral)
+                provider_pending = FakeProvider(ci_status="pending", open_prs={pr_n})
+                iterate.run_iterate(
+                    'test-board', 'test/repo',
+                    resolved=resolved, provider=provider_pending,
+                )
 
-            # Tick 2: CI green → merge fires (should log merge)
-            provider_green = FakeProvider(ci_status="green", open_prs={pr_n})
-            iterate.run_iterate(
-                'test-board', 'test/repo',
-                resolved=resolved, provider=provider_green,
-            )
+                # Tick 2: CI green → merge fires (should log merge)
+                provider_green = FakeProvider(ci_status="green", open_prs={pr_n})
+                iterate.run_iterate(
+                    'test-board', 'test/repo',
+                    resolved=resolved, provider=provider_green,
+                )
 
             all_logs = " ".join(log_messages)
 
@@ -1413,7 +1374,6 @@ class TestCronTickMergeTrigger:
         finally:
             logger.removeHandler(handler)
             logger.setLevel(old_level)
-            iterate.kanban = saved
 
 
 class TestCronTickMergeTriggerIntegration:
@@ -1434,54 +1394,52 @@ class TestCronTickMergeTriggerIntegration:
         from tests.conftest import FakeKanban, FakeProvider
 
         fk = FakeKanban()
-        saved = getattr(iterate, "kanban", None)
-        iterate.kanban = fk
-        try:
-            issue_n = 9300
-            pr_n = 9300
+        issue_n = 9300
+        pr_n = 9300
 
-            docs_tid = fk.seed(
-                assignee="documentation-daedalus",
-                title=f"#{issue_n} Docs: Issue",
-                status="blocked",
-                reason=f"docs posted: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-            )
+        docs_tid = fk.seed(
+            assignee="documentation-daedalus",
+            title=f"#{issue_n} Docs: Issue",
+            status="blocked",
+            reason=f"docs posted: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+        )
 
-            fk.seed(
-                assignee="qa-daedalus",
-                title=f"#{issue_n} QA: Issue",
-                status="blocked",
-                reason=f"qa-passed: PR #{pr_n}",
-                summary=f"qa-passed: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"qa-{issue_n}",
-            )
+        fk.seed(
+            assignee="qa-daedalus",
+            title=f"#{issue_n} QA: Issue",
+            status="blocked",
+            reason=f"qa-passed: PR #{pr_n}",
+            summary=f"qa-passed: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"qa-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="reviewer-daedalus",
-                title=f"#{issue_n} Reviewer: Issue",
-                status="blocked",
-                reason=f"review-approved: PR #{pr_n}",
-                summary=f"review-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"reviewer-{issue_n}",
-            )
+        fk.seed(
+            assignee="reviewer-daedalus",
+            title=f"#{issue_n} Reviewer: Issue",
+            status="blocked",
+            reason=f"review-approved: PR #{pr_n}",
+            summary=f"review-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"reviewer-{issue_n}",
+        )
 
-            fk.seed(
-                assignee="security-analyst-daedalus",
-                title=f"#{issue_n} Security: Issue",
-                status="blocked",
-                reason=f"security-approved: PR #{pr_n}",
-                summary=f"security-approved: PR #{pr_n}",
-                body=f"Issue #{issue_n}\nPR #{pr_n}",
-                idempotency_key=f"security-{issue_n}",
-            )
+        fk.seed(
+            assignee="security-analyst-daedalus",
+            title=f"#{issue_n} Security: Issue",
+            status="blocked",
+            reason=f"security-approved: PR #{pr_n}",
+            summary=f"security-approved: PR #{pr_n}",
+            body=f"Issue #{issue_n}\nPR #{pr_n}",
+            idempotency_key=f"security-{issue_n}",
+        )
 
-            resolved = {
-                'execution': {'auto_merge': True, 'merge_method': 'squash'},
-            }
+        resolved = {
+            'execution': {'auto_merge': True, 'merge_method': 'squash'},
+        }
 
+        with kanban_as(iterate.kanban, fk):
             # Tick 1: CI pending → deferred
             provider1 = FakeProvider(ci_status="pending", open_prs={pr_n})
             iterate.run_iterate(
@@ -1516,5 +1474,3 @@ class TestCronTickMergeTriggerIntegration:
             assert len(provider3.merged) == 0, (
                 "Tick 3: no re-merge — docs card already done (idempotent)"
             )
-        finally:
-            iterate.kanban = saved
