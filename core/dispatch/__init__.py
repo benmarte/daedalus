@@ -19,6 +19,10 @@ cluster of helpers:
                       downstream probe, planner-fallback key, validator
                       block enforcement (PR 3/4)
   cli_helpers       — CLI-layer utilities: _sweep_exit_code (PR 4/4)
+  checks            — stage-check family: _check_confirmed_validators,
+                      _check_completed_*, _get_task_summary,
+                      _guard_prefix_on_done and supporting helpers
+                      (issue #1262 PR 2/2)
 
   # NOTE: notifications.py not created — those functions call _hermes_send/_notify_targets
   # which are sibling-patched by tests via disp.*; they stay in daedalus_dispatch.py
