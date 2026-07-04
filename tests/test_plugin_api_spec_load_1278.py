@@ -46,7 +46,11 @@ sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 
 route_count = len(m.router.routes)
-assert route_count > 0, f"Expected routes > 0, got {{route_count}}"
+# Floor of 10: a partial mount (some route modules failing to import while
+# others succeed) must fail this test, not just a total failure. 23 routes
+# exist today; the floor leaves headroom for route removals without going
+# blind to a half-dead plugin.
+assert route_count >= 10, f"Expected routes >= 10, got {{route_count}}"
 print(f"routes={{route_count}}")
 """
 
@@ -80,6 +84,12 @@ def test_spec_load_registers_routes(tmp_path: Path) -> None:
 
     Simulates the exact context in which the Hermes web server loads the file:
     module registered under a spec name, repo NOT on sys.path.
+
+    Pre-fix proof: without the sys.modules bootstrap block at the top of
+    plugin_api.py this probe fails with ``ModuleNotFoundError: No module
+    named 'dashboard'`` (verified by stashing the fix and re-running); the
+    probe subprocess is what makes that reproducible — in-process pytest
+    masks the bug because the repo root is on sys.path.
     """
     tmp_hermes = tmp_path / "hermes_home"
     tmp_hermes.mkdir()
