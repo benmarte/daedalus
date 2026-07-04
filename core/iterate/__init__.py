@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from core import kanban
-from core.providers.base import CIStatus, issue_linked_to_pr
+from core.providers.base import CIStatus, issue_linked_to_pr as issue_linked_to_pr
 from core.util import extract_issue_number
 
 logger = logging.getLogger("daedalus.iterate")
@@ -122,7 +122,7 @@ from core.iterate.executors import (  # noqa: E402
     _strip_code_blocks as _strip_code_blocks,
     _sub_issue_body as _sub_issue_body,
     _write_fix_attempts as _write_fix_attempts,
-    has_decomposed_marker,
+    has_decomposed_marker as has_decomposed_marker,
 )
 
 
