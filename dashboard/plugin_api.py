@@ -33,6 +33,26 @@ from fastapi import APIRouter, HTTPException, Request
 # in dashboard/cron_helpers.py (issue #1155, PR 1/3, behaviour-neutral). They
 # are re-imported here so every historical ``dashboard.plugin_api._X`` import
 # path and test patch keeps resolving unchanged.
+
+# The web server loads this file standalone via spec_from_file_location, so
+# the ``dashboard`` package name is not importable there. Register a synthetic
+# package entry pointing at this directory so the absolute imports below
+# resolve in both contexts (repo/pytest and installed-plugin). Scoped to the
+# ``dashboard`` name only — the plugin root must NOT go on sys.path.
+if "dashboard" not in sys.modules:
+    import types as _types
+
+    _dash_pkg = _types.ModuleType("dashboard")
+    _dash_pkg.__path__ = [str(Path(__file__).resolve().parent)]
+    sys.modules["dashboard"] = _dash_pkg
+# Alias this module as dashboard.plugin_api so the routes modules' circular
+# imports (``import dashboard.plugin_api as _api``) resolve to THIS in-flight
+# module instead of re-executing the file under a second name. The web server
+# registers us in sys.modules under the spec name before exec, so __name__ is
+# always resolvable here; in repo/pytest context setdefault is a no-op.
+if __name__ in sys.modules:
+    sys.modules.setdefault("dashboard.plugin_api", sys.modules[__name__])
+
 from dashboard._shared import (  # noqa: F401  (re-exported for import-path / test-patch compatibility)
     ConfigLoader,
     _SECRET_KEYS,
