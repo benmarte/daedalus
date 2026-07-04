@@ -258,6 +258,31 @@ execution:
 #   Fork 3 (marker-read optimisation) requires the separate workdir-threading
 #   follow-up before it takes effect.  Point at issue #1170 for the full checklist.
 #
+# ── Pipeline structure (epic #1276) ──────────────────────────────────────────
+# upfront_dag (default: false — behaviour byte-identical when off)
+#   false — the dispatcher creates ONLY the validator card at Ready-time and
+#            fans out the downstream stages per-tick after the validator emits
+#            CONFIRMED (the classic phased flow). This is the default.
+#   true  — the ENTIRE stage graph is built in one shot at Ready-time:
+#            validator → pm → developer → qa → [reviewer, security,
+#            accessibility] → docs, with every non-root stage created
+#            dependency-blocked (`block --kind dependency`) so Hermes
+#            auto-promotes it the moment ALL of its parents complete (docs is
+#            multi-parented to reviewer + security + accessibility). A 6-outcome
+#            arbiter then prunes the DAG by the validator's structured verdict:
+#            CONFIRMED keeps it; ALREADY_FIXED/DUPLICATE cancel every branch;
+#            NEEDS_MORE_INFO/BLOCK_FOR_REVIEW block for human input; SECURITY_THREAT
+#            escalates + cancels; anything unparseable safe-parks (never
+#            auto-proceeds). The per-tick downstream creation no-ops while this is
+#            on. Keep protocol.metadata_transport: true alongside so the arbiter
+#            can read the validator verdict from native run metadata.
+#
+#   KEYSTONE of epic #1276 (Phase 2). Highest-risk toggle — soak with the flag
+#   OFF; downstream work (#1291 gates, #1292 labels, #1294 decompose) builds on
+#   this. See issue #1290.
+pipeline:
+  # upfront_dag: false
+
 protocol:
   # prefix_fallback: true
 

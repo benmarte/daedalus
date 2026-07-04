@@ -260,6 +260,7 @@ from core.dispatch.stages import (  # noqa: F401, E402
     _CONSULT_RESOLVED_MARKER_TMPL,
     _PLANNER_FALLBACK_KEY_RE,
     _PLANNER_FALLBACK_TERMINAL_STATUSES,
+    _arbitrate_validator_outcome,
     _compute_planner_fallback_idempotency_key,
     _downstream_tasks_running_or_done,
     _enforce_validator_blocks,
@@ -1384,6 +1385,106 @@ def _pm_body(
         issue_number=n,
     )
     return _body
+
+
+# Upfront-DAG stage key → profile/skills/bounds role name (#1290). The DAG uses
+# "docs" as its terminal stage key; the roster profile for it is "documentation".
+_DAG_STAGE_ROLE: Dict[str, str] = {
+    "validator": "validator",
+    "pm": "pm",
+    "developer": "developer",
+    "qa": "qa",
+    "reviewer": "reviewer",
+    "security": "security",
+    "accessibility": "accessibility",
+    "docs": "documentation",
+}
+
+
+def _dag_stage_body(role: str, n: int, title: str, workdir: str) -> str:
+    """Concise body for an upfront-DAG stage card (#1290).
+
+    Used for the intermediate stages whose rich, phase-specific bodies depend on
+    upstream output that does not exist yet at Ready-time (e.g. the PM spec, the
+    developer PR). The card is created dependency-blocked and only dispatches once
+    its parents complete; a follow-up will thread the upstream summaries into
+    these bodies. Kept deliberately generic so the flag-off path is unaffected —
+    this helper is only ever reached when ``pipeline.upfront_dag`` is on.
+    """
+    return (
+        f"Pipeline stage **{role}** for issue #{n} ({title}).\n\n"
+        f"This card was created as part of the upfront pipeline DAG (#1290): it "
+        f"sat dependency-blocked from Ready-time and auto-promoted once every "
+        f"upstream stage completed. Perform your role's work per your SOUL and "
+        f"emit the usual completion signal / structured outcome.\n\n"
+        f"Workspace dir: {workdir}\n"
+    )
+
+
+def _pipeline_dag_role_specs(
+    repo: str,
+    issue: Dict[str, Any],
+    workdir: str,
+    base_branch: str,
+    provider_name: str,
+    profiles: Dict[str, str],
+    execution: Dict[str, Any],
+    resolved: Dict[str, Any],
+    role_skills: Dict[str, List[str]],
+    bounds: Dict[str, Any],
+    coding_agent_cmd: str,
+    security_notify_targets: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Assemble the per-stage creation specs for :func:`iterate.build_pipeline_dag`.
+
+    Returns ``{stage_key: {assignee, body, workspace, skills, extra}}`` for every
+    stage of the upfront DAG. The validator and PM stages reuse their real body
+    builders; the remaining stages use a concise generic body (see
+    :func:`_dag_stage_body`) because their rich bodies depend on upstream output
+    that does not exist at Ready-time. Only reached when the flag is on.
+    """
+    n = issue["number"]
+    title = issue.get("title", "")
+    ws = f"dir:{workdir}" if workdir else ""
+
+    def _extra(stage_key: str) -> Dict[str, Any]:
+        return dict(native_bounds.bounds_kwargs(bounds, _DAG_STAGE_ROLE[stage_key]))
+
+    def _skills(stage_key: str) -> Optional[List[str]]:
+        return role_skills.get(_DAG_STAGE_ROLE[stage_key]) or None
+
+    specs: Dict[str, Dict[str, Any]] = {}
+    for stage_key in (
+        "validator", "pm", "developer", "qa",
+        "reviewer", "security", "accessibility", "docs",
+    ):
+        role = _DAG_STAGE_ROLE[stage_key]
+        if stage_key == "validator":
+            body = _validator_body(
+                repo, issue, workdir, base_branch, provider_name,
+                security_notify_targets,
+                coding_agent=_resolve_agent_for_role(execution, "validator"),
+                coding_agent_cmd=coding_agent_cmd,
+            )
+        elif stage_key == "pm":
+            body = _pm_body(
+                repo, issue, "", workdir, base_branch, provider_name,
+                profiles=profiles,
+                coding_agent=_resolve_agent_for_role(execution, "pm"),
+                coding_agent_cmd=coding_agent_cmd,
+            )
+        else:
+            body = _dag_stage_body(role, n, title, workdir)
+        specs[stage_key] = {
+            "title": f"#{n} {title}" if stage_key == "validator"
+                     else f"#{n} {role.title()} — {title}",
+            "assignee": profiles.get(role, ""),
+            "body": body,
+            "workspace": ws,
+            "skills": _skills(stage_key),
+            "extra": _extra(stage_key),
+        }
+    return specs
 
 
 def _downstream_body(
@@ -3099,16 +3200,32 @@ def _run_tick(
         )
     )
 
+    # Phase-2 (#1290): upfront_dag flag.  Default FALSE — behaviour byte-identical.
+    _pipeline_cfg = resolved.get("pipeline") or {}
+    _upfront_dag = bool(_pipeline_cfg.get("upfront_dag", False))
+
     # Enforce validator blocks: set 'Blocked' column on VCS board and cancel
     # downstream tasks for any issue whose validator card is currently blocked.
     # Runs each tick so issues blocked mid-cycle are caught immediately.
-    blocked_issues = _enforce_validator_blocks(
-        slug,
-        provider,
-        existing,
-        validator_profile=profiles["validator"],
-        dry_run=dry_run,
-    )
+    # When pipeline.upfront_dag is ON, the 6-outcome arbiter prunes the pre-built
+    # DAG by the validator's structured verdict instead; when OFF the legacy
+    # enforcement runs exactly as before (flag-off byte-identical).
+    if _upfront_dag:
+        blocked_issues = _arbitrate_validator_outcome(
+            slug,
+            provider,
+            existing,
+            validator_profile=profiles["validator"],
+            dry_run=dry_run,
+        )
+    else:
+        blocked_issues = _enforce_validator_blocks(
+            slug,
+            provider,
+            existing,
+            validator_profile=profiles["validator"],
+            dry_run=dry_run,
+        )
 
     _follow_up_cfg: Dict[str, Any] = resolved.get("follow_up_extraction") or {}
 
@@ -3621,6 +3738,32 @@ def _run_tick(
                     skills=role_skills.get("planner") or None,
                     **native_bounds.bounds_kwargs(bounds, "planner"),
                 )
+        elif _upfront_dag:
+            # Phase-2 (#1290): build the ENTIRE stage DAG at Ready-time. The
+            # validator is created unblocked (dispatches now); every downstream
+            # stage is created dependency-blocked and auto-promotes as its
+            # parents complete. The 6-outcome arbiter (above) prunes by verdict.
+            # Idempotency is handled inside build_pipeline_dag via <role>-{n} keys.
+            _dag_specs = _pipeline_dag_role_specs(
+                repo, issue, workdir, base_branch, provider.name,
+                profiles, execution, resolved, role_skills, bounds,
+                coding_agent_cmd,
+                _notify_targets(resolved, "security-escalation"),
+            )
+            # Detect a pre-existing DAG so re-ticks don't re-run the one-time
+            # bookkeeping below (thread mirror, dispatch-state record) — mirrors
+            # the validator-only path's existing-card guard.
+            _dag_preexisting = any(
+                (t.get("idempotency_key") or "") == f"validator-{n}"
+                for t in kanban.list_tasks(slug)
+            )
+            _dag_ids = iterate.build_pipeline_dag(
+                slug, n, _dag_specs, dry_run=dry_run,
+            )
+            # vid drives the post-creation bookkeeping below. The validator is the
+            # only immediately-dispatchable stage; use its id as the sentinel, but
+            # only when the DAG was freshly created this tick.
+            vid = None if _dag_preexisting else _dag_ids.get("validator")
         else:
             # Phase 1: dispatch ONLY the validator. The dispatcher creates developer/
             # reviewer/security/documentation tasks ONLY after the validator completes
