@@ -77,7 +77,8 @@ jobs:
 
       - name: Skip (non-PR event)
         if: github.event_name != 'pull_request'
-        run: echo "dist-drift: skip — non-PR event, nothing to diff"
+        run: |
+          echo "dist-drift: skip — non-PR event, nothing to diff"
 
   ci-complete:
     needs: [test, lint, typecheck, dist-drift]

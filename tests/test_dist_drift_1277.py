@@ -218,3 +218,32 @@ def test_src_fail_includes_fix_hint():
 def test_dist_fail_includes_fix_hint():
     _, msg = check_drift(["dashboard/dist/index-HAND.js"])
     assert "npm run build" in msg
+
+
+# ── workflow YAML structure guard ─────────────────────────────────────────────
+
+def test_workflow_yaml_parses():
+    """CI workflow must be valid YAML with dist-drift wired into ci-complete.
+
+    Guards against invalid YAML (bare run: scalars with ': ' are mis-parsed as
+    nested mappings) and against accidentally unwiring dist-drift from the gate.
+    pyyaml is already a CI dep so this is portable.
+    """
+    import yaml  # noqa: PLC0415 — only needed here; pyyaml is always available
+
+    workflow_path = _ROOT / ".github" / "workflows" / "ci.yml"
+    with workflow_path.open() as f:
+        doc = yaml.safe_load(f)
+
+    assert doc is not None, "Workflow YAML is empty or null"
+    jobs = doc.get("jobs", {})
+
+    # Both new jobs must be present.
+    assert "dist-drift" in jobs, "dist-drift job missing from ci.yml"
+    assert "ci-complete" in jobs, "ci-complete job missing from ci.yml"
+
+    # ci-complete must depend on dist-drift so a drift failure blocks the gate.
+    needs = jobs["ci-complete"].get("needs", [])
+    assert "dist-drift" in needs, (
+        f"ci-complete.needs does not include dist-drift: {needs}"
+    )
