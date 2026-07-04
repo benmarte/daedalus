@@ -484,6 +484,7 @@ def _execute_advance(
     dry_run: bool = False,
     pr_number: int | None = None,
     metadata_transport: bool = False,
+    upfront_dag: bool = False,
     **_kwargs: Any,
 ) -> bool:
     """Complete a developer card to advance the chain (CI no longer gates this).
@@ -548,7 +549,7 @@ def _execute_advance(
     if issue_number is not None:
         _pkg()._create_downstream_review_tasks(
             slug, issue_number, card,
-            pr_number=pr, dry_run=dry_run,
+            pr_number=pr, dry_run=dry_run, upfront_dag=upfront_dag,
         )
     else:
         logger.warning(
@@ -654,6 +655,7 @@ def _create_downstream_review_tasks(
     *,
     pr_number: int | None = None,
     dry_run: bool = False,
+    upfront_dag: bool = False,
 ) -> list[str]:
     """Create qa/reviewer/security/accessibility/docs tasks after a developer card completes.
 
@@ -662,7 +664,20 @@ def _create_downstream_review_tasks(
     exists on the board (any status), creation is skipped for that role.
 
     Returns the list of newly-created task ids.
+
+    ``upfront_dag`` (#1290, default False): when the ``pipeline.upfront_dag`` flag
+    is ON the full stage graph is built at Ready-time by :func:`build_pipeline_dag`
+    and Hermes auto-promotes each stage via ``--kind dependency`` blocks. In that
+    world the per-tick post-developer creation would double-own the downstream
+    cards, so it no-ops here. When the flag is OFF (the default) this runs exactly
+    as before — byte-identical.
     """
+    if upfront_dag:
+        logger.debug(
+            "iterate: pipeline.upfront_dag ON — per-tick downstream creation for "
+            "issue #%s no-ops (upfront DAG owns the stages)", issue_number,
+        )
+        return []
     kanban = _pkg().kanban
     created: list[str] = []
     tid = card.get("id") or ""
@@ -747,6 +762,137 @@ def _create_downstream_review_tasks(
         )
 
     return created
+
+
+# ── Upfront pipeline DAG (#1290, KEYSTONE of #1276) ──────────────────────────
+#
+# The full stage graph, built in ONE shot at Ready-time when the
+# ``pipeline.upfront_dag`` flag is ON. Each non-root stage is created with
+# ``--parent`` edges to its predecessor(s) and then blocked with
+# ``--kind dependency`` so Hermes auto-promotes it the moment ALL of its parents
+# complete. Ordering mirrors the invariant pipeline:
+#
+#     validator → pm → developer → qa → [reviewer, security, accessibility] → docs
+#
+# ``docs`` is multi-parented to reviewer + security + accessibility so it only
+# unblocks once every review branch has finished. The list is topologically
+# ordered so a parent id is always resolvable before its children are created.
+_PIPELINE_DAG_STAGES: list[tuple[str, tuple[str, ...]]] = [
+    ("validator", ()),
+    ("pm", ("validator",)),
+    ("developer", ("pm",)),
+    ("qa", ("developer",)),
+    ("reviewer", ("qa",)),
+    ("security", ("qa",)),
+    ("accessibility", ("qa",)),
+    ("docs", ("reviewer", "security", "accessibility")),
+]
+
+
+def build_pipeline_dag(
+    slug: str,
+    issue_number: int,
+    role_specs: dict[str, dict],
+    *,
+    dry_run: bool = False,
+) -> dict[str, str]:
+    """Create the full pipeline stage graph as blocked, parent-linked cards.
+
+    Called at Ready-time ONLY when ``pipeline.upfront_dag`` is ON (#1290). Builds
+    every stage in :data:`_PIPELINE_DAG_STAGES` topological order:
+
+      * The root (``validator``) is created *unblocked* so it dispatches
+        immediately.
+      * Every other stage is created with ``--parent`` edges to its predecessors
+        and then blocked with ``kind="dependency"`` so Hermes auto-promotes it
+        when ALL of its parents complete. ``docs`` is multi-parented to
+        reviewer + security + accessibility.
+
+    ``role_specs`` maps each role key to its creation kwargs::
+
+        {"validator": {"assignee": "validator-daedalus", "body": "...",
+                       "workspace": "dir:/w", "skills": [...], "extra": {...}},
+         "pm": {...}, ...}
+
+    ``extra`` (optional) is merged into :func:`kanban.create_task` kwargs (used
+    for native bounds like ``max_runtime``). A role absent from ``role_specs`` is
+    skipped (its edges collapse to whatever parents *do* exist).
+
+    Idempotency: each card uses a stable ``<role>-{issue_number}`` key. Existing
+    cards (any status) are recovered — never re-created — so a re-tick never
+    double-creates. Returns ``{role_key: task_id}`` for every stage that now
+    exists (created or recovered). Never raises — degrades per-role on failure.
+    """
+    kanban = _pkg().kanban
+    role_ids: dict[str, str] = {}
+
+    # Idempotency: recover the id of any stage card that already exists so a
+    # re-tick both skips creation AND can still resolve parent edges.
+    existing_keys: dict[str, str] = {}
+    for task in kanban.list_tasks(slug):
+        ikey = (task.get("idempotency_key") or "")
+        tid_existing = task.get("id")
+        if ikey and tid_existing:
+            existing_keys[ikey] = tid_existing
+    for role_key, _parents in _PIPELINE_DAG_STAGES:
+        recovered = existing_keys.get(f"{role_key}-{issue_number}")
+        if recovered:
+            role_ids[role_key] = recovered
+
+    for role_key, parent_keys in _PIPELINE_DAG_STAGES:
+        spec = role_specs.get(role_key)
+        if spec is None:
+            continue
+        ikey = f"{role_key}-{issue_number}"
+        if role_key in role_ids:
+            logger.info(
+                "iterate: upfront-DAG stage '%s' already exists for issue #%s — skip",
+                ikey, issue_number,
+            )
+            continue
+
+        parents = [role_ids[p] for p in parent_keys if role_ids.get(p)]
+
+        if dry_run:
+            logger.info(
+                "[dry-run] would create upfront-DAG stage %s for issue #%s "
+                "(parents=%s, dependency-block=%s)",
+                ikey, issue_number, parents, bool(parent_keys),
+            )
+            continue
+
+        extra = dict(spec.get("extra") or {})
+        new_tid = kanban.create_task(
+            slug,
+            spec.get("title") or f"#{issue_number} {role_key}",
+            body=spec.get("body", ""),
+            assignee=spec.get("assignee", ""),
+            workspace=spec.get("workspace", ""),
+            idempotency_key=ikey,
+            parents=parents or None,
+            skills=spec.get("skills") or None,
+            **extra,
+        )
+        if not new_tid:
+            logger.warning(
+                "iterate: upfront-DAG failed to create stage '%s' for issue #%s",
+                role_key, issue_number,
+            )
+            continue
+        role_ids[role_key] = new_tid
+        # Non-root stages sit dependency-blocked until every parent completes.
+        if parent_keys:
+            kanban.block_task(
+                slug, new_tid,
+                f"dependency: awaiting {', '.join(parent_keys)} (upfront DAG)",
+                kind="dependency",
+            )
+        logger.info(
+            "iterate: upfront-DAG created stage %s (%s) for issue #%s (parents=%s)",
+            new_tid, role_key, issue_number, parents,
+        )
+
+    return role_ids
 
 
 def _check_and_maybe_escalate(

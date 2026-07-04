@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -197,6 +198,7 @@ class FakeKanban:
         self._counter = 0
         self.completed: List[tuple] = []
         self.blocked_calls: List[tuple] = []
+        self.block_kind_calls: List[tuple] = []  # (task_id, reason, kind) — #1290
         self.unblocked_calls: List[tuple] = []
         self.created: List[Dict[str, Any]] = []
         self.comments: List[tuple] = []
@@ -316,14 +318,20 @@ class FakeKanban:
         self.completed.append((task_id, summary))
         return True
 
-    def block_task(self, slug: str, task_id: str, reason: str = "") -> bool:
+    def block_task(
+        self, slug: str, task_id: str, reason: str = "", *, kind: Optional[str] = None
+    ) -> bool:
         t = self.tasks.get(task_id)
         if not t:
             return False
         t["status"] = "blocked"
         t["reason"] = reason
         t["latest_summary"] = reason
+        # #1290: record the native block kind (dependency/needs_input/…) so tests
+        # can assert the DAG's dependency blocks and the arbiter's human gate.
+        t["block_kind"] = kind
         self.blocked_calls.append((task_id, reason))
+        self.block_kind_calls.append((task_id, reason, kind))
         return True
 
     def unblock_task(self, slug: str, task_id: str, reason: str = "") -> bool:
@@ -397,6 +405,46 @@ class FakeKanban:
         self.decomposed.append(task_id)
         return True
 
+    def run_outcome(self, slug: str, task_id: str) -> Optional[Dict[str, Any]]:
+        """Return the structured outcome metadata on a card's closing run (#1288).
+
+        Seed via ``fk.tasks[tid]["run_metadata"] = {...}`` to exercise the
+        native-metadata read path of the arbiter / classify_blocked.
+        """
+        t = self.tasks.get(task_id) or {}
+        meta = t.get("run_metadata")
+        return dict(meta) if isinstance(meta, dict) else None
+
+    def close_issue_tasks(
+        self, slug: str, issue_number: int, *, summary: str = "", dry_run: bool = False
+    ) -> List[str]:
+        """Complete all non-terminal cards referencing #issue_number (word-boundary).
+
+        Mirrors the real helper closely enough for arbiter tests: completes both
+        active and blocked cards (so pruned DAG branches don't strand) and returns
+        the completed ids.
+        """
+        pattern = re.compile(rf"(?<!\d)#{issue_number}(?!\d)")
+        closed: List[str] = []
+        for t in list(self.tasks.values()):
+            title = t.get("title") or ""
+            body = t.get("body") or ""
+            if not (pattern.search(title) or pattern.search(body)):
+                continue
+            status = (t.get("status") or "").lower()
+            if status in ("done", "complete", "completed", "cancelled"):
+                continue
+            tid = t.get("id")
+            if not tid:
+                continue
+            if not dry_run:
+                t["status"] = "done"
+                if summary:
+                    t["summary"] = summary
+                    t["latest_summary"] = summary
+            closed.append(str(tid))
+        return closed
+
     # ---- assertion helpers ----
 
     def created_with_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
@@ -446,6 +494,8 @@ def kanban_as(kanban_mod: Any, fk: "FakeKanban"):
         "archive_task",
         "create_triage",
         "decompose",
+        "run_outcome",
+        "close_issue_tasks",
     ]
     patches = [
         mock.patch.object(kanban_mod, m, side_effect=getattr(fk, m))
@@ -487,8 +537,13 @@ class FakeProvider:
         closed_issues: Optional[set[int]] = None,
         close_issue_fail_for: Optional[set[int]] = None,
         post_issue_comment_fail_for: Optional[set[int]] = None,
+        board_configured: bool = False,
     ) -> None:
         self.name = name
+        # #1290: arbiter/enforcement tests need a "configured" board. Default
+        # False preserves every existing test that assumes no VCS board.
+        self._board_configured = board_configured
+        self.board_status_calls: List[tuple] = []
         self._ci = ci_status
         self._issues = issues or {}
         self._branch_prs = branch_prs or {}
@@ -620,7 +675,12 @@ class FakeProvider:
         return True
 
     def board_configured(self) -> bool:
-        return False
+        return self._board_configured
+
+    def board_set_status(self, issue_number: int, status: str) -> bool:
+        """Record a board status change (#1290 arbiter tests)."""
+        self.board_status_calls.append((issue_number, status))
+        return True
 
 
 # ── multi-tick pipeline harness (issue #901) ──────────────────────────────────

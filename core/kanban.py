@@ -474,11 +474,28 @@ def unblock_task(slug: str, task_id: str, reason: str = "") -> bool:
     return True
 
 
-def block_task(slug: str, task_id: str, reason: str = "") -> bool:
-    """Block a task. Returns True on success."""
+def block_task(
+    slug: str,
+    task_id: str,
+    reason: str = "",
+    *,
+    kind: str | None = None,
+) -> bool:
+    """Block a task. Returns True on success.
+
+    ``kind`` (optional, #1290) tags the block with a native Hermes block category
+    so the framework knows how to treat it. Valid kinds: ``dependency`` (auto-
+    promotes when ALL parent cards complete — the mechanism behind the upfront
+    pipeline DAG), ``needs_input`` (human attention required), ``capability``,
+    ``transient`` (flaky/retryable). When ``kind`` is None (the default) no
+    ``--kind`` flag is emitted, so every existing caller produces byte-identical
+    CLI args to the pre-#1290 behaviour. Never raises — degrades gracefully.
+    """
     args = ["--board", slug, "block", task_id]
     if reason:
         args += [reason]  # hermes kanban block uses positional reason, not --reason
+    if kind:
+        args += ["--kind", kind]
     rc, out, err = _hk(args)
     _invalidate_tick_cache()
     if rc != 0:
