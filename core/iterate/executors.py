@@ -2,14 +2,16 @@
 
 This is the second extracted layer of core/iterate (PR 2/3, issue #1154).
 
-Package layout after this PR:
+Package layout (final after PR 3/3):
 
   classify.py   — action constants, _parse_handoff, classify_blocked  (PR 1/3)
   executors.py  — decompose lock, fix-attempt tracking, role-gate helpers,
                   all _execute_* functions, planner helpers, _ACTION_EXECUTORS (PR 2/3)
-  __init__.py   — package root: re-exports both layers + source-reading
-                  infrastructure, _try_merge_if_gates_pass, sweep_deferred_merges,
-                  run_iterate
+  sources.py    — Phase 4 epic-context extraction + source-file reading (PR 3/3)
+  gates.py      — block-loop rescue, merge-gate, CI-rerun, sweep_deferred_merges
+                  (PR 3/3)
+  __init__.py   — package root: re-exports all layers + kanban binding,
+                  _source_reading_fallback_count, run_iterate
 
 kanban BINDING MECHANICS
 ------------------------
@@ -1522,6 +1524,21 @@ from core.iterate.classify import (  # noqa: E402
     RECONCILE_MERGED,
 )
 
+# _ACTION_EXECUTORS CONTRACT
+# --------------------------
+# Values are import-time function references captured when this module loads.
+# This means:
+#   • The table is PATCH-IMMUNE — mock.patch("core.iterate._execute_X") replaces
+#     the name in __init__'s namespace AFTER this dict was built, so the dict
+#     still holds the original function object.
+#   • run_iterate calls executor = _ACTION_EXECUTORS.get(action), then
+#     executor(slug, card, ...) — it calls the real function directly, not via
+#     a name lookup that would see a patch.
+#   • Tests that need to intercept an executor must patch the kanban methods it
+#     calls (mock.patch.object(kanban, "complete", ...)) or use the direct-call
+#     paths (call the executor function directly in a unit test).
+#   • No test currently patches _execute_X and expects run_iterate to call the
+#     mock — there is no need to route through _pkg() here.
 _ACTION_EXECUTORS: dict[str, Any] = {
     ADVANCE: _execute_advance,
     QA_FIX: _execute_qa_fix,
