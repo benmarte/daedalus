@@ -157,6 +157,21 @@ execution:
   #   - "*.secrets"
   #   - "secrets.*"
 
+  # ── Ground-truth outcome verification (#1170 Phase 2) ────────────────────
+  # When enabled, the dispatcher verifies the VCS claims in structured JSON
+  # outcome records BEFORE acting on stage completions.  Verification failures
+  # downgrade the action (blocked → hold; qa-passed → qa-failed) rather than
+  # crashing — provider errors skip verification entirely (fail-open).
+  #
+  # Rules applied when enabled:
+  #   developer/pr_opened  → PR must exist and reference the issue
+  #   qa/passed (ci green) → provider CI status must actually be green
+  #   docs/posted          → "**Agent: documentation**" comment must exist
+  #
+  # Default: false (opt-in for one release cycle; enable once agents reliably
+  # emit valid JSON outcome records — see outcome_source telemetry in history).
+  # verify_outcomes: false
+
   # ── Crash retry (issue #1205) ──────────────────────────────────────────────
   # A card whose worker CRASHED (agent process died, session/usage limit,
   # provider connection error) is automatically unblocked and re-dispatched on

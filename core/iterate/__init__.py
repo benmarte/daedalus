@@ -96,6 +96,14 @@ from core.iterate.outcomes import (  # noqa: E402
     parse as parse,
 )
 
+# ── verify layer (Phase 2 of #1170) ──────────────────────────────────────────
+# Ground-truth outcome verification (config-gated; default OFF).
+# Re-exported for ``mock.patch("core.iterate.verify_outcome")``.
+from core.dispatch.verify import (  # noqa: E402
+    VerifyResult as VerifyResult,
+    verify_outcome as verify_outcome,
+)
+
 # Source-reading fallback counter for observability.
 # MUST live here (not in sources.py) because:
 #   1. Tests restore it via ``iterate_mod._source_reading_fallback_count = N``
@@ -277,6 +285,10 @@ def run_iterate(
         # observe when agents reliably emit valid records.
         "_outcome_json": 0,
         "_outcome_prefix": 0,
+        # Phase-2 telemetry (#1170): verify_outcome results (when enabled).
+        "_verify_verified": 0,
+        "_verify_mismatch": 0,
+        "_verify_skipped": 0,
     }
     # Per-tick outcome-source collector.  classify_blocked appends "json" or
     # "prefix" for each card it processes; we tally at end-of-loop.
@@ -292,6 +304,8 @@ def run_iterate(
     execution = (resolved or {}).get("execution") or {}
     auto_merge = bool(execution.get("auto_merge", False))
     merge_method = str(execution.get("merge_method", "squash")).lower()
+    # Phase-2 (#1170): ground-truth verification gate.  Default OFF.
+    _verify_outcomes = bool(execution.get("verify_outcomes", False))
 
     blocked_cards = kanban.list_blocked(slug)
 
@@ -411,6 +425,88 @@ def run_iterate(
                                   skip_qa=skip_qa,
                                   max_fix_attempts=max_fix_attempts,
                                   _source_collector=_outcome_sources)
+
+        # ── Phase-2 ground-truth verification (#1170) ─────────────────────
+        # Only runs when:
+        #   • verify_outcomes=true in config (default OFF — zero-cost no-op)
+        #   • The card was routed via a JSON OutcomeRecord (prefix-only cards
+        #     carry no structured VCS claims; nothing to verify)
+        #   • The action is ADVANCE or APPROVE_ADVANCE (completion actions)
+        # On mismatch: increment the role's fix-attempt counter (same counter
+        # family as qa_fix/max_fix_attempts).  Under cap → post a mismatch
+        # comment and leave the card blocked for the next tick's re-evaluation.
+        # At cap → escalate via the existing escalation executor.
+        if (
+            _verify_outcomes
+            and _outcome_sources
+            and _outcome_sources[-1] == "json"
+            and action in (ADVANCE, APPROVE_ADVANCE)
+        ):
+            _record = parse(handoff)
+            if _record is not None:
+                _issue_n_for_verify = _extract_issue_number_from_card(card)
+                _vresult = verify_outcome(
+                    _record,
+                    provider,
+                    issue_number=_issue_n_for_verify,
+                    pr_number=pr,
+                )
+                counts[f"_verify_{_vresult.verdict}"] = (
+                    counts.get(f"_verify_{_vresult.verdict}", 0) + 1
+                )
+                if _vresult.verdict == "mismatch":
+                    logger.warning(
+                        "iterate: verify_outcome MISMATCH for card %s "
+                        "(action=%s, role=%s/%s): %s",
+                        tid, action, _record.role, _record.verdict, _vresult.note,
+                    )
+                    # Increment fix-attempt counter (bounded by max_fix_attempts).
+                    _vm_attempts = _increment_fix_attempts(card, workdir)
+                    if _vm_attempts >= max_fix_attempts:
+                        # At cap: escalate via existing machinery.
+                        logger.warning(
+                            "iterate: verify-mismatch for card %s hit cap "
+                            "(%d/%d) — escalating",
+                            tid, _vm_attempts, max_fix_attempts,
+                        )
+                        _esc = _ACTION_EXECUTORS.get(ESCALATE)
+                        if _esc:
+                            try:
+                                _esc(
+                                    slug, card, repo, handoff,
+                                    workdir=workdir,
+                                    notify_target=notify_target,
+                                    router_profile=router_profile,
+                                    dry_run=dry_run,
+                                    pr_number=pr,
+                                    provider=provider,
+                                    max_fix_attempts=max_fix_attempts,
+                                )
+                            except Exception as _esc_exc:
+                                logger.error(
+                                    "iterate: escalation executor failed for "
+                                    "verify-mismatch card %s: %s",
+                                    tid, _esc_exc,
+                                )
+                        counts[ESCALATE] = counts.get(ESCALATE, 0) + 1
+                        if _issue_n_for_verify is not None:
+                            escalated_issues[_issue_n_for_verify] = tid
+                    else:
+                        # Under cap: post mismatch comment; card stays blocked
+                        # and the next tick will re-run verify.
+                        if not dry_run:
+                            kanban.comment(
+                                slug, tid,
+                                f"verify-mismatch (attempt {_vm_attempts}/"
+                                f"{max_fix_attempts}): {_vresult.note}",
+                            )
+                        else:
+                            logger.info(
+                                "[dry-run] would post verify-mismatch comment "
+                                "on card %s (attempt %d/%d)",
+                                tid, _vm_attempts, max_fix_attempts,
+                            )
+                    continue  # always skip the ADVANCE/APPROVE_ADVANCE executor
 
         # ── Escalation dedup (issue #35) ─────────────────────────────────
         # Before executing ESCALATE, check two layers of dedup:
