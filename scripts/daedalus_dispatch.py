@@ -1107,6 +1107,25 @@ def _resolve_max_developer_retries(execution: Dict[str, Any], default: int = 2) 
     return val if val > 0 else default
 
 
+def _resolve_max_fix_attempts(execution: Dict[str, Any], default: int = 3) -> int:
+    """Return the CI-/review-fix escalation cap from ``execution.max_fix_attempts``.
+
+    Controls how many developer/reviewer/security fix cycles run before a card
+    escalates for manual intervention (the ``MAX_FIX_ATTEMPTS`` constant in
+    ``core/iterate.py``). The resolved value is threaded into ``iterate.run_iterate``
+    so per-project config can raise it (flaky suites needing more retries) or lower
+    it (fail-fast). Falls back to ``default`` (3) when unset, non-numeric, or <= 0.
+    """
+    raw = (execution or {}).get("max_fix_attempts")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
 _HISTORY_MAX_LINES: int = 1000
 
 
@@ -7028,6 +7047,7 @@ def _run_tick(
         resolved=resolved,
         provider=provider,
         dry_run=dry_run,
+        max_fix_attempts=_resolve_max_fix_attempts(execution),
     )
     for _qf in qa_failed_cards:
         _notify_qa_failed(

@@ -189,6 +189,7 @@ def classify_blocked(
     pr_is_open: bool | None = None,
     pr_is_merged: bool | None = None,
     skip_qa: bool = False,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -221,6 +222,10 @@ def classify_blocked(
         skip_qa: When True, the QA card bypasses the ``qa-passed`` signal
                  requirement and advances immediately (used when the PR has
                  the ``skip-qa`` label applied).
+        max_fix_attempts: The escalation cap for developer/reviewer/security
+                 fix cycles. Defaults to the module constant ``MAX_FIX_ATTEMPTS``
+                 (3); the dispatcher threads the ``execution.max_fix_attempts``
+                 config override in via ``run_iterate``.
 
     Returns one of: {advance, qa_fix, pending_signal, pm_route, approve_advance,
     escalate, reconcile_merged}.
@@ -261,7 +266,7 @@ def classify_blocked(
     # ── developer card ───────────────────────────────────────────────────
     if assignee == "developer-daedalus":
         # Exceeded max fix attempts → escalate
-        if fix_attempts >= MAX_FIX_ATTEMPTS:
+        if fix_attempts >= max_fix_attempts:
             return ESCALATE
         # Review-required handoff with PR → ADVANCE immediately (CI no longer gates)
         # CI gating is enforced at merge-time only (per epic #1074), so
@@ -309,7 +314,7 @@ def classify_blocked(
     # ── reviewer / security-analyst card ─────────────────────────────────
     if assignee in ("reviewer-daedalus", "security-analyst-daedalus"):
         # Exceeded max fix attempts → escalate
-        if fix_attempts >= MAX_FIX_ATTEMPTS:
+        if fix_attempts >= max_fix_attempts:
             return ESCALATE
         # A developer fix card is already in flight — don't create another PM-ROUTE.
         # Concurrent cron ticks would otherwise each spawn a separate PM-ROUTE
@@ -925,6 +930,7 @@ def _check_and_maybe_escalate(
     *,
     workdir: str = "",
     dry_run: bool = False,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
 ) -> bool | int:
     """Shared fix-attempt escalation guard for the fix-card executors.
 
@@ -937,8 +943,9 @@ def _check_and_maybe_escalate(
     # Read-then-increment is not atomic, but the dispatcher is a single-process
     # cron (projects processed sequentially) — no lock needed unless that changes.
     fix_attempts = _count_fix_attempts(card, slug=slug, workdir=workdir) + 1
-    if fix_attempts > MAX_FIX_ATTEMPTS:
-        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir, dry_run=dry_run)
+    if fix_attempts > max_fix_attempts:
+        return _execute_escalate(slug, card, repo, handoff_text, workdir=workdir,
+                                 dry_run=dry_run, max_fix_attempts=max_fix_attempts)
     return fix_attempts
 
 
@@ -951,6 +958,7 @@ def _execute_qa_fix(
     workdir: str = "",
     dry_run: bool = False,
     pr_number: int | None = None,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     **_kwargs: Any,
 ) -> bool:
     """Create a developer fix card for QA-reported test failures, idempotent per (card, attempt).
@@ -966,7 +974,8 @@ def _execute_qa_fix(
         logger.warning("iterate: qa_fix on %s but no PR found in handoff", tid)
         return False
     res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
-                                    workdir=workdir, dry_run=dry_run)
+                                    workdir=workdir, dry_run=dry_run,
+                                    max_fix_attempts=max_fix_attempts)
     if isinstance(res, bool):
         return res
     fix_attempts = res
@@ -974,7 +983,7 @@ def _execute_qa_fix(
     title = f"Task 2.3 FIX — QA failure on PR #{pr} — fix and push"
     body = (
         f"QA reported failing tests on PR #{pr} (repo {repo}). "
-        f"Fix the failing tests/build and push. Fix attempt {fix_attempts}/{MAX_FIX_ATTEMPTS}."
+        f"Fix the failing tests/build and push. Fix attempt {fix_attempts}/{max_fix_attempts}."
     )
 
     idem_key = f"fix-ci-{tid}-attempt-{fix_attempts}"
@@ -982,7 +991,7 @@ def _execute_qa_fix(
 
     if dry_run:
         logger.info("[dry-run] would create CI fix card for %s (attempt %s/%s, PR #%s)",
-                     tid, fix_attempts, MAX_FIX_ATTEMPTS, pr)
+                     tid, fix_attempts, max_fix_attempts, pr)
         return True
 
     fix_tid = kanban.create_task(
@@ -995,11 +1004,11 @@ def _execute_qa_fix(
     )
     if fix_tid:
         kanban.comment(slug, tid,
-                       f"Created CI fix task {fix_tid} (attempt {fix_attempts}/{MAX_FIX_ATTEMPTS})")
+                       f"Created CI fix task {fix_tid} (attempt {fix_attempts}/{max_fix_attempts})")
         # Persist the incremented fix attempt count so escalation works across ticks.
         _increment_fix_attempts(card, workdir)
         logger.info("iterate: created CI fix card %s for %s (attempt %s/%s)",
-                     fix_tid, tid, fix_attempts, MAX_FIX_ATTEMPTS)
+                     fix_tid, tid, fix_attempts, max_fix_attempts)
         return True
     return False
 
@@ -1072,6 +1081,7 @@ def _execute_pm_route(
     router_profile: str = "project-manager-daedalus",
     dry_run: bool = False,
     pr_number: int | None = None,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     **_kwargs: Any,
 ) -> bool:
     """Create a PM routing card for review findings (changes-requested).
@@ -1095,7 +1105,8 @@ def _execute_pm_route(
         return False
     pr = pr_number or _parse_pr_number(handoff_text)
     res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
-                                    workdir=workdir, dry_run=dry_run)
+                                    workdir=workdir, dry_run=dry_run,
+                                    max_fix_attempts=max_fix_attempts)
     if isinstance(res, bool):
         return res
     fix_attempts = res
@@ -1108,6 +1119,7 @@ def _execute_pm_route(
         return _execute_legacy_dev_fix_review(
             slug, card, repo, handoff_text,
             workdir=workdir, dry_run=dry_run,
+            max_fix_attempts=max_fix_attempts,
         )
 
     title = f"PM-ROUTE — decide fix owner for PR #{pr or '?'}"
@@ -1135,7 +1147,7 @@ def _execute_pm_route(
 
     if dry_run:
         logger.info("[dry-run] would create PM routing card for %s via %s (attempt %s/%s, PR #%s)",
-                     tid, rp, fix_attempts, MAX_FIX_ATTEMPTS, pr)
+                     tid, rp, fix_attempts, max_fix_attempts, pr)
         return True
 
     pm_tid = kanban.create_task(
@@ -1158,12 +1170,12 @@ def _execute_pm_route(
             logger.info("iterate: PM-ROUTE %s already resolved (done) — skipping increment", pm_tid)
             return True
         kanban.comment(slug, tid,
-                       f"Created PM routing card {pm_tid} (attempt {fix_attempts}/{MAX_FIX_ATTEMPTS})")
+                       f"Created PM routing card {pm_tid} (attempt {fix_attempts}/{max_fix_attempts})")
         # Mark the reviewer card as blocked (awaiting-fix) so pending state is visible
         kanban.block_task(slug, tid, f"awaiting-fix: {pm_tid}")
         _increment_fix_attempts(card, workdir)
         logger.info("iterate: created PM routing card %s for %s via %s (attempt %s/%s)",
-                     pm_tid, tid, rp, fix_attempts, MAX_FIX_ATTEMPTS)
+                     pm_tid, tid, rp, fix_attempts, max_fix_attempts)
         return True
 
     # CLI create failed — profile likely absent; fall back to direct developer
@@ -1172,6 +1184,7 @@ def _execute_pm_route(
     return _execute_legacy_dev_fix_review(
         slug, card, repo, handoff_text,
         workdir=workdir, dry_run=dry_run,
+        max_fix_attempts=max_fix_attempts,
     )
 
 
@@ -1184,6 +1197,7 @@ def _execute_legacy_dev_fix_review(
     workdir: str = "",
     dry_run: bool = False,
     pr_number: int | None = None,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
 ) -> bool:
     """Fallback: create a developer fix card directly (old behavior).
 
@@ -1192,7 +1206,8 @@ def _execute_legacy_dev_fix_review(
     tid = card.get("id")
     pr = pr_number or _parse_pr_number(handoff_text)
     res = _check_and_maybe_escalate(slug, card, repo, handoff_text,
-                                    workdir=workdir, dry_run=dry_run)
+                                    workdir=workdir, dry_run=dry_run,
+                                    max_fix_attempts=max_fix_attempts)
     if isinstance(res, bool):
         return res
     fix_attempts = res
@@ -1201,7 +1216,7 @@ def _execute_legacy_dev_fix_review(
     body = (
         f"Review findings for PR #{pr or '?'} (repo {repo}):\n\n"
         f"{handoff_text}\n\n"
-        f"Address all findings and push. Fix attempt {fix_attempts}/{MAX_FIX_ATTEMPTS}."
+        f"Address all findings and push. Fix attempt {fix_attempts}/{max_fix_attempts}."
     )
 
     idem_key = f"fix-review-{tid}-attempt-{fix_attempts}"
@@ -1209,7 +1224,7 @@ def _execute_legacy_dev_fix_review(
 
     if dry_run:
         logger.info("[dry-run] would create legacy review-fix card for %s (attempt %s/%s, PR #%s)",
-                     tid, fix_attempts, MAX_FIX_ATTEMPTS, pr)
+                     tid, fix_attempts, max_fix_attempts, pr)
         return True
 
     fix_tid = kanban.create_task(
@@ -1222,10 +1237,10 @@ def _execute_legacy_dev_fix_review(
     )
     if fix_tid:
         kanban.comment(slug, tid,
-                       f"Created review-fix task {fix_tid} (fallback, attempt {fix_attempts}/{MAX_FIX_ATTEMPTS})")
+                       f"Created review-fix task {fix_tid} (fallback, attempt {fix_attempts}/{max_fix_attempts})")
         kanban.block_task(slug, tid, f"awaiting-fix: {fix_tid}")
         logger.info("iterate: created legacy review-fix card %s for %s (attempt %s/%s)",
-                     fix_tid, tid, fix_attempts, MAX_FIX_ATTEMPTS)
+                     fix_tid, tid, fix_attempts, max_fix_attempts)
         return True
     return False
 
@@ -1260,6 +1275,7 @@ def _execute_escalate(
     notify_target: str = "",
     dry_run: bool = False,
     pr_number: int | None = None,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     **_kwargs: Any,
 ) -> bool:
     """Escalate a card that has exceeded max fix attempts.
@@ -1274,7 +1290,7 @@ def _execute_escalate(
     pr = pr_number or _parse_pr_number(handoff_text)
     msg = (
         f"⚠️ ESCALATE: card {tid} (PR #{pr or '?'}) has exceeded "
-        f"{MAX_FIX_ATTEMPTS} fix attempts. Manual intervention required."
+        f"{max_fix_attempts} fix attempts. Manual intervention required."
     )
     logger.warning("iterate: %s", msg)
 
@@ -2800,6 +2816,7 @@ def run_iterate(
     resolved: dict[str, Any] | None = None,
     provider: Any | None = None,
     dry_run: bool = False,
+    max_fix_attempts: int = MAX_FIX_ATTEMPTS,
 ) -> tuple[dict[str, int], list[int], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Run the auto-advance routing and self-healing loop.
 
@@ -2820,6 +2837,10 @@ def run_iterate(
             lookups. Without one, branch→PR resolution is skipped and CI is
             treated as not-green.
         dry_run: If True, log intentions without mutating anything.
+        max_fix_attempts: Escalation cap for developer/reviewer/security fix
+            cycles. Defaults to the module constant ``MAX_FIX_ATTEMPTS`` (3);
+            the dispatcher resolves ``execution.max_fix_attempts`` and threads
+            the per-project override in here.
 
     Returns:
         (counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards) tuple.
@@ -2962,7 +2983,8 @@ def run_iterate(
                                   fix_attempts=fix_attempts, pr_number=pr,
                                   raw_ci=raw_ci, pr_is_open=pr_is_open,
                                   pr_is_merged=pr_is_merged,
-                                  skip_qa=skip_qa)
+                                  skip_qa=skip_qa,
+                                  max_fix_attempts=max_fix_attempts)
 
         # ── Escalation dedup (issue #35) ─────────────────────────────────
         # Before executing ESCALATE, check two layers of dedup:
@@ -3060,6 +3082,7 @@ def run_iterate(
                 dry_run=dry_run,
                 pr_number=pr,
                 provider=provider,
+                max_fix_attempts=max_fix_attempts,
             )
 
             # Gate on ok=True: prevents notification when the executor fails
@@ -3074,7 +3097,7 @@ def run_iterate(
                 # Use file-only counter to avoid a second kanban.list_tasks round-trip.
                 _tid = card.get("id", "")
                 _file_count = _read_fix_attempts(workdir).get(_tid, 0) if workdir and _tid else 0
-                _escalated = (_file_count >= MAX_FIX_ATTEMPTS)
+                _escalated = (_file_count >= max_fix_attempts)
                 if _escalated:
                     escalated_cards.append(entry)
                 else:
