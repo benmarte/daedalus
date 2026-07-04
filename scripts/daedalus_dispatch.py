@@ -1874,6 +1874,26 @@ def _repair_orphan_tasks(
 
 
 
+def _native_send_enabled(resolved: Dict[str, Any]) -> bool:
+    """Whether native ``hermes send`` fully replaces the legacy webhook path (#1293).
+
+    When ``notify.native_send`` is true, the redundant raw-webhook calls
+    (``send_webhook_notification`` → ``SLACK_WEBHOOK_URL`` / ``DISCORD_WEBHOOK_URL``,
+    Block Kit / embeds) are skipped because the native ``_hermes_send`` path already
+    delivers the same notifications through ``hermes send``. Defaults to ``False``
+    (byte-identical legacy behaviour: both transports fire). Never raises.
+
+    Tradeoff when enabled: ``hermes send`` delivers plain markdown only (no Block
+    Kit / Discord embeds), and delivery follows ``cron.notifications`` targets
+    rather than the ``SLACK_WEBHOOK_URL`` / ``DISCORD_WEBHOOK_URL`` env webhooks.
+    """
+    try:
+        notify = resolved.get("notify") or {}
+        return bool(notify.get("native_send", False))
+    except Exception:
+        return False
+
+
 def _send_retry_cap_notification(
     *,
     role: str,
@@ -1891,14 +1911,17 @@ def _send_retry_cap_notification(
     logged but not raised.
     """
     # Fire webhook notification asynchronously (non-blocking) — independent of
-    # whether ``hermes send`` targets are configured.
-    _fire_webhook_notification(
-        role=role,
-        issue_number=issue_number,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        dry_run=dry_run,
-    )
+    # whether ``hermes send`` targets are configured. Skipped when
+    # ``notify.native_send`` is on: the native ``_hermes_send`` path below already
+    # delivers this notification, so the legacy webhook is redundant (#1293).
+    if not _native_send_enabled(resolved):
+        _fire_webhook_notification(
+            role=role,
+            issue_number=issue_number,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            dry_run=dry_run,
+        )
 
     targets = _notify_targets(resolved, "retry-cap-exhausted")
     if not targets:
@@ -2054,7 +2077,10 @@ def _send_crash_retries_exhausted_notification(
         f"{task_id}` (resets the crash-retry counter)."
     )
 
-    if not dry_run:
+    # Legacy raw-webhook path — skipped when ``notify.native_send`` is on: the
+    # native ``_hermes_send`` fan-out below already delivers this notification to
+    # ``crash-retries-exhausted`` (fallback ``retry-cap-exhausted``) targets (#1293).
+    if not dry_run and not _native_send_enabled(resolved):
 
         def _fire():
             try:

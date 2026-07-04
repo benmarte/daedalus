@@ -114,6 +114,26 @@ cron:
   #     target: "discord:1234567890123456789"  # numeric channel ID (not name)
   #     events: ["dispatch-summary", "pr-ready", "comment-mirror"]
 
+# ── Notification delivery transport (#1293) ───────────────────────────────────
+notify:
+  # native_send (default: false) — DELIVERY-ONLY flag.
+  #
+  # false (default): behaviour is byte-identical to before. Escalation
+  #   notifications (retry-cap-exhausted, crash-retries-exhausted) fire on BOTH
+  #   transports: the native `hermes send` path (cron.notifications targets, with
+  #   threading) AND the legacy raw webhook path (core/notification_sender.py →
+  #   SLACK_WEBHOOK_URL / DISCORD_WEBHOOK_URL env vars, with Block Kit / embeds).
+  #
+  # true: skip the redundant legacy raw-webhook calls — the native `hermes send`
+  #   path already delivers the same notifications. Use this once your escalation
+  #   channels are configured under `cron.notifications`.
+  #   ⚠️ Tradeoff: `hermes send` delivers PLAIN MARKDOWN only (no Slack Block Kit,
+  #   no Discord embeds), and delivery follows `cron.notifications` targets rather
+  #   than the SLACK_WEBHOOK_URL / DISCORD_WEBHOOK_URL env webhooks. If you rely
+  #   ONLY on those env webhooks (no `cron.notifications` targets), keep this false
+  #   or add native targets first, or these escalations will not be delivered.
+  native_send: false
+
 # ── Execution tunables ────────────────────────────────────────────────────────
 execution:
   # How many issues the dispatcher spawns per tick (default: 5). Caps how many

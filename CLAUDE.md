@@ -122,6 +122,7 @@ Validator → PM → Developer → QA → Reviewer + Security-Analyst + Accessib
 - Per-repo: `<repo>/.hermes/daedalus.yaml` (scaffolded by `setup.sh` or dashboard).
 - Template: `templates/daedalus.yaml` (deep-merged — nested dicts merge, lists replaced).
 - No secrets in YAML — `vcs.token_env` names the env var.
+- **`notify.native_send: false`** (default — behaviour byte-identical; #1293, delivery-only): when `true`, escalation notifications (`retry-cap-exhausted`, `crash-retries-exhausted`) are delivered over native `hermes send` only (`cron.notifications` targets, plain markdown); the redundant legacy raw-webhook path (`core/notification_sender.py` → `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`, Block Kit / embeds) is skipped via `_native_send_enabled()`. With the flag off, both transports fire (legacy env webhooks still deliver Block Kit / embeds). Configure native targets before flipping. Inbound intake (native webhook receiver) is tracked separately in #1298.
 
 ### Test isolation (critical)
 - Every test gets isolated `HERMES_HOME` (tmp dir) via autouse conftest fixture.
