@@ -1314,6 +1314,25 @@ Each piece exists because the obvious approach failed:
   looping silently. Configurable via `execution.crash_retry` knobs in
   `templates/daedalus.yaml`. This replaces the old silent-stuck behaviour where
   a crashed agent card sat indefinitely in `running`.
+- **Native per-task bounds** (`core/native_bounds.py`, issue #1289) — an
+  opt-in `execution.native_bounds` flag (default `false`) tags every
+  dispatcher-created role card with Hermes-native circuit breakers so a
+  crashed or runaway worker self-bounds without waiting on the crash-retry
+  reconciler: `--max-retries N` (a per-task *consecutive-worker-failure*
+  breaker — Hermes parks the card after `N` straight worker deaths; default
+  `2`, matching `kanban.failure_limit`) and `--max-runtime <dur>` (a
+  wall-clock cap after which Hermes SIGTERM→SIGKILL→requeues the card).
+  Note the `--max-retries` breaker is a DIFFERENT mechanism from the
+  CI/review fix-loop `MAX_FIX_ATTEMPTS = 3`: the breaker retries a card whose
+  *worker process died*; the fix-loop retries a *completed* card whose
+  artifact failed CI or review. Global defaults and per-role overrides come
+  from `execution.native_max_retries`, `execution.native_max_runtime`, and
+  `execution.native_bounds_by_role`. With the flag on, native `--max-runtime`
+  requeue is authoritative for wall-clock timeouts, so the crash-retry
+  reconciler skips `timeout`-class cards to avoid double-handling; all other
+  crash classes are unaffected. Bounds-only for now — goal-mode (`--goal`
+  judge adjudication) is a deliberate follow-up. With the flag off (default)
+  the emitted CLI args are byte-identical to before.
 - **Provider failover chain** (`core/provider_failover.py`, issue #1207) —
   when a coding agent (Claude Code, Codex, etc.) hits a transient failure
   (session limit, quota, crash, timeout), the crash-retry reconciler

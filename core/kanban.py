@@ -403,6 +403,7 @@ def create_task(
     goal: bool = False,
     goal_max_turns: int | None = None,
     max_retries: int | None = None,
+    max_runtime: str | None = None,
 ) -> str | None:
     """Create a regular (non-triage) task. Returns task id or None.
 
@@ -411,6 +412,10 @@ def create_task(
     ``goal`` spawns the worker in goal mode (multi-turn with adjudication).
     ``goal_max_turns`` sets the turn budget (only meaningful when goal=True).
     ``max_retries`` overrides the default failure-before-block retry cap.
+    ``max_runtime`` (e.g. ``"30m"``) sets a native wall-clock cap after which
+    Hermes SIGTERM→SIGKILL→requeues the card (native self-bounding, #1289).
+    Both are omitted from the CLI args when None, so a caller that does not
+    pass them produces byte-identical args to the pre-#1289 behaviour.
     """
     args = ["--board", slug, "create", title]
     if body:
@@ -429,6 +434,8 @@ def create_task(
             args += ["--skill", s]
     if max_retries is not None:
         args += ["--max-retries", str(max_retries)]
+    if max_runtime is not None:
+        args += ["--max-runtime", str(max_runtime)]
     if goal:
         args += ["--goal"]
         if goal_max_turns is not None:
