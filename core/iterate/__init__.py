@@ -144,6 +144,7 @@ from core.iterate.executors import (  # noqa: E402
     _ROLE_ASSIGNEE_PREFIX as _ROLE_ASSIGNEE_PREFIX,
     _acquire_decompose_lock as _acquire_decompose_lock,
     _build_decomposed_marker as _build_decomposed_marker,
+    build_pipeline_dag as build_pipeline_dag,
     _check_and_maybe_escalate as _check_and_maybe_escalate,
     _count_fix_attempts as _count_fix_attempts,
     _create_downstream_review_tasks as _create_downstream_review_tasks,
@@ -318,6 +319,13 @@ def run_iterate(
     # completion handoffs emit the outcome via complete(metadata=).  When OFF,
     # native_outcome is always None so classify_blocked is byte-identical.
     _metadata_transport = bool(_protocol.get("metadata_transport", False))
+    # Phase-2 (#1290): upfront_dag flag.  Default FALSE (behaviour unchanged).
+    # When ON the full stage graph is built at Ready-time and Hermes auto-promotes
+    # each stage via dependency blocks, so the per-tick post-developer downstream
+    # creation must no-op (the upfront DAG owns those cards).  When OFF the
+    # per-tick path runs exactly as today — byte-identical.
+    _pipeline_cfg = (resolved or {}).get("pipeline") or {}
+    _upfront_dag = bool(_pipeline_cfg.get("upfront_dag", False))
 
     blocked_cards = kanban.list_blocked(slug)
 
@@ -627,6 +635,7 @@ def run_iterate(
                 provider=provider,
                 max_fix_attempts=max_fix_attempts,
                 metadata_transport=_metadata_transport,
+                upfront_dag=_upfront_dag,
             )
 
             # Gate on ok=True: prevents notification when the executor fails
