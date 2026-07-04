@@ -268,7 +268,7 @@ def _compute_sub_issue_dependencies(
             break
         if _file_paths_overlap(current_ctx.file_paths, contexts[prior_idx].file_paths):
             latest_overlapping_n = prior_n  # keep updating: want the most recent
-    deps: list[int] = list(existing_deps or [])
+    deps: list[int] = list(existing_deps or [])  # type: ignore[no-redef]  # earlier defs are in always-returning branches
     if latest_overlapping_n is not None and latest_overlapping_n not in deps:
         deps.append(latest_overlapping_n)
     return deps
@@ -630,8 +630,8 @@ def identify_relevant_files(
                     if not fp.is_file() or not fp.resolve().is_relative_to(workdir_path.resolve()):
                         continue
                     # Skip common non-source dirs
-                    rel = str(fp.relative_to(workdir_path))
-                    if any(seg in rel for seg in ("node_modules", ".git", "__pycache__", ".venv", "venv", ".tox")):
+                    rel_s = str(fp.relative_to(workdir_path))
+                    if any(seg in rel_s for seg in ("node_modules", ".git", "__pycache__", ".venv", "venv", ".tox")):
                         continue
                 except (OSError, ValueError):
                     continue

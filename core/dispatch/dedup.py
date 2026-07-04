@@ -11,7 +11,6 @@ The dispatcher re-exports every symbol so the public surface is unchanged.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
 
 from core import kanban
 

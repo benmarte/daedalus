@@ -31,17 +31,6 @@ def extract_issue_number(text: str, *, prefer_qualified: bool = False) -> int | 
     return int(m.group(1)) if m else None
 
 
-def extract_pr_number_from_summary(text: str) -> int | None:
-    """Parse a PR number from text, looking for ``PR #<n>`` patterns.
-
-    Used by the dispatcher to extract PR numbers from card bodies and summaries.
-    Returns ``None`` if no PR reference is found.
-    """
-    text = text or ""
-    m = re.search(r"PR #(\d+)", text)
-    return int(m.group(1)) if m else None
-
-
 def board_slug(repo: str, name: str = "") -> str:
     """Derive kanban board slug from repo path (org/repo → org-repo)."""
     slug = repo.replace("/", "-") if repo else name
