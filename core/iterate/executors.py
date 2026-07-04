@@ -1277,7 +1277,7 @@ def _execute_planner_decompose(
 ) -> bool:
     """Create sub-issues from an epic when the planner completes with PLANNING COMPLETE."""
     kanban = _pkg().kanban
-    tid = card.get("id")
+    tid: str = card.get("id") or ""  # kanban task id; always a str at runtime
     parent_n = _extract_issue_number_from_card(card)
     if parent_n is None:
         logger.warning("iterate: planner_decompose — cannot parse issue number from card %s", tid)

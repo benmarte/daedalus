@@ -59,7 +59,8 @@ This is a map, not a tutorial — read the linked files for depth.
 | `python -m pytest tests/ -n auto --timeout=60` | Parallel pytest (CI uses this) |
 | `python tests/test_daedalus.py` | Standalone smoke test (custom `check()` runner) |
 | `make test` | Full suite: standalone + `pytest tests/ -q` |
-| `make lint` | Ruff lint on changed files (`origin/dev...HEAD`) |
+| `make lint` | Ruff lint on changed files (`origin/dev...HEAD`); CI runs `ruff check .` repo-wide |
+| `make typecheck` | Mypy on scoped packages: `core/dispatch/`, `core/iterate/`, `core/util.py`, `core/db.py`, `config/` |
 | `make e2e` | Offline E2E regression (seeds issue, drives full pipeline) |
 | `make e2e-live` | Live smoke against REAL dispatcher (needs `GITHUB_TOKEN`) |
 | `python scripts/daedalus_dispatch.py --self-test` | Hermetic GitHub-free pipeline wiring check |

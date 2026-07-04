@@ -22,8 +22,34 @@ jobs:
       - name: Pytest suites (parallel, with timeout)
         run: pytest tests/ -n auto --timeout=60
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install ruff
+        run: pip install --quiet ruff
+      - name: Ruff check (whole repo)
+        run: ruff check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install mypy + runtime stubs
+        run: pip install --quiet mypy pyyaml fastapi httpx
+      # Scope: new split packages + small clean modules. Legacy modules are
+      # baseline-ignored in pyproject.toml [tool.mypy.overrides] (see #1262).
+      - name: Mypy (scoped packages)
+        run: python3 -m mypy core/dispatch/ core/iterate/ core/util.py core/db.py config/
+
   ci-complete:
-    needs: [test]
+    needs: [test, lint, typecheck]
     runs-on: ubuntu-latest
     steps:
       - run: echo "all required checks passed"

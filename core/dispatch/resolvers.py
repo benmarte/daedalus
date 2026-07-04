@@ -18,10 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config import ConfigLoader  # noqa: E402
-from core import dispatch_state as _dispatch_state  # noqa: E402  (for _resolve_active_model_provider)
 from core import registry  # noqa: E402
 from core.providers.base import (  # noqa: E402
-    _DECOMP_LANGUAGE_RE,
     _SUB_ISSUE_CHECKLIST_RE,
     is_epic,
 )
@@ -312,8 +310,8 @@ def _resolve_coding_agent_cmd(execution: Dict[str, Any]) -> str:
     if agent in ("hermes", "none"):
         return cmd
     active = _resolve_active_model_provider()
-    if active.get("model"):
-        cmd = _inject_model_into_coding_agent_cmd(cmd, agent, active["model"])
+    if model := active.get("model"):
+        cmd = _inject_model_into_coding_agent_cmd(cmd, agent, model)
     return cmd
 
 
@@ -328,7 +326,7 @@ def _resolve_coding_agent_max_turns(execution: Dict[str, Any]) -> int:
     """
     raw = (execution or {}).get("coding_agent_max_turns")
     try:
-        n = int(raw)
+        n = int(raw)  # type: ignore[arg-type]  # raw is Any; TypeError caught below
         return n if n > 0 else _DEFAULT_CODING_AGENT_MAX_TURNS
     except (TypeError, ValueError):
         return _DEFAULT_CODING_AGENT_MAX_TURNS
@@ -378,7 +376,7 @@ def _resolve_coding_agent_max_wait(execution: Dict[str, Any]) -> int:
     """
     raw = (execution or {}).get("coding_agent_max_wait")
     try:
-        val = int(raw)
+        val = int(raw)  # type: ignore[arg-type]  # raw is Any; TypeError caught below
     except (TypeError, ValueError):
         return _DEFAULT_CODING_AGENT_MAX_WAIT
     return val if val > 0 else _DEFAULT_CODING_AGENT_MAX_WAIT
@@ -397,7 +395,7 @@ def _resolve_max_dispatch(execution: Dict[str, Any], default: int = 5) -> int:
     """
     raw = (execution or {}).get("max_dispatch")
     try:
-        val = int(raw)
+        val = int(raw)  # type: ignore[arg-type]  # raw is Any; TypeError caught below
     except (TypeError, ValueError):
         return default
     return val if val > 0 else default

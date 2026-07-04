@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Optional
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------

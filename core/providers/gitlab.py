@@ -73,7 +73,7 @@ class GitLabProvider(VCSProvider):
                     limit: int = 50) -> list[IssueSummary]:
         """ANY-label semantics: one call per label, deduped (GitHub parity)."""
         gl_state = {"open": "opened", "closed": "closed"}.get(state)
-        label_sets = [[l] for l in (labels or []) if l] or [[]]
+        label_sets = [[lbl] for lbl in (labels or []) if lbl] or [[]]
         seen: dict[int, IssueSummary] = {}
         for ls in label_sets:
             params: dict[str, Any] = {"per_page": min(limit, 100)}
@@ -407,5 +407,5 @@ class GitLabProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("list_labels failed: %s", e)
             return []
-        return [LabelDef(name=l.get("name") or "", color=(l.get("color") or "").lstrip("#"))
-                for l in data or [] if l.get("name")]
+        return [LabelDef(name=lbl.get("name") or "", color=(lbl.get("color") or "").lstrip("#"))
+                for lbl in data or [] if lbl.get("name")]

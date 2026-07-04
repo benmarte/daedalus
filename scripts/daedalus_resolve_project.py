@@ -11,7 +11,12 @@ Resolution order:
 Then: task id -> which board DB contains it -> board slug ->
       registry project whose daedalus.yaml `repo:` slugifies to that slug.
 """
-import os, sys, re, glob, json, subprocess
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
 
 # Make the plugin root importable so this standalone hook script can share the
 # WAL connection helper with the rest of the codebase (issue #1134). This script
@@ -105,7 +110,7 @@ def board_for_task(task_id: str) -> str:
 def project_for_board(slug: str) -> str:
     reg = os.path.join(HERMES, "daedalus", "projects")
     try:
-        paths = [l.strip() for l in open(reg) if l.strip()]
+        paths = [line.strip() for line in open(reg) if line.strip()]
     except Exception:
         return ""
     for p in paths:
@@ -145,7 +150,7 @@ def cwd_from_payload() -> str:
         return ""
     reg = os.path.join(HERMES, "daedalus", "projects")
     try:
-        paths = [l.strip() for l in open(reg) if l.strip()]
+        paths = [line.strip() for line in open(reg) if line.strip()]
     except Exception:
         return ""
     for p in paths:
