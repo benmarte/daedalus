@@ -144,35 +144,52 @@ def _parse_handoff(handoff_text: str) -> dict[str, Any]:
     }
 
     # Detect review outcomes
-    lower = text.lower()
-    # Changes requested signals
+    lower = text.lower().lstrip()
+    # Changes-requested signals — checked with startswith to avoid false positives.
+    # Role-specific prefixes are listed explicitly because e.g. "review-changes-requested:"
+    # starts with "review-" not "changes-", so a plain "changes-requested" prefix would miss it.
     change_signals = [
-        "changes requested", "changes required", "blocking findings",
-        "request changes", "needs fixes", "need fixes",
-        "changes-requested",  # hyphenated form used by reviewer SOUL: "review-changes-requested:"
+        "changes-requested",           # bare hyphenated form
+        "changes requested",           # bare spaced form (accessibility: "changes requested: …")
+        "changes required",
+        "blocking findings",
+        "request changes",
+        "needs fixes",
+        "need fixes",
+        "review-changes-requested",    # reviewer SOUL: "review-changes-requested: <reason>"
+        "security-changes-requested",  # security SOUL: "security-changes-requested: <reason>"
+        "a11y-changes-requested",      # accessibility SOUL legacy form
     ]
-    if any(s in lower for s in change_signals):
+    if any(lower.startswith(s) for s in change_signals):
         result["is_changes_requested"] = True
 
-    # Approval signals
+    # Approval signals — checked with startswith to prevent mid-string matches.
+    # Example false-positive avoided: "changes-requested: approved workaround" no longer
+    # sets is_approved=True (it starts with "changes-requested", not "approved").
+    # "review-approved" is explicit because "review-approved: PR #N" does not start
+    # with the bare "approved" token (#1125 F1).
     # Removed: "pass" (ambiguous — caused false positives on "tests pass", "password").
-    # Added explicit prefixed signals for role-specific approvals (qa, a11y, security).
     approve_signals = [
-        "approved", "sign-off", "signoff", "approved.", "lgtm",
-        "looks good", "no findings", ":+1:",
-        "qa-passed", "qa passed",
-        "a11y-passed", "a11y passed",
-        "security-approved", "security approved",
-        "security-passed", "security passed",
+        "approved",           # bare approval: "approved: …" or "approved — …"
+        "review-approved",    # reviewer SOUL: "review-approved: PR #N"
+        "sign-off",
+        "signoff",
+        "lgtm",
+        "looks good",
+        "no findings",
+        ":+1:",
+        "qa-passed",          # qa: "qa-passed: PR #N verified"
+        "a11y-passed",        # accessibility: "a11y-approved: …" (contains "a11y-passed" is rare; keep for completeness)
+        "security-approved",  # security: "security-approved: PR #N"
+        "security-passed",
         # The security agent's documented pass signal is 'security: cleared'
         # (#1185). Without it, classify_blocked returned "" for a cleared
         # security card — it never APPROVE_ADVANCEd and the #1182 PM-consult
-        # skip could not recognise it as a passing handoff. Keep these
-        # prefixed so a reviewer merely mentioning "cleared" is not mistaken
-        # for an approval.
-        "security: cleared", "security cleared",
+        # skip could not recognise it as a passing handoff.
+        "security: cleared",
+        "security cleared",
     ]
-    if any(s in lower for s in approve_signals):
+    if any(lower.startswith(s) for s in approve_signals):
         result["is_approved"] = True
 
     return result
@@ -244,7 +261,9 @@ def classify_blocked(
 
     # ── planner → decompose or PM ────────────────────────────────────────
     if assignee == "planner-daedalus":
-        if "PLANNING COMPLETE" in (handoff_text or "").upper():
+        # Use startswith so a mid-string "PLANNING COMPLETE" in unrelated text
+        # cannot trip this gate (#1125 F1).
+        if (handoff_text or "").upper().lstrip().startswith("PLANNING COMPLETE"):
             return PLANNER_DECOMPOSE
         return PM_ROUTE  # unexpected planner output → escalate to PM
 
@@ -252,7 +271,7 @@ def classify_blocked(
     # Docs is the last pipeline stage. When it blocks with 'docs posted:'
     # the job is done — complete the card. Anything else routes to PM.
     if assignee == "documentation-daedalus":
-        if "docs posted" in (handoff_text or "").lower():
+        if (handoff_text or "").lower().lstrip().startswith("docs posted"):
             return APPROVE_ADVANCE
         return PM_ROUTE
 
@@ -336,22 +355,29 @@ def classify_blocked(
         # Bypass QA signal requirement when skip-qa label is present
         if skip_qa:
             return ADVANCE
-        summary = (handoff_text or "").lower()
-        if "qa-passed" in summary:
+        # Use startswith to prevent a mid-string match such as
+        # "qa-passed: but then qa-failed on retry" advancing the pipeline (#1125 F1).
+        summary = (handoff_text or "").lower().lstrip()
+        if summary.startswith("qa-passed"):
             return ADVANCE
-        if "qa-failed" in summary:
+        if summary.startswith("qa-failed"):
             return QA_FIX
         return PENDING_SIGNAL
 
     # ── accessibility-daedalus card ───────────────────────────────────────
-    # Accessibility auditors PRs for WCAG 2.1 AA compliance. Posts
-    # 'approved' / 'accessibility-na' to advance, 'changes requested' to
-    # route back to the PM for re-routing, otherwise pending.
+    # Accessibility auditors PRs for WCAG 2.1 AA compliance. Posts a signal
+    # starting with 'approved' / 'a11y-approved' / 'accessibility-na' /
+    # 'a11y-skipped' to advance, 'changes requested:' to route back to the PM,
+    # otherwise pending.
+    # startswith prevents "changes-requested: approved workaround" from falsely
+    # matching the 'approved' advance gate (#1125 F1).
+    # 'a11y-approved' is kept alongside bare 'approved' because the SOUL emits
+    # 'a11y-approved: PR #N' whose prefix is 'a11y-approved', not 'approved'.
     if assignee == "accessibility-daedalus":
-        summary = (handoff_text or "").lower()
-        if "approved" in summary or "accessibility-na" in summary or "a11y-skipped" in summary:
+        summary = (handoff_text or "").lower().lstrip()
+        if summary.startswith(("approved", "a11y-approved", "accessibility-na", "a11y-skipped")):
             return ADVANCE
-        if "changes requested" in summary:
+        if summary.startswith("changes requested"):
             return PM_ROUTE
         return PENDING_SIGNAL
 
@@ -610,8 +636,10 @@ def _role_gate_passed(
         except Exception as e:
             logger.error("iterate: failed to get %s card %s: %s", role, card.get("id"), e)
             continue
-        summary = ((detail or {}).get("latest_summary") or "").lower()
-        if summary and any(sig in summary for sig in approval_signals):
+        summary = ((detail or {}).get("latest_summary") or "").lower().lstrip()
+        # startswith prevents a mid-string signal match, e.g.
+        # "changes-requested: approved workaround" no longer passes the gate (#1125 F1).
+        if summary and any(summary.startswith(sig) for sig in approval_signals):
             return True
     return False
 

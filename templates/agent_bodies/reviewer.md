@@ -8,6 +8,6 @@ QA has passed. Review the developer's PR for correctness, quality, and performan
 1. Find the PR linked to issue #${n} and read its diff (e.g. `gh pr diff ${n}`).
 2. Review the diff INLINE across five axes: correctness, readability, architecture, security, performance. Note anything simplifiable with no behavior change.
 3. Post your review findings on the PR (not the issue), using the PR number: ${comment_howto}
-4. Complete your kanban card:
-   - 'reviewed: approved' if ready to merge
-   - 'reviewed: changes-requested: <reason>' if fixes needed
+4. Block your kanban card with review-required, reason:
+   - 'review-approved: PR #<pr_number>' if ready to merge  (summary MUST START WITH 'review-approved:')
+   - 'review-changes-requested: <reason>' if fixes needed  (summary MUST START WITH 'review-changes-requested:')

@@ -134,7 +134,7 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 **Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
 
-⛔ **Only recognised substrings produce pipeline progress.** The canonical prefixes are `review-approved:` (contains `approved`) and `review-changes-requested:` (contains `changes-requested`), but the full set of recognised synonyms (see below — e.g. `review-lgtm`, `review-sign-off`) will also advance the pipeline. Only phrasing outside the recognise synonym set — e.g. `review-needs-work:`, `review-commented:`, `review-discussion:` — falls to `""` (silent permanent stall, no escalation, no recovery). The dispatcher does not re-route or prompt you; the card simply sits in `review-required` state forever.
+⛔ **Your block reason MUST START WITH a recognised prefix.** Since #1125 F1 the dispatcher uses prefix matching (`startswith`), not substring. The canonical prefixes are `review-approved:` (starts with `review-approved`) and `review-changes-requested:` (starts with `review-changes-requested`). Only phrasing that STARTS WITH a recognised synonym — e.g. `review-lgtm:`, `review-sign-off:`, `lgtm:` — advances the pipeline. Phrasing outside the recognised set at the START — e.g. `review-needs-work:`, `review-commented:`, embedding `approved` mid-sentence — falls to `""` (silent permanent stall). Always put the canonical signal at the BEGINNING of your block reason.
 
 ---
 
@@ -181,39 +181,40 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 
 ## Dispatcher Signal Reference (authoritative)
 
-This SOUL is consumed by the `reviewer-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the block/handoff reason text.
+This SOUL is consumed by the `reviewer-daedalus` branch of `classify_blocked()` in `core/iterate.py`. Since #1125 F1, the dispatcher uses **prefix matching** (`startswith`) — the block reason must **start with** the signal prefix.
 
 **Recognised signals for `reviewer-daedalus`:**
 
-| Block reason substring | Dispatcher action |
+| Block reason **starts with** | Dispatcher action |
 |---|---|
 | Any approve synonym (see below) | `APPROVE_ADVANCE` — advances pipeline |
 | Any change-request synonym (see below) | `PM_ROUTE` — PM re-routes to developer for fix |
 | `awaiting-fix: <card_id>` | silent no-op (a developer fix card is in flight; card auto-resumes when fix completes) |
 | (after 3 fix attempts) | `ESCALATE` — human review |
-| ANY OTHER PHRASING | `""` — **silent permanent stall** (no escalation, no recovery) |
+| ANY OTHER PHRASING AT START | `""` — **silent permanent stall** (no escalation, no recovery) |
 
-**Full approve synonyms** (any one triggers `APPROVE_ADVANCE`, case-insensitive — authoritative list in `core/iterate.py:_parse_handoff`):
-- `approved` (e.g. `review-approved: PR #N`)
+**Full approve synonyms** (block reason must START WITH one of these, case-insensitive — authoritative list in `core/iterate.py:_parse_handoff`):
+- `review-approved` (e.g. `review-approved: PR #N`) ← canonical
+- `approved` (bare approval at start)
 - `sign-off`, `signoff`
 - `lgtm`
 - `looks good`
 - `no findings`
-- `pass`
 - `:+1:`
 
-**Full change-request synonyms** (any one triggers `PM_ROUTE`, case-insensitive):
-- `changes requested` (with space)
-- `changes-requested` (hyphenated)
+**Full change-request synonyms** (block reason must START WITH one of these):
+- `review-changes-requested` (e.g. `review-changes-requested: <reason>`) ← canonical
+- `changes-requested` (hyphenated, at start)
+- `changes requested` (with space, at start)
 - `changes required`
 - `blocking findings`
 - `request changes`
 - `needs fixes`
 - `need fixes`
 
-**Canonical forms you should emit** (subset of above, for clarity and predictability):
-- Approval → `review-approved: PR #<n>` (contains `approved`)
-- Changes requested → `review-changes-requested: <reason>` (contains `changes-requested`)
+**Canonical forms you MUST emit** (summary MUST START with these prefixes):
+- Approval → `review-approved: PR #<n>` (starts with `review-approved`)
+- Changes requested → `review-changes-requested: <reason>` (starts with `review-changes-requested`)
 
 ## Quality bar
 - Every changed file must appear in the review — no skipping files

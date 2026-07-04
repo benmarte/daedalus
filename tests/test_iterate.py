@@ -248,9 +248,10 @@ def test_classify_blocked_dev_pr_not_merged_still_holds():
 
 def test_classify_blocked_reviewer_changes():
     """Reviewer + changes requested → pm_route."""
+    # Canonical prefix per #1125 F1: must start with "review-changes-requested:".
     result = iterate.classify_blocked(
         "reviewer-daedalus",
-        "review-required: CHANGES REQUESTED — SQL injection in api/search.py",
+        "review-changes-requested: SQL injection in api/search.py",
         ci_green=True,
     )
     check("reviewer changes requested → pm_route", result == iterate.PM_ROUTE)
@@ -258,9 +259,10 @@ def test_classify_blocked_reviewer_changes():
 
 def test_classify_blocked_reviewer_approved():
     """Reviewer + approved → approve_advance."""
+    # Canonical prefix per #1125 F1: must start with "review-approved:".
     result = iterate.classify_blocked(
         "reviewer-daedalus",
-        "review-required: APPROVED. PR #42 looks good.",
+        "review-approved: PR #42",
         ci_green=True,
     )
     check("reviewer approved → approve_advance", result == iterate.APPROVE_ADVANCE)
@@ -268,9 +270,10 @@ def test_classify_blocked_reviewer_approved():
 
 def test_classify_blocked_reviewer_escalate():
     """Reviewer + changes requested + fix_attempts >= max → escalate."""
+    # Canonical prefix per #1125 F1: must start with "review-changes-requested:".
     result = iterate.classify_blocked(
         "reviewer-daedalus",
-        "review-required: CHANGES REQUESTED",
+        "review-changes-requested: fix null deref",
         ci_green=True,
         fix_attempts=3,
     )
@@ -279,9 +282,10 @@ def test_classify_blocked_reviewer_escalate():
 
 def test_classify_blocked_security_approved():
     """Security-analyst + approved → approve_advance."""
+    # Canonical prefix per #1125 F1: must start with "security-approved:".
     result = iterate.classify_blocked(
         "security-analyst-daedalus",
-        "review-required: No findings. Approved for merge.",
+        "security-approved: PR #42 — no findings",
         ci_green=True,
     )
     check("security approved → approve_advance", result == iterate.APPROVE_ADVANCE)
@@ -289,9 +293,10 @@ def test_classify_blocked_security_approved():
 
 def test_classify_blocked_security_findings():
     """Security-analyst + blocking findings → pm_route."""
+    # Canonical prefix per #1125 F1: must start with "security-changes-requested:".
     result = iterate.classify_blocked(
         "security-analyst-daedalus",
-        "review-required: BLOCKING FINDINGS — hardcoded secret in config.py",
+        "security-changes-requested: hardcoded secret in config.py",
         ci_green=True,
     )
     check("security findings → pm_route", result == iterate.PM_ROUTE)
@@ -825,7 +830,8 @@ def test_run_iterate_reviewer_changes():
     cards = [{
         "id": "t_rev",
         "assignee": "reviewer-daedalus",
-        "runs": [{"reason": "review-required: CHANGES REQUESTED — fix auth"}, {"metadata": {"fix_attempts": 0}}],
+        # Canonical prefix per #1125 F1: "review-changes-requested:" triggers is_changes_requested.
+        "runs": [{"reason": "review-changes-requested: fix auth"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
@@ -842,7 +848,8 @@ def test_run_iterate_reviewer_approved():
     cards = [{
         "id": "t_rev",
         "assignee": "reviewer-daedalus",
-        "runs": [{"reason": "review-required: APPROVED"}],
+        # Canonical prefix per #1125 F1: "review-approved:" triggers is_approved.
+        "runs": [{"reason": "review-approved: PR #42"}],
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
         with mock.patch.object(kanban, "complete", return_value=True):
@@ -1170,7 +1177,8 @@ def test_run_iterate_respects_router_profile_config():
     cards = [{
         "id": "t_rev",
         "assignee": "reviewer-daedalus",
-        "runs": [{"reason": "review-required: CHANGES REQUESTED — fix X"}, {"metadata": {"fix_attempts": 0}}],
+        # Canonical prefix per #1125 F1: "review-changes-requested:" triggers is_changes_requested.
+        "runs": [{"reason": "review-changes-requested: fix X"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
@@ -1191,7 +1199,8 @@ def test_run_iterate_default_router_profile():
     cards = [{
         "id": "t_rev",
         "assignee": "reviewer-daedalus",
-        "runs": [{"reason": "review-required: CHANGES REQUESTED — fix X"}, {"metadata": {"fix_attempts": 0}}],
+        # Canonical prefix per #1125 F1: "review-changes-requested:" triggers is_changes_requested.
+        "runs": [{"reason": "review-changes-requested: fix X"}, {"metadata": {"fix_attempts": 0}}],
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):
@@ -1317,9 +1326,10 @@ def test_classify_blocked_planner_returns_pm_route():
 
 def test_classify_blocked_documentation_docs_posted_returns_approve_advance():
     """Documentation blocked with 'docs posted' → approve_advance (terminal complete)."""
+    # Canonical prefix per #1125 F1: must start with "docs posted:".
     result = iterate.classify_blocked(
         "documentation-daedalus",
-        "review-required: docs posted: issue #32 PR #34 — README updated",
+        "docs posted: PR #34 — README updated",
         ci_green=True,
     )
     check("docs posted → approve_advance", result == iterate.APPROVE_ADVANCE)
@@ -1907,9 +1917,10 @@ def test_run_iterate_pending_signal_classified_correctly():
 
 def test_classify_blocked_qa_passed():
     """QA card with qa-passed handoff + CI green → ADVANCE."""
+    # Canonical prefix per #1125 F1: must start with "qa-passed:".
     result = iterate.classify_blocked(
         "qa-daedalus",
-        "review-required: qa-passed: PR #5 — all tests pass, coverage adequate",
+        "qa-passed: PR #5 — all tests pass, coverage adequate",
         ci_green=True,
     )
     check("qa qa-passed + green CI → advance", result == iterate.ADVANCE)
@@ -2014,7 +2025,8 @@ def test_run_iterate_qa_passed_advances():
     cards = [{
         "id": "t_qa",
         "assignee": "qa-daedalus",
-        "runs": [{"reason": "review-required: qa-passed: PR #7 — all good"}],
+        # Canonical prefix per #1125 F1: must start with "qa-passed:".
+        "runs": [{"reason": "qa-passed: PR #7 — all good"}],
         "workspace": "dir:/w",
     }]
     with mock.patch.object(kanban, "list_blocked", return_value=cards):

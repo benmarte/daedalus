@@ -15,4 +15,4 @@ ${doc_template}
 
 Replace every <placeholder> with the real value.
 NOTE: messaging-platform delivery is handled by the dispatcher — do NOT attempt to send it yourself.
-3. Complete with summary: 'docs: posted completion report for PR #N'
+3. Complete with summary: 'docs posted: PR #N — <one-line summary>'  (summary MUST START WITH 'docs posted:' — the dispatcher uses startswith matching since #1125 F1)

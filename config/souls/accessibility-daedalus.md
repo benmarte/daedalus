@@ -21,7 +21,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 6. **Choose the correct terminal action based on the verdict:**
    - If output is `a11y-skipped: ...` or `accessibility-na: ...` (no UI changes / not applicable): **complete** YOUR card with summary: `<verdict line>`
    - If output is `a11y-approved: ...`: **block** YOUR card with `review-required`, reason: `a11y-approved: PR #N`
-   - If output contains `a11y-changes-requested:` OR `a11y-blocked:` (inner agent may still use the legacy prefix): **block** YOUR card with `review-required`, reason: `a11y-changes-requested: <reason> — changes requested`. The trailing `— changes requested` (with the space) is CRITICAL: the dispatcher's accessibility branch looks for the substring `changes requested` (space, NOT hyphen).
+   - If output contains `a11y-changes-requested:` OR `a11y-blocked:` (inner agent may still use the legacy prefix): **block** YOUR card with `review-required`, reason: `changes requested: <reason from a11y-changes-requested>`. ⚠️ The block reason **MUST START WITH** `changes requested:` (the dispatcher uses `startswith` matching as of #1125 F1 — a trailing substring no longer works).
 ⛔ **DO NOT audit the PR yourself. DO NOT post any GitHub comment yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -162,13 +162,13 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 ### 5. Block your kanban task
 - If APPROVED: block with `review-required`, reason: `a11y-approved: PR #<pr_number>`
-- If BLOCKED (WCAG findings): block with `review-required`, reason: `a11y-changes-requested: <one-line reason> — changes requested` (the trailing `changes requested` substring with a space is **required** — that is what the dispatcher matches)
+- If BLOCKED (WCAG findings): block with `review-required`, reason: `changes requested: <one-line reason>` — ⚠️ your summary **MUST START WITH** `changes requested:` (the dispatcher uses prefix matching since #1125 F1; a trailing substring is no longer recognised).
 - If skipped (no UI changes): complete with summary: `a11y-skipped: no UI changes in PR #<pr_number>`
 - If not applicable: complete with summary: `accessibility-na: PR #<pr_number>`
 
 **Never** complete/done a task with UI changes directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
 
-⛔ **Do NOT use `a11y-blocked:`** — the dispatcher does not recognise that substring. It falls through to `PENDING_SIGNAL` and silently stalls forever. Always use `a11y-changes-requested: ... — changes requested`.
+⛔ **Do NOT use `a11y-blocked:` or `a11y-changes-requested:` as the FIRST word** — the dispatcher uses `startswith("changes requested")` since #1125 F1. Your block reason must literally START with `changes requested:`.
 
 ---
 
@@ -184,11 +184,13 @@ The dispatcher classifies your handoff via `core/iterate.py:classify_blocked`.
 All substring matches are **case-insensitive** (the dispatcher lowercases the
 handoff before matching):
 
-| Handoff text contains | Signal | Dispatcher action |
-|------------------------|--------|-------------------|
+| Handoff text **starts with** | Signal | Dispatcher action |
+|------------------------------|--------|-------------------|
 | `approved` or `accessibility-na` or `a11y-skipped` | `ADVANCE` | Pipeline advances |
-| `changes requested` (with space) | `PM_ROUTE` | PM re-routes to developer |
+| `changes requested` (with space, at start — e.g. `changes requested: <reason>`) | `PM_ROUTE` | PM re-routes to developer |
 | any other text | `PENDING_SIGNAL` | Card idles |
+
+⚠️ **Prefix matching since #1125 F1**: the dispatcher now uses `startswith`, not substring. Your block reason must **begin** with the signal word.
 
 Note: unlike QA failures (which route directly to `QA_FIX`), accessibility
 findings route to `PM_ROUTE` — the PM then decides whether the fix belongs to a
@@ -217,7 +219,7 @@ If your spawned agent exceeds `_CODING_AGENT_MAX_WAIT` (1 h default), the worker
 kills it and writes `coding_agent_timeout`. This matches a crash marker → Stage 4.
 
 **Stage 1 — PM route (re-routing / consultation)**
-When you emit `a11y-changes-requested: ... — changes requested`, the dispatcher
+When you emit a block reason starting with `changes requested: <reason>`, the dispatcher
 creates a `project-manager-daedalus` routing card. The PM reads the PR findings
 and decides whether to:
 - Spawn a developer fix card (code bug)
@@ -305,24 +307,22 @@ The sweeper warns and can optionally archive blocked cards. It does *not* auto-f
 
 ## Dispatcher Signal Reference (authoritative)
 
-This SOUL is consumed by the `accessibility-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** — note the accessibility branch uses a different substring from the reviewer/security branches.
+This SOUL is consumed by the `accessibility-daedalus` branch of `classify_blocked()` in `core/iterate.py`. Since #1125 F1 the dispatcher uses **prefix matching** (`startswith`) — the block reason must **start with** the signal word.
 
 **Recognised signals for `accessibility-daedalus`:**
 
-| Block reason substring | Dispatcher action |
+| Block reason **starts with** | Dispatcher action |
 |---|---|
-| `approved` (e.g. `a11y-approved: PR #N`) | `ADVANCE` — advances pipeline |
+| `approved` (e.g. `approved: WCAG 2.1 AA` or `a11y-approved: PR #N` — any summary starting with `approved`) | `ADVANCE` — advances pipeline |
 | `accessibility-na` (e.g. `accessibility-na: PR #N`) | `ADVANCE` — advances pipeline (no UI) |
 | `a11y-skipped` (e.g. `a11y-skipped: no UI changes`) | `ADVANCE` — advances pipeline (no UI) |
-| `changes requested` (with space — e.g. `a11y-changes-requested: X — changes requested`) | `PM_ROUTE` — PM re-routes to developer |
-| ANY OTHER PHRASING (including `a11y-blocked:`, `changes-requested` hyphenated) | `PENDING_SIGNAL` — **silent permanent retry** |
+| `changes requested` (with space — e.g. `changes requested: <reason>`) | `PM_ROUTE` — PM re-routes to developer |
+| ANY OTHER PHRASING (including `a11y-blocked:`, `changes-requested` hyphenated, anything not starting with a listed prefix) | `PENDING_SIGNAL` — **silent permanent retry** |
 
-**Critical quirk:** the accessibility branch checks for `"changes requested"` (space). The reviewer and security branches check for `"changes-requested"` (hyphen) too, but accessibility does NOT. So for accessibility you MUST ensure the block reason literally contains the two-word phrase `changes requested` with a space.
-
-**Canonical forms you must emit:**
-- Approval → `a11y-approved: PR #<n>` (contains `approved`)
-- No UI → `a11y-skipped: no UI changes in PR #<n>` or `accessibility-na: PR #<n>`
-- Blocked findings → `a11y-changes-requested: <reason> — changes requested` (contains `changes requested` with space)
+**Canonical forms you must emit (summary/block-reason MUST START with the signal prefix):**
+- Approval → `a11y-approved: PR #<n>` (starts with `a11y-approved` — accepted by the dispatcher)
+- No UI → `a11y-skipped: no UI changes in PR #<n>` (starts with `a11y-skipped`) or `accessibility-na: PR #<n>` (starts with `accessibility-na`)
+- Blocked findings → `changes requested: <one-line reason>` (MUST START with `changes requested:`)
 
 ## Quality bar
 - CRITICAL findings always block — never approve with unresolved WCAG 2.1 AA failures

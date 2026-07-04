@@ -215,23 +215,23 @@ Report: https://github.com/<org>/<repo>/issues/N"
 ### 4. Complete your kanban task
 Complete your card with summary: `docs posted: issue #N PR #<pr_number> — <one-line summary>`
 
-⛔ **The summary MUST contain the literal substring `docs posted` (case-insensitive).** Any other phrasing (e.g. `docs updated:`, `posted docs:`, `documentation complete:`) causes the dispatcher to PM_ROUTE instead of APPROVE_ADVANCE. When auto-merge is enabled (`execution.auto_merge=true` in `daedalus.yaml`), the APPROVE_ADVANCE outcome triggers the PR merge automatically.
+⛔ **Your summary MUST START WITH `docs posted` (case-insensitive).** Since #1125 F1 the dispatcher uses prefix matching (`startswith`). Any other phrasing — including `docs updated:`, `posted docs:`, `documentation complete:`, or placing `docs posted` anywhere other than the very beginning — causes PM_ROUTE instead of APPROVE_ADVANCE. When auto-merge is enabled (`execution.auto_merge=true` in `daedalus.yaml`), the APPROVE_ADVANCE outcome triggers the PR merge automatically.
 
 ---
 
 ## Dispatcher Signal Reference (authoritative)
 
-This SOUL is consumed by the `documentation-daedalus` branch of `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the completion summary / block reason text.
+This SOUL is consumed by the `documentation-daedalus` branch of `classify_blocked()` in `core/iterate.py`. Since #1125 F1, the dispatcher uses **prefix matching** (`startswith`) — the summary must **start with** `docs posted`.
 
 **Recognised signals for `documentation-daedalus`:**
 
-| Completion summary substring | Dispatcher action |
+| Completion summary **starts with** | Dispatcher action |
 |---|---|
 | `docs posted` (e.g. `docs posted: issue #N PR #M — summary`) | `APPROVE_ADVANCE` — advances pipeline (or triggers auto-merge if `execution.auto_merge=true`) |
-| ANY OTHER PHRASING | `PM_ROUTE` — falls back to PM (wasted round-trip, pipeline delay) |
+| ANY OTHER PHRASING AT START | `PM_ROUTE` — falls back to PM (wasted round-trip, pipeline delay) |
 
-**Canonical form you must emit:**
-- `docs posted: issue #N PR #<pr_number> — <one-line summary>` (contains `docs posted`)
+**Canonical form you MUST emit:**
+- `docs posted: issue #N PR #<pr_number> — <one-line summary>` (starts with `docs posted`)
 
 Documentation is the last pipeline stage. APPROVE_ADVANCE here is terminal — the pipeline considers the issue complete.
 

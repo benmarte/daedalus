@@ -635,3 +635,166 @@ def test_check_and_maybe_escalate_over_cap_delegates_to_escalate():
         res = iterate._check_and_maybe_escalate("slug", card, "O/R", "review-required: PR #42")
     assert res is True
     assert "escalate" in mk_comment.call_args[0][2].lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F1 (#1125) — startswith prefix enforcement prevents mid-string false positives
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestF1PrefixEnforcement:
+    """Verify that gate matching uses startswith so mid-string signals are rejected."""
+
+    # ── _parse_handoff approve_signals ──────────────────────────────────────
+
+    def test_parse_handoff_midstring_approved_rejected(self):
+        """'changes-requested: approved workaround' must NOT set is_approved=True.
+
+        The classic false-positive: the word 'approved' appears mid-string after a
+        changes-requested prefix.  With old substring matching it fires; with
+        startswith it does not.
+        """
+        result = iterate._parse_handoff("changes-requested: approved workaround")
+        assert result["is_approved"] is False, (
+            "mid-string 'approved' must not fire with startswith matching"
+        )
+        # But is_changes_requested should be True (prefix matches).
+        assert result["is_changes_requested"] is True
+
+    def test_parse_handoff_review_approved_prefix_accepted(self):
+        """'review-approved: PR #42' MUST set is_approved=True."""
+        result = iterate._parse_handoff("review-approved: PR #42")
+        assert result["is_approved"] is True
+
+    def test_parse_handoff_security_cleared_prefix_accepted(self):
+        """'security: cleared — no vulns' MUST set is_approved=True."""
+        result = iterate._parse_handoff("security: cleared — no vulns")
+        assert result["is_approved"] is True
+
+    def test_parse_handoff_review_changes_requested_prefix(self):
+        """'review-changes-requested: fix null deref' MUST set is_changes_requested=True."""
+        result = iterate._parse_handoff("review-changes-requested: fix null deref")
+        assert result["is_changes_requested"] is True
+
+    def test_parse_handoff_security_changes_requested_prefix(self):
+        """'security-changes-requested: CVE found' MUST set is_changes_requested=True."""
+        result = iterate._parse_handoff("security-changes-requested: CVE found")
+        assert result["is_changes_requested"] is True
+
+    def test_parse_handoff_midstring_changes_requested_in_approved_summary_rejected(self):
+        """'approved: no changes requested' must NOT set is_changes_requested=True."""
+        result = iterate._parse_handoff("approved: no changes requested")
+        assert result["is_changes_requested"] is False, (
+            "mid-string 'changes requested' must not fire with startswith matching"
+        )
+        assert result["is_approved"] is True
+
+    # ── classify_blocked — QA branch ────────────────────────────────────────
+
+    def test_qa_midstring_qa_passed_not_at_start_pending(self):
+        """QA summary 'not-qa-passed: contains qa-passed' must NOT advance."""
+        result = iterate.classify_blocked("qa-daedalus", "not-qa-passed: something", ci_green=True)
+        assert result == iterate.PENDING_SIGNAL, (
+            "qa-passed mid-string must not trigger ADVANCE with startswith"
+        )
+
+    def test_qa_midstring_qa_failed_not_at_start_pending(self):
+        """QA summary 'comment: qa-failed somewhere' must NOT trigger QA_FIX."""
+        result = iterate.classify_blocked("qa-daedalus", "comment: qa-failed was seen", ci_green=True)
+        assert result == iterate.PENDING_SIGNAL
+
+    # ── classify_blocked — accessibility branch ──────────────────────────────
+
+    def test_a11y_midstring_approved_not_at_start_pending(self):
+        """'changes-requested: approved workaround' must NOT advance (was ADVANCE with substring)."""
+        result = iterate.classify_blocked(
+            "accessibility-daedalus",
+            "changes-requested: approved workaround",
+            ci_green=True,
+        )
+        assert result == iterate.PENDING_SIGNAL, (
+            "mid-string 'approved' after 'changes-requested:' must not fire ADVANCE"
+        )
+
+    def test_a11y_changes_requested_at_start_routes_to_pm(self):
+        """'changes requested: add aria labels' (at start) MUST route to PM."""
+        result = iterate.classify_blocked(
+            "accessibility-daedalus", "changes requested: add aria labels", ci_green=True
+        )
+        assert result == iterate.PM_ROUTE
+
+    def test_a11y_approved_at_start_advances(self):
+        """'approved: WCAG 2.1 AA compliant' (at start) MUST advance."""
+        result = iterate.classify_blocked(
+            "accessibility-daedalus", "approved: WCAG 2.1 AA compliant", ci_green=True
+        )
+        assert result == iterate.ADVANCE
+
+    def test_a11y_a11y_approved_advances(self):
+        """'a11y-approved: PR #N' (legacy SOUL form — starts with a11y-approved) MUST advance."""
+        result = iterate.classify_blocked(
+            "accessibility-daedalus", "a11y-approved: PR #55", ci_green=True
+        )
+        assert result == iterate.ADVANCE
+
+    # ── classify_blocked — planner branch ───────────────────────────────────
+
+    def test_planner_planning_complete_at_start_decomposes(self):
+        """'PLANNING COMPLETE: ready' (at start) MUST trigger PLANNER_DECOMPOSE."""
+        result = iterate.classify_blocked(
+            "planner-daedalus", "PLANNING COMPLETE: ready to fan out", ci_green=True
+        )
+        assert result == iterate.PLANNER_DECOMPOSE
+
+    def test_planner_planning_complete_mid_string_routes_to_pm(self):
+        """'note: PLANNING COMPLETE appears here' (mid-string) MUST NOT decompose."""
+        result = iterate.classify_blocked(
+            "planner-daedalus",
+            "note: I mentioned PLANNING COMPLETE as an example",
+            ci_green=True,
+        )
+        assert result == iterate.PM_ROUTE
+
+    # ── classify_blocked — docs branch ──────────────────────────────────────
+
+    def test_docs_posted_at_start_approves(self):
+        """'docs posted: issue #N PR #M' (at start) MUST approve."""
+        result = iterate.classify_blocked(
+            "documentation-daedalus", "docs posted: issue #5 PR #22 — added readme", ci_green=True
+        )
+        assert result == iterate.APPROVE_ADVANCE
+
+    def test_docs_posted_mid_string_routes_to_pm(self):
+        """'summary: docs posted is the terminal signal' (mid-string) MUST NOT approve."""
+        result = iterate.classify_blocked(
+            "documentation-daedalus",
+            "summary: docs posted is the terminal signal",
+            ci_green=True,
+        )
+        assert result == iterate.PM_ROUTE
+
+    # ── _role_gate_passed — startswith prevents mid-string false positive ────
+
+    def test_role_gate_passed_midstring_approved_rejected(self):
+        """_role_gate_passed with ['approved'] must not match 'changes-requested: approved wk'."""
+        card_data = {
+            "id": "t_rev",
+            "latest_summary": "changes-requested: approved workaround",
+            "status": "done",
+        }
+        with mock.patch.object(kanban, "list_tasks", return_value=[
+            {"id": "t_rev", "title": "#42", "assignee": "reviewer-daedalus"},
+        ]), mock.patch.object(kanban, "show_card", return_value={"latest_summary": "changes-requested: approved workaround"}):
+            passed = iterate._role_gate_passed("slug", 42, "reviewer", ["approved", "review-approved"])
+        assert passed is False, (
+            "mid-string 'approved' in 'changes-requested: approved workaround' "
+            "must not trigger gate with startswith"
+        )
+
+    def test_role_gate_passed_canonical_prefix_accepted(self):
+        """_role_gate_passed with 'review-approved' must match 'review-approved: LGTM'."""
+        with mock.patch.object(kanban, "list_tasks", return_value=[
+            {"id": "t_rev", "title": "#42", "assignee": "reviewer-daedalus"},
+        ]), mock.patch.object(kanban, "show_card", return_value={"latest_summary": "review-approved: LGTM, no findings"}):
+            passed = iterate._role_gate_passed("slug", 42, "reviewer", ["approved", "review-approved"])
+        assert passed is True
