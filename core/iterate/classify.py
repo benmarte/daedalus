@@ -266,6 +266,7 @@ def classify_blocked(
     skip_qa: bool = False,
     max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     _source_collector: list[str] | None = None,
+    prefix_fallback: bool = True,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -302,6 +303,17 @@ def classify_blocked(
                  fix cycles. Defaults to the module constant ``MAX_FIX_ATTEMPTS``
                  (3); the dispatcher threads the ``execution.max_fix_attempts``
                  config override in via ``run_iterate``.
+        prefix_fallback: When ``True`` (default), a card with no valid JSON
+                 outcome record falls through to legacy prefix routing —
+                 the Phase-1/2 dual-write soak behaviour.
+                 When ``False`` (flip after telemetry confirms JSON-primary),
+                 a card with no valid JSON record is treated as "unparseable
+                 completion" and returns ``PENDING_SIGNAL`` regardless of role.
+                 PENDING_SIGNAL holds the card for next-tick re-evaluation
+                 without creating side effects (no PM tasks, no escalation) —
+                 the conservative choice aligned with the guard philosophy.
+                 Driven by ``protocol.prefix_fallback`` in the project config
+                 (#1170 Phase 3).
 
     Returns one of: {advance, qa_fix, pending_signal, pm_route, approve_advance,
     escalate, reconcile_merged}.
@@ -375,6 +387,19 @@ def classify_blocked(
             "falling back to prefix routing",
             _outcome.role,
         )
+
+    # ── Phase 3 (#1170): prefix_fallback gate ─────────────────────────────
+    # When prefix_fallback=False, JSON is required — if we reach here without a
+    # valid JSON record the completion is "unparseable".  Route to PENDING_SIGNAL
+    # so the card is held for next-tick re-evaluation without creating side effects
+    # (no PM tasks, no escalation).  skip_qa is already handled above.
+    if not prefix_fallback and not _use_json:
+        logger.info(
+            "classify: %s — no valid JSON outcome and prefix_fallback=False → "
+            "PENDING_SIGNAL (hold for next tick)",
+            assignee,
+        )
+        return PENDING_SIGNAL
 
     # ── planner → decompose or PM ────────────────────────────────────────
     if assignee == "planner-daedalus":

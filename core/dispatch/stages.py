@@ -70,6 +70,7 @@ def _is_consult_resolved(
     issue_n: int,
     *,
     workdir: str = "",
+    prefix_fallback: bool = True,
 ) -> bool:
     """Return True if the blocked card has a consult-resolved stamp for this issue.
 
@@ -80,6 +81,12 @@ def _is_consult_resolved(
     Phase 2 (#1170): when *workdir* is supplied, check ``dispatch_state``
     FIRST before scanning card comments.  On a comment-scan hit, backfill the
     state record for future ticks (lazy migration).
+
+    Phase 3 (#1170): when ``prefix_fallback=False`` AND *workdir* is supplied,
+    the comment-scan fallback is skipped entirely — ``dispatch_state`` is
+    authoritative.  Consultation stamps are still WRITTEN (see
+    :func:`_stamp_resolved_consultations`) for human visibility; only the
+    READ path changes.  When *workdir* is empty the flag has no effect.
     """
     # ── Phase 2 dual-read: state-first ────────────────────────────────────────
     if workdir:
@@ -96,6 +103,11 @@ def _is_consult_resolved(
             )
 
     # ── Comment-scan fallback (original behaviour) ─────────────────────────────
+    # Phase 3: when prefix_fallback=False and workdir is set, dispatch_state is
+    # authoritative — skip the comment scan entirely (read-path only).
+    if workdir and not prefix_fallback:
+        return False
+
     marker = _CONSULT_RESOLVED_MARKER_TMPL.format(n=issue_n)
     card = kanban.show_card(slug, card_id)
     if not card:

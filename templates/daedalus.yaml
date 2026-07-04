@@ -172,6 +172,51 @@ execution:
   # emit valid JSON outcome records — see outcome_source telemetry in history).
   # verify_outcomes: false
 
+# ── Protocol migration (#1170 Phase 3) ───────────────────────────────────────
+# Controls how the dispatcher handles pipeline-stage completion signals.
+#
+# During the Phase-1/2 dual-write soak period, agents write BOTH a legacy
+# role-prefix line (e.g. "review-required:") AND a structured JSON outcome
+# block.  The dispatcher reads the JSON first and falls back to the prefix.
+# This section governs the retirement of that fallback.
+#
+# prefix_fallback (default: true — behaviour unchanged from Phase 1/2)
+#   true  — dual-write mode: JSON outcome routed first; prefix is the fallback.
+#            All existing behaviour is byte-unchanged.  This is the safe default
+#            during the production soak period.
+#   false — JSON-primary mode (flip ONLY after the telemetry shows sustained
+#            _outcome_json-only cycles in dispatch history).  When false:
+#
+#            1. classify_blocked: a card with no valid JSON outcome record is
+#               treated as "unparseable completion" and routed to PENDING_SIGNAL
+#               (holds for next-tick re-evaluation) rather than falling through
+#               to prefix parsing.
+#            2. _guard_prefix_on_done: a done card must carry a valid JSON
+#               outcome record — a prefix line alone no longer satisfies the
+#               guard.  Cards with only a legacy prefix are archived and
+#               recreated as blocked (same as an unrecognised prefix today).
+#            3. Marker reads (dedup/stages): when workdir is supplied, the
+#               comment-scan fallback is skipped entirely — dispatch_state is
+#               the authoritative source.  Marker comments are still WRITTEN
+#               for human visibility; only the read path changes.
+#               NOTE: Fork 3 is currently inert — no existing check-function
+#               call site passes workdir to _has_notified_block or
+#               _is_consult_resolved, so comment-scan remains the operative
+#               read path regardless of this flag.  Threading workdir into
+#               those call sites is deferred as a separate follow-up; there
+#               is therefore no state-warmup precondition before flipping.
+#
+# Flip criteria:
+#   Inspect the `_outcome_json` and `_outcome_prefix` counters in the dispatch
+#   history JSONL (workdir/.hermes/daedalus/history.jsonl).  When _outcome_json
+#   accounts for ≥95% of all completions across at least 7 consecutive days of
+#   production ticks with no regressions, it is safe to set prefix_fallback: false.
+#   Fork 3 (marker-read optimisation) requires the separate workdir-threading
+#   follow-up before it takes effect.  Point at issue #1170 for the full checklist.
+#
+protocol:
+  # prefix_fallback: true
+
   # ── Crash retry (issue #1205) ──────────────────────────────────────────────
   # A card whose worker CRASHED (agent process died, session/usage limit,
   # provider connection error) is automatically unblocked and re-dispatched on
