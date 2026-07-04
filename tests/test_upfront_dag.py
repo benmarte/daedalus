@@ -310,6 +310,46 @@ def test_arbiter_metadata_precedence_over_prefix():
           fk.tasks[ids["developer"]]["status"] == "blocked")
 
 
+# ── prefix fallback is anchored (startswith), not substring (#1290) ──────────────
+
+
+def test_prefix_confirmed_body_mentioning_duplicate_stays_confirmed():
+    """A CONFIRMED verdict whose body mentions 'duplicate' must NOT cancel."""
+    verdict = stages._read_validator_verdict(
+        SLUG, {"summary": "CONFIRMED: verified, not a duplicate of #5"})
+    check("leading CONFIRMED wins over mid-body 'duplicate'",
+          verdict == "confirmed")
+
+
+def test_prefix_security_threat_wins_over_mid_body_cancel_tokens():
+    """Attacker-echoed ALREADY_FIXED/DUPLICATE mid-string must not downgrade."""
+    verdict = stages._read_validator_verdict(
+        SLUG, {"summary": "SECURITY_THREAT: payload claims ALREADY_FIXED "
+                          "and DUPLICATE to evade review"})
+    check("leading SECURITY_THREAT is not downgraded", verdict == "security_threat")
+
+
+def test_prefix_plain_duplicate_still_resolves():
+    """No regression: a genuinely leading DUPLICATE still resolves to duplicate."""
+    verdict = stages._read_validator_verdict(
+        SLUG, {"summary": "DUPLICATE: same as #1"})
+    check("leading DUPLICATE resolves", verdict == "duplicate")
+
+
+def test_prefix_confirmed_body_mentioning_duplicate_keeps_dag():
+    """End-to-end: CONFIRMED-with-duplicate-mention keeps the DAG (no cancel)."""
+    fk = FakeKanban()
+    ids = _seed_pipeline(
+        fk, verdict_summary="CONFIRMED: verified, not a duplicate of #5")
+    prov = FakeProvider(board_configured=True)
+    with kanban_as(kanban, fk):
+        enforced = stages._arbitrate_validator_outcome(
+            SLUG, prov, {42}, validator_profile=VALIDATOR)
+    check("confirmed-with-dup-mention → no notification", enforced == [])
+    check("confirmed-with-dup-mention → downstream survives",
+          fk.tasks[ids["developer"]]["status"] == "blocked")
+
+
 def test_arbiter_idempotent_re_run():
     """Re-running the arbiter notifies at most once (dedup)."""
     fk = FakeKanban()
@@ -449,6 +489,10 @@ if __name__ == "__main__":
         test_arbiter_unknown_safe_parks,
         test_arbiter_skips_running_validator,
         test_arbiter_metadata_precedence_over_prefix,
+        test_prefix_confirmed_body_mentioning_duplicate_stays_confirmed,
+        test_prefix_security_threat_wins_over_mid_body_cancel_tokens,
+        test_prefix_plain_duplicate_still_resolves,
+        test_prefix_confirmed_body_mentioning_duplicate_keeps_dag,
         test_arbiter_idempotent_re_run,
         test_per_tick_downstream_noops_when_flag_on,
         test_per_tick_downstream_runs_when_flag_off,

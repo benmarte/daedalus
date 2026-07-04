@@ -396,16 +396,20 @@ _VALIDATOR_ARBITER_MAP: dict[str, str] = {
     "security_threat": ARBITER_ESCALATE,
 }
 
-# Legacy prefix → verdict, for the prefix-fallback read path.  Longest / most
-# specific tokens first so e.g. "ALREADY_FIXED" is matched before a bare scan
-# could confuse it.  Matched case-insensitively against the summary text.
+# Legacy prefix → verdict, for the prefix-fallback read path.  Validators emit
+# the outcome as a LEADING token, so the summary is matched with ``startswith``
+# (anchored), not a substring scan — a "CONFIRMED: … not a duplicate of #5"
+# body must NOT resolve to ``duplicate`` (#1290).  Conservative outcomes
+# (``security_threat`` / ``block_for_review`` / ``needs_more_info``) are ordered
+# BEFORE the silent-cancel outcomes (``already_fixed`` / ``duplicate``) so that
+# on any residual ambiguity the arbiter never favours a silent cancel.
 _VALIDATOR_PREFIX_VERDICTS: list[tuple[str, str]] = [
-    ("ALREADY_FIXED", "already_fixed"),
     ("SECURITY_THREAT", "security_threat"),
     ("BLOCK_FOR_REVIEW", "block_for_review"),
     ("NEEDS_MORE_INFO", "needs_more_info"),
-    ("DUPLICATE", "duplicate"),
     ("CONFIRMED", "confirmed"),
+    ("ALREADY_FIXED", "already_fixed"),
+    ("DUPLICATE", "duplicate"),
 ]
 
 # Validator card statuses the arbiter acts on.  A still-running / pending
@@ -456,10 +460,12 @@ def _read_validator_verdict(slug: str, card: dict) -> str | None:
         if rec is not None and rec.role == "validator":
             return rec.verdict
 
-    # 3) legacy prefix fallback.
-    upper = summary.upper()
+    # 3) legacy prefix fallback — anchored to the leading token (mirrors
+    # classify_blocked's startswith convention) so mid-body mentions of another
+    # outcome cannot flip the verdict (#1290).
+    upper = summary.strip().upper()
     for prefix, verdict in _VALIDATOR_PREFIX_VERDICTS:
-        if prefix in upper:
+        if upper.startswith(prefix):
             return verdict
     return None
 
