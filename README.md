@@ -985,7 +985,7 @@ handoff text against to detect `approve_advance`) deliberately omits the bare to
 `pass` — it false-triggered on phrases like "all tests pass" and "password", silently
 advancing a reviewer/security card that hadn't actually been approved. The set now
 carries only explicit, role-prefixed signals (`approved`, `lgtm`, `qa-passed`,
-`a11y-passed`, `security-approved`, …), so a QA pass note can describe its run without
+`security-approved`, …), so a QA pass note can describe its run without
 being misread as an approval (fixed in #956).
 
 **Merged-PR guard on Done sync.** When an issue reaches **Done** on the VCS board, the
