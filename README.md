@@ -659,6 +659,16 @@ execution:
    spawn nested subagents. The triple-nesting (outer profile → inner agent → skill subagent)
    broke completion detection and caused polling churn; the inner agent now reads the diff
    and writes its verdict directly (#1192).
+6. The **developer** role uses a **script-owned delegation lifecycle** (`scripts/daedalus-delegate.sh`,
+   #1280) rather than making the outer LLM poll for the PR. The dispatcher injects ONE blocking
+   `terminal(...)` call to the wrapper, which backgrounds the coding agent in its isolated
+   per-issue worktree, waits in-shell for it to finish or open a PR (bounded by
+   `coding_agent_max_wait` → `DAEDALUS_MAX_WAIT`), heartbeats the card so it never looks stale,
+   and prints the structured outcome (`PR URL: … PR number: <n>`, or a `CODING_AGENT_DIED` /
+   `CODING_AGENT_TIMEOUT` marker). The bash `wait` loop — not model turns — owns liveness and
+   the timeout, so a turn-budget exhaustion mid-wait can no longer complete the card prematurely.
+   The wrapper never completes or merges the card; the outer body just relays
+   `review-required: PR #<n>`.
 
 **Per-role override.** Each role can choose its own agent via
 `execution.profiles.<role>.agent`, which takes precedence over the global

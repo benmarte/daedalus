@@ -2,6 +2,10 @@
 
 ## [refactor: extract agent prompt bodies to templates/agent_bodies/](https://github.com/benmarte/daedalus/issues/1147) — [PR #1240](https://github.com/benmarte/daedalus/pull/1240)
 
+## [feat: script-owned delegation lifecycle wrapper](https://github.com/benmarte/daedalus/issues/1280) — [PR #1284](https://github.com/benmarte/daedalus/pull/1284)
+
+The developer role no longer makes the outer orchestrator LLM poll `gh pr list` every couple of minutes while its delegated coding agent works. A new `scripts/daedalus-delegate.sh` wrapper collapses spawn → in-shell wait → heartbeat → structured outcome into ONE blocking `terminal(...)` call: it backgrounds the coding agent in its isolated per-issue worktree, waits in-shell on the first of {inner exit, `daedalus-detect-pr.sh` handshake, stop-hook signal, `DAEDALUS_MAX_WAIT` ceiling}, periodically runs `hermes kanban heartbeat` so the card never looks stale, and prints `PR URL: … PR number: <n>` (or a `CODING_AGENT_DIED`/`CODING_AGENT_TIMEOUT` marker). The bash `wait` loop — not model turns — now owns liveness, the timeout ceiling, and PR detection, so turn-budget exhaustion can no longer complete a card prematurely. The wrapper never completes or merges the card (the parent dispatcher holds the claim); the outer body just relays `review-required: PR #<n>`. `run_cmd` is passed as opaque trailing args (same contract as `daedalus-worktree-spawn.sh`), so every `coding_agents` failover entry works with no per-agent branching. Adds `core.kanban.heartbeat()` and a `metadata=` param on `core.kanban.complete()`.
+
 ## [perf: cache kanban list_tasks per dispatch tick](https://github.com/benmarte/daedalus/issues/1142) — [PR #1238](https://github.com/benmarte/daedalus/pull/1238)
 
 ## [perf: cache notification platform probes with a short TTL](https://github.com/benmarte/daedalus/issues/1144) — [PR #1232](https://github.com/benmarte/daedalus/pull/1232)

@@ -46,7 +46,7 @@ This is a map, not a tutorial — read the linked files for depth.
 | Postinstall | `scripts/postinstall.py` | Prerequisite checks + roster provisioning + cron/hook/watchdog install |
 | Advance hook | `scripts/register_advance_hook.py` | Registers session-end advance hook in profile config |
 | Project resolver | `scripts/daedalus_resolve_project.py` | Resolves project repo-path for advance hook scoping |
-| Shell scripts | `scripts/*.sh` | `daedalus-advance.sh` (session-end dispatch), `daedalus-ready.sh` (webhook), `daedalus-detect-pr.sh` (PR handshake), `daedalus-worktree-spawn.sh` (worktree isolation), `provision_roster.sh` (9-agent roster), `setup.sh` (config scaffold), `uninstall.sh` (full cleanup), `e2e_smoke_test.sh` |
+| Shell scripts | `scripts/*.sh` | `daedalus-advance.sh` (session-end dispatch), `daedalus-ready.sh` (webhook), `daedalus-detect-pr.sh` (PR handshake), `daedalus-worktree-spawn.sh` (worktree isolation), `daedalus-delegate.sh` (developer script-owned delegation lifecycle — spawn + in-shell wait/heartbeat/PR-detect, #1280), `provision_roster.sh` (9-agent roster), `setup.sh` (config scaffold), `uninstall.sh` (full cleanup), `e2e_smoke_test.sh` |
 
 ---
 
