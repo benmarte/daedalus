@@ -314,3 +314,63 @@ def test_stages_consult_state_read_skips_kanban(tmp_path, monkeypatch):
     result = _stages._is_consult_resolved("slug", "blocked-card-1", 100, workdir=wd)
     check("state-first returns True", result is True)
     check("list_tasks not called (state hit)", show_card_called == [])
+
+
+# ── _mark_notified_block: first-match-only semantics (break behaviour) ────────
+
+
+def test_mark_notified_block_stamps_only_first_validator_card(tmp_path, monkeypatch):
+    """_mark_notified_block stamps exactly ONE validator card even when multiple match.
+
+    The ``break`` after the first match is intentional: only the first validator
+    card for the issue is stamped.  A second (re-run) validator card for the same
+    issue is NOT stamped by this call — it will be deduped via the dual-read
+    state path instead.  This test pins that behaviour so future refactors don't
+    silently revert to stamping all cards.
+    """
+    from core.dispatch import dedup as _dedup
+
+    wd = str(tmp_path)
+
+    # Two validator cards for issue #110 — both match #110 in title.
+    v1 = {"id": "v1-card", "title": "validate issue #110", "assignee": "validator-daedalus"}
+    v2 = {"id": "v2-card", "title": "validate issue #110 re-run", "assignee": "validator-daedalus"}
+
+    comments_posted: dict[str, list[str]] = {}
+
+    def _fake_comment(slug: str, tid: str, body: str) -> bool:
+        comments_posted.setdefault(tid, []).append(body)
+        return True
+
+    monkeypatch.setattr("core.dispatch.dedup.kanban.list_tasks", lambda *a, **kw: [v1, v2])
+    monkeypatch.setattr("core.dispatch.dedup.kanban.comment", _fake_comment)
+
+    result = _dedup._mark_notified_block("slug", 110, workdir=wd)
+
+    check("mark returned True", result is True)
+    check("exactly one card was stamped", len(comments_posted) == 1)
+    check("the FIRST matching card was stamped", "v1-card" in comments_posted)
+    check("the second card was NOT stamped", "v2-card" not in comments_posted)
+
+
+def test_mark_notified_block_fallback_after_no_validator(tmp_path, monkeypatch):
+    """When no validator card matches, fallback_task_id is stamped instead."""
+    from core.dispatch import dedup as _dedup
+
+    wd = str(tmp_path)
+
+    comments_posted: dict[str, list[str]] = {}
+
+    def _fake_comment(slug: str, tid: str, body: str) -> bool:
+        comments_posted.setdefault(tid, []).append(body)
+        return True
+
+    # No validator cards on the board.
+    monkeypatch.setattr("core.dispatch.dedup.kanban.list_tasks", lambda *a, **kw: [])
+    monkeypatch.setattr("core.dispatch.dedup.kanban.comment", _fake_comment)
+
+    result = _dedup._mark_notified_block("slug", 111, fallback_task_id="fallback-card", workdir=wd)
+
+    check("mark returned True via fallback", result is True)
+    check("fallback card was stamped", "fallback-card" in comments_posted)
+    check("no validator card stamped (none found)", len(comments_posted) == 1)

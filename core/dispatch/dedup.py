@@ -151,7 +151,11 @@ def _mark_notified_block(
     ``<!-- daedalus:retry-cap-notified:<role> -->``.
 
     Stamp target priority (#1167):
-    1. The validator card for the issue (original behaviour).
+    1. The FIRST validator card matching ``#<issue_number>`` in its title.
+       Only one card is stamped even if multiple validator cards exist for the
+       issue — the ``break`` after the first match is intentional; subsequent
+       validator cards (re-runs) would inherit the dedup stamp on their next
+       read via the dual-read path in ``_has_notified_block``.
     2. If no validator card is found and ``fallback_task_id`` is provided,
        stamp the triggering card directly (it always exists in the cap path).
     3. If neither is found, log a warning and return False.

@@ -21,9 +21,20 @@ Verification rules (JSON-path only; prefix-only completions skip entirely):
     contain an ``**Agent: documentation**`` comment.
     Absent → ``mismatch("verify: docs comment not found")``.
 
-Fail-open semantics (CRITICAL — never brick the pipeline on API hiccups):
-  * Any provider exception → ``VerifyResult("skipped", "provider error: ...")``.
-    Logged at WARNING so telemetry shows skips without halting the tick.
+Fail-open semantics — CANARY PATTERN (critical):
+  VCS providers NEVER raise; transient errors return None / empty.  A falsy
+  primary result therefore does NOT immediately mean mismatch — the provider
+  may be experiencing an outage.  Before declaring mismatch, make ONE cheap
+  "canary" call whose expected result is independent of the claim (e.g.
+  ``provider.get_issue(iss)`` — the issue certainly exists because the kanban
+  card came from it).
+
+    canary also falsy  →  provider is unhealthy  →  ``skipped`` (logged WARNING)
+    canary healthy, primary falsy  →  claim is genuinely false  →  ``mismatch``
+
+  Additional fail-open paths:
+  * Any genuine Python exception from a provider method → ``skipped``
+    (kept as safety-net for non-conforming custom providers).
   * ``provider is None`` → ``skipped`` immediately.
   * Roles / verdicts with no verifiable claim → ``skipped`` (not ``verified``)
     so telemetry accurately counts only checks that actually ran.
@@ -117,7 +128,7 @@ def verify_outcome(
     if role == "qa" and verdict == "passed":
         claimed_ci = (record.evidence.get("ci") or "").lower()
         if claimed_ci == "green":
-            return _verify_ci_green(record, provider, pr_number)
+            return _verify_ci_green(record, provider, pr_number, issue_number)
         # No CI claim in evidence → nothing to verify.
         return VerifyResult("skipped", "qa/passed: no ci claim in evidence")
 
@@ -129,6 +140,49 @@ def verify_outcome(
     return VerifyResult("skipped", f"{role}/{verdict}: no verifiable claims in Phase 2")
 
 
+# ── canary helper ─────────────────────────────────────────────────────────────
+
+
+def _canary_check(
+    provider: Any,
+    *,
+    issue_number: int | None = None,
+    pr_number: int | None = None,
+) -> bool:
+    """Proof-of-life call to distinguish unhealthy-provider from genuine-false-claim.
+
+    Providers never raise — transient errors return None/empty.  Before declaring
+    a "mismatch" we make one cheap canary call whose result should be truthy if
+    the provider is functioning.  If the canary ALSO returns falsy, the provider
+    is unhealthy and the caller should return ``skipped``.
+
+    Tries ``get_issue(issue_number)`` first (always exists for the issue the kanban
+    card came from), then ``is_pr_open(pr_number)`` as fallback.  Returns ``True``
+    when no canary method is available on the provider (can't disprove health →
+    assume healthy so we don't suppress genuine mismatches on minimal providers).
+    """
+    # Prefer issue check — the issue certainly exists.
+    if issue_number is not None:
+        _fn = getattr(provider, "get_issue", None)
+        if callable(_fn):
+            try:
+                return bool(_fn(issue_number))
+            except Exception:
+                return False  # method raised → unhealthy
+
+    # Fall back to PR existence check.
+    if pr_number is not None:
+        _fn = getattr(provider, "is_pr_open", None)
+        if callable(_fn):
+            try:
+                return bool(_fn(pr_number))
+            except Exception:
+                return False  # method raised → unhealthy
+
+    # No canary method available → cannot disprove health → assume healthy.
+    return True
+
+
 # ── rule implementations ──────────────────────────────────────────────────────
 
 
@@ -137,7 +191,12 @@ def _verify_pr_opened(
     provider: Any,
     issue_number: int | None,
 ) -> VerifyResult:
-    """Rule 1 — developer/pr_opened: a matching PR must exist in the VCS."""
+    """Rule 1 — developer/pr_opened: a matching PR must exist in the VCS.
+
+    Canary: ``provider.get_issue(iss)`` — the issue certainly exists because the
+    kanban card came from it.  If the canary also returns nothing the provider is
+    unhealthy and we skip rather than mismatch.
+    """
     # Prefer the record's issue_ref; fall back to the caller-supplied number.
     iss: int | None = record.issue_ref if record.issue_ref is not None else issue_number
     if iss is None:
@@ -145,17 +204,30 @@ def _verify_pr_opened(
 
     claimed_pr: int | None = record.pr_ref  # may be None when agent omitted it
 
+    # Primary lookup — providers never raise; None means "not found or unhealthy".
     try:
         pr = provider._pr_for_issue(iss)
     except Exception as exc:
+        # Safety-net: non-conforming provider actually raised.
         logger.warning(
             "verify: _pr_for_issue(#%s) raised %s — skipping PR verification (fail-open)",
-            iss,
-            exc,
+            iss, exc,
         )
         return VerifyResult("skipped", f"provider error: {exc}")
 
     if pr is None or not getattr(pr, "number", None):
+        # CANARY: before declaring mismatch, confirm provider is healthy.
+        if not _canary_check(provider, issue_number=iss):
+            logger.warning(
+                "verify: developer/pr_opened — primary returned None AND canary "
+                "get_issue(#%s) also returned nothing; provider likely unhealthy — "
+                "skipping (fail-open)",
+                iss,
+            )
+            return VerifyResult(
+                "skipped",
+                f"provider unhealthy: canary issue lookup returned nothing for #{iss}",
+            )
         note = (
             f"verify: claimed PR #{claimed_pr} not found "
             f"(provider returned no PR for issue #{iss})"
@@ -174,8 +246,7 @@ def _verify_pr_opened(
 
     logger.info(
         "verify: developer/pr_opened VERIFIED — PR #%s references issue #%s",
-        pr_num,
-        iss,
+        pr_num, iss,
     )
     return _VERIFIED
 
@@ -184,8 +255,14 @@ def _verify_ci_green(
     record: OutcomeRecord,
     provider: Any,
     pr_number: int | None,
+    issue_number: int | None,
 ) -> VerifyResult:
-    """Rule 2 — qa/passed with ci:green claim: provider must report CI green."""
+    """Rule 2 — qa/passed with ci:green claim: provider must report CI green.
+
+    Canary: ``provider._pr_for_issue(iss)`` (the "PR lookup you already did" —
+    confirms the provider can see the PR before we call the CI mismatch).  If
+    the PR lookup returns nothing the provider is likely unhealthy and we skip.
+    """
     pr: int | None = record.pr_ref if record.pr_ref is not None else pr_number
     if pr is None:
         return VerifyResult("skipped", "qa/passed: no pr_number available for CI check")
@@ -196,17 +273,32 @@ def _verify_ci_green(
             f"qa/passed: provider does not support CI status (PR #{pr})",
         )
 
+    # Primary lookup — providers never raise.
     try:
         ci: str = provider.get_pr_ci_status(pr)
     except Exception as exc:
+        # Safety-net for non-conforming providers.
         logger.warning(
             "verify: get_pr_ci_status(#%s) raised %s — skipping CI verification (fail-open)",
-            pr,
-            exc,
+            pr, exc,
         )
         return VerifyResult("skipped", f"provider error: {exc}")
 
     if ci != CIStatus.GREEN:
+        # CANARY: confirm provider is healthy before declaring mismatch.
+        # Use the PR lookup as the canary (independent of CI status).
+        iss: int | None = record.issue_ref if record.issue_ref is not None else issue_number
+        if not _canary_check(provider, issue_number=iss, pr_number=pr):
+            logger.warning(
+                "verify: qa/passed ci:green — CI not green (got %r for PR #%s) AND "
+                "canary PR/issue lookup failed; provider likely unhealthy — "
+                "skipping (fail-open)",
+                ci, pr,
+            )
+            return VerifyResult(
+                "skipped",
+                f"provider unhealthy: canary lookup failed for PR #{pr}",
+            )
         note = (
             f"verify: CI claim mismatch — "
             f"agent claimed green but provider reports {ci!r} for PR #{pr}"
@@ -224,7 +316,11 @@ def _verify_docs_posted(
     issue_number: int | None,
     pr_number: int | None,
 ) -> VerifyResult:
-    """Rule 3 — docs/posted: an **Agent: documentation** comment must exist."""
+    """Rule 3 — docs/posted: an **Agent: documentation** comment must exist.
+
+    Canary: ``provider.get_issue(iss)`` — confirms the provider is healthy before
+    declaring mismatch when no docs comment is found.
+    """
     pr: int | None = record.pr_ref if record.pr_ref is not None else pr_number
     iss: int | None = record.issue_ref if record.issue_ref is not None else issue_number
 
@@ -253,8 +349,7 @@ def _verify_docs_posted(
                 logger.warning(
                     "verify: list_pr_comments(#%s) raised %s — "
                     "falling through to issue-comments check",
-                    pr,
-                    exc,
+                    pr, exc,
                 )
 
     # ── Fall back to issue comments ───────────────────────────────────────────
@@ -275,10 +370,21 @@ def _verify_docs_posted(
                 logger.warning(
                     "verify: get_issue_comments(#%s) raised %s — "
                     "skipping docs verification (fail-open)",
-                    iss,
-                    exc,
+                    iss, exc,
                 )
                 return VerifyResult("skipped", f"provider error: {exc}")
+
+    # No docs comment found anywhere.
+    # CANARY: confirm provider is healthy before declaring mismatch.
+    if not _canary_check(provider, issue_number=iss, pr_number=pr):
+        logger.warning(
+            "verify: docs/posted — no docs comment found AND canary lookup failed; "
+            "provider likely unhealthy — skipping (fail-open)",
+        )
+        return VerifyResult(
+            "skipped",
+            "provider unhealthy: canary lookup failed for docs check",
+        )
 
     note = (
         f"verify: docs comment not found "

@@ -432,8 +432,10 @@ def run_iterate(
         #   • The card was routed via a JSON OutcomeRecord (prefix-only cards
         #     carry no structured VCS claims; nothing to verify)
         #   • The action is ADVANCE or APPROVE_ADVANCE (completion actions)
-        # On mismatch the executor is skipped; the card stays blocked so the
-        # next tick re-evaluates once the agent corrects the claim.
+        # On mismatch: increment the role's fix-attempt counter (same counter
+        # family as qa_fix/max_fix_attempts).  Under cap → post a mismatch
+        # comment and leave the card blocked for the next tick's re-evaluation.
+        # At cap → escalate via the existing escalation executor.
         if (
             _verify_outcomes
             and _outcome_sources
@@ -455,10 +457,56 @@ def run_iterate(
                 if _vresult.verdict == "mismatch":
                     logger.warning(
                         "iterate: verify_outcome MISMATCH for card %s "
-                        "(action=%s, role=%s/%s) — skipping executor: %s",
+                        "(action=%s, role=%s/%s): %s",
                         tid, action, _record.role, _record.verdict, _vresult.note,
                     )
-                    continue  # leave card blocked; next tick re-evaluates
+                    # Increment fix-attempt counter (bounded by max_fix_attempts).
+                    _vm_attempts = _increment_fix_attempts(card, workdir)
+                    if _vm_attempts >= max_fix_attempts:
+                        # At cap: escalate via existing machinery.
+                        logger.warning(
+                            "iterate: verify-mismatch for card %s hit cap "
+                            "(%d/%d) — escalating",
+                            tid, _vm_attempts, max_fix_attempts,
+                        )
+                        _esc = _ACTION_EXECUTORS.get(ESCALATE)
+                        if _esc:
+                            try:
+                                _esc(
+                                    slug, card, repo, handoff,
+                                    workdir=workdir,
+                                    notify_target=notify_target,
+                                    router_profile=router_profile,
+                                    dry_run=dry_run,
+                                    pr_number=pr,
+                                    provider=provider,
+                                    max_fix_attempts=max_fix_attempts,
+                                )
+                            except Exception as _esc_exc:
+                                logger.error(
+                                    "iterate: escalation executor failed for "
+                                    "verify-mismatch card %s: %s",
+                                    tid, _esc_exc,
+                                )
+                        counts[ESCALATE] = counts.get(ESCALATE, 0) + 1
+                        if _issue_n_for_verify is not None:
+                            escalated_issues[_issue_n_for_verify] = tid
+                    else:
+                        # Under cap: post mismatch comment; card stays blocked
+                        # and the next tick will re-run verify.
+                        if not dry_run:
+                            kanban.comment(
+                                slug, tid,
+                                f"verify-mismatch (attempt {_vm_attempts}/"
+                                f"{max_fix_attempts}): {_vresult.note}",
+                            )
+                        else:
+                            logger.info(
+                                "[dry-run] would post verify-mismatch comment "
+                                "on card %s (attempt %d/%d)",
+                                tid, _vm_attempts, max_fix_attempts,
+                            )
+                    continue  # always skip the ADVANCE/APPROVE_ADVANCE executor
 
         # ── Escalation dedup (issue #35) ─────────────────────────────────
         # Before executing ESCALATE, check two layers of dedup:
