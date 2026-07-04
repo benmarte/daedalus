@@ -215,6 +215,23 @@ _MAX_CANDIDATES: int = 10
 # ── public API ────────────────────────────────────────────────────────────────
 
 
+def parse_dict(obj: Any) -> OutcomeRecord | None:
+    """Validate an already-parsed dict into an :class:`OutcomeRecord`, or None.
+
+    The counterpart to :func:`parse` for callers that already hold a decoded
+    dict — e.g. native run metadata read via ``hermes kanban runs --json``
+    (#1288 ``metadata_transport``). Applies the same schema validation as the
+    free-text path. Never raises.
+    """
+    if not isinstance(obj, dict):
+        return None
+    try:
+        return _validate(obj)
+    except Exception as exc:  # noqa: BLE001 — must never raise
+        logger.debug("outcomes: parse_dict validation error: %s", exc)
+        return None
+
+
 def parse(summary: str) -> OutcomeRecord | None:
     """Extract and validate the outcome record from an agent summary string.
 

@@ -2683,6 +2683,10 @@ def _run_tick(
     _protocol = resolved.get("protocol") or {}
     _pf_raw = _protocol.get("prefix_fallback", True)
     _prefix_fallback = True if _pf_raw is None else bool(_pf_raw)
+    # Phase-1 (#1288): metadata_transport flag — default false (behaviour
+    # unchanged). Threaded into _guard_prefix_on_done the same way as
+    # prefix_fallback so the done-card guard can accept native run metadata.
+    _metadata_transport = bool(_protocol.get("metadata_transport", False))
     iterations = int(
         execution.get("max_lifecycle_iterations", 3)
     )  # self-improving loop cap (configurable)
@@ -3234,6 +3238,7 @@ def _run_tick(
         closed_issue_cache=_tick_closed_cache,
         provider=provider,
         prefix_fallback=_prefix_fallback,
+        metadata_transport=_metadata_transport,
     )
     if guard_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

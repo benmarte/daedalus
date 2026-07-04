@@ -241,17 +241,38 @@ def review_handoff_pr(slug: str, task_id: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def complete(slug: str, task_id: str, summary: str = "") -> bool:
+def complete(
+    slug: str,
+    task_id: str,
+    summary: str = "",
+    metadata: dict | None = None,
+) -> bool:
     """Mark a task complete (advances any children that were blocked on it).
-    
+
     Args:
         slug: Board slug
         task_id: Task ID to complete
         summary: Optional summary message to record with the completion
+        metadata: Optional dict of structured facts (a daedalus outcome record)
+            stored on the CLOSING RUN via ``hermes kanban complete --metadata``
+            (#1288). This is the native transport for completion handoffs — read
+            back with :func:`run_outcome`. Blocked handoffs cannot carry metadata
+            (``hermes kanban block`` has no ``--metadata``); they keep the
+            free-text JSON fallback until #1290. Serialisation never raises: a
+            non-serialisable dict is logged and the metadata is dropped rather
+            than aborting the completion.
     """
     args = ["--board", slug, "complete", task_id]
     if summary:
         args += ["--summary", summary]
+    if metadata:
+        try:
+            args += ["--metadata", json.dumps(metadata)]
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "kanban: complete %s — dropping unserialisable metadata: %s",
+                task_id, exc,
+            )
     rc, out, err = _hk(args)
     _invalidate_tick_cache()
     if rc != 0:
@@ -259,6 +280,57 @@ def complete(slug: str, task_id: str, summary: str = "") -> bool:
         return False
     logger.info("kanban: completed %s", task_id)
     return True
+
+
+def heartbeat(slug: str, task_id: str, note: str = "") -> bool:
+    """Emit a liveness heartbeat for a task (``hermes kanban heartbeat``).
+
+    Keeps a long-running card from tripping the sweeper's stale-running
+    detection while its worker is still active. Degrades gracefully (logs +
+    returns False) — a failed heartbeat must never break a dispatch tick.
+    """
+    args = ["--board", slug, "heartbeat", task_id]
+    if note:
+        args += ["--note", note]
+    rc, out, err = _hk(args)
+    if rc != 0:
+        logger.warning("kanban: heartbeat %s failed: %s", task_id, (err or out or "").strip())
+        return False
+    return True
+
+
+def run_outcome(slug: str, task_id: str) -> dict | None:
+    """Return the structured outcome metadata on a task's closing run, or None.
+
+    Reads ``hermes kanban runs <task_id> --json`` and returns the ``metadata``
+    dict of the most recent run that carries a ``daedalus_outcome`` record (the
+    native transport written by :func:`complete` when ``metadata_transport`` is
+    on — #1288). ``metadata`` is already a parsed dict in the CLI payload, but a
+    JSON-string form is tolerated too. Parses defensively; returns None on any
+    failure (no runs, no metadata, malformed JSON) — never raises.
+    """
+    rc, out, _ = _hk(["--board", slug, "runs", task_id, "--json"])
+    if rc != 0 or not out:
+        return None
+    try:
+        runs = json.loads(out or "[]")
+    except Exception:
+        return None
+    if not isinstance(runs, list):
+        return None
+    # Scan newest-first so the closing run wins over earlier attempts.
+    for run in reversed(runs):
+        if not isinstance(run, dict):
+            continue
+        meta = run.get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                continue
+        if isinstance(meta, dict) and "daedalus_outcome" in meta:
+            return meta
+    return None
 
 
 def edit_summary(slug: str, task_id: str, summary: str) -> bool:
