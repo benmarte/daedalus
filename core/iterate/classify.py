@@ -8,13 +8,59 @@ Nothing here touches kanban or the file system.  ``classify_blocked`` and
 
 All symbols are re-exported via ``core/iterate/__init__.py`` so existing
 imports and ``mock.patch`` targets remain unchanged.
+
+Phase 1 of #1170 adds structured-outcome routing on top of the existing prefix
+logic.  See ``core/iterate/outcomes.py`` for the schema and parser.
+
+(role, verdict) → action mapping table
+---------------------------------------
+Each row maps a JSON outcome record's (role, verdict) pair to the dispatcher
+action the *equivalent prefix* would produce.  Column "equivalent prefix" shows
+the legacy handoff text that the prefix path would match.  Guards
+(fix_attempts, pr_is_open, pr_is_merged, awaiting-fix:) are applied ON TOP
+by ``_classify_by_outcome`` exactly as they are in the prefix branches.
+
+| role      | verdict             | equivalent prefix                    | action          |
+|-----------|---------------------|--------------------------------------|-----------------|
+| planner   | plan                | "PLANNING COMPLETE"                  | PLANNER_DECOMPOSE |
+| planner   | not_suitable        | other planner output                 | PM_ROUTE        |
+| docs      | posted              | "docs posted"                        | APPROVE_ADVANCE |
+| pm        | escalated           | PM blocked (not awaiting-fix:)       | ESCALATE        |
+| pm        | spec/assigned/      | (work-in-progress — analogous to     | "" (no-op)      |
+|           | clarified           |  "awaiting-fix:" for reviewer)       |                 |
+| developer | pr_opened           | "review-required: PR #N"             | ADVANCE*        |
+| developer | blocked             | other dev block reason               | PM_ROUTE        |
+| reviewer  | approved            | approval signals                     | APPROVE_ADVANCE*|
+| reviewer  | changes_requested   | "review-changes-requested:"          | PM_ROUTE*       |
+| security  | approved            | approval signals (incl. "cleared")   | APPROVE_ADVANCE*|
+| security  | changes_requested   | "security-changes-requested:"        | PM_ROUTE*       |
+| qa        | passed              | "qa-passed"                          | ADVANCE         |
+| qa        | failed              | "qa-failed"                          | QA_FIX          |
+| a11y      | approved            | "approved", "a11y-approved"          | ADVANCE         |
+| a11y      | na                  | "accessibility-na"                   | ADVANCE         |
+| a11y      | skipped             | "a11y-skipped"                       | ADVANCE         |
+| a11y      | changes_requested   | "changes requested"                  | PM_ROUTE        |
+| validator | * (any)             | blocked validator                    | ESCALATE        |
+
+*: additional guards apply (fix_attempts >= max → ESCALATE;
+   "awaiting-fix:" in text → ""; pr_is_open/pr_is_merged for developer).
+
+Phase-1 invariant: ``_guard_prefix_on_done`` in ``core/dispatch/checks.py``
+still requires the prefix line to be present — a valid JSON block alone does
+NOT satisfy the guard.  Dual-write (prefix + JSON) is required throughout
+Phase 1.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from core.iterate.outcomes import OutcomeRecord
+from core.iterate.outcomes import parse as _parse_outcome
 from core.util import extract_pr_number_from_summary
+
+logger = logging.getLogger("daedalus.iterate.classify")
 
 # ── action constants ──────────────────────────────────────────────────────────
 # Actions that classify_blocked can return.
@@ -31,6 +77,111 @@ RECONCILE_MERGED = "reconcile_merged"  # dev card whose PR merged outside the pi
 
 # Maximum fix attempts per PR before escalation
 MAX_FIX_ATTEMPTS = 3
+
+
+# ── pure helpers ──────────────────────────────────────────────────────────────
+
+
+# ── structured-outcome routing (Phase 1 of #1170) ────────────────────────────
+
+# Maps kanban profile names → JSON role names used in OutcomeRecord.
+_ASSIGNEE_TO_ROLE: dict[str, str] = {
+    "validator-daedalus":        "validator",
+    "qa-daedalus":               "qa",
+    "reviewer-daedalus":         "reviewer",
+    "security-analyst-daedalus": "security",
+    "accessibility-daedalus":    "a11y",
+    "documentation-daedalus":    "docs",
+    "planner-daedalus":          "planner",
+    "project-manager-daedalus":  "pm",
+    "developer-daedalus":        "developer",
+}
+
+
+def _classify_by_outcome(
+    outcome: OutcomeRecord,
+    handoff_text: str,
+    fix_attempts: int,
+    max_fix_attempts: int,
+    effective_pr: int | None,
+    pr_is_open: bool | None,
+    pr_is_merged: bool | None,
+) -> str | None:
+    """Route by (role, verdict) → action using the mapping table above.
+
+    Applies the same guards (fix_attempts, pr_is_merged, pr_is_open,
+    awaiting-fix:) as the prefix branches so behaviour is identical for
+    equivalent inputs.
+
+    Returns the action string (possibly ``""`` for no-op) or ``None`` when
+    the role is not in the mapping table (caller should fall back to prefix).
+    """
+    role = outcome.role
+    verdict = outcome.verdict
+    # Prefer the PR reference from the outcome record; fall back to the
+    # caller-supplied value derived from the handoff text.
+    pr = outcome.pr_ref if outcome.pr_ref is not None else effective_pr
+
+    if role == "planner":
+        return PLANNER_DECOMPOSE if verdict == "plan" else PM_ROUTE
+
+    if role == "docs":
+        # "posted" is the only valid docs verdict; always APPROVE_ADVANCE.
+        return APPROVE_ADVANCE
+
+    if role == "pm":
+        # "awaiting-fix:" in handoff text is still the canonical no-op signal
+        # for PM cards (the dispatcher writes it when blocking the card while
+        # waiting for a developer fix to arrive).  Dual-write preserves it.
+        if "awaiting-fix:" in handoff_text.lower():
+            return ""
+        return ESCALATE if verdict == "escalated" else ""
+
+    if role == "validator":
+        # A blocked validator card is always an error (validators only complete).
+        return ESCALATE
+
+    if role == "developer":
+        if fix_attempts >= max_fix_attempts:
+            return ESCALATE
+        if verdict == "pr_opened" and pr:
+            # #957: reconcile when the PR was merged outside the pipeline.
+            if pr_is_merged is True:
+                return RECONCILE_MERGED
+            # #953: hold when the provider says the PR is not open.
+            if pr_is_open is False:
+                return PENDING_PR
+            return ADVANCE
+        # verdict == "blocked" or pr_opened without a resolvable PR number.
+        return PM_ROUTE
+
+    if role in ("reviewer", "security"):
+        if fix_attempts >= max_fix_attempts:
+            return ESCALATE
+        # "awaiting-fix:" guard: a fix card is already in flight, don't re-route.
+        if "awaiting-fix:" in handoff_text.lower():
+            return ""
+        if verdict == "approved":
+            return APPROVE_ADVANCE
+        if verdict == "changes_requested":
+            return PM_ROUTE
+        return ""
+
+    if role == "qa":
+        if verdict == "passed":
+            return ADVANCE
+        if verdict == "failed":
+            return QA_FIX
+        return PENDING_SIGNAL
+
+    if role == "a11y":
+        if verdict in ("approved", "na", "skipped"):
+            return ADVANCE
+        if verdict == "changes_requested":
+            return PM_ROUTE
+        return PENDING_SIGNAL
+
+    return None  # unknown role — caller should fall back to prefix
 
 
 # ── pure helpers ──────────────────────────────────────────────────────────────
@@ -114,6 +265,7 @@ def classify_blocked(
     pr_is_merged: bool | None = None,
     skip_qa: bool = False,
     max_fix_attempts: int = MAX_FIX_ATTEMPTS,
+    _source_collector: list[str] | None = None,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -165,6 +317,64 @@ def classify_blocked(
 
     # Resolve PR number: handoff first, then the explicit fallback.
     effective_pr = handoff["pr_number"] or pr_number
+
+    # ── Phase 1 (#1170): try structured JSON outcome FIRST ───────────────────
+    # Parse the last fenced JSON block (or bare JSON object) from the summary.
+    # When valid AND the role matches the card assignee, route by the
+    # (role, verdict) → action table and record "json" telemetry.
+    # On None (no JSON / invalid JSON / role mismatch), fall through to the
+    # prefix routing below unchanged.
+    #
+    # QA skip_qa bypass: the skip-qa label overrides ALL signal requirements
+    # (prefix *and* JSON) and advances immediately — check it before JSON.
+    if assignee == "qa-daedalus" and skip_qa:
+        if _source_collector is not None:
+            # skip_qa overrides routing entirely; JSON outcome may or may not
+            # be present — record the source of the outcome that would have
+            # been used otherwise so the telemetry reflects signal presence.
+            _outcome_for_tel = _parse_outcome(handoff_text or "")
+            expected_role_tel = _ASSIGNEE_TO_ROLE.get(assignee)
+            if (
+                _outcome_for_tel is not None
+                and expected_role_tel is not None
+                and _outcome_for_tel.role == expected_role_tel
+            ):
+                _source_collector.append("json")
+            else:
+                _source_collector.append("prefix")
+        return ADVANCE
+
+    _outcome = _parse_outcome(handoff_text or "")
+    _expected_role = _ASSIGNEE_TO_ROLE.get(assignee)
+    _use_json = (
+        _outcome is not None
+        and _expected_role is not None
+        and _outcome.role == _expected_role
+    )
+    if _source_collector is not None:
+        _source_collector.append("json" if _use_json else "prefix")
+
+    if _use_json:
+        # _outcome is not None here (mypy: assert for type narrowing)
+        assert _outcome is not None
+        _json_action = _classify_by_outcome(
+            _outcome,
+            handoff_text or "",
+            fix_attempts,
+            max_fix_attempts,
+            effective_pr,
+            pr_is_open,
+            pr_is_merged,
+        )
+        if _json_action is not None:
+            return _json_action
+        # _classify_by_outcome returned None → unknown role in mapping table
+        # (should not happen for a validated outcome, but be defensive).
+        logger.debug(
+            "classify: JSON outcome role=%r not in mapping table — "
+            "falling back to prefix routing",
+            _outcome.role,
+        )
 
     # ── planner → decompose or PM ────────────────────────────────────────
     if assignee == "planner-daedalus":
@@ -258,10 +468,9 @@ def classify_blocked(
     # of three signals: qa-passed (all good), qa-failed (tests/lint broken),
     # or something unspecified (still running / unclear). CI is not a gate for
     # QA — the dispatcher acts on the signal directly.
+    # NOTE: skip_qa bypass is handled earlier (before JSON/prefix routing),
+    # so by the time we reach here skip_qa is always False.
     if assignee == "qa-daedalus":
-        # Bypass QA signal requirement when skip-qa label is present
-        if skip_qa:
-            return ADVANCE
         # Use startswith to prevent a mid-string match such as
         # "qa-passed: but then qa-failed on retry" advancing the pipeline (#1125 F1).
         summary = (handoff_text or "").lower().lstrip()

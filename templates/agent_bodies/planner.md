@@ -31,6 +31,22 @@ and the PM will be notified.
 
 ---
 
+### Structured Outcome Block (append to your summary, #1170 Phase 1)
+
+**Dual-write required**: keep the `PLANNING COMPLETE` prefix AND append this
+fenced JSON block.
+
+Valid verdicts for this role: `plan` | `not_suitable`
+
+    ```json
+    {"daedalus_outcome": 1, "role": "planner", "verdict": "plan",
+     "refs": {"issue": ${n}, "pr": null},
+     "evidence": {"sub_issues": "<count>"},
+     "note": ""}
+    ```
+
+---
+
 ## Issue Body
 
 ${body_excerpt}${truncation_note}${source_section}

@@ -226,3 +226,18 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 - The implementation order must be correct: dependencies first
 - Risks must reflect actual code inspection, not generic boilerplate
 - The plan must be detailed enough that the developer can implement without re-reading the issue
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When completing your kanban card, append a fenced JSON block **after** your prefix line.
+Both lines are required throughout Phase 1.
+
+Valid verdicts: "plan" | "not_suitable"
+
+```json
+{"daedalus_outcome": 1, "role": "planner", "verdict": "plan",
+ "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"sub_issues": "5"},
+ "note": ""}
+```

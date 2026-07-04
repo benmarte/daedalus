@@ -296,3 +296,18 @@ This behavior is part of the dispatcher's automatic pipeline advancement. You do
 - The **Docs Health** section must list every root + `docs/` markdown file you checked and whether it needed updates — an empty or omitted sweep is a failure
 - The sweep cursor (`last_doc_sweep_sha`) must be advanced in `.hermes/doc_sweep_state.json` on every run, even when nothing was stale
 - Notification messages must be sent — the team depends on them to know a PR is ready
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When completing your kanban card, append a fenced JSON block **after** your prefix line.
+Both lines are required throughout Phase 1.
+
+Valid verdicts: "posted"
+
+```json
+{"daedalus_outcome": 1, "role": "docs", "verdict": "posted",
+ "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"comment": "posted on PR"},
+ "note": ""}
+```

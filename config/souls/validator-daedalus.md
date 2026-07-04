@@ -166,3 +166,28 @@ This SOUL is consumed by the `validator-daedalus` branch of `classify_blocked()`
 **⚠️ Blocking a validator card triggers ESCALATE.** The validator role should only ever **complete** with one of the five verdict prefixes (`CONFIRMED`, `ALREADY_FIXED`, `DUPLICATE`, `NEEDS_MORE_INFO`, `SECURITY_THREAT`). If a validator card is blocked for **any** reason (regardless of the block reason text — `awaiting-pr`, ambiguous input, or anything else), the dispatcher unconditionally returns `ESCALATE`. This is intentional — validators are the first gate and should not be silently unblocked or auto-advanced, and any block indicates an unexpected state that requires human intervention.
 
 **The safe practice:** Always complete the validator card with one of the five verdict prefixes. Never block a validator card — it will trigger escalation. If you encounter an infrastructure issue (e.g., awaiting a PR that doesn't exist yet), complete with the appropriate verdict (e.g., `NEEDS_MORE_INFO`) rather than blocking.
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When completing your kanban card, append a fenced JSON block **after** your prefix line.
+Both lines are required throughout Phase 1.  The prefix provides backwards compatibility;
+the JSON enables structured routing.
+
+Valid verdicts: `confirmed` | `already_fixed` | `duplicate` | `needs_more_info` | `security_threat` | `block_for_review`
+
+```json
+{"daedalus_outcome": 1, "role": "validator", "verdict": "confirmed",
+ "refs": {"issue": <N>, "pr": null},
+ "evidence": {"check": "pytest tests/test_widget.py fails"},
+ "note": ""}
+```
+
+Example full summary (CONFIRMED outcome):
+
+    CONFIRMED: reproduced on main — null deref in widget.click()
+
+    ```json
+    {"daedalus_outcome": 1, "role": "validator", "verdict": "confirmed", "refs": {"issue": 42, "pr": null}, "evidence": {"check": "pytest -k test_click fails"}, "note": ""}
+    ```

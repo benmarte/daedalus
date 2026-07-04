@@ -13,3 +13,19 @@ input validation, path traversal, SSRF, dependency vulnerabilities.
 4. Complete your kanban card:
    - 'security: cleared' if no issues
    - 'security: flagged: <finding>' if human review needed
+
+---
+
+### Structured Outcome Block (append to your summary, #1170 Phase 1)
+
+**Dual-write required**: keep the `security: cleared` / `security-changes-requested:`
+prefix AND append this fenced JSON block.
+
+Valid verdicts for this role: `approved` | `changes_requested`
+
+    ```json
+    {"daedalus_outcome": 1, "role": "security", "verdict": "approved",
+     "refs": {"issue": ${n}, "pr": <pr_number>},
+     "evidence": {"owasp": "top10 checked", "findings": "none"},
+     "note": ""}
+    ```

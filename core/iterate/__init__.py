@@ -80,8 +80,20 @@ from core.iterate.classify import (  # noqa: E402
     PM_ROUTE,
     QA_FIX,
     RECONCILE_MERGED,
+    _ASSIGNEE_TO_ROLE as _ASSIGNEE_TO_ROLE,
+    _classify_by_outcome as _classify_by_outcome,
     _parse_handoff as _parse_handoff,
     classify_blocked,
+)
+
+# ── outcomes layer (Phase 1 of #1170) ────────────────────────────────────────
+# Re-exported so ``from core.iterate import X`` and
+# ``mock.patch("core.iterate.X")`` continue to resolve for tests.
+from core.iterate.outcomes import (  # noqa: E402
+    SCHEMA_VERSION as _OUTCOME_SCHEMA_VERSION,
+    VERDICT_TABLE as _OUTCOME_VERDICT_TABLE,
+    OutcomeRecord as OutcomeRecord,
+    parse as _parse_outcome,
 )
 
 # Source-reading fallback counter for observability.
@@ -259,7 +271,16 @@ def run_iterate(
         ESCALATE: 0,
         PLANNER_DECOMPOSE: 0,
         RECONCILE_MERGED: 0,
+        # Phase-1 telemetry (#1170): tracks how many cards were routed via the
+        # structured JSON outcome vs the legacy prefix path.  These counters
+        # land in the dispatch history JSONL via routed_actions so Phase-3 can
+        # observe when agents reliably emit valid records.
+        "_outcome_json": 0,
+        "_outcome_prefix": 0,
     }
+    # Per-tick outcome-source collector.  classify_blocked appends "json" or
+    # "prefix" for each card it processes; we tally at end-of-loop.
+    _outcome_sources: list[str] = []
     advance_prs: list[int] = []  # PR numbers for cards that were advanced
     pending_signal_cards: list[dict[str, Any]] = []  # Cards with unrecognized QA/a11y signal
     qa_failed_cards: list[dict[str, Any]] = []  # QA cards that created a fix card
@@ -388,7 +409,8 @@ def run_iterate(
                                   raw_ci=raw_ci, pr_is_open=pr_is_open,
                                   pr_is_merged=pr_is_merged,
                                   skip_qa=skip_qa,
-                                  max_fix_attempts=max_fix_attempts)
+                                  max_fix_attempts=max_fix_attempts,
+                                  _source_collector=_outcome_sources)
 
         # ── Escalation dedup (issue #35) ─────────────────────────────────
         # Before executing ESCALATE, check two layers of dedup:
@@ -536,5 +558,11 @@ def run_iterate(
                     )
         except Exception as e:
             logger.error("iterate: executor %s failed for card %s: %s", action, tid, e)
+
+    # Tally outcome-source telemetry into counts for the history JSONL.
+    # These land in routed_actions → summary → _append_history so Phase-3
+    # can observe when agents reliably emit valid JSON outcome records.
+    counts["_outcome_json"] = _outcome_sources.count("json")
+    counts["_outcome_prefix"] = _outcome_sources.count("prefix")
 
     return counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards

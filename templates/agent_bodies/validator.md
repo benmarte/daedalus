@@ -63,3 +63,23 @@ NEEDS_MORE_INFO — the issue lacks enough detail to reproduce or implement.
      → Post a comment on issue #${n} listing exactly what info is needed.
      ${action_needs_info}
 
+---
+
+### Structured Outcome Block (append to your completion summary, #1170 Phase 1)
+
+**Dual-write required**: keep the prefix line above unchanged AND append this
+fenced JSON block so the dispatcher can route by structured verdict as well as
+by prefix.  Both forms must be present throughout Phase 1.
+
+Valid verdicts for this role:
+`confirmed` | `already_fixed` | `duplicate` | `needs_more_info` | `security_threat` | `block_for_review`
+
+Append immediately after your prefix line (fill all real values):
+
+    ```json
+    {"daedalus_outcome": 1, "role": "validator", "verdict": "confirmed",
+     "refs": {"issue": ${n}, "pr": null},
+     "evidence": {"check": "pytest tests/test_widget.py -k test_click fails"},
+     "note": ""}
+    ```
+

@@ -329,3 +329,18 @@ This SOUL is consumed by the `accessibility-daedalus` branch of `classify_blocke
 - "No findings" is only acceptable after genuinely checking all categories above
 - Reference the specific WCAG criterion number for every finding
 - Do not skip this review just because a change looks small — even single-component changes can introduce regressions
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When completing your kanban card, append a fenced JSON block **after** your prefix line.
+Both lines are required throughout Phase 1.
+
+Valid verdicts: "approved" | "na" | "skipped" | "changes_requested"
+
+```json
+{"daedalus_outcome": 1, "role": "a11y", "verdict": "approved",
+ "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"wcag": "2.1 AA compliant"},
+ "note": ""}
+```

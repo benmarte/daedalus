@@ -37,3 +37,19 @@ Do NOT post a GitHub comment yourself — the dispatcher posts your completion s
 Block with: `review-required: PR #<pr_number> — fix/issue-${n}-<slug>`
 ⛔ Do NOT complete your card — the dispatcher completes it after QA passes.
 
+---
+
+### Structured Outcome Block (append to your block reason, #1170 Phase 1)
+
+**Dual-write required**: keep the `review-required:` prefix line above AND
+append this fenced JSON block.
+
+Valid verdicts for this role: `pr_opened` | `blocked`
+
+    ```json
+    {"daedalus_outcome": 1, "role": "developer", "verdict": "pr_opened",
+     "refs": {"issue": ${n}, "pr": <pr_number>},
+     "evidence": {"branch": "fix/issue-${n}-<slug>"},
+     "note": ""}
+    ```
+
