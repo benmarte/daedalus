@@ -127,6 +127,13 @@ execution:
   # Falls back to 3 when unset, non-numeric, or <= 0. (default: 3)
   # max_fix_attempts: 3
 
+  # How many times the planner is retried when it completes WITHOUT a
+  # "PLANNING COMPLETE" signal (a silent stall — context overflow / agent
+  # crash). After the cap is exhausted the dispatcher posts an exhaustion
+  # comment on the issue so a human is pinged instead of the epic stalling
+  # silently. Falls back to 2 when unset, non-numeric, or <= 0. (default: 2)
+  # max_planner_retries: 2
+
   # Iterations per agent (how many back-and-forth steps each agent gets).
   # iterations: 5
 
