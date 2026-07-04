@@ -1107,6 +1107,26 @@ def _resolve_max_developer_retries(execution: Dict[str, Any], default: int = 2) 
     return val if val > 0 else default
 
 
+def _resolve_max_planner_retries(execution: Dict[str, Any], default: int = 2) -> int:
+    """Return planner retry cap from ``execution.max_planner_retries``.
+
+    The planner produces the decomposition plan for epics. A planner that
+    completes without the ``PLANNING COMPLETE`` signal is a silent stall
+    (context overflow, agent crash) — the same failure mode the validator
+    guards against. A cap of 2 keeps the loop tight while giving a second
+    chance on transient glitches before surfacing a manual-intervention signal
+    via the retry-cap notification + GitHub comment (#1125 F2).
+    """
+    raw = (execution or {}).get("max_planner_retries")
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
 def _resolve_max_fix_attempts(execution: Dict[str, Any], default: int = 3) -> int:
     """Return the CI-/review-fix escalation cap from ``execution.max_fix_attempts``.
 
@@ -5464,6 +5484,189 @@ def _check_confirmed_validators(
     return triggered
 
 
+def _retry_or_escalate_planner_stall(
+    slug: str,
+    task: Dict[str, Any],
+    *,
+    workdir: str,
+    repo: str,
+    base_branch: str,
+    provider,
+    profiles: Dict[str, str],
+    role_skills: Dict[str, str],
+    issues_map: Dict[int, Dict[str, Any]],
+    epic_config: Optional[Dict[str, Any]],
+    resolved: Optional[Dict[str, Any]],
+    closed_issue_cache: Dict[int, Optional[bool]],
+    dry_run: bool,
+) -> Optional[int]:
+    """Retry a silently-stalled planner card or escalate at the cap (#1125 F2).
+
+    A planner card that completes without ``PLANNING COMPLETE`` / ``PLAN:`` /
+    ``NOT SUITABLE`` is a delegation failure (context overflow, agent crash).
+    This mirrors the validator done-without-CONFIRMED path:
+
+      * count planner cards for the issue (all statuses) → attempt number;
+      * if a planner run is still in flight (non-terminal), wait — this gives
+        per-tick idempotency (never double-count) and prevents spawning a
+        duplicate retry while one is running;
+      * under the cap, create a fresh planner retry task with a unique
+        ``planner-retry-{n}-r{count}`` idempotency key;
+      * at the cap, fire a one-shot retry-cap notification + GitHub comment so
+        a human is pinged instead of the issue stalling silently.
+
+    Returns the issue number when a retry task was (or would be, in dry_run)
+    created; otherwise ``None`` (in-flight, capped, closed, or unresolvable).
+    """
+    p = profiles
+    n = extract_issue_number(task.get("title") or "")
+    if n is None:
+        logger.warning(
+            "dispatch: planner stall for task %s — no issue number in title, skipping",
+            task.get("id"),
+        )
+        return None
+    # Skip closed/unknown issues (issues #1115, #1120 — treat None as skip).
+    if _is_issue_closed_cached(provider, n, closed_issue_cache) is not False:
+        logger.debug(
+            "dispatch: skipping planner stall for closed/unknown issue #%s", n
+        )
+        return None
+
+    planner_tasks = [
+        t
+        for t in kanban.list_tasks(slug)
+        if (t.get("assignee") or "").strip() == p["planner"]
+        and f"#{n}" in (t.get("title") or "")
+    ]
+    # In-flight guard: if any planner card for this issue is non-terminal, a run
+    # (original or a prior retry) is still active — wait for it rather than
+    # spawning a duplicate. Guarantees per-tick idempotency (no double-count).
+    _ACTIVE_STATUSES = {"todo", "ready", "running", "in_progress", "blocked"}
+    if any((t.get("status") or "").lower() in _ACTIVE_STATUSES for t in planner_tasks):
+        logger.debug(
+            "dispatch: planner stall #%s — a planner run is still in flight, waiting",
+            n,
+        )
+        return None
+
+    retry_count = len(planner_tasks)
+    max_planner_retries = _resolve_max_planner_retries(
+        (resolved or {}).get("execution") or {}
+    )
+    if retry_count > max_planner_retries:
+        # Cap exhausted — notify once + post GitHub comment so a human is pinged.
+        logger.error(
+            "dispatch: planner for #%s has %d runs (cap %d) with no PLANNING COMPLETE "
+            "— manual intervention required",
+            n,
+            retry_count,
+            max_planner_retries,
+        )
+        if not _has_notified_block(slug, n, marker=_RETRY_CAP_MARKER, role="planner"):
+            _send_retry_cap_notification(
+                role="planner",
+                issue_number=n,
+                retry_count=retry_count,
+                max_retries=max_planner_retries,
+                resolved=resolved or {},
+                dry_run=dry_run,
+            )
+            if not dry_run:
+                _mark_notified_block(
+                    slug,
+                    n,
+                    marker=_RETRY_CAP_MARKER,
+                    role="planner",
+                    fallback_task_id=str(task.get("id") or ""),
+                )
+            if provider is not None and not dry_run:
+                try:
+                    cap_comment = (
+                        f"⚠️ **Planner retry cap exhausted** for issue #{n}\n\n"
+                        f"The planner has completed {retry_count} times "
+                        f"(max: {max_planner_retries}) without a PLANNING COMPLETE "
+                        f"outcome.\n\n"
+                        f"**Manual intervention required.**\n\n"
+                        f"Likely cause: Planner agent completed without a PLANNING "
+                        f"COMPLETE summary (context window overflow, agent crash, or "
+                        f"silent failure).\n\n"
+                        f"Recovery: Check agent logs, verify issue context, then "
+                        f"manually requeue the planner or escalate to human review."
+                    )
+                    if not provider.post_issue_comment(n, cap_comment):
+                        logger.warning(
+                            "dispatch: failed to post planner retry-cap comment on #%s",
+                            n,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "dispatch: post_issue_comment #%s raised %s — planner "
+                        "retry-cap comment failed",
+                        n,
+                        exc,
+                    )
+        return None
+
+    # Under cap — send an intermediate retry-attempt notification (suppressed at
+    # the boundary so the cap-exhausted ping next tick is not duplicated), then
+    # create the retry task with a unique per-attempt idempotency key.
+    if resolved is not None and retry_count < max_planner_retries:
+        _send_retry_attempt_notification(
+            role="planner",
+            issue_number=n,
+            retry_count=retry_count,
+            max_retries=max_planner_retries,
+            resolved=resolved,
+            dry_run=dry_run,
+        )
+
+    retry_key = f"planner-retry-{n}-r{retry_count}"
+    if dry_run:
+        logger.info(
+            "[dry-run] planner stall #%s — would retry (run %d/%d)",
+            n,
+            retry_count,
+            max_planner_retries,
+        )
+        return n
+
+    issue = issues_map.get(n)
+    if not issue and provider is not None:
+        fetched = _fetch_issue_with_retry(provider, n)
+        if fetched:
+            issue = fetched.as_dict() if hasattr(fetched, "as_dict") else fetched
+    if not issue:
+        logger.warning(
+            "dispatch: planner stall #%s but issue not in current scope — "
+            "cannot retry without issue context",
+            n,
+        )
+        return None
+
+    provider_name = provider.name if provider is not None else "github"
+    pid = kanban.create_task(
+        slug,
+        f"#{n} {issue.get('title', '')}",
+        body=_planner_body(repo, issue, workdir, base_branch, provider_name, epic_config),
+        assignee=p["planner"],
+        idempotency_key=retry_key,
+        workspace=f"dir:{workdir}" if workdir else "",
+        skills=role_skills.get("planner") or None,
+    )
+    if pid:
+        logger.warning(
+            "dispatch: planner for #%s completed with no PLANNING COMPLETE — "
+            "scheduling retry (run %d/%d, key=%s)",
+            n,
+            retry_count,
+            max_planner_retries,
+            retry_key,
+        )
+        return n
+    return None
+
+
 def _check_completed_planner(
     slug: str,
     workdir: str,
@@ -5472,15 +5675,30 @@ def _check_completed_planner(
     dry_run: bool = False,
     provider=None,
     closed_issue_cache: Optional[Dict[int, bool]] = None,
+    repo: str = "",
+    base_branch: str = "dev",
+    issues_map: Optional[Dict[int, Dict[str, Any]]] = None,
+    role_skills: Optional[Dict[str, str]] = None,
+    epic_config: Optional[Dict[str, Any]] = None,
+    resolved: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-3 epic trigger: planner PLANNING COMPLETE → create sub-issues + triage cards.
 
     Runs each tick. Idempotency is handled inside _execute_planner_decompose
     via the <!-- daedalus:sub-issues:[...] --> marker comment on the parent issue.
+
+    A planner card that completes WITHOUT ``PLANNING COMPLETE`` / ``PLAN:`` and
+    WITHOUT a ``NOT SUITABLE`` signal is a silent stall (context overflow, agent
+    crash). When ``resolved`` config context is supplied, such a stall is
+    retried up to ``execution.max_planner_retries`` (mirroring the validator
+    done-without-CONFIRMED path); on cap exhaustion a retry-cap notification is
+    fired and a GitHub comment is posted so a human is pinged (#1125 F2).
     """
     from core.iterate import _execute_planner_decompose
 
     p = profiles or _DEFAULT_PROFILES
+    rs = role_skills or {}
+    _issues_map = issues_map or {}
     triggered: List[int] = []
     _closed_issue_cache: Dict[int, Optional[bool]] = (
         closed_issue_cache if closed_issue_cache is not None else {}
@@ -5497,12 +5715,48 @@ def _check_completed_planner(
                     "dispatch: planner done task %s has 'PLAN:' summary — treating as PLANNING COMPLETE synonym",
                     task.get("id"),
                 )
-            else:
-                logger.warning(
-                    "dispatch: planner done task %s has unrecognised summary signal — skipping "
-                    "(NOT SUITABLE path handles its own signal)",
+            elif _NOT_SUITABLE_RE.search(summary_raw or ""):
+                # NOT SUITABLE FOR DECOMPOSITION is a legitimate terminal signal
+                # routed to the validator-fallback path by _check_planner_not_suitable.
+                # Skip it here so we do not treat it as a silent stall.
+                logger.debug(
+                    "dispatch: planner done task %s is NOT SUITABLE — handled by "
+                    "not_suitable path, skipping stall check",
                     task.get("id"),
                 )
+                continue
+            elif resolved is None:
+                # No config context (legacy/unit-test caller). Preserve the
+                # original warn-and-skip behaviour — the dispatcher always
+                # threads ``resolved`` so the retry path only activates in prod.
+                logger.warning(
+                    "dispatch: planner done task %s has unrecognised summary signal — skipping "
+                    "(no retry context)",
+                    task.get("id"),
+                )
+                continue
+            else:
+                # F2 (#1125): silent stall — planner completed without a
+                # recognised signal. Retry up to max_planner_retries, then
+                # escalate via notification + GitHub comment. Mirrors the
+                # validator done-without-CONFIRMED retry mechanism.
+                stalled_n = _retry_or_escalate_planner_stall(
+                    slug,
+                    task,
+                    workdir=workdir,
+                    repo=repo,
+                    base_branch=base_branch,
+                    provider=provider,
+                    profiles=p,
+                    role_skills=rs,
+                    issues_map=_issues_map,
+                    epic_config=epic_config,
+                    resolved=resolved,
+                    closed_issue_cache=_closed_issue_cache,
+                    dry_run=dry_run,
+                )
+                if stalled_n is not None:
+                    triggered.append(stalled_n)
                 continue
         n = extract_issue_number(task.get("title") or "")
         if n is None:
@@ -7231,6 +7485,12 @@ def _run_tick(
         dry_run=dry_run,
         provider=provider,
         closed_issue_cache=_tick_closed_cache,
+        repo=repo,
+        base_branch=base_branch,
+        issues_map=issues_map,
+        role_skills=role_skills,
+        epic_config=epic_config,
+        resolved=resolved,
     )
     if planner_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
