@@ -16,20 +16,17 @@ status bookkeeping happens here, in code, so it can never be skipped.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
-import shlex
 import signal
-import subprocess
+import subprocess  # noqa: F401 — kept for test compatibility: mock.patch.object(disp.subprocess, "run")
 import sys
 import threading
 import time
-from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from filelock import FileLock, Timeout
 
@@ -58,7 +55,6 @@ from core import provider_failover  # noqa: E402
 from core import iterate  # noqa: E402
 from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
-from core.db import connect_wal  # noqa: E402
 from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
 from core import sweeper  # noqa: E402
@@ -72,7 +68,6 @@ from core.providers.base import (  # noqa: E402
     _DECOMP_LANGUAGE_RE,
     _SUB_ISSUE_CHECKLIST_RE,
     ensure_closing_keyword,
-    is_epic,
 )
 from core import tier_promotion  # noqa: E402
 from core.util import board_slug as _board_slug  # noqa: E402
@@ -162,6 +157,48 @@ from core.dispatch.delivery import (  # noqa: F401, E402
     _send_via_hermes,
     _summary_events,
     _validator_summary_burns_cap,
+)
+from core.dispatch.bodies import (  # noqa: F401, E402
+    _AGENT_BODY_CACHE,
+    _AGENT_BODY_TEMPLATE_DIR,
+    _AGENT_COMMENT_NOTE,
+    _AGENT_FAILED_NOTE,
+    _CLOSE_ISSUE_HOWTO,
+    _CLOUD_AGENT_LABELS,
+    _INNER_BODY_SEPARATOR,
+    _PR_COMMENT_HOWTO,
+    _PR_CREATE_HOWTO,
+    _ROLE_AFTER_SPAWN,
+    _load_agent_body_template,
+    _pm_consultation_body,
+    _render_agent_body,
+    _resolve_howtos,
+    _spawn_step3,
+    _wait_for_agent_cmd,
+)
+from core.dispatch.validator_comment import (  # noqa: F401, E402
+    _pm_spec_comment,
+    _validator_github_comment_outcome,
+)
+from core.dispatch.housekeeping import (  # noqa: F401, E402
+    _FOLLOWUP_MARKER,
+    _FOLLOWUP_MARKER_RE,
+    _GENERIC_TO_ROLE,
+    _GET_ISSUE_RETRY_DELAYS,
+    _WT_BRANCH_ISSUE_RE,
+    _WT_PATH_ISSUE_RE,
+    _WT_TERMINAL_STATUSES,
+    _check_follow_ups_from_reviewer_prs,
+    _check_stalled_in_progress,
+    _extract_follow_ups_from_pr_comment,
+    _fetch_issue_with_retry,
+    _fetch_issues,
+    _find_issue_n_from_parents,
+    _global_reconcile_orphan_cards,
+    _is_issue_closed_cached,
+    _maybe_reset_brain_to_primary,
+    _remap_generic_role_assignees,
+    _sweep_orphan_worktrees,
 )
 # ── End leaf-module re-exports ────────────────────────────────────────────────
 
@@ -258,181 +295,10 @@ _ROLE_TMP_PREFIX: Dict[str, str] = {
 # (see ``_wait_for_agent_cmd``) reports the agent died or timed out, the worker
 # must move its card OUT of ``running`` (block it) so the dispatcher retries per
 # kanban.failure_limit instead of leaving a zombie ``running`` card (issue #141).
-_AGENT_FAILED_NOTE = (
-    "If that output contains 'CODING_AGENT_DIED' or 'CODING_AGENT_TIMEOUT', the coding agent "
-    "failed to produce a result — do NOT proceed, do NOT attempt to implement or investigate "
-    "the issue yourself, and do NOT complete your card. "
-    'Block it with kanban_block("coding-agent-failed: <CODING_AGENT_DIED|CODING_AGENT_TIMEOUT> — see stderr above") '
-    "and STOP. The dispatcher will retry automatically on your next session end."
-)
 
-
-def _wait_for_agent_cmd(
-    pfx: str, issue_number: int, max_wait: int, detect_pr: bool = False
-) -> str:
-    """Build the bounded, liveness-guarded wait command for a spawned coding agent.
-
-    Polls for the agent's output file, but unlike the old ``until [ -s out ]``
-    loop it ALSO (a) checks the spawned PID with ``kill -0`` and bails the moment
-    the process is gone with no output, and (b) enforces a ``max_wait`` wall-clock
-    ceiling. On either failure it prints a ``CODING_AGENT_DIED`` /
-    ``CODING_AGENT_TIMEOUT`` marker plus the stderr tail so the death reason
-    (OOM / auth / crash) is visible (issue #141). The whole command is a single
-    line so it drops straight into a ``terminal("...")`` call.
-
-    When ``detect_pr`` is set (developer role only), each poll also runs
-    ``daedalus-detect-pr.sh``: if the coding agent has already opened a PR for its
-    branch but hasn't exited/emitted the handshake line, the helper writes that
-    line to ``out`` and kills the agent, so the card advances to review instead of
-    sitting ``running`` until the timeout and then retrying into a duplicate PR
-    (issue #146). The helper is a quiet no-op when no PR exists yet, so the
-    liveness/timeout backstop below is unchanged for every other case.
-    """
-    out = f"/tmp/{pfx}-{issue_number}-out.txt"
-    err = f"/tmp/{pfx}-{issue_number}-err.txt"
-    pid = f"/tmp/{pfx}-{issue_number}-pid.txt"
-    detect = "$HOME/.hermes/plugins/daedalus/scripts/daedalus-detect-pr.sh"
-    # Pass the deterministic branch so detection is race-free (the developer runs
-    # in an isolated worktree on fix/issue-<N>; reading the shared HEAD would
-    # report another concurrent agent's branch — the #1131 cross-wire loop).
-    detect_branch = f"fix/issue-{issue_number}" if issue_number else ""
-    # No double quotes anywhere — this whole string is embedded inside a
-    # terminal("...") call, so a literal " would terminate it early. An empty or
-    # stale PID makes ``kill -0`` exit non-zero (treated as dead), which is the
-    # behavior we want, so the unquoted $P needs no -z guard.
-    #
-    # The PR-detection step runs FIRST each iteration and may populate {out}
-    # (and kill the agent). The ``[ -s {out} ] && break`` right after it exits the
-    # loop without consuming a 30s sleep when a PR was just found. {out} is a
-    # space-free /tmp path so it needs no quoting.
-    detect_step = (
-        f"bash {detect} {out} {pid} {detect_branch} 2>/dev/null; [ -s {out} ] && break; "
-        if detect_pr
-        else ""
-    )
-    return (
-        f"P=$(cat {pid} 2>/dev/null); S=$SECONDS; "
-        f"while [ ! -s {out} ]; do "
-        f"{detect_step}"
-        f"if ! kill -0 $P 2>/dev/null; then "
-        f"echo CODING_AGENT_DIED: agent exited without writing output. stderr tail:; "
-        f"tail -n 40 {err} 2>/dev/null; break; fi; "
-        f"if [ $((SECONDS-S)) -ge {max_wait} ]; then "
-        f"echo CODING_AGENT_TIMEOUT: exceeded {max_wait}s with no output. stderr tail:; "
-        f"tail -n 40 {err} 2>/dev/null; break; fi; "
-        f"sleep 30; done; cat {out} 2>/dev/null"
-    )
-
-
-# Templates keyed by role. ``{wait_cmd}`` (the bounded liveness-guarded wait) and
-# ``{failed_note}`` are filled in by ``_build_delegation_instructions`` along with
-# ``{pfx}``/``{issue_number}`` so each concurrent task reads/writes an isolated
-# /tmp pair (issue #114) and fails fast on a dead agent (issue #141).
-_ROLE_AFTER_SPAWN: Dict[str, str] = {
-    "developer": (
-        '  4. Wait for the coding agent to finish: terminal("{wait_cmd}")\n'
-        "  4b. {failed_note}\n"
-        "  5. On success the agent will have opened a PR and output: 'PR URL: ... PR number: <n>'\n"
-        "  5b. If the output does NOT contain 'PR URL:', the inner agent ran but failed to open a PR — "
-        'block the card with kanban_block("coding-agent-failed: inner agent produced no PR URL") and STOP. '
-        "Do NOT attempt to implement or fix the issue yourself.\n"
-        '  6. Block your card: kanban_block("review-required: PR #<n> — <branch>")\n'
-        "  STOP — do NOT open the PR yourself and do NOT attempt the implementation yourself. "
-        "Wait for coding agent output, then block with the real PR number. "
-        "The task body below is for the INNER coding agent only.\n"
-    ),
-    "validator": (
-        '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
-        "  4b. {failed_note}\n"
-        "  5. On success the inner agent will have printed its verdict as the last line of stdout.\n"
-        "  6. Complete YOUR kanban card with the exact verdict line from the output: 'CONFIRMED: <reason>' or 'BLOCKED: <reason>' or 'ALREADY_FIXED: <reason>'\n"
-        "  STOP — do NOT investigate the issue yourself. Do NOT call kanban_block unless the inner agent failed.\n"
-    ),
-    "pm": (
-        '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
-        "  4b. {failed_note}\n"
-        '  5. On success the agent will have posted the spec to GitHub and output "spec: <summary>".\n'
-        "  6. Complete your card with: 'spec: <one-line summary from the output>'\n"
-        "  STOP — do not write the spec yourself.\n"
-    ),
-    "qa": (
-        '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
-        "  4b. {failed_note}\n"
-        "  5. On success the agent will have posted a QA report to GitHub and output its verdict.\n"
-        "  6. Complete your card: 'qa-passed: PR #N' or block with 'qa-failed: <reason>'\n"
-        "  STOP — do not run the tests yourself.\n"
-    ),
-    "reviewer": (
-        '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
-        "  4b. {failed_note}\n"
-        "  5. On success the agent will have posted review findings to GitHub and output its verdict.\n"
-        "  6. Complete your card: 'reviewed: approved' or 'reviewed: changes-requested: <reason>'\n"
-        "  STOP — do not review the PR yourself.\n"
-    ),
-    "security": (
-        '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
-        "  4b. {failed_note}\n"
-        "  5. On success the agent will have posted security findings to GitHub and output its verdict.\n"
-        "  6. Complete your card: 'security: cleared' or 'security: flagged: <finding>'\n"
-        "  STOP — do not audit the PR yourself.\n"
-    ),
-    "documentation": (
-        '  4. Wait for the coding agent: terminal("{wait_cmd}")\n'
-        "  4b. {failed_note}\n"
-        "  5. On success the agent will have posted the completion report to GitHub.\n"
-        "  6. Complete your card: 'docs: posted completion report for PR #N'\n"
-        "  STOP — do not write the report yourself.\n"
-    ),
-}
-
-_CLOUD_AGENT_LABELS: Dict[str, str] = {
-    "claude-code": "Claude Code",
-    "codex": "Codex",
-    "opencode": "OpenCode",
-}
-
-# Boundary between the outer delegation wrapper and the inner coding-agent
-# prompt (#1241). Block-first bodies end the delegation block with this line
-# and the wrapper's step 1 says "copy ONLY the text below it"; body-first
-# bodies use the "⚠️  AGENT DELEGATION" marker line itself as the boundary.
-# Copying the wrapper into the inner agent's stdin makes it re-delegate
-# (spawn a background subagent and exit with no output).
-_INNER_BODY_SEPARATOR = (
-    "━━━ INNER TASK BODY — write ONLY the text BELOW this line to the task file ━━━"
-)
-
-
-def _spawn_step3(
-    pfx: str, issue_number: int, run_cmd: str, role: str, base_branch: str
-) -> str:
-    """Build the step-3 ``terminal(...)`` spawn line for the delegated coding agent.
-
-    For the developer role the agent is launched inside a dedicated per-issue git
-    worktree (branch ``fix/issue-<N>`` forked off freshly-fetched ``origin/<base>``)
-    via ``daedalus-worktree-spawn.sh``. This isolates concurrent developers so they
-    never share a working tree — the fix for the shared-workdir branch/PR cross-wire
-    race (a #1131-style CODING_AGENT_DIED loop). Every worktree forks off *current*
-    ``base`` (the wrapper fetches first) to minimise merge conflicts.
-
-    Other roles keep the original in-place spawn (they run against an existing PR
-    and do not create branches).
-    """
-    tmp = f"/tmp/{pfx}-{issue_number}-task.txt"
-    outf = f"/tmp/{pfx}-{issue_number}-out.txt"
-    errf = f"/tmp/{pfx}-{issue_number}-err.txt"
-    pidf = f"/tmp/{pfx}-{issue_number}-pid.txt"
-    if role == "developer":
-        spawn = (
-            "$HOME/.hermes/plugins/daedalus/scripts/daedalus-worktree-spawn.sh "
-            f"{issue_number} {base_branch} {tmp} {outf} {errf} {run_cmd}"
-        )
-        return f"  3. terminal(\"bash -c 'echo $$ > {pidf}; exec {spawn}'\", background=True)\n"
-    return (
-        f"  3. terminal(\"bash -c 'echo $$ > {pidf}; "
-        f"{run_cmd} < {tmp} > {outf} 2> {errf}'\", background=True)\n"
-    )
-
-
+# _AGENT_FAILED_NOTE, _wait_for_agent_cmd, _ROLE_AFTER_SPAWN, _CLOUD_AGENT_LABELS,
+# _INNER_BODY_SEPARATOR, _spawn_step3
+# → moved to core/dispatch/bodies.py (issue #1153 PR 2/4)
 def _build_delegation_instructions(
     agent: str,
     cmd: str = "",
@@ -796,70 +662,8 @@ def _build_failover_context(
     }
 
 
-def _maybe_reset_brain_to_primary(
-    workdir: str, failover_ctx: Dict[str, Any], dry_run: bool
-) -> None:
-    """Restore the primary brain provider once its cooldown expires (#1207).
 
-    Brain failover is global (profiles are resynced for every role), so
-    recovery is a per-tick check rather than per-card: when the profiles are
-    on a fallback entry, ``reset_to_primary`` is set, and the primary's
-    cooldown window has passed, resync back and clear the cooldown.
-    """
-    if dry_run:
-        return
-    fcfg = failover_ctx["cfg"]
-    chain = failover_ctx["chains"]["brain"]
-    if len(chain) < 2 or not fcfg.get("reset_to_primary", True):
-        return
-    if dispatch_state.get_brain_active_index(workdir) <= 0:
-        return
-    primary = chain[0]
-    key = provider_failover.provider_key(
-        provider_failover.LAYER_BRAIN, primary["provider"]
-    )
-    if dispatch_state.get_provider_cooldowns(workdir).get(key, 0) > time.time():
-        return  # still cooling — stay on the fallback
-    if failover_ctx["apply"]["brain"]({}, primary):
-        dispatch_state.clear_provider_cooldown(workdir, key)
-        failover_ctx["current"]["brain"] = primary["provider"]
-        logger.info(
-            "failover: primary brain provider %s recovered — profiles "
-            "resynced back (reset_to_primary)",
-            primary["provider"],
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# _maybe_reset_brain_to_primary → moved to core/dispatch/housekeeping.py (issue #1153 PR 2/4)
 def _validate_profiles(
     profiles: Dict[str, str],
     *,
@@ -927,165 +731,11 @@ def _validate_profiles(
 
 
 
-def _fetch_issues(provider, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Open issues matching the configured label filter (ANY label), deduped.
 
-    Paginates until the provider returns all issues; logs a WARNING when more
-    than one page is fetched so operators know the board is growing large.
-    An optional ``filters.max_issues`` ceiling caps the total result count for
-    performance-sensitive deployments.
-    """
-    if provider is None:
-        return []
-    state = filters.get("state", "open")
-    # ``limit`` is the page size sent to the provider (max 100 per GitHub API).
-    # list_issues() now paginates automatically, so this is no longer a hard cap.
-    page_size = int(filters.get("limit", 100))
-    max_issues = filters.get("max_issues")  # optional hard ceiling
-    labels = [lbl for lbl in (filters.get("labels") or []) if lbl]
-    issues = [
-        i.as_dict()
-        for i in provider.list_issues(state=state, labels=labels, limit=page_size)
-    ]
-    if len(issues) > page_size:
-        logger.warning(
-            "dispatch: _fetch_issues returned %d issues (>%d page_size) — "
-            "board has multiple pages; set filters.max_issues to cap if needed",
-            len(issues),
-            page_size,
-        )
-    if max_issues is not None:
-        ceiling = int(max_issues)
-        if len(issues) > ceiling:
-            logger.warning(
-                "dispatch: _fetch_issues truncated to max_issues=%d (total=%d)",
-                ceiling,
-                len(issues),
-            )
-            issues = issues[:ceiling]
-    return issues
+# _fetch_issues → moved to core/dispatch/housekeeping.py (issue #1153 PR 2/4)
 
-
-# Agents no longer post their own GitHub comments (#894). GITHUB_TOKEN is NOT
-# exported into the cron worker environment, so the old urllib/token snippets
-# raised KeyError and the progress comment was silently dropped. Instead, the
-# dispatcher mirrors each role's kanban completion summary to the issue via its
-# already-authenticated provider (see ``_post_completion_comments``). The
-# how-to string below therefore just tells the agent NOT to post — and to write
-# a clear kanban summary, which the dispatcher posts on its behalf.
-_AGENT_COMMENT_NOTE = (
-    "the dispatcher — it automatically posts your completion summary to the "
-    "issue when your kanban card completes, so you do NOT post GitHub comments "
-    "yourself. Just write a clear kanban completion summary stating your role, "
-    "your findings/decision, and the next steps"
-)
-_PR_COMMENT_HOWTO = {
-    "github": _AGENT_COMMENT_NOTE,
-    "gitlab": _AGENT_COMMENT_NOTE,
-    "azuredevops": _AGENT_COMMENT_NOTE,
-}
-
-_CLOSE_ISSUE_HOWTO = {
-    "github": (
-        "PATCH https://api.github.com/repos/{repo}/issues/{n} "
-        "-H 'Authorization: Bearer $GITHUB_TOKEN' "
-        "-H 'Accept: application/vnd.github+json' "
-        '-d \'{{"state":"closed","state_reason":"{reason}"}}\''
-    ),
-    "gitlab": (
-        "PUT /api/v4/projects/<project-id>/issues/{n} "
-        "-H 'PRIVATE-TOKEN: $GITLAB_TOKEN' "
-        '-d \'{{"state_event":"close"}}\''
-    ),
-    "azuredevops": (
-        "PATCH .../workitems/{n} (Basic auth with $AZURE_DEVOPS_PAT) "
-        '-d \'[{{"op":"add","path":"/fields/System.State","value":"Done"}}]\''
-    ),
-}
-
-_PR_CREATE_HOWTO = {
-    "github": (
-        "the GitHub API. "
-        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal for this, "
-        "as PR body markdown breaks shell escaping. "
-        "WARNING: pr_body below is PLAIN MARKDOWN TEXT — do NOT set it to JSON or a dict. "
-        "Python example:\n"
-        "```python\n"
-        "import os, urllib.request, json\n"
-        "# pr_body is PLAIN MARKDOWN — not JSON, not a dict, just text\n"
-        "pr_body = 'Closes #<issue_number>\\n\\n## Problem\\n<describe>\\n\\n## Fix\\n<what changed>\\n\\n## How to test\\n<steps>'\n"
-        "payload = {{'title': '<title>', 'head': '<branch>', 'base': '<base>', 'body': pr_body}}\n"
-        "req = urllib.request.Request(\n"
-        "    'https://api.github.com/repos/{repo}/pulls',\n"
-        "    data=json.dumps(payload).encode(),\n"
-        "    headers={{'Authorization': f'Bearer {{os.environ[\"GITHUB_TOKEN\"]}}',\n"
-        "             'Accept': 'application/vnd.github+json'}}, method='POST')\n"
-        "resp = json.loads(urllib.request.urlopen(req).read())\n"
-        "print('PR URL:', resp['html_url'], 'PR number:', resp['number'])\n"
-        "```\n"
-        "— pr_body MUST be a plain markdown string starting with 'Closes #<issue_number>' on its own line; "
-        "NEVER set pr_body to json.dumps(...) or a dict"
-    ),
-    "gitlab": (
-        "the GitLab API. "
-        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
-        "WARNING: description below is PLAIN MARKDOWN TEXT — do NOT set it to JSON or a dict. "
-        "Python example:\n"
-        "```python\n"
-        "import os, urllib.request, json\n"
-        "# description is PLAIN MARKDOWN — not JSON, not a dict, just text\n"
-        "description = 'Closes #<issue_number>\\n\\n## Problem\\n<describe>\\n\\n## Fix\\n<what changed>\\n\\n## How to test\\n<steps>'\n"
-        "payload = {{'source_branch': '<branch>', 'target_branch': '<base>',\n"
-        "            'title': '<title>', 'description': description}}\n"
-        "req = urllib.request.Request(\n"
-        "    'https://gitlab.com/api/v4/projects/<project-id>/merge_requests',\n"
-        "    data=json.dumps(payload).encode(),\n"
-        "    headers={{'PRIVATE-TOKEN': os.environ['GITLAB_TOKEN'],\n"
-        "             'Content-Type': 'application/json'}}, method='POST')\n"
-        "resp = json.loads(urllib.request.urlopen(req).read())\n"
-        "print('MR URL:', resp['web_url'], 'MR number:', resp['iid'])\n"
-        "```\n"
-        "— description MUST be a plain markdown string starting with 'Closes #<issue_number>' on its own line; "
-        "NEVER set description to json.dumps(...) or a dict"
-    ),
-    "azuredevops": (
-        "the Azure DevOps API. "
-        "IMPORTANT: use execute_code(language='python') — do NOT use curl/terminal. "
-        "WARNING: description below is PLAIN MARKDOWN TEXT — do NOT set it to JSON or a dict. "
-        "Python example:\n"
-        "```python\n"
-        "import os, urllib.request, json, base64\n"
-        "pat = os.environ['AZURE_DEVOPS_PAT']\n"
-        "auth = base64.b64encode(f':{pat}'.encode()).decode()\n"
-        "# description is PLAIN MARKDOWN — not JSON, not a dict, just text\n"
-        "description = 'Fixes #<issue_number>\\n\\n## Problem\\n<describe>\\n\\n## Fix\\n<what changed>\\n\\n## How to test\\n<steps>'\n"
-        "payload = {{'title': '<title>', 'sourceRefName': 'refs/heads/<branch>',\n"
-        "            'targetRefName': 'refs/heads/<base>', 'description': description}}\n"
-        "req = urllib.request.Request(\n"
-        "    'https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullrequests?api-version=7.1',\n"
-        "    data=json.dumps(payload).encode(),\n"
-        "    headers={{'Authorization': f'Basic {{auth}}', 'Content-Type': 'application/json'}}, method='POST')\n"
-        "resp = json.loads(urllib.request.urlopen(req).read())\n"
-        "print('PR URL:', resp.get('url'), 'PR ID:', resp.get('pullRequestId'))\n"
-        "```\n"
-        "— description MUST be a plain markdown string starting with 'Fixes #<issue_number>' on its own line; "
-        "NEVER set description to json.dumps(...) or a dict"
-    ),
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# _AGENT_COMMENT_NOTE, _PR_COMMENT_HOWTO, _CLOSE_ISSUE_HOWTO, _PR_CREATE_HOWTO
+# → moved to core/dispatch/bodies.py (issue #1153 PR 2/4)
 def _check_epic_qa_ready(
     slug: str,
     issue_number: int,
@@ -1280,36 +930,9 @@ def _maybe_undefer_epic_qa_tasks(
 # builder.  It raises ``FileNotFoundError`` when the template file is missing
 # (never silently yields an empty prompt).
 
-_AGENT_BODY_TEMPLATE_DIR = _PLUGIN_ROOT / "templates" / "agent_bodies"
-_AGENT_BODY_CACHE: Dict[str, str] = {}
 
-
-def _load_agent_body_template(name: str) -> str:
-    """Load and cache the raw text of ``templates/agent_bodies/<name>.md``."""
-    if name in _AGENT_BODY_CACHE:
-        return _AGENT_BODY_CACHE[name]
-    path = _AGENT_BODY_TEMPLATE_DIR / f"{name}.md"
-    if not path.is_file():
-        raise FileNotFoundError(f"agent-body template not found: {path}")
-    text = path.read_text(encoding="utf-8")
-    _AGENT_BODY_CACHE[name] = text
-    return text
-
-
-def _render_agent_body(name: str, **variables: Any) -> str:
-    """Render ``templates/agent_bodies/<name>.md`` with ``string.Template``.
-
-    Uses ``$placeholder`` syntax (``$$`` for a literal ``$``).  Literal braces
-    are safe — they are NOT special in ``string.Template``.  Missing
-    placeholders raise ``KeyError`` (via ``.substitute``), never silently
-    leave ``$name`` in the output.
-    """
-    from string import Template
-
-    tmpl = _load_agent_body_template(name)
-    return Template(tmpl).substitute(variables)
-
-
+# _AGENT_BODY_TEMPLATE_DIR, _AGENT_BODY_CACHE, _load_agent_body_template, _render_agent_body
+# → moved to core/dispatch/bodies.py (issue #1153 PR 2/4)
 def _planner_body(
     repo: str,
     issue: Dict[str, Any],
@@ -1416,37 +1039,7 @@ def _planner_body(
     )
 
 
-def _resolve_howtos(
-    provider_name: str, repo: str, issue_number: int = 0
-) -> Dict[str, str]:
-    """Resolve provider-appropriate how-to instruction strings for a role body.
-
-    Returns ``{"comment", "pr_create", "close_completed", "close_wontfix"}`` —
-    the same strings each ``_*_body()`` previously built inline. Callers pick the
-    keys they need; unused keys are cheap to compute and never emitted.
-    """
-    comment = _PR_COMMENT_HOWTO.get(provider_name, _PR_COMMENT_HOWTO["github"]).format(
-        repo=repo
-    )
-    pr_create = _PR_CREATE_HOWTO.get(provider_name, _PR_CREATE_HOWTO["github"]).format(
-        repo=repo
-    )
-    close_tmpl = _CLOSE_ISSUE_HOWTO.get(provider_name, _CLOSE_ISSUE_HOWTO["github"])
-    return {
-        "comment": comment,
-        "pr_create": pr_create,
-        "close_completed": close_tmpl.format(
-            repo=repo, n=issue_number, reason="completed"
-        ),
-        "close_wontfix": close_tmpl.format(
-            repo=repo, n=issue_number, reason="not_planned"
-        ),
-    }
-
-
-
-
-
+# _resolve_howtos → moved to core/dispatch/bodies.py (issue #1153 PR 2/4)
 
 
 
@@ -2062,84 +1655,9 @@ _CONSULT_RESOLVED_MARKER_PREFIX = "<!-- daedalus:consult-resolved:"
 _BLOCKER_CARD_COMMENT_PREFIX = "blocker-card: "
 
 
-def _validator_github_comment_outcome(
-    provider,
-    issue_number: int,
-    validator_profile: str = "validator-daedalus",
-) -> str:
-    """Return 'confirmed', 'rejected', or '' by scanning GitHub issue comments.
 
-    When a validator agent's kanban summary is None (context-limit dropout), its
-    GitHub comment is the only reliable record of its decision.  We scan all
-    comments on the issue for one authored by the validator (detected via the
-    mandatory '**Agent: validator**' attribution prefix from SOUL.md) and look
-    for the outcome keyword in the comment body.
-    """
-    if provider is None:
-        return ""
-    try:
-        comments = provider.get_issue_comments(issue_number) or []
-    except Exception:
-        return ""
-    # Extract the role name for the SOUL.md attribution header check.
-    # e.g. "validator-daedalus" → match "agent: validator" in the body.
-    role_slug = validator_profile.split("-")[0]  # "validator"
-    agent_marker = f"agent: {role_slug}"  # "agent: validator"
-    for c in reversed(comments):
-        body_lower = (c.get("body") or "").lower()
-        if agent_marker not in body_lower[:300]:
-            continue
-        if "confirmed" in body_lower:
-            return "confirmed"
-        if (
-            "rejected" in body_lower
-            or "cannot_reproduce" in body_lower
-            or "already_fixed" in body_lower
-        ):
-            return "rejected"
-    return ""
-
-
-def _pm_spec_comment(
-    provider,
-    issue_number: int,
-    pm_profile: str = "project-manager-daedalus",
-) -> str:
-    """Return a short head of the issue's '## Implementation Spec' comment, or ''.
-
-    When the PM kanban card completes with an empty summary (hermes
-    premature-completion bug, #1161), the spec the PM posted on the GitHub issue
-    is the only surviving record. Mirrors _validator_github_comment_outcome: scan
-    comments newest-first for one carrying the PM attribution marker in its head
-    and an '## Implementation Spec' heading, and return the first non-empty line
-    after the heading (truncated to 200 chars) for use in an adopted summary.
-
-    The marker strips the trailing profile suffix with rsplit — the validator
-    helper's split('-')[0] would derive 'agent: project' from
-    'project-manager-daedalus' and match unrelated 'project-*' agents.
-    """
-    if provider is None:
-        return ""
-    try:
-        comments = provider.get_issue_comments(issue_number) or []
-    except Exception:
-        return ""
-    role_slug = pm_profile.rsplit("-", 1)[0] if "-" in pm_profile else pm_profile
-    agent_marker = f"agent: {role_slug}"  # "agent: project-manager"
-    for c in reversed(comments):
-        body = c.get("body") or ""
-        body_lower = body.lower()
-        if agent_marker not in body_lower[:300]:
-            continue
-        idx = body_lower.find("## implementation spec")
-        if idx == -1:
-            continue
-        for line in body[idx:].splitlines()[1:]:
-            line = line.strip()
-            if line:
-                return line[:200]
-    return ""
-
+# _validator_github_comment_outcome, _pm_spec_comment
+# → moved to core/dispatch/validator_comment.py (issue #1153 PR 2/4)
 
 def _try_adopt_pm_spec_comment(
     slug: str,
@@ -2691,305 +2209,15 @@ def _stamp_resolved_consultations(
 
 
 # Marker embedded in the summary comment for idempotency.
-_FOLLOWUP_MARKER = "<!-- daedalus:follow-up-extracted PR #{pr} issue #{issue} -->"
-_FOLLOWUP_MARKER_RE = re.compile(
-    r"<!-- daedalus:follow-up-extracted PR #(\d+) issue #(\d+) -->",
-)
 
+# _FOLLOWUP_MARKER, _FOLLOWUP_MARKER_RE, _extract_follow_ups_from_pr_comment,
+# _check_follow_ups_from_reviewer_prs
+# → moved to core/dispatch/housekeeping.py (issue #1153 PR 2/4)
+# agent-header used in follow-up comment: "**Agent: dispatcher**\n\n"
 
-
-
-def _extract_follow_ups_from_pr_comment(
-    slug: str,
-    repo: str,
-    provider,
-    pr_number: int,
-    workdir: str,
-    reviewer_slugs: List[str],
-    labels: List[str],
-    triage_assignee: str,
-    extra_patterns: List[str],
-    *,
-    dry_run: bool = False,
-) -> List[int]:
-    """Extract follow-ups from one PR's reviewer/QA comments and create tracking issues.
-
-    Returns list of newly created GitHub issue numbers.  Idempotent: already-extracted
-    items are skipped via embedded HTML comment markers in the PR summary comment.
-    """
-    comments = provider.list_pr_comments(pr_number)
-
-    # Collect already-extracted issue numbers from marker comments (idempotency).
-    already_extracted: set = set()
-    for c in comments:
-        for m in _FOLLOWUP_MARKER_RE.finditer(c.body or ""):
-            if int(m.group(1)) == pr_number:
-                already_extracted.add(int(m.group(2)))
-
-    # Filter to reviewer / QA comments.
-    reviewer_comments = [c for c in comments if (c.author or "") in reviewer_slugs]
-    if not reviewer_comments:
-        return []
-
-    # Parse follow-up items from each qualifying comment.
-    follow_ups: List[tuple] = []  # (title, source_excerpt)
-    for c in reviewer_comments:
-        items = _parse_follow_ups(c.body or "", extra_patterns)
-        for item in items:
-            excerpt = (c.body or "")[:600]
-            follow_ups.append((item, excerpt))
-
-    if not follow_ups:
-        return []
-
-    # Deduplicate titles across comments.
-    seen_titles: set = set()
-    deduped: List[tuple] = []
-    for title, excerpt in follow_ups:
-        key = title.lower()
-        if key not in seen_titles:
-            seen_titles.add(key)
-            deduped.append((title, excerpt))
-
-    created: List[int] = []
-    pr_url = (
-        provider.pr_url(pr_number) if hasattr(provider, "pr_url") else f"#{pr_number}"
-    )
-
-    for title, excerpt in deduped:
-        issue_title = f"[Follow-up from PR #{pr_number}] {title}"
-
-        # Skip titles that look like already-existing issues (exact title match guard).
-        try:
-            existing_issues = provider.list_issues(
-                state="open", labels=["follow-up"], limit=100
-            )
-            existing_titles = {i.title.lower() for i in existing_issues}
-            if issue_title.lower() in existing_titles:
-                logger.debug(
-                    "follow-up already exists as open issue, skipping: %r", issue_title
-                )
-                continue
-        except Exception as exc:
-            # #1111: a failed dedup query means we cannot verify this title is
-            # unique. Skip creation instead of blindly making a potential
-            # duplicate, and log a warning so the bypass is never silent.
-            logger.warning(
-                "follow-up dedup query failed for PR #%s (%s) — skipping "
-                "creation of %r to avoid a silent duplicate (#1111)",
-                pr_number,
-                exc,
-                issue_title,
-            )
-            continue
-
-        issue_body = (
-            f"_Auto-extracted by Daedalus from PR #{pr_number} reviewer/QA comment._\n\n"
-            f"**Original PR:** {pr_url}\n\n"
-            f"**Follow-up item:** {title}\n\n"
-            f"---\n\n"
-            f"**Comment excerpt:**\n\n"
-            f"```\n{excerpt}\n```\n"
-        )
-
-        if dry_run:
-            logger.info(
-                "[dry-run] would create follow-up issue: %r (PR #%s)", title, pr_number
-            )
-            created.append(0)
-            continue
-
-        issue_num = provider.create_issue(issue_title, issue_body, labels)
-        if not issue_num:
-            logger.warning(
-                "follow-up extraction: create_issue failed for PR #%s: %r",
-                pr_number,
-                title,
-            )
-            continue
-
-        if issue_num in already_extracted:
-            logger.debug("follow-up #%s already tracked (PR #%s)", issue_num, pr_number)
-            continue
-
-        kanban.create_triage(
-            slug,
-            issue_num,
-            issue_title,
-            issue_body,
-            idempotency_key=f"follow-up-{pr_number}-{issue_num}",
-            workspace=f"dir:{workdir}" if workdir else None,
-        )
-        created.append(issue_num)
-        logger.info(
-            "follow-up extracted: PR #%s → issue #%s %r", pr_number, issue_num, title
-        )
-
-    if created and not dry_run:
-        markers = "\n".join(
-            _FOLLOWUP_MARKER.format(pr=pr_number, issue=n) for n in created
-        )
-        issue_refs = "\n".join(f"- #{n}" for n in created)
-        summary = (
-            f"**Agent: dispatcher**\n\n"
-            f"Follow-up items extracted from reviewer/QA comments:\n\n"
-            f"{issue_refs}\n\n"
-            f"{markers}"
-        )
-        provider.post_pr_comment(pr_number, summary)
-
-    return created
-
-
-def _check_follow_ups_from_reviewer_prs(
-    slug: str,
-    repo: str,
-    provider,
-    workdir: str,
-    profiles: Dict[str, str],
-    follow_up_cfg: Dict[str, Any],
-    *,
-    dry_run: bool = False,
-) -> int:
-    """Scan recent PRs for follow-up items in reviewer/QA comments.
-
-    Called from run() after _check_completed_pm.  Returns count of new issues created.
-    Controlled by follow_up_extraction: enabled: true/false in daedalus.yaml.
-    """
-    if not follow_up_cfg.get("enabled", True):
-        return 0
-
-    reviewer_slugs = [
-        profiles.get("reviewer", _DEFAULT_PROFILES["reviewer"]),
-        "qa-daedalus",
-    ]
-    labels: List[str] = follow_up_cfg.get("labels") or ["enhancement", "follow-up"]
-    triage_assignee: str = follow_up_cfg.get(
-        "assign_triage_to", profiles.get("pm", _DEFAULT_PROFILES["pm"])
-    )
-    extra_patterns: List[str] = follow_up_cfg.get("patterns") or []
-    scan_limit: int = int(follow_up_cfg.get("scan_pr_limit", 20))
-
-    try:
-        prs = provider.list_prs(state="all", limit=scan_limit)
-    except Exception as exc:
-        logger.warning("follow-up extraction: list_prs failed: %s", exc)
-        return 0
-
-    total = 0
-    for pr in prs:
-        try:
-            created = _extract_follow_ups_from_pr_comment(
-                slug,
-                repo,
-                provider,
-                pr.number,
-                workdir,
-                reviewer_slugs,
-                labels,
-                triage_assignee,
-                extra_patterns,
-                dry_run=dry_run,
-            )
-            total += len(created)
-        except Exception as exc:
-            logger.warning("follow-up extraction: PR #%s failed: %s", pr.number, exc)
-    return total
-
-
-# Generic role names the PM agent may use instead of Daedalus profile names.
-# Maps generic name → key in the profiles dict.
-_GENERIC_TO_ROLE: Dict[str, str] = {
-    "developer": "developer",
-    "qa": "qa",
-    "reviewer": "reviewer",
-    "security-analyst": "security",
-    "security": "security",
-    "documentation": "documentation",
-    "accessibility": "accessibility",
-    "planner": "pm",
-}
-
-
-def _remap_generic_role_assignees(
-    slug: str,
-    profiles: Dict[str, str],
-    *,
-    dry_run: bool = False,
-) -> Dict[str, tuple]:
-    """Auto-correct generic role names to Daedalus profile names on todo/ready tasks.
-
-    The PM agent sometimes sets assignee='developer' instead of 'developer-daedalus'.
-    This runs each tick before dispatch so tasks are corrected before workers are spawned.
-    Returns {task_id: (original_assignee, remapped_assignee)} for any remapped tasks.
-    """
-    profile_values = set(profiles.values())
-    remapped: Dict[str, tuple] = {}
-    for status in ("todo", "ready"):
-        for task in kanban.list_tasks(slug, status=status):
-            original = (task.get("assignee") or "").strip()
-            if not original or original in profile_values:
-                continue
-            role = _GENERIC_TO_ROLE.get(original)
-            if role is None:
-                logger.debug(
-                    "dispatch: remap: unknown assignee %r on task %s — skipping",
-                    original,
-                    task.get("id", "?"),
-                )
-                continue
-            new_assignee = profiles.get(role)
-            if not new_assignee:
-                continue
-            task_id = (task.get("id") or task.get("task_id") or "").strip()
-            if not task_id:
-                continue
-            if dry_run:
-                logger.info(
-                    "[dry-run] remap: would reassign %s: %s → %s",
-                    task_id,
-                    original,
-                    new_assignee,
-                )
-                remapped[task_id] = (original, new_assignee)
-            elif kanban.reassign_task(slug, task_id, new_assignee):
-                remapped[task_id] = (original, new_assignee)
-    if remapped:
-        lines = "\n".join(
-            f"  {tid}: {orig} → {new}" for tid, (orig, new) in remapped.items()
-        )
-        logger.info(
-            "dispatch: remapped %d generic assignee(s) → Daedalus profiles:\n%s",
-            len(remapped),
-            lines,
-        )
-    return remapped
-
-
-def _find_issue_n_from_parents(slug: str, task_id: str) -> Optional[str]:
-    """Return the first issue number found in a parent task's title or body.
-
-    Queries task_links in the board SQLite DB directly since the kanban CLI
-    does not expose parent IDs in list output.
-    """
-    db_path = os.path.expanduser(f"~/.hermes/kanban/boards/{slug}/kanban.db")
-    if not os.path.exists(db_path):
-        return None
-    try:
-        conn = connect_wal(db_path)
-        rows = conn.execute(
-            "SELECT t.title, t.body FROM task_links l JOIN tasks t ON t.id = l.parent_id WHERE l.child_id = ?",
-            (task_id,),
-        ).fetchall()
-        conn.close()
-        for parent_title, parent_body in rows:
-            text = (parent_title or "") + " " + (parent_body or "")
-            num = extract_issue_number(text)
-            if num is not None:
-                return str(num)
-    except Exception as exc:
-        logger.debug("dispatch: repair: parent lookup failed for %s: %s", task_id, exc)
-    return None
+# _GENERIC_TO_ROLE, _remap_generic_role_assignees, _find_issue_n_from_parents,
+# _global_reconcile_orphan_cards
+# → moved to core/dispatch/housekeeping.py (issue #1153 PR 2/4)
 
 
 def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
@@ -3003,6 +2231,11 @@ def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
     The tasks are filtered to exclude terminal states (done, complete, completed,
     cancelled, canceled, archived), consistent with the status-blind principle from
     epic #1008.
+
+    NOTE: stays in dispatcher (not housekeeping.py) because tests replace
+    ``disp.kanban = fk`` and this function reads ``kanban.list_tasks``; moving
+    it would break the fake-kanban injection in test_issue_1008 and
+    test_concurrent_dispatch (issue #1153 PR 2/4).
     """
     terminal_statuses = {
         "done",
@@ -3021,53 +2254,6 @@ def _count_active_issue_tasks(slug: str, issue_number: int) -> int:
         if status not in terminal_statuses:
             count += 1
     return count
-
-
-def _global_reconcile_orphan_cards(
-    slug: str, provider, *, dry_run: bool = False
-) -> None:
-    """Sweep all non-terminal kanban cards and complete those whose issue is Done.
-
-    Safety net: if a card references an issue that's already Done on the board
-    but the card itself is still non-terminal (bug in earlier cleanup paths,
-    card added after the issue moved to Done, etc.), complete it here.
-    Idempotent — re-running never double-completes or thrashes terminal cards.
-    """
-    if provider is None:
-        return
-    board_done_nums = set(
-        provider.board_numbers_with_statuses([provider.status_name("done")])
-    )
-    terminal_states = {"done", "complete", "completed", "cancelled"}
-    for t in kanban.list_tasks(slug):
-        # Skip already-terminal cards
-        if (t.get("status") or "").lower() in terminal_states:
-            continue
-        # Resolve issue number from title or body
-        title = t.get("title") or ""
-        body = t.get("body") or ""
-        num = extract_issue_number(title)
-        if num is None:
-            num = extract_issue_number(body)
-        if num is None or num not in board_done_nums:
-            continue
-        # This card belongs to a Done issue — complete it
-        tid = t.get("id") or t.get("task_id")
-        if not tid:
-            continue
-        if dry_run:
-            logger.info(
-                "[dry-run] would complete orphan card %s (parent issue #%s is Done)",
-                tid,
-                num,
-            )
-        elif kanban.complete(slug, str(tid), summary="orphan: parent issue is Done"):
-            logger.info(
-                "dispatch: completed orphan card %s (parent issue #%s reached Done)",
-                tid,
-                num,
-            )
-
 
 def _repair_orphan_tasks(
     slug: str,
@@ -3167,161 +2353,10 @@ def _repair_orphan_tasks(
     return repaired
 
 
-# Issue attribution for registered worktrees: the branch name our developer
-# worktrees are spawned on (fix/issue-<N>), falling back to the directory name
-# convention (.worktrees/dev-<N>). Worktrees matching neither are left alone —
-# the sweep never removes what it cannot attribute to an issue.
-_WT_BRANCH_ISSUE_RE = re.compile(r"fix/issue-(\d+)$")
-_WT_PATH_ISSUE_RE = re.compile(r"(?:issue|dev)-(\d+)$")
-
-# Kanban statuses that mean "this issue's pipeline is finished" — a worktree
-# whose issue has ONLY tasks in these states (or none at all) is an orphan.
-_WT_TERMINAL_STATUSES = ("done", "complete", "completed", "cancelled", "archived")
+# _WT_BRANCH_ISSUE_RE, _WT_PATH_ISSUE_RE, _WT_TERMINAL_STATUSES, _sweep_orphan_worktrees
+# → moved to core/dispatch/housekeeping.py (issue #1153 PR 2/4)
 
 
-def _sweep_orphan_worktrees(workdir: str, slug: str, *, dry_run: bool = False) -> int:
-    """Remove registered git worktrees whose issue has no active kanban task.
-
-    Agents are instructed to ``git worktree remove --force`` on cleanup, but a
-    crashed/reclaimed agent leaves its worktree behind and they accumulate
-    unboundedly (issue #1114). This enforcement sweep runs once per tick:
-
-      1. Enumerate worktrees via ``git worktree list --porcelain``.
-      2. Attribute each to an issue number (branch ``fix/issue-<N>``, falling
-         back to a ``dev-<N>``/``issue-<N>`` directory name). The main worktree
-         and unattributable entries are always skipped.
-      3. Remove any whose issue has no active (non-terminal) kanban task, then
-         ``git worktree prune`` the stale metadata.
-
-    Every git call is wrapped so a single broken worktree (locked, missing,
-    permission error) is logged at WARNING and skipped — this function never
-    raises and never aborts the tick. If the board itself can't be read the
-    sweep aborts without removing anything (active worktrees are at risk when
-    the active-task set is unknown). Returns the count of removed worktrees
-    (in dry-run mode, the count that would be removed).
-    """
-    if not workdir:
-        return 0
-    try:
-        listed = subprocess.run(
-            ["git", "-C", workdir, "worktree", "list", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except Exception as exc:
-        logger.warning("dispatch: worktree sweep skipped — git list failed: %s", exc)
-        return 0
-    if listed.returncode != 0:
-        logger.debug(
-            "dispatch: worktree sweep skipped — %s is not a usable git repo", workdir
-        )
-        return 0
-
-    # Porcelain output: one block per worktree ("worktree <path>" / "HEAD <sha>"
-    # / "branch refs/heads/<name>" or "detached"), blocks separated by blank lines.
-    entries: List[Dict[str, str]] = []
-    cur: Dict[str, str] = {}
-    for line in (listed.stdout or "").splitlines():
-        if not line.strip():
-            if cur:
-                entries.append(cur)
-                cur = {}
-        elif line.startswith("worktree "):
-            cur["path"] = line[len("worktree ") :].strip()
-        elif line.startswith("branch "):
-            cur["branch"] = line[len("branch ") :].strip()
-    if cur:
-        entries.append(cur)
-
-    root = os.path.realpath(workdir)
-    candidates: List[Tuple[str, str, int]] = []
-    for entry in entries:
-        path = entry.get("path") or ""
-        if not path or os.path.realpath(path) == root:
-            continue  # never touch the main worktree
-        branch = entry.get("branch") or ""
-        if branch.startswith("refs/heads/"):
-            branch = branch[len("refs/heads/") :]
-        m = _WT_BRANCH_ISSUE_RE.search(branch) or _WT_PATH_ISSUE_RE.search(
-            os.path.basename(path.rstrip("/"))
-        )
-        if not m:
-            logger.debug(
-                "dispatch: worktree sweep: cannot attribute %s to an issue — skipping",
-                path,
-            )
-            continue
-        candidates.append((path, branch, int(m.group(1))))
-    if not candidates:
-        return 0
-
-    try:
-        tasks = kanban.list_tasks(slug)
-    except Exception as exc:
-        logger.warning("dispatch: worktree sweep skipped — kanban list failed: %s", exc)
-        return 0
-    active: set = set()
-    for task in tasks:
-        if (task.get("status") or "").lower() in _WT_TERMINAL_STATUSES:
-            continue
-        n = extract_issue_number(task.get("title") or "")
-        if n is not None:
-            active.add(n)
-
-    removed = 0
-    for path, branch, issue_n in candidates:
-        if issue_n in active:
-            continue
-        if dry_run:
-            logger.info(
-                "[dry-run] would remove orphan worktree %s (branch=%s, issue=#%d)",
-                path,
-                branch,
-                issue_n,
-            )
-            removed += 1
-            continue
-        try:
-            rm = subprocess.run(
-                ["git", "-C", workdir, "worktree", "remove", "--force", path],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        except Exception as exc:
-            logger.warning(
-                "dispatch: failed to remove orphan worktree %s: %s — skipping",
-                path,
-                exc,
-            )
-            continue
-        if rm.returncode != 0:
-            logger.warning(
-                "dispatch: failed to remove orphan worktree %s: %s — skipping",
-                path,
-                (rm.stderr or rm.stdout or "").strip()[:200],
-            )
-            continue
-        logger.info(
-            "dispatch: swept orphan worktree %s (branch=%s, issue=#%d)",
-            path,
-            branch,
-            issue_n,
-        )
-        removed += 1
-
-    if removed and not dry_run:
-        try:
-            subprocess.run(
-                ["git", "-C", workdir, "worktree", "prune"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except Exception as exc:
-            logger.warning("dispatch: git worktree prune failed: %s", exc)
-    return removed
 
 
 def _send_retry_cap_notification(
@@ -5169,63 +4204,8 @@ def _planner_not_suitable_validator_body(
     )
 
 
-_GET_ISSUE_RETRY_DELAYS = (1.0, 2.0)  # seconds; len == extra attempts after the first
-
-
-def _fetch_issue_with_retry(provider, n: int):
-    """Fetch an issue not in the list window, retrying on transient failure.
-
-    ``get_issue`` collapses transient (exhausted 429/5xx, transport) and
-    permanent (404/PR/deleted) failures into ``None``. For a confirmed-spec
-    issue the issue almost always exists, so a ``None`` is treated as likely
-    transient and retried a bounded number of times with short backoff before
-    falling through to the caller's warn-and-skip path.
-    """
-    fetched = provider.get_issue(n)
-    if fetched:
-        return fetched
-    for delay in _GET_ISSUE_RETRY_DELAYS:
-        time.sleep(delay)
-        fetched = provider.get_issue(n)
-        if fetched:
-            logger.info("dispatch: get_issue #%s succeeded on retry", n)
-            return fetched
-    return None
-
-
-def _is_issue_closed_cached(
-    provider, issue_number: int, cache: Dict[int, Optional[bool]]
-) -> Optional[bool]:
-    """Three-state closed-issue check, memoized per-tick to avoid redundant API calls.
-
-    Returns:
-        ``True``  — the GitHub issue is confirmed closed.
-        ``False`` — the issue is confirmed open (or no provider/method is
-                    available, so we fail open for tests without a full provider).
-        ``None``  — the state is *unknown*: ``provider.get_issue_state`` raised
-                    (e.g. a 403 rate-limit error). Callers MUST treat ``None`` as
-                    "skip / do not process" rather than "open", otherwise the
-                    stale scan keeps processing under rate limit and reinforces
-                    the very rate limiting that defeats this guard (issue #1120).
-
-    Callers should therefore gate on ``is not False`` (skip when closed *or*
-    unknown) rather than the plain truthiness of the return value.
-    """
-    if issue_number not in cache:
-        if provider is not None and hasattr(provider, "get_issue_state"):
-            try:
-                cache[issue_number] = provider.get_issue_state(issue_number) == "closed"
-            except Exception as exc:  # rate limit / transient API error
-                logger.warning(
-                    "dispatch: get_issue_state(#%s) failed (%s) — treating state as "
-                    "unknown and skipping to avoid reinforcing rate limiting (#1120)",
-                    issue_number,
-                    exc,
-                )
-                cache[issue_number] = None
-        else:
-            cache[issue_number] = False
-    return cache[issue_number]
+# _GET_ISSUE_RETRY_DELAYS, _fetch_issue_with_retry, _is_issue_closed_cached
+# → moved to core/dispatch/housekeeping.py (issue #1153 PR 2/4)
 
 
 def _check_completed_pm(
@@ -5880,107 +4860,8 @@ def _guard_prefix_on_done(
     return triggered
 
 
-def _pm_consultation_body(
-    repo: str,
-    issue: Dict[str, Any],
-    blocker_summary: str,
-    workdir: str,
-    provider_name: str,
-) -> str:
-    """Task body for a PM consultation when a team member hits a technical blocker."""
-    n, title, _, _ = _unpack_issue(issue)
-    comment_howto = _resolve_howtos(provider_name, repo, n)["comment"]
-    return (
-        f"You are the PRODUCT MANAGER responding to a TEAM BLOCKER on issue {repo}#{n}: {title}\n"
-        f"Work in the existing git repo at {workdir}.\n\n"
-        f"A team member has been blocked and cannot proceed without PM clarification.\n"
-        f"Blocker reported: {blocker_summary}\n\n"
-        f"⛔ DO NOT write code. Your role is to unblock the team with product/design decisions.\n\n"
-        f"Steps:\n"
-        f"   a) Read the blocker summary and the original issue #{n} carefully.\n"
-        f"   b) Post a clarification comment on issue #{n} via: {comment_howto}\n"
-        f"      Your comment must:\n"
-        f"      - Address the specific blocker described above\n"
-        f"      - Make a concrete product decision (not 'it depends')\n"
-        f"      - Reference acceptance criteria from the spec if applicable\n"
-        f"   c) If the blocker reveals a product-level ambiguity: update the spec comment "
-        f"on issue #{n} with the new decision.\n"
-        f"   d) Complete your card with summary starting 'CLARIFIED: ' followed by a "
-        f"1-sentence description of the decision made.\n\n"
-        f"If this blocker cannot be resolved without human input (requires legal, compliance, "
-        f"or C-level sign-off), complete your card with 'ESCALATED: ' and explain why.\n"
-    )
-
-
-def _check_stalled_in_progress(
-    slug: str,
-    stall_minutes: int = 30,
-    *,
-    dry_run: bool = False,
-) -> List[str]:
-    """Detect stalled in-progress cards and move them to blocked.
-
-    For every card in 'running' status whose last update is older than
-    ``stall_minutes``, move it to 'blocked' with a STALLED summary so that
-    _check_team_blockers picks it up on the next tick and routes it to PM.
-
-    Returns list of task ids that were transitioned.
-    """
-    stalled: List[str] = []
-    # List running tasks
-    for task in kanban.list_tasks(slug, status="running"):
-        tid = (task.get("id") or task.get("task_id") or "").strip()
-        if not tid:
-            continue
-        # Fetch full card to get updated_at
-        card = kanban.show_card(slug, tid) or {}
-        updated_raw = card.get("updated_at") or card.get("started_at") or ""
-        if not updated_raw:
-            continue
-        try:
-            # Try parsing ISO timestamp
-            if isinstance(updated_raw, str):
-                # Handle various ISO formats
-                updated_dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
-            elif isinstance(updated_raw, (int, float)):
-                updated_dt = datetime.fromtimestamp(updated_raw, tz=timezone.utc)
-            else:
-                continue
-            # If naive, assume UTC
-            if updated_dt.tzinfo is None:
-                updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-            age_minutes = (
-                datetime.now(timezone.utc) - updated_dt
-            ).total_seconds() / 60.0
-        except (ValueError, TypeError, OSError):
-            continue
-        if age_minutes < stall_minutes:
-            continue
-        # Stalled — move to blocked
-        if dry_run:
-            logger.info(
-                "[dry-run] stalled card %s (age=%.0fm) — would move to blocked",
-                tid,
-                age_minutes,
-            )
-            stalled.append(tid)
-            continue
-        # Use kanban.block to move to blocked state
-        try:
-            kanban.block_task(
-                slug,
-                tid,
-                f"STALLED: session ended without completing (age={age_minutes:.0f}m)",
-            )
-            logger.info(
-                "dispatch: stalled card %s moved to blocked (age=%.0fm)",
-                tid,
-                age_minutes,
-            )
-            stalled.append(tid)
-        except Exception as e:
-            logger.warning("dispatch: failed to block stalled card %s: %s", tid, e)
-    return stalled
+# _pm_consultation_body → moved to core/dispatch/bodies.py (issue #1153 PR 2/4)
+# _check_stalled_in_progress → moved to core/dispatch/housekeeping.py (issue #1153 PR 2/4)
 
 
 def _check_team_blockers(
