@@ -48,18 +48,39 @@
 #   HERMES_KANBAN_TASK       task id for the heartbeat (set in the worker env)
 set -euo pipefail
 
+# Harden temp-file handling: private-by-default perms on everything we create,
+# so the per-run sidecar dir (below) and its contents are 0700/0600 (CWE-377).
+umask 077
+
 n="${1:?issue number required}"
 base="${2:-dev}"
 task="${3:?task file required}"
 out="${4:?out file required}"
 err="${5:?err file required}"
 shift 5
+
+# Validate the issue number is numeric before it flows into the mktemp template,
+# the fix/issue-<N> branch name, or the metadata JSON — a non-numeric $n would
+# let a caller smuggle path/format characters into those contexts.
+case "$n" in
+  ''|*[!0-9]*)
+    echo "daedalus-delegate: issue number must be numeric (got: '$n')" >&2
+    exit 2
+    ;;
+esac
 # Remaining args ("$@") are the opaque RUN_CMD; forwarded verbatim to the
 # worktree spawner, which runs them under `bash -c`.
 
 MAX_WAIT="${DAEDALUS_MAX_WAIT:-3600}"
 HEARTBEAT_SECS="${DAEDALUS_HEARTBEAT_SECS:-60}"
-POLL_SECS=5
+POLL_SECS="${DAEDALUS_POLL_SECS:-5}"
+# Run the (network) detect-pr check only every Nth poll iteration instead of
+# every POLL_SECS. detect-pr shells out to `gh pr list`; at POLL_SECS=5 for the
+# full max_wait that is ~720 API calls/hour/developer, which trips GitHub's
+# secondary rate limit under concurrency. The PID `kill -0` liveness check and
+# the wall-clock timeout still run EVERY iteration; only the PR poll is throttled
+# to the ~30s cadence (6 * 5s) a human-review handoff easily tolerates.
+DETECT_PR_EVERY="${DAEDALUS_DETECT_PR_EVERY:-6}"
 
 # Sibling scripts live next to this one — derive the dir so the wrapper works
 # from any install location (worktree, installed plugin) without a hardcoded path.
@@ -67,16 +88,36 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SPAWN="$SCRIPT_DIR/daedalus-worktree-spawn.sh"
 DETECT="$SCRIPT_DIR/daedalus-detect-pr.sh"
 
-# Derive the sidecar file paths from OUT so they share the per-issue prefix the
-# dispatcher already uses (/tmp/dev-<N>-out.txt -> -pid.txt / -meta.json / -stop.txt).
-stem="${out%-out.txt}"
-pidfile="${stem}-pid.txt"
-meta="${stem}-meta.json"
+# Per-run PRIVATE sidecar dir (CWE-59/377). The pid/meta/signal/stdout/stderr
+# sidecars used to live at predictable /tmp/dev-<N>-* paths, which let a hostile
+# co-tenant pre-plant a symlink (TOCTOU) so our `>` writes followed it into an
+# arbitrary file, or race the name into existence. `mktemp -d` gives an
+# unguessable 0700 dir (umask 077 above keeps it private) that only we can write
+# into. The passed-in OUT/ERR args are the dispatcher's contract, but nothing
+# external reads those files — the outer LLM reads THIS wrapper's stdout — so we
+# relocate the actual stdout/stderr capture into the private dir too and remove
+# it on exit.
+RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/daedalus-delegate-${n}.XXXXXX")"
+trap 'rm -rf "$RUNDIR" 2>/dev/null || true' EXIT
+
+out="$RUNDIR/out.txt"
+err="$RUNDIR/err.txt"
+pidfile="$RUNDIR/pid.txt"
+meta="$RUNDIR/meta.json"
 # Stop-hook signal file: a Claude Code Stop hook (deployed separately) can touch
 # this to signal the inner session ended even before its stdout flushes. Watched
 # here so the wait can break on it; absent hook => file never appears (no-op).
-signal="${stem}-stop.txt"
-rm -f "$signal" 2>/dev/null || true
+signal="$RUNDIR/stop.txt"
+
+# Refuse to write through a symlink. RUNDIR is a fresh 0700 mktemp dir so
+# pre-planting is already impossible, but guard the wrapper's own writes
+# explicitly (defence-in-depth, CWE-59) before any `printf >` to a sidecar.
+_no_symlink() {
+  if [ -L "$1" ]; then
+    echo "daedalus-delegate: refusing to write through symlink: $1" >&2
+    exit 1
+  fi
+}
 
 # Best-effort heartbeat — never fatal (guarded so it can't trip `set -e`).
 # Board slug comes from DAEDALUS_BOARD, falling back to the worker env's
@@ -93,28 +134,52 @@ _heartbeat() {
   fi
 }
 
+# Mask common secret shapes in RELAYED output. The failure path emits the inner
+# agent's stderr tail to stdout, which the orchestrator may mirror into kanban
+# comments / Slack — a path that bypasses core/providers/http.py's token
+# redaction. Mask tokens/keys here before they leave the process. sed -E only,
+# so it stays portable across BSD (macOS) and GNU sed: no \b/\d, POSIX classes
+# and {n,} intervals only. Specific token shapes run before the generic
+# high-entropy rule so their labels survive.
+_redact() {
+  sed -E \
+    -e 's/(gh[pousr]_)[A-Za-z0-9]+/\1[REDACTED]/g' \
+    -e 's/(sk-)[A-Za-z0-9-]+/\1[REDACTED]/g' \
+    -e 's/(xox[baprs]-)[A-Za-z0-9-]+/\1[REDACTED]/g' \
+    -e 's/([Bb]earer )[A-Za-z0-9._-]+/\1[REDACTED]/g' \
+    -e 's/([A-Za-z0-9_]*(TOKEN|KEY|SECRET)=)[^[:space:]]+/\1[REDACTED]/g' \
+    -e 's/[A-Za-z0-9_-]{32,}/[REDACTED]/g'
+}
+
 # Background the inner agent inside its isolated per-issue worktree. worktree-spawn
 # `exec`s the coding agent, so $! is the agent's own PID — the liveness check and
 # detect-pr's kill both target it.
 "$SPAWN" "$n" "$base" "$task" "$out" "$err" "$@" &
 PID=$!
+_no_symlink "$pidfile"
 printf '%s\n' "$PID" > "$pidfile"
 
 marker=""            # CODING_AGENT_DIED / CODING_AGENT_TIMEOUT, else empty
 start=$SECONDS
 last_hb=$SECONDS
+iter=0               # poll counter — gates the throttled detect-pr check
 
 # Wait on the FIRST of {inner exit, detect-pr handshake, stop-hook signal,
 # max_wait}. The inner agent's stdout lands in $out; detect-pr also writes the
 # handshake line to $out (and kills the agent) when a PR is already open, so a
 # non-empty $out is the single "we're done, advance" condition either way.
 while [ ! -s "$out" ]; do
+  iter=$((iter + 1))
   # PR handshake: if an open PR already exists for fix/issue-<N>, this writes the
   # handshake line to $out and kills the still-running agent (#146). Quiet no-op
-  # otherwise. Deterministic branch keeps detection race-free (#1131).
-  bash "$DETECT" "$out" "$pidfile" "fix/issue-$n" 2>/dev/null || true
-  if [ -s "$out" ]; then
-    break
+  # otherwise. Deterministic branch keeps detection race-free (#1131). Throttled
+  # to every DETECT_PR_EVERY-th iteration (the `gh pr list` call is the rate-limit
+  # risk) while liveness/timeout below still run every iteration.
+  if [ $((iter % DETECT_PR_EVERY)) -eq 0 ]; then
+    bash "$DETECT" "$out" "$pidfile" "fix/issue-$n" 2>/dev/null || true
+    if [ -s "$out" ]; then
+      break
+    fi
   fi
   # Stop-hook signalled the session ended.
   if [ -f "$signal" ]; then
@@ -163,6 +228,7 @@ fi
 
 # Structured outcome -> metadata file (for the dispatcher's later use; the
 # runtime completion path stays block-based per the #1280 invariant).
+_no_symlink "$meta"
 printf '{"daedalus_delegate":1,"issue":%s,"exit_code":%s,"pr":%s,"marker":"%s","verdict":"%s"}\n' \
   "$n" "$rc" "${pr:-null}" "$marker" "$verdict" > "$meta" 2>/dev/null || true
 
@@ -172,7 +238,10 @@ printf '{"daedalus_delegate":1,"issue":%s,"exit_code":%s,"pr":%s,"marker":"%s","
 cat "$out" 2>/dev/null || true
 if [ -n "$marker" ]; then
   echo "$marker: developer coding agent failed (verdict=$verdict, rc=$rc). stderr tail:"
-  tail -n 40 "$err" 2>/dev/null || true
+  # Redact secret shapes from the relayed stderr tail before it leaves the
+  # process (the orchestrator may mirror it into kanban/Slack). Block markers
+  # above are emitted separately, so they stay intact.
+  tail -n 40 "$err" 2>/dev/null | _redact || true
 fi
 
 exit 0

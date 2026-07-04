@@ -185,6 +185,95 @@ def test_ac4_wrapper_forwards_run_cmd_as_opaque_trailing_args():
         assert name not in code, f"wrapper must not branch on agent name {name!r}"
 
 
+# ── Hardening pass (#1284/#1280): private sidecar dir, stderr redaction, cadence ─
+
+
+def test_sidecars_use_private_mktemp_dir_not_predictable_tmp():
+    """Fix A: pid/meta/signal/stdout/stderr live in a per-run 0700 mktemp dir, not
+    at predictable /tmp/dev-<N>-* names (CWE-59/377)."""
+    src = WRAPPER.read_text(encoding="utf-8")
+    assert "umask 077" in src, "wrapper must set a private umask before creating temp files"
+    assert "mktemp -d" in src, "wrapper must create a private per-run dir via mktemp -d"
+    assert "daedalus-delegate-" in src, "mktemp template must be namespaced to this wrapper"
+    # The old predictable derivation ('${stem}-pid.txt' off the OUT stem) is gone.
+    code = _wrapper_code()
+    assert "-pid.txt" not in code, "pidfile must live in the private dir, not a predictable /tmp name"
+    assert "-meta.json" not in code, "meta must live in the private dir, not a predictable /tmp name"
+    assert "RUNDIR=$(mktemp -d" in code.replace('"', ""), "RUNDIR must come from mktemp -d"
+    assert 'pidfile="$RUNDIR/pid.txt"' in code
+    assert 'meta="$RUNDIR/meta.json"' in code
+    # Numeric-only issue-number validation before it reaches the mktemp template.
+    assert "*[!0-9]*" in code, "wrapper must reject a non-numeric issue number"
+    # Symlink guard exists and is invoked before the wrapper's own writes.
+    assert "_no_symlink" in code and "[ -L" in code, "wrapper must guard against symlink writes"
+    # detect-pr still receives the (relocated) pidfile path explicitly — the
+    # handshake contract with daedalus-detect-pr.sh is preserved.
+    assert '"$DETECT" "$out" "$pidfile"' in code, "detect-pr must still get the pidfile path"
+
+
+def test_detect_pr_cadence_is_a_named_constant_and_liveness_stays_every_iter():
+    """Fix C: the detect-pr `gh pr list` poll is throttled via a named constant,
+    while `kill -0` liveness runs every iteration."""
+    code = _wrapper_code()
+    assert "DETECT_PR_EVERY" in code, "cadence must be a named constant"
+    # detect-pr is gated by the modulo of the constant …
+    assert "% DETECT_PR_EVERY" in code, "detect-pr must run only every DETECT_PR_EVERY-th iteration"
+    # … but the liveness check is NOT inside that gate (it must run every loop).
+    lines = code.splitlines()
+    gate_idx = next(i for i, ln in enumerate(lines) if "% DETECT_PR_EVERY" in ln)
+    kill_idx = next(i for i, ln in enumerate(lines) if 'kill -0 "$PID"' in ln)
+    # The liveness `kill -0` sits AFTER the detect gate's closing block, unindented
+    # relative to the gate body — i.e. it is not nested under the cadence `if`.
+    assert kill_idx > gate_idx
+    assert lines[kill_idx].startswith("  if ! kill -0"), (
+        "liveness kill -0 must be a top-level loop step, not nested under the cadence gate"
+    )
+    # Default cadence ≈ 30s at POLL_SECS=5.
+    assert "DAEDALUS_DETECT_PR_EVERY:-6" in code
+
+
+def test_failure_tail_redacts_planted_secret_end_to_end(tmp_path):
+    """Fix B: run the REAL wrapper with a coding-agent command that leaks a fake
+    token to stderr then dies; the relayed stderr tail must be masked."""
+    import os
+    import subprocess
+
+    fake_token = "ghp_" + "A" * 36  # GitHub-PAT shape, 40-char run
+    task = tmp_path / "task.txt"
+    task.write_text("inner task body")
+    out = tmp_path / "out.txt"  # relocated internally; passed for the arg contract
+    err = tmp_path / "err.txt"
+    workdir = tmp_path / "work"  # NON-git cwd → worktree-spawn falls back, no repo pollution
+    workdir.mkdir()
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "DAEDALUS_MAX_WAIT": "30",
+            "DAEDALUS_POLL_SECS": "1",  # die within one poll → fast test, detect-pr never fires
+            "DAEDALUS_HEARTBEAT_SECS": "999",
+        }
+    )
+    for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_BOARD", "DAEDALUS_BOARD"):
+        env.pop(k, None)
+
+    # One opaque RUN_CMD arg (worktree-spawn joins "$@" and runs it via bash -c):
+    # emit the token to stderr, produce NO PR line, exit non-zero → CODING_AGENT_DIED.
+    run_cmd = f"echo leaked {fake_token} >&2; exit 1"
+    proc = subprocess.run(
+        ["bash", str(WRAPPER), "999", "dev", str(task), str(out), str(err), run_cmd],
+        cwd=str(workdir),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    combined = proc.stdout
+    assert "CODING_AGENT_DIED" in combined, f"expected silent-death marker, got:\n{combined}\n{proc.stderr}"
+    assert fake_token not in combined, f"planted token leaked into relayed tail:\n{combined}"
+    assert "ghp_[REDACTED]" in combined, f"token shape must be masked, got:\n{combined}"
+
+
 # ── core/kanban.py: heartbeat + complete(metadata=...) ────────────────────────
 
 
@@ -252,10 +341,14 @@ def test_kanban_complete_with_metadata_passes_json():
 if __name__ == "__main__":
     # Dual-mode: run standalone without pytest. Auto-discovers test_* functions;
     # parametrized cases are invoked with representative args.
+    import tempfile
+
     failures = 0
     _params = {
         "test_ac3_classify_blocked_routes_crash_markers_to_infra_failure": ["coding_agent_died"],
         "test_ac4_wrapper_command_embeds_run_cmd_for_every_agent": ["codex", "codex exec --full-auto"],
+        # tmp_path is a pytest fixture; supply a real temp dir in standalone mode.
+        "test_failure_tail_redacts_planted_secret_end_to_end": [Path(tempfile.mkdtemp())],
     }
     for name, fn in sorted(globals().items()):
         if not (name.startswith("test_") and callable(fn)):
