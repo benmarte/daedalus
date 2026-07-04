@@ -358,3 +358,195 @@ def _enforce_validator_blocks(
             enforced.append(n)
             _mark_notified_block(slug, n, validator_profile=validator_profile)
     return enforced
+
+
+# ── 6-outcome validator arbiter (upfront pipeline DAG, #1290) ─────────────────
+#
+# When ``pipeline.upfront_dag`` is ON the entire stage graph is created at
+# Ready-time (see :func:`core.iterate.build_pipeline_dag`).  This arbiter is the
+# generalisation of :func:`_enforce_validator_blocks` for that world: instead of
+# only reacting to a *blocked* validator card, it reads the validator's
+# structured 6-outcome verdict (native run metadata first — #1288 transport —
+# then the free-text JSON block, then the legacy prefix) and prunes the DAG:
+#
+#     confirmed                       → KEEP     (Hermes auto-promotes PM)
+#     already_fixed | duplicate       → CANCEL   (cancel every downstream branch)
+#     needs_more_info | block_for_review → HUMAN  (block --kind needs_input; human)
+#     security_threat                 → ESCALATE (notify + cancel every branch)
+#     unknown / unparseable           → PARK     (== needs_more_info; NEVER auto-proceed)
+#
+# Active ONLY when the flag is on — the dispatcher calls _enforce_validator_blocks
+# instead when it is off, so flag-off behaviour is byte-identical.
+
+# Arbiter action constants (return values of :func:`_map_validator_outcome`).
+ARBITER_KEEP = "keep"
+ARBITER_CANCEL = "cancel"
+ARBITER_HUMAN = "human"
+ARBITER_ESCALATE = "escalate"
+ARBITER_PARK = "park"
+
+# Validator verdict → arbiter action.  Any verdict not in this table (including
+# None / unparseable) safe-parks — the pipeline never auto-proceeds on ambiguity.
+_VALIDATOR_ARBITER_MAP: dict[str, str] = {
+    "confirmed": ARBITER_KEEP,
+    "already_fixed": ARBITER_CANCEL,
+    "duplicate": ARBITER_CANCEL,
+    "needs_more_info": ARBITER_HUMAN,
+    "block_for_review": ARBITER_HUMAN,
+    "security_threat": ARBITER_ESCALATE,
+}
+
+# Legacy prefix → verdict, for the prefix-fallback read path.  Longest / most
+# specific tokens first so e.g. "ALREADY_FIXED" is matched before a bare scan
+# could confuse it.  Matched case-insensitively against the summary text.
+_VALIDATOR_PREFIX_VERDICTS: list[tuple[str, str]] = [
+    ("ALREADY_FIXED", "already_fixed"),
+    ("SECURITY_THREAT", "security_threat"),
+    ("BLOCK_FOR_REVIEW", "block_for_review"),
+    ("NEEDS_MORE_INFO", "needs_more_info"),
+    ("DUPLICATE", "duplicate"),
+    ("CONFIRMED", "confirmed"),
+]
+
+# Validator card statuses the arbiter acts on.  A still-running / pending
+# validator has no verdict yet and must NOT be parked — only terminal-or-blocked
+# cards are arbitrated.
+_ARBITER_READABLE_STATUSES = {"done", "complete", "completed", "blocked"}
+
+
+def _map_validator_outcome(verdict: str | None) -> str:
+    """Map a validator verdict to an arbiter action (never raises).
+
+    ``None`` or any unrecognised verdict maps to :data:`ARBITER_PARK` — the
+    pipeline is held for a human rather than silently advanced on ambiguity.
+    """
+    if not verdict:
+        return ARBITER_PARK
+    return _VALIDATOR_ARBITER_MAP.get(verdict.strip().lower(), ARBITER_PARK)
+
+
+def _read_validator_verdict(slug: str, card: dict) -> str | None:
+    """Resolve a validator card's structured verdict, or None (never raises).
+
+    Read order mirrors ``classify_blocked`` (#1288): native closing-run metadata
+    first, then the free-text JSON outcome block in the summary, then the legacy
+    uppercase prefix.  Returns the verdict string (e.g. ``"confirmed"``) or None
+    when nothing parseable is present — the caller safe-parks on None.
+    """
+    from core.iterate import outcomes as _outcomes  # lazy: avoid import cycle
+
+    tid = card.get("id") or card.get("task_id") or ""
+
+    # 1) native run metadata (metadata_transport transport).
+    if tid:
+        try:
+            meta = kanban.run_outcome(slug, str(tid))
+        except Exception:
+            meta = None
+        if meta:
+            rec = _outcomes.parse_dict(meta)
+            if rec is not None and rec.role == "validator":
+                return rec.verdict
+
+    # 2) free-text JSON outcome block in the recorded summary.
+    summary = (card.get("summary") or card.get("last_summary")
+               or card.get("latest_summary") or "")
+    if summary:
+        rec = _outcomes.parse(summary)
+        if rec is not None and rec.role == "validator":
+            return rec.verdict
+
+    # 3) legacy prefix fallback.
+    upper = summary.upper()
+    for prefix, verdict in _VALIDATOR_PREFIX_VERDICTS:
+        if prefix in upper:
+            return verdict
+    return None
+
+
+def _arbitrate_validator_outcome(
+    slug: str,
+    provider,
+    existing: set,
+    *,
+    validator_profile: str = "validator-daedalus",
+    dry_run: bool = False,
+) -> List[int]:
+    """6-outcome DAG pruner for the upfront-DAG world (#1290).
+
+    For every terminal-or-blocked validator card of a managed issue, read the
+    structured verdict and prune the pre-built stage graph accordingly (see the
+    module comment above).  Returns the issue numbers that warrant an operator
+    notification (human-gate / escalation) — cancels are silent so pruned
+    branches never fire notifications (AC7).  Idempotent: cancels skip
+    already-done cards and notifications are de-duped via ``_has_notified_block``.
+    Never raises — provider / kanban helpers already degrade gracefully.
+    """
+    if provider is None or not provider.board_configured():
+        return []
+    enforced: List[int] = []
+    for card in kanban.list_tasks(slug):
+        if (card.get("assignee") or "").strip() != validator_profile:
+            continue
+        status = (card.get("status") or "").strip().lower()
+        if status not in _ARBITER_READABLE_STATUSES:
+            continue  # still running/pending — no verdict yet
+        summary = (card.get("summary") or card.get("last_summary") or "").lower()
+        # An infrastructure crash is not a validator verdict — leave it to the
+        # crash-retry reconciler (mirrors _enforce_validator_blocks).
+        if crash_retry.is_crash_class(slug, card, summary):
+            continue
+        n = extract_issue_number(card.get("title") or "")
+        if n is None or n not in existing:
+            continue
+
+        verdict = _read_validator_verdict(slug, card)
+        action = _map_validator_outcome(verdict)
+
+        if action == ARBITER_KEEP:
+            logger.info("dispatch: arbiter #%s — validator confirmed; DAG proceeds", n)
+            continue
+
+        if dry_run:
+            logger.info(
+                "[dry-run] arbiter #%s — verdict=%s action=%s", n, verdict, action)
+            if action in (ARBITER_HUMAN, ARBITER_ESCALATE, ARBITER_PARK):
+                enforced.append(n)
+            continue
+
+        if action == ARBITER_CANCEL:
+            cancelled = kanban.close_issue_tasks(
+                slug, n, summary=f"cancelled: validator {verdict}")
+            logger.info(
+                "dispatch: arbiter #%s — validator %s; cancelled %d downstream card(s)",
+                n, verdict, len(cancelled))
+            # silent: pruned branch fires no notification (AC7).
+            continue
+
+        if action == ARBITER_ESCALATE:
+            provider.board_set_status(n, "Blocked")
+            cancelled = kanban.close_issue_tasks(
+                slug, n, summary="cancelled: validator SECURITY_THREAT — escalated")
+            logger.info(
+                "dispatch: arbiter #%s — SECURITY_THREAT; escalated + cancelled %d card(s)",
+                n, len(cancelled))
+        else:  # ARBITER_HUMAN or ARBITER_PARK
+            provider.board_set_status(n, "Blocked")
+            tid = card.get("id") or card.get("task_id")
+            if tid:
+                # Tag the validator card as awaiting human input (degrades if the
+                # card is already terminal — block_task never raises).
+                kanban.block_task(
+                    slug, str(tid),
+                    f"needs_input: validator {verdict or 'unparseable'} — human required",
+                    kind="needs_input",
+                )
+            logger.info(
+                "dispatch: arbiter #%s — verdict=%s → human gate (needs_input)",
+                n, verdict)
+
+        # Notify once per issue (human-gate + escalation), deduped.
+        if not _has_notified_block(slug, n, validator_profile=validator_profile):
+            enforced.append(n)
+            _mark_notified_block(slug, n, validator_profile=validator_profile)
+    return enforced
