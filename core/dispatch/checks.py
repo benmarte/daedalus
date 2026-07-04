@@ -94,6 +94,12 @@ def _disp():
 
     Priority 2 — ``sys.modules`` fallback: covers production (``"__main__"``)
     and conftest-only tests that never store the module in a local variable.
+
+    The stack walk is unbounded — it ascends every frame until the stack root
+    (``frame.f_back is None``) before falling through to the ``sys.modules``
+    fallback; the ``except Exception: pass`` guard ensures any
+    ``AttributeError`` or ``SystemError`` from frame introspection does not
+    propagate.
     """
     try:
         frame = sys._getframe(1)
@@ -632,7 +638,7 @@ def _check_confirmed_validators(
     dry_run: bool = False,
     provider=None,
     resolved: Optional[Dict[str, Any]] = None,
-    closed_issue_cache: Optional[Dict[int, bool]] = None,
+    closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
 ) -> List[int]:
     """Phase-2 trigger: for every validator task completed with 'CONFIRMED:' summary,
     create a PM task to write the spec + acceptance criteria.
@@ -1630,7 +1636,7 @@ def _check_completed_planner(
     *,
     dry_run: bool = False,
     provider=None,
-    closed_issue_cache: Optional[Dict[int, bool]] = None,
+    closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
     repo: str = "",
     base_branch: str = "dev",
     issues_map: Optional[Dict[int, Dict[str, Any]]] = None,
@@ -2006,7 +2012,7 @@ def _check_completed_pm(
     *,
     dry_run: bool = False,
     provider=None,
-    closed_issue_cache: Optional[Dict[int, bool]] = None,
+    closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
     create the downstream triage (Developer + Reviewer + Security + Docs).
@@ -2284,7 +2290,7 @@ def _check_completed_developer(
     dry_run: bool = False,
     provider=None,
     resolved: Optional[Dict[str, Any]] = None,
-    closed_issue_cache: Optional[Dict[int, bool]] = None,
+    closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
 ) -> List[int]:
     """Phase-4 retry: when a developer task completes with no PR in its summary,
     retry up to ``max_developer_retries`` times before surfacing a cap-exhausted
@@ -2556,7 +2562,7 @@ def _guard_prefix_on_done(
     profiles: Optional[Dict[str, str]] = None,
     *,
     dry_run: bool = False,
-    closed_issue_cache: Optional[Dict[int, bool]] = None,
+    closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
     provider=None,
 ) -> int:
     """Mechanical backstop: archive done cards that lack the expected role prefix (#1125 F5).
