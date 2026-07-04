@@ -1134,6 +1134,35 @@ def test_source_collector_records_prefix_on_role_mismatch():
     assert sources == ["prefix"], f"expected ['prefix'] (role mismatch), got {sources!r}"
 
 
+def test_planner_hijack_not_suitable_plus_v0_example_routes_pm():
+    """Post-fix: planner hijack scenario from the #1271 review finding.
+
+    Reviewer proof: a planner agent emits real 'not_suitable' outcome then
+    echoes its instructions (which formerly contained version-1 'plan' example).
+    Pre-fix (version 1 examples): last block was plan → PLANNER_DECOMPOSE.
+    Post-fix (version 0 examples + reverse scan): version-0 example is skipped,
+    real 'not_suitable' block is found → PM_ROUTE.
+    """
+    real_block = _json_block("planner", "not_suitable")
+    v0_example = (
+        "```json\n"
+        '{"daedalus_outcome": 0, "role": "planner", "verdict": "plan", '
+        '"refs": {"issue": 1, "pr": null}, "evidence": {}, "note": ""}\n'
+        "```"
+    )
+    summary = (
+        "not_suitable: issue is too small to decompose\n"
+        f"{real_block}\n\n"
+        "--- Instructions reminder ---\n"
+        f"{v0_example}"
+    )
+    result = iterate.classify_blocked("planner-daedalus", summary, ci_green=True)
+    assert result == iterate.PM_ROUTE, (
+        f"Version-0 echoed example must not hijack real 'not_suitable' block; "
+        f"expected PM_ROUTE, got {result!r}"
+    )
+
+
 def test_source_collector_none_is_safe():
     """_source_collector=None (the default) must not raise."""
     try:

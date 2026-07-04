@@ -339,8 +339,10 @@ Both lines are required throughout Phase 1.
 
 Valid verdicts: "approved" | "na" | "skipped" | "changes_requested"
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
 ```json
-{"daedalus_outcome": 1, "role": "a11y", "verdict": "approved",
+{"daedalus_outcome": 0, "role": "a11y", "verdict": "approved",
  "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"wcag": "2.1 AA compliant"},
  "note": ""}
 ```

@@ -28,8 +28,10 @@ block.
 
 Valid verdicts for this role: `spec` | `assigned` | `clarified` | `escalated`
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
     ```json
-    {"daedalus_outcome": 1, "role": "pm", "verdict": "spec",
+    {"daedalus_outcome": 0, "role": "pm", "verdict": "spec",
      "refs": {"issue": ${n}, "pr": null},
      "evidence": {"ac_count": "<n>"},
      "note": ""}

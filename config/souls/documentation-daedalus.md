@@ -306,8 +306,10 @@ Both lines are required throughout Phase 1.
 
 Valid verdicts: "posted"
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
 ```json
-{"daedalus_outcome": 1, "role": "docs", "verdict": "posted",
+{"daedalus_outcome": 0, "role": "docs", "verdict": "posted",
  "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"comment": "posted on PR"},
  "note": ""}
 ```

@@ -336,6 +336,120 @@ def test_outcome_record_is_frozen():
         rec.role = "developer"  # type: ignore[misc]
 
 
+# ── Phase-1 hijack prevention (#1271 review finding) ─────────────────────────
+#
+# Reviewer proved that a SOUL/template example block with a VALID schema
+# (version 1) at the end of a summary would be taken over the real earlier
+# block, because the old parser took the *last* block unconditionally.
+#
+# Fix (two-pronged):
+#   1. Example blocks now use version 0 ("daedalus_outcome": 0), which fails
+#      schema validation and can never be parsed as a real record.
+#   2. The parser now iterates candidates in reverse and returns the FIRST
+#      that validates — so a trailing invalid example block is skipped and
+#      the earlier valid real block is found.
+#
+# These tests lock in both behaviours.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _v0_block(role: str, verdict: str) -> str:
+    """Version-0 fenced block (documentation example — intentionally invalid)."""
+    return (
+        "```json\n"
+        f'{{"daedalus_outcome": 0, "role": "{role}", "verdict": "{verdict}", '
+        '"refs": {"issue": 1, "pr": null}, "evidence": {}, "note": ""}}\n'
+        "```"
+    )
+
+
+def test_real_block_wins_over_trailing_version0_example():
+    """Real valid block + trailing version-0 documentation example → real record.
+
+    This is the exact hijack scenario the reviewer reported: an agent echoes
+    its instructions after its real outcome block.  The echoed example block
+    uses version 0 (now), so the reverse scan skips it and returns the real
+    earlier block.
+    """
+    real = _wrap(_minimal("planner", "not_suitable"))
+    example = _v0_block("planner", "plan")  # version-0 — must not win
+    summary = f"not_suitable: issue is too small for planning\n{real}\n\nInstructions reminder:\n{example}"
+    rec = parse(summary)
+    assert rec is not None, (
+        "Real 'not_suitable' block must be returned despite trailing version-0 example"
+    )
+    assert rec.verdict == "not_suitable"
+    assert rec.role == "planner"
+
+
+def test_only_version0_example_returns_none():
+    """Summary containing ONLY a version-0 documentation example → None.
+
+    Version 0 is intentionally invalid and must never produce a record.
+    """
+    summary = "planner not suitable: issue too small\n" + _v0_block("planner", "plan")
+    assert parse(summary) is None, (
+        "Version-0 block must never parse to a real record"
+    )
+
+
+def test_two_valid_blocks_last_valid_wins():
+    """Two valid version-1 blocks → last valid wins (existing semantics preserved).
+
+    The reverse-scan-first-valid strategy returns the last block when both
+    are valid, because the last one is encountered first in the reverse scan.
+    """
+    first = _wrap(_minimal("qa", "failed", pr=10))
+    second = _wrap(_minimal("qa", "passed", pr=42))
+    summary = f"First attempt:\n{first}\n\nRetry succeeded:\n{second}"
+    rec = parse(summary)
+    assert rec is not None
+    assert rec.verdict == "passed", "Last valid block must win when both are valid"
+    assert rec.pr_ref == 42
+
+
+def test_real_block_then_invalid_v1_block_returns_real():
+    """Real block + trailing invalid version-1 block (wrong verdict) → real record.
+
+    Demonstrates that reverse scan skips genuinely malformed blocks (wrong
+    verdict string) and finds the earlier valid real block.
+    """
+    real = _wrap(_minimal("developer", "pr_opened", pr=77))
+    bad = _wrap('{"daedalus_outcome": 1, "role": "developer", "verdict": "OOPS", '
+                '"refs": {"issue": 5, "pr": null}, "evidence": {}, "note": ""}')
+    summary = f"review-required: PR #77\n{real}\n\nEchoed example:\n{bad}"
+    rec = parse(summary)
+    assert rec is not None, "Earlier valid block must be found despite trailing invalid block"
+    assert rec.verdict == "pr_opened"
+    assert rec.pr_ref == 77
+
+
+def test_multiple_invalid_then_valid_returns_first_valid():
+    """Multiple invalid blocks followed by a valid block → the valid block is returned."""
+    inv1 = _v0_block("qa", "passed")       # version 0 — invalid
+    inv2 = _v0_block("qa", "failed")       # version 0 — invalid
+    valid = _wrap(_minimal("qa", "passed"))  # version 1 — valid
+    summary = f"{inv1}\n\n{inv2}\n\n{valid}"
+    rec = parse(summary)
+    assert rec is not None
+    assert rec.verdict == "passed"
+
+
+def test_version0_does_not_affect_bare_json_fallback():
+    """A version-0 fenced block still prevents bare JSON fallback.
+
+    Even though version-0 fenced blocks don't validate, their PRESENCE
+    signals the agent attempted structured output.  The bare JSON fallback
+    is suppressed to avoid picking up unrelated JSON objects from the prose.
+    """
+    v0_fenced = _v0_block("qa", "passed")
+    bare = _minimal("qa", "passed")  # valid bare JSON — must NOT be used
+    summary = f"{v0_fenced}\n\nSome prose containing {bare}"
+    assert parse(summary) is None, (
+        "Fenced block present (even version-0) must suppress bare JSON fallback"
+    )
+
+
 # ── standalone runner (dual-mode parity) ─────────────────────────────────────
 
 

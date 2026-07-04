@@ -334,8 +334,10 @@ Both lines are required throughout Phase 1.
 
 Valid verdicts: "passed" | "failed"
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
 ```json
-{"daedalus_outcome": 1, "role": "qa", "verdict": "passed",
+{"daedalus_outcome": 0, "role": "qa", "verdict": "passed",
  "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"ci": "green", "suite": "3389 passed"},
  "note": ""}
 ```

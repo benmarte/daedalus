@@ -207,6 +207,11 @@ def _validate(obj: dict[str, Any]) -> OutcomeRecord | None:
     )
 
 
+# Maximum number of candidate blocks (fenced or bare) scanned per call.
+# Bounds cost on very long summaries; the real record is almost always near
+# the end, so we keep only the *last* N candidates and scan in reverse.
+_MAX_CANDIDATES: int = 10
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 
@@ -215,13 +220,23 @@ def parse(summary: str) -> OutcomeRecord | None:
 
     Strategy (in order of preference):
 
-    1. Find all fenced JSON blocks (``` ```json…``` ``` or ``` ```…``` ```) whose
-       content contains ``"daedalus_outcome"``; take the *last* one.
-    2. If no fenced block qualifies, scan the full text for bare JSON objects
-       containing ``"daedalus_outcome"``; take the *last* one.
+    1. Collect all fenced JSON blocks (``` ```json…``` ``` or ``` ```…``` ```)
+       whose content contains ``"daedalus_outcome"``; keep the last
+       ``_MAX_CANDIDATES``.  Iterate in **reverse** order (last block first)
+       and return the **first** that validates.  This ensures a real valid block
+       earlier in the summary wins over a trailing invalid example block
+       (``"daedalus_outcome": 0`` documentation examples are skipped rather
+       than causing the whole extraction to fail).
+    2. If no fenced block contained ``"daedalus_outcome"`` at all, scan the
+       full text for bare JSON objects (last ``_MAX_CANDIDATES``, reverse, first
+       valid wins).
 
-    Validates the extracted object against the schema.
-    Returns ``None`` — without raising — on any failure.
+    If fenced blocks were found (even all-invalid) → return ``None`` immediately
+    after the reverse scan, without falling back to bare JSON.  An agent that
+    attempted structured output but got it wrong should fall back to prefix
+    routing — not have an unrelated bare JSON object picked up instead.
+
+    Never raises.
     """
     if not summary:
         return None
@@ -235,24 +250,28 @@ def parse(summary: str) -> OutcomeRecord | None:
                 fenced_candidates.extend(_find_json_candidates(block_content))
 
         if fenced_candidates:
-            # Take the last fenced candidate.
-            obj = _parse_raw(fenced_candidates[-1])
-            if obj is not None:
-                rec = _validate(obj)
-                if rec is not None:
-                    return rec
-            # Fenced block found but failed validation — do NOT fall back to
-            # bare scan; the agent clearly attempted to emit a record and the
-            # caller should fall back to prefix matching.
+            # Iterate the last _MAX_CANDIDATES in reverse (last block first).
+            # Return the first one that parses AND validates — earlier valid
+            # blocks are preferred over trailing invalid example blocks.
+            for raw in reversed(fenced_candidates[-_MAX_CANDIDATES:]):
+                obj = _parse_raw(raw)
+                if obj is not None:
+                    rec = _validate(obj)
+                    if rec is not None:
+                        return rec
+            # Fenced blocks present but none validated.  Do NOT fall back to
+            # bare scan — the agent attempted structured output; prefix routing
+            # is the correct fallback for the caller.
             logger.debug(
-                "outcomes: fenced block present but failed validation — "
-                "returning None (caller falls back to prefix)"
+                "outcomes: %d fenced candidate(s) found but none validated — "
+                "returning None (caller falls back to prefix)",
+                len(fenced_candidates),
             )
             return None
 
         # ── step 2: bare JSON objects anywhere in the text ───────────────────
         bare_candidates = _find_json_candidates(summary)
-        for raw in reversed(bare_candidates):  # last candidate wins
+        for raw in reversed(bare_candidates[-_MAX_CANDIDATES:]):  # last first
             obj = _parse_raw(raw)
             if obj is not None:
                 rec = _validate(obj)

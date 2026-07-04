@@ -46,8 +46,10 @@ append this fenced JSON block.
 
 Valid verdicts for this role: `pr_opened` | `blocked`
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
     ```json
-    {"daedalus_outcome": 1, "role": "developer", "verdict": "pr_opened",
+    {"daedalus_outcome": 0, "role": "developer", "verdict": "pr_opened",
      "refs": {"issue": ${n}, "pr": <pr_number>},
      "evidence": {"branch": "fix/issue-${n}-<slug>"},
      "note": ""}

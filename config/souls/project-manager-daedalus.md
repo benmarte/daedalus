@@ -269,8 +269,10 @@ Both lines are required throughout Phase 1.
 
 Valid verdicts: "spec" | "assigned" | "clarified" | "escalated"
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
 ```json
-{"daedalus_outcome": 1, "role": "pm", "verdict": "spec",
+{"daedalus_outcome": 0, "role": "pm", "verdict": "spec",
  "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"ac_count": "3"},
  "note": ""}
 ```

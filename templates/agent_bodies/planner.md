@@ -38,8 +38,10 @@ fenced JSON block.
 
 Valid verdicts for this role: `plan` | `not_suitable`
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
     ```json
-    {"daedalus_outcome": 1, "role": "planner", "verdict": "plan",
+    {"daedalus_outcome": 0, "role": "planner", "verdict": "plan",
      "refs": {"issue": ${n}, "pr": null},
      "evidence": {"sub_issues": "<count>"},
      "note": ""}

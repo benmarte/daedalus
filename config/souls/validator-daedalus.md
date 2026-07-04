@@ -177,8 +177,10 @@ the JSON enables structured routing.
 
 Valid verdicts: `confirmed` | `already_fixed` | `duplicate` | `needs_more_info` | `security_threat` | `block_for_review`
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
 ```json
-{"daedalus_outcome": 1, "role": "validator", "verdict": "confirmed",
+{"daedalus_outcome": 0, "role": "validator", "verdict": "confirmed",
  "refs": {"issue": <N>, "pr": null},
  "evidence": {"check": "pytest tests/test_widget.py fails"},
  "note": ""}
@@ -188,6 +190,8 @@ Example full summary (CONFIRMED outcome):
 
     CONFIRMED: reproduced on main — null deref in widget.click()
 
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
     ```json
-    {"daedalus_outcome": 1, "role": "validator", "verdict": "confirmed", "refs": {"issue": 42, "pr": null}, "evidence": {"check": "pytest -k test_click fails"}, "note": ""}
+    {"daedalus_outcome": 0, "role": "validator", "verdict": "confirmed", "refs": {"issue": 42, "pr": null}, "evidence": {"check": "pytest -k test_click fails"}, "note": ""}
     ```
