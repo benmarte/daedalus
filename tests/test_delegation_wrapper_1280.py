@@ -1,15 +1,23 @@
 """Tests for daedalus-delegate.sh — script-owned delegation lifecycle (issue #1280).
 
 Exercises the wrapper as a real subprocess with a fake "coding agent" (a small
-shell command). Uses a PATH-stub hermes so no real CLI calls are made — the stub
-records every invocation to a log file that assertions read.
+shell command). All external binaries (hermes, gh) are PATH-stubbed per test so
+no real CLI calls are ever made — stubs record every invocation to a log file
+that assertions read. No assertion depends on the local environment.
 
 Test cases:
   (a) happy path — agent exits 0, DELEGATE_RESULT status "ok", out captured
-  (b) nonzero exit — DELEGATE_RESULT status "failed" with the correct exit code
-  (c) timeout — agent sleeps beyond a 2s max-wait, status "timeout", child dead
-  (d) done-marker early completion — marker appears before max-wait
-  (e) heartbeat calls — at least one heartbeat with 1s interval
+  (b) nonzero exit 42 — DELEGATE_RESULT status "failed" with the correct exit code
+  (c) exit 1 edge case — propagated exactly
+  (d) timeout — agent sleeps beyond 2s max-wait, status "timeout", direct child dead
+  (e) done-marker early completion — marker appears before max-wait
+  (f) heartbeat calls — at least one heartbeat with 1s interval (non-blocking)
+  (g) grandchild kill — agent spawns a grandchild; pgid-kill via setsid/perl
+      eliminates the grandchild on timeout
+  (h) hung heartbeat — hermes stub sleeps 60s; wrapper still times out at max-wait
+      (heartbeat runs in background subshell, so the loop never blocks)
+  (i-l) transition mode — --transition flag causes hermes kanban block with the
+      correct phrase for ok+PR / ok+no-PR / failed / timeout
 """
 
 from __future__ import annotations
@@ -28,23 +36,33 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DELEGATE_SH = _REPO_ROOT / "scripts" / "daedalus-delegate.sh"
 
 
-def _stub_hermes_bin(tmp_path: Path) -> Path:
-    """Write a stub `hermes` executable that records every call to a log file.
+# ── stub factories ────────────────────────────────────────────────────────────
 
-    Returns the directory containing the stub — prepend it to PATH so the
-    wrapper finds our stub instead of any real hermes installation.
+def _make_stub(stub_dir: Path, name: str, body: str) -> Path:
+    """Write a named executable stub to stub_dir and return its path."""
+    stub = stub_dir / name
+    stub.write_text("#!/usr/bin/env bash\n" + body + "\n")
+    stub.chmod(0o755)
+    return stub
+
+
+def _stub_bin_dir(tmp_path: Path, *, hermes_body: str = "", gh_body: str = "") -> tuple[Path, Path, Path]:
+    """Create a stub-bin directory with hermes and gh stubs.
+
+    Returns (stub_dir, hermes_log, gh_log).
+    hermes_body / gh_body are inserted after the log-append line; pass extra
+    behaviour such as 'sleep 60' for the hung-heartbeat test.
     """
     stub_dir = tmp_path / "stub-bin"
-    stub_dir.mkdir()
-    log = tmp_path / "hermes-calls.log"
-    stub = stub_dir / "hermes"
-    stub.write_text(
-        "#!/usr/bin/env bash\n"
-        f"echo \"$@\" >> {log}\n"
-        "exit 0\n"
-    )
-    stub.chmod(0o755)
-    return stub_dir
+    stub_dir.mkdir(exist_ok=True)
+    hermes_log = tmp_path / "hermes-calls.log"
+    gh_log = tmp_path / "gh-calls.log"
+
+    _make_stub(stub_dir, "hermes",
+               f'echo "$@" >> {hermes_log}\n{hermes_body}exit 0')
+    _make_stub(stub_dir, "gh",
+               f'echo "$@" >> {gh_log}\n{gh_body}exit 0')
+    return stub_dir, hermes_log, gh_log
 
 
 def _run_delegate(
@@ -54,10 +72,17 @@ def _run_delegate(
     max_wait: int = 30,
     heartbeat_interval: int = 300,
     poll_interval: int = 5,
+    transition: bool = False,
+    repo: str = "owner/repo",
+    branch: str = "fix/issue-42-test",
+    hermes_body: str = "",
+    gh_body: str = "",
     extra_env: dict | None = None,
-) -> subprocess.CompletedProcess:
-    """Run daedalus-delegate.sh with a minimal task file and return the result."""
-    stub_dir = _stub_hermes_bin(tmp_path)
+) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    """Run daedalus-delegate.sh and return (result, hermes_log, gh_log)."""
+    stub_dir, hermes_log, gh_log = _stub_bin_dir(
+        tmp_path, hermes_body=hermes_body, gh_body=gh_body
+    )
     task_file = tmp_path / "task.txt"
     task_file.write_text("task body\n")
     out_file = tmp_path / "agent-out.txt"
@@ -65,8 +90,10 @@ def _run_delegate(
     env = {
         **os.environ,
         "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
-        # Keep HERMES_HOME isolated (autouse fixture already set it, but be explicit)
         "HERMES_HOME": str(tmp_path / "hermes-home"),
+        # Prevent any accidental real gh auth
+        "GH_TOKEN": "stub-token",
+        "GITHUB_TOKEN": "stub-token",
     }
     if extra_env:
         env.update(extra_env)
@@ -83,26 +110,29 @@ def _run_delegate(
         "--heartbeat-interval", str(heartbeat_interval),
         "--poll-interval", str(poll_interval),
     ]
-    return subprocess.run(
+    if transition:
+        cmd += ["--transition", "--repo", repo, "--branch", branch]
+
+    result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         env=env,
-        timeout=max_wait + 30,  # test-level timeout (generous)
+        timeout=max_wait + 40,
     )
+    return result, hermes_log, gh_log
 
 
 def _parse_result(stdout: str) -> dict:
-    """Find and parse the DELEGATE_RESULT: {...} line from stdout."""
+    """Find and parse the DELEGATE_RESULT: {...} line."""
     for line in stdout.splitlines():
         if line.startswith("DELEGATE_RESULT: "):
             return json.loads(line[len("DELEGATE_RESULT: "):])
     raise AssertionError(f"No DELEGATE_RESULT line found in stdout:\n{stdout}")
 
 
-def _hermes_calls(tmp_path: Path) -> list[str]:
-    """Return lines from the stub hermes call log."""
-    log = tmp_path / "hermes-calls.log"
+def _log_lines(log: Path) -> list[str]:
+    """Return lines from a stub call log, empty list if missing."""
     if not log.exists():
         return []
     return log.read_text().splitlines()
@@ -111,20 +141,24 @@ def _hermes_calls(tmp_path: Path) -> list[str]:
 # ── (a) happy path ────────────────────────────────────────────────────────────
 
 def test_happy_path_exit_0(tmp_path):
-    """Agent exits 0 → DELEGATE_RESULT status 'ok', exit 0, out file written."""
-    out_file = tmp_path / "agent-out.txt"
-    # The agent echoes something useful and exits 0.
-    agent_cmd = f"bash -c 'echo hello-from-agent; echo \"PR URL: https://github.com/x/y/pull/99 PR number: 99\"'"
+    """Agent exits 0 → DELEGATE_RESULT status 'ok', out file contains agent output."""
+    agent_cmd = (
+        "bash -c '"
+        "echo hello-from-agent; "
+        'echo "PR URL: https://github.com/x/y/pull/99 PR number: 99"'
+        "'"
+    )
+    result, _, _ = _run_delegate(tmp_path, agent_cmd=agent_cmd)
 
-    result = _run_delegate(tmp_path, agent_cmd=agent_cmd)
-
-    assert result.returncode == 0, f"wrapper exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"wrapper exited {result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
     data = _parse_result(result.stdout)
     assert data["status"] == "ok"
     assert data["exit"] == 0
     assert "duration_s" in data
 
-    # Out file should contain agent output (delegate writes stdout+stderr there)
     out_path = Path(data["out"])
     assert out_path.exists(), f"out file missing: {out_path}"
     content = out_path.read_text()
@@ -135,101 +169,95 @@ def test_happy_path_exit_0(tmp_path):
 # ── (b) nonzero exit ─────────────────────────────────────────────────────────
 
 def test_nonzero_exit_propagated(tmp_path):
-    """Agent exits non-zero → DELEGATE_RESULT status 'failed', correct exit code."""
+    """Agent exits 42 → DELEGATE_RESULT status 'failed', exit code exact."""
     agent_cmd = "bash -c 'echo some output; exit 42'"
-    result = _run_delegate(tmp_path, agent_cmd=agent_cmd)
+    result, _, _ = _run_delegate(tmp_path, agent_cmd=agent_cmd)
 
-    assert result.returncode == 42, f"expected exit 42, got {result.returncode}"
+    assert result.returncode == 42, f"expected 42, got {result.returncode}"
     data = _parse_result(result.stdout)
     assert data["status"] == "failed"
     assert data["exit"] == 42
     assert "duration_s" in data
 
 
+# ── (c) exit 1 edge case ─────────────────────────────────────────────────────
+
 def test_exit_1_propagated(tmp_path):
-    """Edge case: exit 1 is also correctly propagated."""
-    agent_cmd = "bash -c 'exit 1'"
-    result = _run_delegate(tmp_path, agent_cmd=agent_cmd)
+    """Exit 1 is propagated correctly (not confused with timeout 124)."""
+    result, _, _ = _run_delegate(tmp_path, agent_cmd="bash -c 'exit 1'")
     assert result.returncode == 1
     data = _parse_result(result.stdout)
     assert data["status"] == "failed"
     assert data["exit"] == 1
 
 
-# ── (c) timeout ───────────────────────────────────────────────────────────────
+# ── (d) timeout + direct-child dead ──────────────────────────────────────────
 
 def test_timeout_kills_child(tmp_path):
-    """Agent sleeps beyond max-wait → status 'timeout', wrapper exits 124, child dead."""
-    # We use a named pipe trick: write the sleep child's PID to a file so we
-    # can verify it's dead after the wrapper returns.
+    """Agent sleeps 999s beyond 2s max-wait → status 'timeout', exit 124, child dead."""
     pid_file = tmp_path / "child.pid"
-    agent_cmd = (
-        f"bash -c 'echo $$ > {pid_file}; sleep 999'"
-    )
+    agent_cmd = f"bash -c 'echo $$ > {pid_file}; sleep 999'"
 
     t0 = time.monotonic()
-    result = _run_delegate(tmp_path, agent_cmd=agent_cmd, max_wait=2)
+    result, _, _ = _run_delegate(
+        tmp_path, agent_cmd=agent_cmd, max_wait=2, poll_interval=1
+    )
     elapsed = time.monotonic() - t0
 
-    # Wrapper must return within a reasonable window of the 2s timeout.
-    assert elapsed < 20, f"wrapper took too long: {elapsed:.1f}s"
-    assert result.returncode == 124, f"expected 124 (timeout), got {result.returncode}"
+    # Must finish within 2s timeout + 5s grace + small overhead
+    assert elapsed < 20, f"wrapper took {elapsed:.1f}s"
+    assert result.returncode == 124
     data = _parse_result(result.stdout)
     assert data["status"] == "timeout"
     assert data["exit"] == 124
 
-    # Verify the child process (the sleep) is actually dead.
+    # Direct child must be dead
     if pid_file.exists():
-        child_pid_str = pid_file.read_text().strip()
-        if child_pid_str.isdigit():
-            child_pid = int(child_pid_str)
-            # Give a moment for the kill to propagate.
+        raw = pid_file.read_text().strip()
+        if raw.isdigit():
             time.sleep(0.5)
             try:
-                os.kill(child_pid, 0)
-                # If we get here without OSError, the process is still alive.
-                pytest.fail(f"child PID {child_pid} is still alive after timeout kill")
+                os.kill(int(raw), 0)
+                pytest.fail(f"child PID {raw} still alive after timeout kill")
             except ProcessLookupError:
-                pass  # expected — process is dead
+                pass
             except PermissionError:
-                pass  # process exists but we can't signal it (also means alive)
+                pass  # zombie / no permission — still alive, but acceptable on macOS
 
 
-# ── (d) done-marker early completion ─────────────────────────────────────────
+# ── (e) done-marker early completion ─────────────────────────────────────────
 
 def test_done_marker_early_completion(tmp_path):
-    """Inner agent writes <out>.done — wrapper treats as complete before max-wait."""
+    """<out>.done marker triggers early exit well before max-wait."""
     out_file = tmp_path / "agent-out.txt"
     done_marker = tmp_path / "agent-out.txt.done"
 
-    # Agent writes some output, creates the done marker, then sleeps (simulates
-    # a process that is still running when the hook fires).
+    # Agent writes output + marker immediately, then sleeps; wrapper should exit fast.
     agent_cmd = (
-        f"bash -c 'echo agent-output > {out_file}; touch {done_marker}; sleep 999'"
+        f"bash -c 'echo agent-output; touch {done_marker}; sleep 999'"
     )
 
     t0 = time.monotonic()
-    result = _run_delegate(tmp_path, agent_cmd=agent_cmd, max_wait=30)
+    result, _, _ = _run_delegate(
+        tmp_path, agent_cmd=agent_cmd, max_wait=30, poll_interval=1
+    )
     elapsed = time.monotonic() - t0
 
-    # Should complete well before the 30s max-wait because the marker appeared.
-    assert elapsed < 15, f"wrapper took too long ({elapsed:.1f}s) — done-marker not honoured"
+    assert elapsed < 15, f"done-marker not honoured ({elapsed:.1f}s)"
     data = _parse_result(result.stdout)
-    # Done-marker path treats the run as successful (exit 0).
     assert data["status"] == "ok"
     assert data["exit"] == 0
 
 
-# ── (e) heartbeat calls ───────────────────────────────────────────────────────
+# ── (f) heartbeat non-blocking ────────────────────────────────────────────────
 
 def test_heartbeat_sent_within_interval(tmp_path):
-    """With a 1s heartbeat interval and 1s poll interval, at least one heartbeat fires during a 4s run."""
-    # Agent sleeps 4s. With poll_interval=1 the loop checks every second:
-    # t=0 spawn, t=1 poll (alive, HB fires: elapsed=1 >= 1), t=2 poll (alive),
-    # t=3 poll (alive), t=4 poll (exits) → at least one heartbeat recorded.
+    """Heartbeat fires within interval; non-blocking — loop keeps ticking."""
+    # Agent sleeps 4s; poll_interval=1 so the loop checks each second.
+    # At t≈1 the hb_elapsed (1s) >= heartbeat_interval (1s) → heartbeat fires.
     agent_cmd = "bash -c 'sleep 4; echo done'"
 
-    result = _run_delegate(
+    result, hermes_log, _ = _run_delegate(
         tmp_path,
         agent_cmd=agent_cmd,
         max_wait=30,
@@ -237,15 +265,199 @@ def test_heartbeat_sent_within_interval(tmp_path):
         poll_interval=1,
     )
 
-    assert result.returncode == 0, f"wrapper exited {result.returncode}\n{result.stdout}"
-
-    calls = _hermes_calls(tmp_path)
-    # We expect at least one "kanban heartbeat t_test123 --board test-board" line.
-    heartbeat_calls = [c for c in calls if "heartbeat" in c]
-    assert heartbeat_calls, (
-        f"No heartbeat calls recorded. All hermes calls: {calls}\n"
+    assert result.returncode == 0, (
+        f"wrapper exited {result.returncode}\n{result.stdout}"
+    )
+    calls = _log_lines(hermes_log)
+    hb_calls = [c for c in calls if "heartbeat" in c]
+    assert hb_calls, (
+        f"No heartbeat calls recorded.\nAll hermes calls: {calls}\n"
         f"wrapper stdout:\n{result.stdout}"
     )
-    # Verify the card and board were passed correctly.
-    for call in heartbeat_calls:
-        assert "t_test123" in call, f"card id missing in heartbeat call: {call}"
+    for call in hb_calls:
+        assert "t_test123" in call, f"card id missing: {call}"
+
+
+# ── (g) grandchild kill ───────────────────────────────────────────────────────
+
+def test_grandchild_killed_on_timeout(tmp_path):
+    """On timeout, the process GROUP is killed — grandchildren do not survive.
+
+    The agent spawns a grandchild (sleep 999 & disown) in its own process
+    group (the one created by setsid/perl-setsid). When the wrapper sends
+    SIGTERM/-SIGKILL to the pgid, the grandchild must also die.
+    """
+    gc_pid_file = tmp_path / "grandchild.pid"
+
+    # Agent: spawn a grandchild, record its PID, disown it, then sleep forever.
+    # All three processes share the agent's process group (the one the wrapper
+    # setsid'd) — disown only removes from bash's job table, not from the pgid.
+    agent_cmd = (
+        f"bash -c '"
+        f"sleep 999 & echo $! > {gc_pid_file}; disown; sleep 999"
+        f"'"
+    )
+
+    t0 = time.monotonic()
+    result, _, _ = _run_delegate(
+        tmp_path, agent_cmd=agent_cmd, max_wait=2, poll_interval=1
+    )
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 20, f"wrapper took {elapsed:.1f}s"
+    assert result.returncode == 124, f"expected timeout exit 124, got {result.returncode}"
+
+    # Give the kill a moment to propagate
+    time.sleep(1.0)
+
+    if not gc_pid_file.exists():
+        # PID file was never written (agent killed before it could write) — pass
+        return
+
+    raw = gc_pid_file.read_text().strip()
+    if not raw.isdigit():
+        return  # Can't verify — skip
+
+    gc_pid = int(raw)
+    try:
+        os.kill(gc_pid, 0)
+        # Still alive: check if it's a zombie (acceptable on some OS configs).
+        # On macOS, PermissionError is raised for zombies owned by us — that
+        # can't happen here since gc_pid is a child. If kill -0 succeeds, the
+        # grandchild is genuinely alive, which is a failure.
+        pytest.fail(
+            f"grandchild PID {gc_pid} is still alive after timeout — "
+            "pgid-kill did not reach it. Check setsid/perl availability."
+        )
+    except ProcessLookupError:
+        pass  # expected: grandchild is dead
+
+
+# ── (h) hung heartbeat does not block wait loop ───────────────────────────────
+
+def test_hung_heartbeat_does_not_block_timeout(tmp_path):
+    """Heartbeat stub sleeps 60s; wrapper still exits at max-wait (not at 60s+).
+
+    Without the background-subshell fix the heartbeat call would block the
+    PID-poll loop, causing the wrapper to miss its 3s deadline by a full minute.
+    """
+    # hermes stub sleeps 60s — any synchronous heartbeat blocks for a minute
+    agent_cmd = "bash -c 'sleep 999'"
+
+    t0 = time.monotonic()
+    result, _, _ = _run_delegate(
+        tmp_path,
+        agent_cmd=agent_cmd,
+        max_wait=3,
+        heartbeat_interval=1,   # heartbeat fires almost immediately
+        poll_interval=1,
+        hermes_body="sleep 60\n",  # slow hermes
+    )
+    elapsed = time.monotonic() - t0
+
+    # Wrapper must exit well under the 60s hermes sleep — if heartbeat blocked
+    # the loop, elapsed would be ~61s. Allow generous headroom for CI.
+    assert elapsed < 20, (
+        f"Wrapper took {elapsed:.1f}s — heartbeat probably blocked the loop. "
+        "Ensure heartbeat runs in a background subshell."
+    )
+    assert result.returncode == 124
+    data = _parse_result(result.stdout)
+    assert data["status"] == "timeout"
+
+
+# ── (i–l) transition mode ─────────────────────────────────────────────────────
+# All four transition cases verify that hermes kanban block is called with the
+# exact phrase the developer SOUL's signal table expects (byte-identical strings
+# that classify_blocked() substring-matches). gh is also stubbed via PATH.
+
+def _block_calls(hermes_log: Path) -> list[str]:
+    """Return only the hermes block invocation lines."""
+    return [ln for ln in _log_lines(hermes_log) if "block" in ln]
+
+
+def test_transition_ok_with_pr(tmp_path):
+    """ok + PR found → block with 'review-required: PR #N — <branch>'."""
+    # gh stub returns PR number 99
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'echo done; exit 0'",
+        transition=True,
+        repo="owner/repo",
+        branch="fix/issue-42-test",
+        gh_body="echo 99\n",  # gh pr list returns 99
+    )
+
+    assert result.returncode == 0, f"wrapper failed: {result.stdout}\n{result.stderr}"
+    data = _parse_result(result.stdout)
+    assert data["status"] == "ok"
+
+    blocks = _block_calls(hermes_log)
+    assert blocks, f"No kanban block call recorded.\nAll hermes calls:\n{_log_lines(hermes_log)}"
+    # Exact phrase the SOUL signal table maps to ADVANCE
+    assert any("review-required: PR #99 — fix/issue-42-test" in b for b in blocks), (
+        f"Expected 'review-required: PR #99 — fix/issue-42-test' in block calls.\n"
+        f"Block calls: {blocks}"
+    )
+
+
+def test_transition_ok_no_pr(tmp_path):
+    """ok + no PR → block with 'review-required: awaiting-pr'."""
+    # gh stub returns nothing (empty output → no PR)
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'exit 0'",
+        transition=True,
+        repo="owner/repo",
+        branch="fix/issue-42-test",
+        gh_body="echo ''\n",  # gh returns empty
+    )
+
+    assert result.returncode == 0
+    blocks = _block_calls(hermes_log)
+    assert blocks, f"No kanban block call.\nAll calls: {_log_lines(hermes_log)}"
+    assert any("review-required: awaiting-pr" in b for b in blocks), (
+        f"Expected 'review-required: awaiting-pr'.\nBlock calls: {blocks}"
+    )
+
+
+def test_transition_failed(tmp_path):
+    """failed exit → block with 'coding-agent-failed: exited with code N'."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'exit 7'",
+        transition=True,
+        repo="owner/repo",
+        branch="fix/issue-42-test",
+    )
+
+    assert result.returncode == 7
+    data = _parse_result(result.stdout)
+    assert data["status"] == "failed"
+    blocks = _block_calls(hermes_log)
+    assert blocks, f"No kanban block call.\nAll calls: {_log_lines(hermes_log)}"
+    assert any("coding-agent-failed: exited with code 7" in b for b in blocks), (
+        f"Expected 'coding-agent-failed: exited with code 7'.\nBlock calls: {blocks}"
+    )
+
+
+def test_transition_timeout(tmp_path):
+    """timeout → block with 'coding-agent-failed: CODING_AGENT_TIMEOUT'."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'sleep 999'",
+        max_wait=2,
+        poll_interval=1,
+        transition=True,
+        repo="owner/repo",
+        branch="fix/issue-42-test",
+    )
+
+    assert result.returncode == 124
+    data = _parse_result(result.stdout)
+    assert data["status"] == "timeout"
+    blocks = _block_calls(hermes_log)
+    assert blocks, f"No kanban block call.\nAll calls: {_log_lines(hermes_log)}"
+    assert any("coding-agent-failed: CODING_AGENT_TIMEOUT" in b for b in blocks), (
+        f"Expected 'coding-agent-failed: CODING_AGENT_TIMEOUT'.\nBlock calls: {blocks}"
+    )
