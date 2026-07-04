@@ -280,8 +280,26 @@ execution:
 #   KEYSTONE of epic #1276 (Phase 2). Highest-risk toggle — soak with the flag
 #   OFF; downstream work (#1291 gates, #1292 labels, #1294 decompose) builds on
 #   this. See issue #1290.
+#
+# native_gates (default: false — behaviour byte-identical when off)
+#   Phase 3 of epic #1276 (#1291). When true, in-pipeline human gates are tagged
+#   with the native Hermes block category `--kind needs_input` so an awaiting-
+#   human card is natively distinguishable on the board from a machine-wait.
+#   Currently applied to the developer `review-required: PR #N` re-block (the PR
+#   is open and awaiting human review/merge while QA/reviewer/security run). The
+#   `kind` is advisory metadata only — routing (classify_blocked) still reads the
+#   block-reason string, so flag-on adds the tag without changing flow and
+#   flag-off omits `--kind` entirely (plain block, byte-identical). Machine-wait
+#   blocks (`awaiting-fix:`, `awaiting-pr`) are deliberately NOT tagged — they
+#   have no --parent edges and must not be mistaken for a human gate.
+#   Not converted: the 3 GitHub-side gates (move-to-Ready, merge action, close-
+#   issue) stay human/assert-only, never card blocks. The native pending-merge
+#   (auto_merge=false) needs_input marker is a documented follow-up — the docs
+#   card is terminal by merge-time so there is no non-fragile card to block; see
+#   issue #1291. See issue #1291.
 pipeline:
   # upfront_dag: false
+  # native_gates: false
 
 protocol:
   # prefix_fallback: true

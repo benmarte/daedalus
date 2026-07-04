@@ -326,6 +326,13 @@ def run_iterate(
     # per-tick path runs exactly as today — byte-identical.
     _pipeline_cfg = (resolved or {}).get("pipeline") or {}
     _upfront_dag = bool(_pipeline_cfg.get("upfront_dag", False))
+    # Phase-3 (#1291): native_gates flag.  Default FALSE (behaviour unchanged).
+    # When ON, in-pipeline human gates (currently the developer review-required
+    # re-block) are tagged with `--kind needs_input` so an awaiting-human card is
+    # natively distinguishable from a machine-wait.  The kind is advisory metadata
+    # only — classify_blocked still routes off the block-reason string — so flag-on
+    # adds the tag without changing flow and flag-off omits --kind (byte-identical).
+    _native_gates = bool(_pipeline_cfg.get("native_gates", False))
 
     blocked_cards = kanban.list_blocked(slug)
 
@@ -636,6 +643,7 @@ def run_iterate(
                 max_fix_attempts=max_fix_attempts,
                 metadata_transport=_metadata_transport,
                 upfront_dag=_upfront_dag,
+                native_gates=_native_gates,
             )
 
             # Gate on ok=True: prevents notification when the executor fails
