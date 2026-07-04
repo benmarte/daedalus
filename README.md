@@ -1671,6 +1671,33 @@ auto-remediation actions, and delivered doc reports. Documentation reports are
 wrapped in a structured envelope with a header, navigation links, and issue
 cross-reference before delivery.
 
+#### Delivery transport — `notify.native_send` (#1293)
+
+Escalation notifications (`retry-cap-exhausted`, `crash-retries-exhausted`) can be
+delivered over two transports. The `notify.native_send` flag (default `false`)
+selects which:
+
+- **`false` (default)** — behaviour is byte-identical to before. These escalations
+  fire on **both** transports: the native `hermes send` path (`cron.notifications`
+  targets, with threading) **and** the legacy raw-webhook path
+  (`core/notification_sender.py` → the `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`
+  env vars, with Slack Block Kit / Discord embeds).
+- **`true`** — routes delivery through native `hermes send` only; the redundant
+  legacy raw-webhook calls are skipped because the native path already delivers the
+  same notifications. **Tradeoff:** `hermes send` delivers **plain markdown only**
+  (no Block Kit, no Discord embeds) and follows your `cron.notifications` targets
+  rather than the `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` env webhooks. If you
+  rely only on those env webhooks, add native `cron.notifications` targets before
+  flipping it on, or these escalations will not be delivered.
+
+```yaml
+notify:
+  native_send: false   # true = native hermes send only; false = both transports
+```
+
+This flag is **delivery-only**. Inbound intake — the native webhook receiver — is
+tracked separately in [#1298](https://github.com/benmarte/daedalus/issues/1298).
+
 ### Comment threading
 
 Since **beta.30**, every daedalus-managed issue gets **one persistent thread per
