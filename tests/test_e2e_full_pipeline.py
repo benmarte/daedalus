@@ -124,33 +124,38 @@ def test_full_seven_stage_pipeline(pipeline, fake_issue, fake_provider):
     assert acc_card is not None and acc_card["assignee"] == ACCESSIBILITY
 
     # ── Stage 4: QA passes → advance (QA card completed) ────────────────────
+    # Signal MUST START WITH 'qa-passed' per #1125 F1 (startswith matching).
     _advance_stage(
         iterate, kanban, provider, role_cards["qa"]["id"],
-        f"review-required: qa-passed: PR #{PR} — suite green", ADVANCE,
+        f"qa-passed: PR #{PR} — suite green", ADVANCE,
     )
 
     # ── Stage 5: reviewer approves → approve-advance ────────────────────────
+    # Signal MUST START WITH 'review-approved:' per #1125 F1.
     _advance_stage(
         iterate, kanban, provider, role_cards["reviewer"]["id"],
-        f"review-required: No findings. Approved for merge. PR #{PR}", APPROVE_ADVANCE,
+        f"review-approved: PR #{PR}", APPROVE_ADVANCE,
     )
 
     # ── Stage 6: security clears → approve-advance ──────────────────────────
+    # Signal MUST START WITH 'security-approved:' per #1125 F1.
     _advance_stage(
         iterate, kanban, provider, role_cards["security"]["id"],
-        f"review-required: No findings. Approved for merge. PR #{PR}", APPROVE_ADVANCE,
+        f"security-approved: PR #{PR}", APPROVE_ADVANCE,
     )
 
     # ── Stage 7a: accessibility (no UI changes) → advance ───────────────────
+    # Signal MUST START WITH 'a11y-skipped:' per #1125 F1.
     _advance_stage(
         iterate, kanban, provider, acc_card["id"],
-        f"review-required: a11y-skipped: no UI changes. PR #{PR}", ADVANCE,
+        f"a11y-skipped: no UI changes. PR #{PR}", ADVANCE,
     )
 
     # ── Stage 7b: docs posts its report → approve-advance (terminal) ────────
+    # Signal MUST START WITH 'docs posted:' per #1125 F1.
     _advance_stage(
         iterate, kanban, provider, role_cards["docs"]["id"],
-        f"review-required: docs posted: issue #{n} PR #{PR} — README updated",
+        f"docs posted: PR #{PR} — README updated",
         APPROVE_ADVANCE,
     )
 

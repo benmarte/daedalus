@@ -5798,8 +5798,10 @@ def _check_completed_planner(
         if (task.get("assignee") or "").strip() != p["planner"]:
             continue
         summary_raw = _get_task_summary(task, slug)
-        summary_upper = summary_raw.upper()
-        if "PLANNING COMPLETE" not in summary_upper:
+        summary_upper = summary_raw.upper().lstrip()
+        # startswith enforces prefix position; a mid-body "PLANNING COMPLETE" mention
+        # in unrelated text no longer trips the decompose gate (#1125 F1).
+        if not summary_upper.startswith("PLANNING COMPLETE"):
             if summary_upper.startswith("PLAN:"):
                 # "PLAN:" is a valid synonym — planner finished analysis, issue warrants decomposition
                 logger.info(
@@ -5990,9 +5992,11 @@ def _check_planner_not_suitable(
             if (task.get("assignee") or "").strip() != p["planner"]:
                 continue
             summary_raw = _get_task_summary(task, slug)
-            summary_upper = summary_raw.upper()
+            summary_upper = summary_raw.upper().lstrip()
             # Happy path is handled by _check_completed_planner — skip to avoid overlap.
-            if "PLANNING COMPLETE" in summary_upper:
+            # Use startswith so a body that merely mentions PLANNING COMPLETE doesn't
+            # short-circuit this handler (#1125 F1).
+            if summary_upper.startswith("PLANNING COMPLETE"):
                 logger.debug(
                     "dispatch: planner #%s has PLANNING COMPLETE signal — skipping not_suitable handler",
                     task_id,
@@ -6700,6 +6704,167 @@ def _check_completed_developer(
                 retry_key,
             )
             triggered.append(n)
+    return triggered
+
+
+# ── F5: per-role done-card prefix guard (#1125 F5) ──────────────────────────
+# For these roles the pipeline advances via classify_blocked (blocked cards).
+# A "done" card with no recognised role prefix means the outer Hermes agent
+# completed the card directly (LLM non-compliance or premature completion).
+# The guard archives the bad card and creates a new blocked card so human
+# intervention is surfaced rather than silently lost.
+#
+# NOTE: validator / pm / developer / planner have existing _check_completed_*
+# handlers with retry logic.  The guard targets the remaining five roles.
+_DONE_GUARD_PREFIXES: Dict[str, tuple] = {
+    "qa-daedalus": ("qa-passed:", "qa-failed:", "qa-deferred:"),
+    "reviewer-daedalus": ("review-approved:", "review-changes-requested:"),
+    "security-analyst-daedalus": (
+        "security-approved:", "security-changes-requested:", "security: cleared",
+        "security cleared:",
+    ),
+    "accessibility-daedalus": (
+        "approved:", "accessibility-na:", "a11y-skipped:", "changes requested:",
+        "a11y-approved:",        # legacy form still emitted by some SOUL versions
+        "a11y-changes-requested:",  # legacy form before SOUL position update
+    ),
+    "documentation-daedalus": ("docs posted:",),
+}
+
+# Idempotency-key prefix for guard-created blocked cards.
+_GUARD_PREFIX_IK_PREFIX = "guard-prefix-"
+
+
+def _guard_prefix_on_done(
+    slug: str,
+    profiles: Optional[Dict[str, str]] = None,
+    *,
+    dry_run: bool = False,
+    closed_issue_cache: Optional[Dict[int, bool]] = None,
+    provider=None,
+) -> int:
+    """Mechanical backstop: archive done cards that lack the expected role prefix (#1125 F5).
+
+    For each role tracked by :data:`_DONE_GUARD_PREFIXES`, scan done cards.  If a
+    card's summary does NOT start with any expected prefix, the outer agent
+    completed the card without going through the proper block/classify_blocked
+    path (LLM non-compliance, premature completion, or inner-agent failure that
+    was not translated to a ``coding-agent-failed:`` block).
+
+    Action taken:
+    1. Archive the bad done card so it leaves the active board.
+    2. Create a new blocked card with reason
+       ``coding-agent-failed: unexpected completion summary: <first 100 chars>``
+       so the sweeper and human operators see the problem.
+
+    Idempotency: the archived card disappears from the ``done`` list on the next
+    tick so the guard does not re-fire.  The ``idempotency_key`` on the new
+    card prevents a duplicate even on concurrent ticks that both see the same
+    done card before either archive completes.
+
+    Returns: count of guards triggered.
+    """
+    p = profiles or _DEFAULT_PROFILES
+    _closed_issue_cache: Dict[int, Optional[bool]] = (
+        closed_issue_cache if closed_issue_cache is not None else {}
+    )
+
+    # Build profile→expected_prefixes mapping, respecting profile overrides.
+    profile_to_prefixes: Dict[str, tuple] = {}
+    for role_key, default_profile in _DEFAULT_PROFILES.items():
+        active_profile = p.get(role_key, default_profile)
+        if active_profile in _DONE_GUARD_PREFIXES:
+            profile_to_prefixes[active_profile] = _DONE_GUARD_PREFIXES[active_profile]
+
+    triggered = 0
+    for task in kanban.list_tasks(slug, status="done"):
+        assignee = (task.get("assignee") or "").strip()
+        expected_prefixes = profile_to_prefixes.get(assignee)
+        if expected_prefixes is None:
+            continue  # Not a guarded role
+
+        summary_raw = _get_task_summary(task, slug)
+        summary_check = (summary_raw or "").lower().lstrip()
+
+        # Well-formed completion: summary starts with a recognised prefix.
+        if any(summary_check.startswith(pf.lower()) for pf in expected_prefixes):
+            continue
+
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            continue
+
+        # Skip done cards for closed/unknown issues.
+        if _is_issue_closed_cached(provider, n, _closed_issue_cache) is not False:
+            logger.debug(
+                "dispatch: guard_prefix_on_done skipping %s card for closed/unknown issue #%s",
+                assignee, n,
+            )
+            continue
+
+        task_id = str(task.get("id") or task.get("task_id") or "")
+        truncated = (summary_raw or "")[:100]
+
+        logger.warning(
+            "dispatch: guard_prefix_on_done: done %s card %s for issue #%s "
+            "lacks expected prefix — archiving and recreating as blocked. "
+            "summary[:100]=%r",
+            assignee, task_id, n, truncated,
+        )
+
+        if dry_run:
+            logger.info(
+                "[dry-run] guard_prefix_on_done: would archive %s and create "
+                "coding-agent-failed blocked card for issue #%s (%s)",
+                task_id, n, assignee,
+            )
+            triggered += 1
+            continue
+
+        # Step 1: Archive the bad done card.
+        if task_id and not kanban.archive_task(slug, task_id):
+            logger.warning(
+                "dispatch: guard_prefix_on_done: archive_task %s failed — "
+                "skipping recreate for issue #%s",
+                task_id, n,
+            )
+            continue
+
+        # Step 2: Create a new blocked card to surface the failure.
+        ik = f"{_GUARD_PREFIX_IK_PREFIX}{assignee}-{n}"
+        fail_reason = f"coding-agent-failed: unexpected completion summary: {truncated!r}"
+        new_id = kanban.create_task(
+            slug,
+            title=f"#{n} {assignee} guard: unexpected completion",
+            body=(
+                f"**Guard triggered** (#1125 F5): `{assignee}` card `{task_id}` for issue #{n} "
+                f"transitioned to done with an unrecognised summary (no canonical role prefix).\n\n"
+                f"**Original summary (first 100 chars):** `{truncated}`\n\n"
+                f"The original card has been archived.  Human intervention is required:\n"
+                f"1. Inspect the agent run log for `{task_id}`.\n"
+                f"2. Determine if the work was actually completed.\n"
+                f"3. If yes, manually complete/re-queue the appropriate downstream stage.\n"
+                f"4. If no, re-queue `{assignee}` for issue #{n}."
+            ),
+            assignee=assignee,
+            idempotency_key=ik,
+        )
+        if not new_id:
+            logger.warning(
+                "dispatch: guard_prefix_on_done: create_task failed for issue #%s role %s — "
+                "card %s archived but no replacement created",
+                n, assignee, task_id,
+            )
+            continue
+
+        kanban.block_task(slug, new_id, fail_reason)
+        logger.info(
+            "dispatch: guard_prefix_on_done: archived %s, created replacement blocked card %s "
+            "for issue #%s role %s",
+            task_id, new_id, n, assignee,
+        )
+        triggered += 1
+
     return triggered
 
 
@@ -7666,6 +7831,22 @@ def _run_tick(
         closed_issue_cache=_tick_closed_cache,
     )
     if dev_retry_triggered and not dry_run:
+        kanban.dispatch(slug, max_spawns=max_dispatch)
+
+    # ── F5: mechanical prefix guard for done cards with unexpected summaries ──
+    # Catches outer-agent LLM non-compliance: when a QA/reviewer/security/
+    # accessibility/docs card transitions to done without the canonical role
+    # prefix, the card is archived and a new blocked card is created so human
+    # operators can intervene.  Validator/pm/developer/planner have dedicated
+    # _check_completed_* handlers with retry logic and are excluded (#1125 F5).
+    guard_triggered = _guard_prefix_on_done(
+        slug,
+        profiles=profiles,
+        dry_run=dry_run,
+        closed_issue_cache=_tick_closed_cache,
+        provider=provider,
+    )
+    if guard_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
 
     # Mirror each completed role's kanban summary to its GitHub issue (#894).

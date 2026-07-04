@@ -166,7 +166,7 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 **Never** complete/done your task directly — always block with `review-required`. The dispatcher reads this to advance the pipeline.
 
-⛔ **The prefixes `qa-passed` and `qa-failed` must appear exactly as substrings in your block reason.** Other phrasings (e.g. `qa pass:`, `tests passed:`, `qa approved:`) fall to `PENDING_SIGNAL` — the dispatcher waits silently and retries indefinitely. Always use the canonical form.
+⛔ **Your block reason MUST START WITH `qa-passed` or `qa-failed`.** Since #1125 F1 the dispatcher uses prefix matching (`startswith`). Other phrasings (e.g. `qa pass:`, `tests passed:`, `qa approved:`, or placing `qa-passed` anywhere other than the start) fall to `PENDING_SIGNAL`. Always put the canonical prefix at the BEGINNING of your block reason.
 
 ---
 
@@ -179,11 +179,10 @@ keeps your outputs unambiguous and prevents the pipeline from stalling.
 ### Signals you emit
 
 The dispatcher classifies your block reason via `core/iterate.py:classify_blocked`.
-All substring matches are **case-insensitive** (the dispatcher lowercases the
-handoff before matching):
+Matching is **case-insensitive prefix matching** (`startswith`) since #1125 F1:
 
-| Handoff text contains | Signal | Dispatcher action |
-|------------------------|--------|-------------------|
+| Handoff text **starts with** | Signal | Dispatcher action |
+|------------------------------|--------|-------------------|
 | `qa-passed` | `ADVANCE` | Pipeline moves to reviewer/security |
 | `qa-failed` | `QA_FIX` | Creates a developer-daedalus fix card |
 | any other text (agent still running, crash, typo) | `PENDING_SIGNAL` | Card idles — dispatcher waits for next tick |

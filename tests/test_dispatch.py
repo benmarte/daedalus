@@ -2038,7 +2038,7 @@ def test_reviewer_task_body_has_role_instructions():
     """_reviewer_task_body contains reviewer-specific instructions."""
     body = disp._reviewer_task_body("org/repo", _ISSUE, "/tmp", "github")
     assert "#55" in body
-    assert "reviewed: approved" in body or "reviewed:" in body
+    assert "review-approved:" in body or "review-changes-requested:" in body
 
 
 def test_security_task_body_has_role_instructions():

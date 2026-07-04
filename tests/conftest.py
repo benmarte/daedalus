@@ -608,19 +608,22 @@ def _role_handoff(role: str, *, issue: int, repo: str, pr: int) -> tuple:
     """Return ``(action, signal)`` for a role's simulated agent.
 
     ``action`` is ``"complete"`` (validator/PM emit a done-card summary the
-    dispatcher reads) or ``"block"`` (team roles emit a ``review-required:``
-    handoff the dispatcher auto-advances). The signal strings mirror the live
-    handoffs exercised by ``test_e2e_full_pipeline``.
+    dispatcher reads) or ``"block"`` (team roles block with the canonical
+    role-prefix signal that iterate.classify_blocked uses startswith matching
+    on since #1125 F1). The signal strings mirror the live handoffs.
     """
     signals = {
         "validator": ("complete", "CONFIRMED: reproduced on main; scope is clear"),
         "pm": ("complete", "SPEC: acceptance criteria defined"),
+        # developer: "review-required: PR #N ..." is the canonical developer handoff.
+        # classify_blocked("developer-daedalus", ...) checks is_review_required + pr_number.
         "developer": ("block", f"review-required: PR #{pr} opened for {repo}#{issue}"),
-        "qa": ("block", f"review-required: qa-passed: PR #{pr} — suite green"),
-        "reviewer": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
-        "security": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
-        "accessibility": ("block", f"review-required: a11y-skipped: no UI changes. PR #{pr}"),
-        "docs": ("block", f"review-required: docs posted: issue #{issue} PR #{pr} — README updated"),
+        # All signals below MUST START WITH their canonical prefix (#1125 F1 — startswith).
+        "qa": ("block", f"qa-passed: PR #{pr} — suite green"),
+        "reviewer": ("block", f"review-approved: PR #{pr}"),
+        "security": ("block", f"security-approved: PR #{pr}"),
+        "accessibility": ("block", f"a11y-skipped: no UI changes. PR #{pr}"),
+        "docs": ("block", f"docs posted: PR #{pr} — README updated"),
     }
     return signals[role]
 

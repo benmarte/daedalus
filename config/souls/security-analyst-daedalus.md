@@ -158,39 +158,42 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 
 ## Dispatcher Signal Reference (authoritative)
 
-This SOUL is consumed by `classify_blocked()` in `core/iterate.py`. The dispatcher branches on **substring matches** in the block/handoff reason text — not on prefixes. Your block reason must contain one of the recognised substrings or the pipeline stalls silently.
+This SOUL is consumed by `classify_blocked()` in `core/iterate.py`. Since #1125 F1, the dispatcher uses **prefix matching** (`startswith`) — your block reason must **start with** a recognised prefix or the pipeline stalls silently.
 
 **Recognised signals for `security-analyst-daedalus`:**
 
-| Block reason substring | Dispatcher action |
+| Block reason **starts with** | Dispatcher action |
 |---|---|
 | Any approve synonym (see below) | `APPROVE_ADVANCE` — advances pipeline |
 | Any change-request synonym (see below) | `PM_ROUTE` — PM re-routes to developer for fix |
 | `awaiting-fix: <card_id>` | silent no-op (a developer fix card is in flight; card auto-resumes when fix completes) |
 | (after 3 fix attempts) | `ESCALATE` — human review |
-| ANY OTHER PHRASING | `""` — **silent permanent stall** (no escalation, no recovery) |
+| ANY OTHER PHRASING AT START | `""` — **silent permanent stall** (no escalation, no recovery) |
 
-**Full approve synonyms** (any one triggers `APPROVE_ADVANCE`, case-insensitive — authoritative list in `core/iterate.py:_parse_handoff`):
-- `approved` (e.g. `security-approved: PR #N`) — also matches `approved.` (defensive substring in source)
+**Full approve synonyms** (block reason must START WITH one of these, case-insensitive — authoritative list in `core/iterate.py:_parse_handoff`):
+- `security-approved` (e.g. `security-approved: PR #N`) ← canonical
+- `security: cleared` (e.g. `security: cleared — no vulnerabilities`)
+- `security cleared`
+- `approved` (bare approval at start)
 - `sign-off`, `signoff`
 - `lgtm`
 - `looks good`
 - `no findings`
-- `pass`
 - `:+1:`
 
-**Full change-request synonyms** (any one triggers `PM_ROUTE`, case-insensitive):
-- `changes requested` (with space)
-- `changes-requested` (hyphenated)
+**Full change-request synonyms** (block reason must START WITH one of these):
+- `security-changes-requested` (e.g. `security-changes-requested: <reason>`) ← canonical
+- `changes-requested` (hyphenated, at start)
+- `changes requested` (with space, at start)
 - `changes required`
 - `blocking findings`
 - `request changes`
 - `needs fixes`
 - `need fixes`
 
-**Canonical forms you should emit** (subset of above, for clarity and predictability):
-- Approval → `security-approved: PR #<n>` (contains `approved`)
-- Blocked findings → `security-changes-requested: <reason>` (contains `changes-requested`)
+**Canonical forms you MUST emit** (summary MUST START with these prefixes):
+- Approval → `security-approved: PR #<n>` (starts with `security-approved`)
+- Blocked findings → `security-changes-requested: <reason>` (starts with `security-changes-requested`)
 
 **Delegation-output translation:** The inner Claude Code agent prints `security:cleared` or `security:flagged:`. Neither substring is recognised by the dispatcher. You (the outer SOUL) MUST translate before blocking:
 - inner `security:cleared` → block `security-approved: PR #N`

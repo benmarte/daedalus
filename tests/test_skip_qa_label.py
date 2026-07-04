@@ -418,9 +418,10 @@ def test_skip_qa_does_not_affect_developer_card():
 
 def test_skip_qa_does_not_affect_reviewer_card():
     """skip_qa on a reviewer card should not alter its normal behaviour."""
+    # Canonical prefix per #1125 F1: "review-changes-requested:" triggers is_changes_requested.
     result = iterate.classify_blocked(
         "reviewer-daedalus",
-        "review-required: CHANGES REQUESTED",
+        "review-changes-requested: fix null deref",
         ci_green=True,
         skip_qa=True,
     )

@@ -140,9 +140,9 @@ Replace every `<placeholder>` with the real value. Do not leave template text.
 ### 5. Complete your kanban task
 Complete with summary: `PLAN: <one-line description of the implementation approach>`
 
-⛔ **The `PLAN:` prefix is critical but not for the reason you might expect.** The dispatcher's `classify_blocked()` looks for `PLANNING COMPLETE` (case-insensitive) in the handoff text of a blocked planner card to trigger decomposition. Today, the planner *completes* the card (rather than blocking) and the decompose trigger fires from elsewhere in the pipeline. However, if you were to *block* instead of complete, the dispatcher would only decompose if your block reason contained `PLANNING COMPLETE`. Without that substring, any planner block routes to PM_ROUTE — which is almost certainly not what you want.
+⛔ **Your completion summary MUST START WITH `PLAN:`.** Since #1125 F1, the dispatcher uses prefix matching (`startswith`). If you block instead of complete, the dispatcher's `classify_blocked()` looks for `PLANNING COMPLETE` at the **start** of the handoff text. Without that start prefix, any planner block routes to PM_ROUTE.
 
-**The safe practice:** always complete (never block) as a planner, and always use the `PLAN:` prefix on your completion summary.
+**The safe practice:** always complete (never block) as a planner, and always use the `PLAN:` prefix at the START of your completion summary.
 
 ---
 
@@ -158,10 +158,10 @@ The planner should always **complete** (not block) with `PLAN:` summary. When th
 
 If the planner blocks (which should not happen under normal operation), `classify_blocked()` is invoked:
 
-| Handoff substring | Dispatcher action |
+| Handoff **starts with** | Dispatcher action |
 |---|---|
-| `PLANNING COMPLETE` (case-insensitive) | `PLANNER_DECOMPOSE` — creates epic sub-issues + triage cards; the triage→decompose step fans out non-deterministically to developer/QA/reviewer/security/accessibility/documentation via the LLM decomposer |
-| ANY OTHER block reason | `PM_ROUTE` — treated as unexpected planner output, escalated to PM |
+| `PLANNING COMPLETE` (case-insensitive, at start) | `PLANNER_DECOMPOSE` — creates epic sub-issues + triage cards; the triage→decompose step fans out non-deterministically to developer/QA/reviewer/security/accessibility/documentation via the LLM decomposer |
+| ANY OTHER block reason at start | `PM_ROUTE` — treated as unexpected planner output, escalated to PM |
 
 ### Path C — Edge case: Issue not suitable for decomposition
 

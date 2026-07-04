@@ -538,9 +538,10 @@ def test_other_planner_handoff_routes_to_pm():
 
 
 def test_non_epic_path_unchanged():
+    # Canonical reviewer approval prefix per #1125 F1: must start with "review-approved:".
     action = classify_blocked(
         "reviewer-daedalus",
-        "reviewed:approved",
+        "review-approved: PR #42",
         ci_green=True,
     )
     assert action == APPROVE_ADVANCE
