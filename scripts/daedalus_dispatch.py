@@ -200,6 +200,18 @@ from core.dispatch.housekeeping import (  # noqa: F401, E402
     _remap_generic_role_assignees,
     _sweep_orphan_worktrees,
 )
+from core.dispatch.stages import (  # noqa: F401, E402
+    _BLOCKER_CARD_COMMENT_PREFIX,
+    _CONSULT_RESOLVED_MARKER_PREFIX,
+    _CONSULT_RESOLVED_MARKER_TMPL,
+    _PLANNER_FALLBACK_KEY_RE,
+    _PLANNER_FALLBACK_TERMINAL_STATUSES,
+    _compute_planner_fallback_idempotency_key,
+    _downstream_tasks_running_or_done,
+    _enforce_validator_blocks,
+    _is_consult_resolved,
+    _stamp_resolved_consultations,
+)
 # ── End leaf-module re-exports ────────────────────────────────────────────────
 
 logger = logging.getLogger("daedalus.dispatch")
@@ -1645,14 +1657,8 @@ def _docs_task_body(
 
 
 
-# Stamped on a blocked team-member card once its PM consultation has completed,
-# preventing re-creation of the same consultation on subsequent ticks (#1125 F4).
-# Format: <!-- daedalus:consult-resolved:{issue_number} -->
-_CONSULT_RESOLVED_MARKER_TMPL = "<!-- daedalus:consult-resolved:{n} -->"
-# Prefix used to identify any consult-resolved comment during scanning.
-_CONSULT_RESOLVED_MARKER_PREFIX = "<!-- daedalus:consult-resolved:"
-# Comment posted on the PM consultation task body to link back to the blocked card.
-_BLOCKER_CARD_COMMENT_PREFIX = "blocker-card: "
+# _CONSULT_RESOLVED_MARKER_TMPL, _CONSULT_RESOLVED_MARKER_PREFIX,
+# _BLOCKER_CARD_COMMENT_PREFIX — moved to core/dispatch/stages.py (PR 3/4)
 
 
 
@@ -1833,26 +1839,7 @@ def _try_adopt_developer_pr(
 
 
 
-def _downstream_tasks_running_or_done(
-    slug: str,
-    issue_number: int,
-    downstream_profiles: tuple[str, ...],
-) -> bool:
-    """Return True if any downstream role card for *issue_number* is running or done.
-
-    Shared helper used by _retry_cap_stage_recovered to avoid 3× duplicated loops.
-    """
-    pattern = f"#{issue_number}"
-    for t in kanban.list_tasks(slug):
-        if pattern not in (t.get("title") or ""):
-            continue
-        assignee = (t.get("assignee") or "").strip()
-        if assignee not in downstream_profiles:
-            continue
-        status = (t.get("status") or "").lower()
-        if status in ("running", "done", "complete", "completed"):
-            return True
-    return False
+# _downstream_tasks_running_or_done — moved to core/dispatch/stages.py (PR 3/4)
 
 
 def _retry_cap_stage_recovered(
@@ -2121,86 +2108,7 @@ def _has_active_pm_consultation(
     return False
 
 
-def _is_consult_resolved(slug: str, card_id: str, issue_n: int) -> bool:
-    """Return True if the blocked card has a consult-resolved stamp for this issue.
-
-    Fetches the card via ``kanban.show_card`` and checks its comments for the
-    ``<!-- daedalus:consult-resolved:{n} -->`` marker.  Returns False when the
-    card cannot be fetched or the marker is absent.
-    """
-    marker = _CONSULT_RESOLVED_MARKER_TMPL.format(n=issue_n)
-    card = kanban.show_card(slug, card_id)
-    if not card:
-        return False
-    for c in card.get("comments") or []:
-        if (c.get("body") or "").strip() == marker:
-            return True
-    return False
-
-
-def _stamp_resolved_consultations(
-    slug: str,
-    pm_profile: str = "project-manager-daedalus",
-) -> int:
-    """Stamp blocked cards whose PM consultations have completed with CLARIFIED/ESCALATED.
-
-    Scans done PM consultation tasks (title starts with ``consult:``) for a
-    ``blocker-card: <id>`` comment (posted at consult-creation time) and, for
-    those whose summary begins with ``clarified:`` or ``escalated:``, stamps the
-    original blocked card with a ``consult-resolved:`` marker so that
-    ``_check_team_blockers`` skips re-creation on subsequent ticks (#1125 F4).
-
-    Returns the count of newly-stamped blocked cards.
-    """
-    resolved_prefixes = ("clarified:", "escalated:")
-    stamped = 0
-    for t in kanban.list_tasks(slug, status="done"):
-        title = (t.get("title") or "").lower()
-        if not title.startswith("consult:"):
-            continue
-        if (t.get("assignee") or "").strip() != pm_profile:
-            continue
-        cid = str(t.get("id") or "")
-        if not cid:
-            continue
-        card_data = kanban.show_card(slug, cid)
-        if not card_data:
-            continue
-        summary = (
-            card_data.get("summary") or card_data.get("latest_summary") or ""
-        ).lower()
-        if not any(summary.startswith(p) for p in resolved_prefixes):
-            continue
-        issue_n = extract_issue_number(t.get("title") or "")
-        if issue_n is None:
-            continue
-        marker = _CONSULT_RESOLVED_MARKER_TMPL.format(n=issue_n)
-        # Locate the blocked-card reference stored as a comment at creation time.
-        for c in card_data.get("comments") or []:
-            body = (c.get("body") or "").strip()
-            if not body.startswith(_BLOCKER_CARD_COMMENT_PREFIX):
-                continue
-            blocked_card_id = body[len(_BLOCKER_CARD_COMMENT_PREFIX):]
-            if not blocked_card_id:
-                continue
-            # Idempotent: only stamp if the marker is not already there.
-            blocked_card = kanban.show_card(slug, blocked_card_id)
-            if not blocked_card:
-                continue
-            already = any(
-                (cc.get("body") or "").strip() == marker
-                for cc in blocked_card.get("comments") or []
-            )
-            if not already:
-                kanban.comment(slug, blocked_card_id, marker)
-                logger.info(
-                    "dispatch: consult-resolved #%s stamped on card %s",
-                    issue_n,
-                    blocked_card_id,
-                )
-                stamped += 1
-            break  # one blocker-card comment per consult task
-    return stamped
+# _is_consult_resolved, _stamp_resolved_consultations — moved to core/dispatch/stages.py (PR 3/4)
 
 
 # ── follow-up extraction ─────────────────────────────────────────────────────
@@ -3932,52 +3840,8 @@ _NOT_SUITABLE_RE = re.compile(
     r"not\s+suitable(?:\s+for\s+decomposition)?", re.IGNORECASE
 )
 
-# Pattern for monotonic planner-fallback idempotency keys: planner-fallback-validator-{N}-g{gen}
-_PLANNER_FALLBACK_KEY_RE = re.compile(r"^planner-fallback-validator-(\d+)-g(\d+)$")
-# Terminal statuses that close a generation (task is done/cancelled/archived)
-_PLANNER_FALLBACK_TERMINAL_STATUSES = frozenset(
-    {"done", "complete", "completed", "cancelled", "canceled", "archived"}
-)
-
-
-def _compute_planner_fallback_idempotency_key(slug: str, issue_number: int) -> str:
-    """Compute a monotonic idempotency key for the planner-fallback validator path.
-
-    Returns ``planner-fallback-validator-{N}-g{gen}`` where ``gen`` is the
-    lowest non-negative integer such that no task with that generation has a
-    terminal status (done/cancelled/archived). This allows a recurring issue
-    to spawn a fresh validator after the previous one closes, while still
-    preventing duplicates within the same generation.
-
-    Legacy static keys (``planner-fallback-validator-{N}`` without a -g{gen}
-    suffix) are ignored so existing production boards can migrate cleanly.
-
-    Epic #1008 (dispatcher race condition fixes).
-    """
-    # Gather all tasks on the board. We need to scan regardless of status
-    # because archived/cancelled tasks still carry their generation number.
-    all_tasks = kanban.list_tasks(slug)
-    # Collect {gen: status} pairs for this issue's planner-fallback keys
-    generations: dict[int, str] = {}
-    prefix = f"planner-fallback-validator-{issue_number}-g"
-    for task in all_tasks:
-        ikey = (task.get("idempotency_key") or "").strip()
-        if not ikey.startswith(prefix):
-            continue
-        m = _PLANNER_FALLBACK_KEY_RE.match(ikey)
-        if not m:
-            continue
-        gen = int(m.group(2))
-        status = (task.get("status") or "").strip().lower()
-        generations[gen] = status
-
-    # Find the lowest generation that is NOT terminal
-    gen = 0
-    while (
-        gen in generations and generations[gen] in _PLANNER_FALLBACK_TERMINAL_STATUSES
-    ):
-        gen += 1
-    return f"planner-fallback-validator-{issue_number}-g{gen}"
+# _PLANNER_FALLBACK_KEY_RE, _PLANNER_FALLBACK_TERMINAL_STATUSES,
+# _compute_planner_fallback_idempotency_key — moved to core/dispatch/stages.py (PR 3/4)
 
 
 def _check_planner_not_suitable(
@@ -4991,72 +4855,7 @@ def _check_team_blockers(
     return triggered
 
 
-def _enforce_validator_blocks(
-    slug: str,
-    provider,
-    existing: set,
-    *,
-    validator_profile: str = "validator-daedalus",
-    dry_run: bool = False,
-) -> List[int]:
-    """For every blocked kanban card that is a validator card for a managed issue:
-    set the VCS board status to 'Blocked' (auto-creating the column if needed),
-    and complete all non-blocked downstream tasks so they cannot be dispatched.
-
-    Called each tick AFTER existing issue numbers are known so we only touch
-    issues the dispatcher is actually managing.  Returns enforced issue numbers.
-    """
-    if provider is None or not provider.board_configured():
-        return []
-    blocked = kanban.list_blocked(slug)
-    if not blocked:
-        return []
-
-    enforced: List[int] = []
-    for card in blocked:
-        assignee_card = (card.get("assignee") or "").strip()
-        summary = (card.get("summary") or card.get("last_summary") or "").lower()
-        # #1205: an infrastructure crash is not a validator verdict — the
-        # crash-retry reconciler owns these (board enforcement + downstream
-        # cancellation would fight the auto re-dispatch during backoff).
-        if crash_retry.is_crash_class(slug, card, summary):
-            continue
-        # Identify validator cards by profile name OR by the block-summary prefix
-        is_validator = (
-            assignee_card == validator_profile
-            or summary.startswith("blocked:")
-            or summary.startswith("escalate:")
-        )
-        if not is_validator:
-            continue
-        n = extract_issue_number(card.get("title") or "")
-        if n is None:
-            continue
-        if n not in existing:
-            continue
-        if dry_run:
-            logger.info(
-                "[dry-run] validator blocked #%s — would set 'Blocked' on board + cancel downstream tasks",
-                n,
-            )
-            enforced.append(n)
-            continue
-        provider.board_set_status(n, "Blocked")
-        logger.info("dispatch: validator blocked #%s — set board status to Blocked", n)
-        cancelled = kanban.close_non_blocked_issue_tasks(slug, n)
-        if cancelled:
-            logger.info(
-                "dispatch: cancelled %d downstream task(s) for blocked #%s: %s",
-                len(cancelled),
-                n,
-                cancelled,
-            )
-        # Only include in the returned list (which triggers notifications) once —
-        # subsequent ticks still enforce board/kanban state but stay silent.
-        if not _has_notified_block(slug, n, validator_profile=validator_profile):
-            enforced.append(n)
-            _mark_notified_block(slug, n, validator_profile=validator_profile)
-    return enforced
+# _enforce_validator_blocks — moved to core/dispatch/stages.py (PR 3/4)
 
 
 def _reconcile_vcs_board(resolved: Dict[str, Any], provider, *, dry_run: bool = False):
