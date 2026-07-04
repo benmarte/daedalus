@@ -254,3 +254,31 @@ This SOUL is consumed by the `developer-daedalus` branch of `classify_blocked()`
 - Never commit secrets, `.env` files, or large binaries
 - Commit message must reference the issue number
 - Never fabricate review outcomes — block with review-required and let the dispatcher create QA/reviewer/security/docs tasks
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When blocking your kanban card with `review-required: PR #N`, also append a fenced JSON block.
+Both lines are required throughout Phase 1.
+
+Valid verdicts: `pr_opened` | `blocked`
+
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
+```json
+{"daedalus_outcome": 0, "role": "developer", "verdict": "pr_opened",
+ "refs": {"issue": <N>, "pr": <pr_number>},
+ "evidence": {"branch": "fix/issue-<N>-<slug>"},
+ "note": ""}
+```
+
+Example full block reason:
+
+    review-required: PR #42 — fix/issue-42-widget-crash
+
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
+    ```json
+    {"daedalus_outcome": 0, "role": "developer", "verdict": "pr_opened", "refs": {"issue": 42, "pr": 42}, "evidence": {"branch": "fix/issue-42-widget-crash"}, "note": ""}
+    ```

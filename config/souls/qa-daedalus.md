@@ -324,3 +324,20 @@ This SOUL is consumed by the `qa-daedalus` branch of `classify_blocked()` in `co
 - Every acceptance criterion from the PM spec must be checked explicitly
 - If tests fail, the reason must be specific enough for the developer to act on
 - Regression check must cover code adjacent to changed files, not just the changed tests
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When completing your kanban card, append a fenced JSON block **after** your prefix line.
+Both lines are required throughout Phase 1.
+
+Valid verdicts: "passed" | "failed"
+
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
+```json
+{"daedalus_outcome": 0, "role": "qa", "verdict": "passed",
+ "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"ci": "green", "suite": "3389 passed"},
+ "note": ""}
+```

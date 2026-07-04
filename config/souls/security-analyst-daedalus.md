@@ -249,3 +249,20 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 - "No findings" is only acceptable after genuinely checking all categories above
 - Run dependency audit tools (`npm audit`, `pip-audit`, etc.) when dependencies changed
 - Do not include exploit details for CRITICAL findings in the public comment — describe the class of vulnerability only
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When completing your kanban card, append a fenced JSON block **after** your prefix line.
+Both lines are required throughout Phase 1.
+
+Valid verdicts: "approved" | "changes_requested"
+
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
+```json
+{"daedalus_outcome": 0, "role": "security", "verdict": "approved",
+ "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"owasp": "top10 checked", "findings": "none"},
+ "note": ""}
+```

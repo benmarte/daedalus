@@ -798,3 +798,375 @@ class TestF1PrefixEnforcement:
         ]), mock.patch.object(kanban, "show_card", return_value={"latest_summary": "review-approved: LGTM, no findings"}):
             passed = iterate._role_gate_passed("slug", 42, "reviewer", ["approved", "review-approved"])
         assert passed is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1 (#1170) — JSON outcome routing characterization
+#
+# For every (role, verdict) pair in VERDICT_TABLE, prove that a JSON-backed
+# summary routes to the SAME action as its prefix-backed twin in _CLASSIFY_CASES.
+#
+# INVARIANT: no row in _CLASSIFY_CASES is modified.  All additions are below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _json_block(
+    role: str,
+    verdict: str,
+    issue: int = 42,
+    pr: "int | None" = None,
+) -> str:
+    """Return a fenced JSON outcome block for the given (role, verdict)."""
+    pr_val = str(pr) if pr is not None else "null"
+    return (
+        "```json\n"
+        f'{{"daedalus_outcome": 1, "role": "{role}", "verdict": "{verdict}", '
+        f'"refs": {{"issue": {issue}, "pr": {pr_val}}}, '
+        '"evidence": {}, "note": ""}}\n'
+        "```"
+    )
+
+
+def _dual(
+    legacy_prefix: str,
+    role: str,
+    verdict: str,
+    pr: "int | None" = None,
+) -> str:
+    """Return a dual-write summary: legacy prefix line + JSON outcome block."""
+    return f"{legacy_prefix}\n{_json_block(role, verdict, pr=pr)}"
+
+
+# Table format: (card_assignee, handoff_text, kwargs, expected_action, note)
+_JSON_CLASSIFY_CASES = [
+    # ── planner-daedalus ──────────────────────────────────────────────────────
+    (
+        "planner-daedalus",
+        _dual("PLANNING COMPLETE — 5 sub-issues", "planner", "plan"),
+        {},
+        iterate.PLANNER_DECOMPOSE,
+        "JSON planner:plan → identical to 'PLANNING COMPLETE' prefix → PLANNER_DECOMPOSE",
+    ),
+    (
+        "planner-daedalus",
+        _json_block("planner", "not_suitable"),
+        {},
+        iterate.PM_ROUTE,
+        "JSON planner:not_suitable → identical to unexpected planner output → PM_ROUTE",
+    ),
+    # ── documentation-daedalus ────────────────────────────────────────────────
+    (
+        "documentation-daedalus",
+        _dual("docs posted: added README", "docs", "posted"),
+        {},
+        iterate.APPROVE_ADVANCE,
+        "JSON docs:posted → identical to 'docs posted:' prefix → APPROVE_ADVANCE (terminal)",
+    ),
+    # ── project-manager-daedalus ──────────────────────────────────────────────
+    (
+        "project-manager-daedalus",
+        _json_block("pm", "spec"),
+        {},
+        "",
+        "JSON pm:spec (work-in-progress) → no-op '' (analogous to 'awaiting-fix:')",
+    ),
+    (
+        "project-manager-daedalus",
+        _json_block("pm", "assigned"),
+        {},
+        "",
+        "JSON pm:assigned (work-in-progress) → no-op ''",
+    ),
+    (
+        "project-manager-daedalus",
+        _json_block("pm", "clarified"),
+        {},
+        "",
+        "JSON pm:clarified (work-in-progress) → no-op ''",
+    ),
+    (
+        "project-manager-daedalus",
+        _json_block("pm", "escalated"),
+        {},
+        iterate.ESCALATE,
+        "JSON pm:escalated → identical to PM blocked (not awaiting-fix) → ESCALATE",
+    ),
+    (
+        "project-manager-daedalus",
+        "awaiting-fix: t_dev123\n" + _json_block("pm", "assigned"),
+        {},
+        "",
+        "JSON pm:assigned with awaiting-fix: in handoff → no-op '' (fix in flight)",
+    ),
+    # ── developer-daedalus ────────────────────────────────────────────────────
+    (
+        "developer-daedalus",
+        _json_block("developer", "pr_opened", pr=42),
+        {"fix_attempts": iterate.MAX_FIX_ATTEMPTS},
+        iterate.ESCALATE,
+        "JSON developer:pr_opened at/over MAX_FIX_ATTEMPTS → ESCALATE (same guard as prefix)",
+    ),
+    (
+        "developer-daedalus",
+        _json_block("developer", "pr_opened", pr=42),
+        {"pr_is_merged": True},
+        iterate.RECONCILE_MERGED,
+        "JSON developer:pr_opened + merged → RECONCILE_MERGED (same as prefix 'review-required: PR #42 merged')",
+    ),
+    (
+        "developer-daedalus",
+        _json_block("developer", "pr_opened", pr=42),
+        {"pr_is_open": False},
+        iterate.PENDING_PR,
+        "JSON developer:pr_opened + provider says not open → PENDING_PR (same as prefix guard)",
+    ),
+    (
+        "developer-daedalus",
+        _dual("review-required: PR #42", "developer", "pr_opened", pr=42),
+        {},
+        iterate.ADVANCE,
+        "JSON developer:pr_opened open PR → ADVANCE (CI no longer gates, epic #1074)",
+    ),
+    (
+        "developer-daedalus",
+        _json_block("developer", "blocked"),
+        {},
+        iterate.PM_ROUTE,
+        "JSON developer:blocked → PM_ROUTE (same as prefix 'some other block reason')",
+    ),
+    # ── reviewer-daedalus ─────────────────────────────────────────────────────
+    (
+        "reviewer-daedalus",
+        _json_block("reviewer", "changes_requested"),
+        {"fix_attempts": iterate.MAX_FIX_ATTEMPTS},
+        iterate.ESCALATE,
+        "JSON reviewer:changes_requested at MAX_FIX_ATTEMPTS → ESCALATE (same guard as prefix)",
+    ),
+    (
+        "reviewer-daedalus",
+        "awaiting-fix: t_fix99\n" + _json_block("reviewer", "approved"),
+        {},
+        "",
+        "JSON reviewer:approved but awaiting-fix: in handoff → no-op '' (fix in flight)",
+    ),
+    (
+        "reviewer-daedalus",
+        _dual("review-changes-requested: needs fixes", "reviewer", "changes_requested"),
+        {},
+        iterate.PM_ROUTE,
+        "JSON reviewer:changes_requested → PM_ROUTE (same as 'review-changes-requested:' prefix)",
+    ),
+    (
+        "reviewer-daedalus",
+        _dual("review-approved: LGTM", "reviewer", "approved"),
+        {},
+        iterate.APPROVE_ADVANCE,
+        "JSON reviewer:approved → APPROVE_ADVANCE (same as 'review-approved:' prefix)",
+    ),
+    # ── security-analyst-daedalus ─────────────────────────────────────────────
+    (
+        "security-analyst-daedalus",
+        _dual("security: cleared — no vulnerabilities", "security", "approved"),
+        {},
+        iterate.APPROVE_ADVANCE,
+        "JSON security:approved → APPROVE_ADVANCE (same as 'security: cleared' prefix, #1185)",
+    ),
+    (
+        "security-analyst-daedalus",
+        _json_block("security", "changes_requested"),
+        {},
+        iterate.PM_ROUTE,
+        "JSON security:changes_requested → PM_ROUTE",
+    ),
+    (
+        "security-analyst-daedalus",
+        _json_block("security", "approved"),
+        {"fix_attempts": iterate.MAX_FIX_ATTEMPTS},
+        iterate.ESCALATE,
+        "JSON security:approved at MAX_FIX_ATTEMPTS → ESCALATE",
+    ),
+    # ── qa-daedalus ───────────────────────────────────────────────────────────
+    (
+        "qa-daedalus",
+        _dual("qa-passed: all tests green", "qa", "passed"),
+        {},
+        iterate.ADVANCE,
+        "JSON qa:passed → ADVANCE (identical to 'qa-passed:' prefix)",
+    ),
+    (
+        "qa-daedalus",
+        _dual("qa-failed: 3 tests broken", "qa", "failed"),
+        {},
+        iterate.QA_FIX,
+        "JSON qa:failed → QA_FIX (identical to 'qa-failed:' prefix)",
+    ),
+    (
+        "qa-daedalus",
+        _dual("qa-passed: all green", "qa", "passed"),
+        {"skip_qa": True},
+        iterate.ADVANCE,
+        "JSON qa:passed with skip_qa=True → still ADVANCE (skip_qa bypasses before JSON check)",
+    ),
+    # ── accessibility-daedalus ────────────────────────────────────────────────
+    (
+        "accessibility-daedalus",
+        _dual("approved — WCAG 2.1 AA compliant", "a11y", "approved"),
+        {},
+        iterate.ADVANCE,
+        "JSON a11y:approved → ADVANCE (same as 'approved' prefix)",
+    ),
+    (
+        "accessibility-daedalus",
+        _dual("accessibility-na: no UI changes", "a11y", "na"),
+        {},
+        iterate.ADVANCE,
+        "JSON a11y:na → ADVANCE (same as 'accessibility-na:' prefix)",
+    ),
+    (
+        "accessibility-daedalus",
+        _dual("a11y-skipped: backend-only PR", "a11y", "skipped"),
+        {},
+        iterate.ADVANCE,
+        "JSON a11y:skipped → ADVANCE (same as 'a11y-skipped:' prefix)",
+    ),
+    (
+        "accessibility-daedalus",
+        _dual("changes requested: add aria labels", "a11y", "changes_requested"),
+        {},
+        iterate.PM_ROUTE,
+        "JSON a11y:changes_requested → PM_ROUTE (same as 'changes requested:' prefix)",
+    ),
+    # ── validator-daedalus ────────────────────────────────────────────────────
+    (
+        "validator-daedalus",
+        _json_block("validator", "block_for_review"),
+        {},
+        iterate.ESCALATE,
+        "JSON validator:block_for_review → ESCALATE (blocked validator is always an error)",
+    ),
+    (
+        "validator-daedalus",
+        _json_block("validator", "confirmed"),
+        {},
+        iterate.ESCALATE,
+        "JSON validator:confirmed on a BLOCKED card → ESCALATE (validators only complete)",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "assignee,handoff,kwargs,expected,note",
+    _JSON_CLASSIFY_CASES,
+    ids=[f"json:{c[0] or 'empty'}:{c[3] or 'noop'}" for c in _JSON_CLASSIFY_CASES],
+)
+def test_classify_blocked_json_outcome_routes_identically(assignee, handoff, kwargs, expected, note):
+    """JSON-outcome routing must produce the same action as the equivalent prefix twin.
+
+    Each case in _JSON_CLASSIFY_CASES has a corresponding row in _CLASSIFY_CASES
+    (or is a guard-variation of one).  The invariant is: if an agent dual-writes
+    (prefix + JSON), the outcome is identical to prefix-only routing.
+    """
+    call_kwargs = {"ci_green": True}
+    call_kwargs.update(kwargs)
+    result = iterate.classify_blocked(assignee, handoff, **call_kwargs)
+    assert result == expected, f"{note}\n  got {result!r}, expected {expected!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dual-path: prefix-only summaries still route correctly (JSON path is skipped)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_dual_path_prefix_only_still_routes_correctly():
+    """Prefix-only summary (no JSON block) must route identically to the
+    golden _CLASSIFY_CASES entries.
+
+    Sampling a cross-section of roles to confirm the JSON branch is skipped
+    when no outcome record is present in the handoff text.
+    """
+    prefix_only_cases = [
+        ("qa-daedalus",              "qa-passed: all tests green",              iterate.ADVANCE),
+        ("qa-daedalus",              "qa-failed: 3 tests broken",               iterate.QA_FIX),
+        ("documentation-daedalus",   "docs posted: added README section",        iterate.APPROVE_ADVANCE),
+        ("reviewer-daedalus",        "review-approved: LGTM, no findings",       iterate.APPROVE_ADVANCE),
+        ("developer-daedalus",       "review-required: PR #42 all green",        iterate.ADVANCE),
+        ("accessibility-daedalus",   "approved — WCAG 2.1 AA compliant",         iterate.ADVANCE),
+        ("planner-daedalus",         "PLANNING COMPLETE — 5 sub-issues",         iterate.PLANNER_DECOMPOSE),
+        ("validator-daedalus",       "awaiting-pr (used dev protocol by mistake)", iterate.ESCALATE),
+    ]
+    for assignee, handoff, expected in prefix_only_cases:
+        result = iterate.classify_blocked(assignee, handoff, ci_green=True)
+        assert result == expected, (
+            f"prefix-only routing broke for {assignee!r}: "
+            f"got {result!r}, expected {expected!r}\n"
+            f"  handoff={handoff!r}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _source_collector telemetry — "json" vs "prefix"
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_source_collector_records_json_when_valid_outcome_present():
+    """_source_collector gets 'json' appended when a valid JSON outcome drives routing."""
+    sources: list[str] = []
+    handoff = _dual("qa-passed: all green", "qa", "passed")
+    iterate.classify_blocked("qa-daedalus", handoff, ci_green=True, _source_collector=sources)
+    assert sources == ["json"], f"expected ['json'], got {sources!r}"
+
+
+def test_source_collector_records_prefix_when_no_json():
+    """_source_collector gets 'prefix' appended when no JSON outcome is present."""
+    sources: list[str] = []
+    iterate.classify_blocked("qa-daedalus", "qa-passed: all tests green",
+                              ci_green=True, _source_collector=sources)
+    assert sources == ["prefix"], f"expected ['prefix'], got {sources!r}"
+
+
+def test_source_collector_records_prefix_on_role_mismatch():
+    """_source_collector gets 'prefix' when JSON role != card assignee → falls back to prefix."""
+    sources: list[str] = []
+    # JSON says "docs" role but card is assigned to qa-daedalus
+    wrong_role_json = _json_block("docs", "posted")
+    iterate.classify_blocked("qa-daedalus", f"qa-passed: all tests green\n{wrong_role_json}",
+                              ci_green=True, _source_collector=sources)
+    assert sources == ["prefix"], f"expected ['prefix'] (role mismatch), got {sources!r}"
+
+
+def test_planner_hijack_not_suitable_plus_v0_example_routes_pm():
+    """Post-fix: planner hijack scenario from the #1271 review finding.
+
+    Reviewer proof: a planner agent emits real 'not_suitable' outcome then
+    echoes its instructions (which formerly contained version-1 'plan' example).
+    Pre-fix (version 1 examples): last block was plan → PLANNER_DECOMPOSE.
+    Post-fix (version 0 examples + reverse scan): version-0 example is skipped,
+    real 'not_suitable' block is found → PM_ROUTE.
+    """
+    real_block = _json_block("planner", "not_suitable")
+    v0_example = (
+        "```json\n"
+        '{"daedalus_outcome": 0, "role": "planner", "verdict": "plan", '
+        '"refs": {"issue": 1, "pr": null}, "evidence": {}, "note": ""}\n'
+        "```"
+    )
+    summary = (
+        "not_suitable: issue is too small to decompose\n"
+        f"{real_block}\n\n"
+        "--- Instructions reminder ---\n"
+        f"{v0_example}"
+    )
+    result = iterate.classify_blocked("planner-daedalus", summary, ci_green=True)
+    assert result == iterate.PM_ROUTE, (
+        f"Version-0 echoed example must not hijack real 'not_suitable' block; "
+        f"expected PM_ROUTE, got {result!r}"
+    )
+
+
+def test_source_collector_none_is_safe():
+    """_source_collector=None (the default) must not raise."""
+    try:
+        iterate.classify_blocked("qa-daedalus", "qa-passed: all green", ci_green=True,
+                                 _source_collector=None)
+    except Exception as exc:
+        pytest.fail(f"classify_blocked with _source_collector=None raised: {exc!r}")

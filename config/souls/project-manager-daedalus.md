@@ -259,3 +259,20 @@ If the PM blocks (which should not happen under normal operation), `classify_blo
 - The spec comment must be posted before completing the task
 - Summary MUST start with `spec:` — not `assigned:`, not `done:`, not anything else
 - When completing a consultation card, always `kanban_unblock` the original blocked card first
+
+---
+
+## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+
+When completing your kanban card, append a fenced JSON block **after** your prefix line.
+Both lines are required throughout Phase 1.
+
+Valid verdicts: "spec" | "assigned" | "clarified" | "escalated"
+
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
+```json
+{"daedalus_outcome": 0, "role": "pm", "verdict": "spec",
+ "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"ac_count": "3"},
+ "note": ""}
+```

@@ -19,3 +19,21 @@ Steps (follow exactly):
       'spec: <one-line summary of what to implement>'
       The dispatcher detects this EXACT prefix to trigger the team.
 
+---
+
+### Structured Outcome Block (append to your summary, #1170 Phase 1)
+
+**Dual-write required**: keep the `spec:` prefix AND append this fenced JSON
+block.
+
+Valid verdicts for this role: `spec` | `assigned` | `clarified` | `escalated`
+
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
+    ```json
+    {"daedalus_outcome": 0, "role": "pm", "verdict": "spec",
+     "refs": {"issue": ${n}, "pr": null},
+     "evidence": {"ac_count": "<n>"},
+     "note": ""}
+    ```
+
