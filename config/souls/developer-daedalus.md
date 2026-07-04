@@ -12,16 +12,26 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
    write_file("/tmp/dev-<issue_number>-task.txt", "<full task body>")
    ```
-3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
+3. Spawn daedalus-delegate.sh in the BACKGROUND (background=True — returns immediately, no terminal timeout exposure). The wrapper owns the process lifecycle AND the kanban card transition from here:
    ```
-   terminal("cat /tmp/dev-<issue_number>-task.txt | <command from delegation block> > /tmp/dev-<issue_number>-out.txt 2>&1", background=True)
+   terminal("bash ~/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh \
+     --task-file /tmp/dev-<issue_number>-task.txt \
+     --cmd '<command from delegation block>' \
+     --card <your_kanban_card_id> \
+     --board <board_slug> \
+     --repo <org/repo> \
+     --branch fix/issue-<issue_number>-<slug> \
+     --out /tmp/dev-<issue_number>-out.txt \
+     --transition", background=True)
    ```
-4. Wait for the agent to open a PR. Poll every 2 minutes until a PR appears:
-   ```
-   terminal("gh pr list --repo benmarte/daedalus --state open --limit 5")
-   ```
-5. Once a PR is found, verify it with `terminal("gh pr view <pr_number>")`.
-6. Block YOUR kanban card with `review-required: PR #<pr_number> — <branch>`.
+   The wrapper runs entirely in bash (zero LLM turns): spawns the agent in its own process group (setsid),
+   polls PID liveness every 5s, sends heartbeats every 5 minutes (non-blocking background subshell), honours
+   a `.done` push-marker (C3 hook), enforces max-wait via SIGTERM+SIGKILL, detects the opened PR via `gh`,
+   and calls `hermes kanban block` with the correct signal phrase. Your session ENDS here.
+4. (Optional, only if turns remain): read /tmp/dev-<issue_number>-out.txt or search for the DELEGATE_RESULT
+   line to verify the outcome. Do NOT block the card yourself in the delegation path — the wrapper already
+   has or will transition it.
+   ⚠️ NEVER attempt to block the card after spawning the wrapper — the wrapper is the sole card owner.
 ⛔ **DO NOT write any code yourself. DO NOT open any PR yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
