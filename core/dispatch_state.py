@@ -428,3 +428,137 @@ def get_config_values(workdir: str) -> dict[str, str] | None:
         "coding_agent": str(vals.get("coding_agent", "")),
         "model_default": str(vals.get("model_default", "")),
     }
+
+
+# ── Per-issue pipeline state (#1170 Phase 2) ──────────────────────────────────
+#
+# First-class handoff state that replaces comment-marker scanning over time.
+# State lives under issues[N]["pipeline_state"] in the existing JSON file.
+#
+# Schema (all fields optional / absent = default-false):
+#   "retry_cap_notified":  {role: bool}   — one-shot retry-cap alert sent
+#   "escalation_notified": bool           — one-shot escalation alert sent
+#   "consult_resolved":    {card_id: bool} — PM consult resolved for card
+#   "stage_history":       [{...}]        — append-only outcome log
+#
+# Dual-read: callers check state FIRST, fall back to comment-marker scan,
+# backfill on fallback hit (lazy migration — no big-bang re-scan needed).
+# Dual-write: state written alongside the existing comment post so both
+# sources stay in sync throughout Phases 2–3.
+#
+# All helpers are atomic (read/mutate/_save) and safe under concurrent ticks.
+
+
+def _pipeline_entry(state: dict[str, Any], issue_number: int) -> dict[str, Any]:
+    """Return (creating if needed) the mutable pipeline_state sub-entry."""
+    entry = _issue_entry(state, issue_number)
+    ps = entry.setdefault("pipeline_state", {})
+    if not isinstance(ps, dict):
+        ps = {}
+        entry["pipeline_state"] = ps
+    return ps
+
+
+def get_issue_pipeline_state(workdir: str, issue_number: int) -> dict[str, Any]:
+    """Return a copy of the pipeline_state dict for *issue_number* (may be empty)."""
+    entry = _load(workdir).get("issues", {}).get(str(issue_number))
+    if not isinstance(entry, dict):
+        return {}
+    ps = entry.get("pipeline_state")
+    return dict(ps) if isinstance(ps, dict) else {}
+
+
+# ── retry-cap notifications ───────────────────────────────────────────────────
+
+
+def is_retry_cap_notified(workdir: str, issue_number: int, role: str) -> bool:
+    """Return True if a retry-cap notification was already sent for *role*."""
+    ps = get_issue_pipeline_state(workdir, issue_number)
+    notified = ps.get("retry_cap_notified")
+    if not isinstance(notified, dict):
+        return False
+    return bool(notified.get(role))
+
+
+def mark_retry_cap_notified(workdir: str, issue_number: int, role: str) -> None:
+    """Record that the retry-cap notification has been sent for *role*."""
+    state = _load(workdir)
+    ps = _pipeline_entry(state, issue_number)
+    notified = ps.setdefault("retry_cap_notified", {})
+    if not isinstance(notified, dict):
+        notified = {}
+        ps["retry_cap_notified"] = notified
+    notified[role] = True
+    _save(workdir, state)
+
+
+# ── escalation notifications ──────────────────────────────────────────────────
+
+
+def is_escalation_notified(workdir: str, issue_number: int) -> bool:
+    """Return True if an escalation notification was already sent."""
+    ps = get_issue_pipeline_state(workdir, issue_number)
+    return bool(ps.get("escalation_notified"))
+
+
+def mark_escalation_notified(workdir: str, issue_number: int) -> None:
+    """Record that the escalation notification has been sent."""
+    state = _load(workdir)
+    ps = _pipeline_entry(state, issue_number)
+    ps["escalation_notified"] = True
+    _save(workdir, state)
+
+
+# ── consult-resolved per-card ─────────────────────────────────────────────────
+
+
+def is_consult_resolved_for_card(
+    workdir: str, card_id: str, issue_number: int
+) -> bool:
+    """Return True if the consult-resolved marker was set for *card_id* + *issue_number*."""
+    ps = get_issue_pipeline_state(workdir, issue_number)
+    resolved = ps.get("consult_resolved")
+    if not isinstance(resolved, dict):
+        return False
+    return bool(resolved.get(str(card_id)))
+
+
+def mark_consult_resolved_for_card(
+    workdir: str, card_id: str, issue_number: int
+) -> None:
+    """Record that the consult-resolved marker has been stamped for *card_id*."""
+    state = _load(workdir)
+    ps = _pipeline_entry(state, issue_number)
+    resolved = ps.setdefault("consult_resolved", {})
+    if not isinstance(resolved, dict):
+        resolved = {}
+        ps["consult_resolved"] = resolved
+    resolved[str(card_id)] = True
+    _save(workdir, state)
+
+
+# ── stage history (append-only outcome log) ───────────────────────────────────
+
+
+def append_stage_history(
+    workdir: str,
+    issue_number: int,
+    record: dict[str, Any],
+) -> None:
+    """Append *record* to the per-issue stage_history log.
+
+    *record* is an arbitrary dict — callers typically include:
+      ``{"ts": float, "role": str, "verdict": str, "source": "json"|"prefix",
+         "verify": "verified"|"mismatch"|"skipped", "note": str}``
+
+    The list is append-only; individual entries are never modified or removed
+    (Phase 3 may cap length or rotate old entries).
+    """
+    state = _load(workdir)
+    ps = _pipeline_entry(state, issue_number)
+    hist = ps.setdefault("stage_history", [])
+    if not isinstance(hist, list):
+        hist = []
+        ps["stage_history"] = hist
+    hist.append(dict(record))
+    _save(workdir, state)

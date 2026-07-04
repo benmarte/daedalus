@@ -46,6 +46,7 @@ from typing import List
 
 from core import crash_retry  # noqa: E402
 from core import kanban  # noqa: E402
+import core.dispatch_state as _ds  # noqa: E402
 from core.dispatch.dedup import _has_notified_block, _mark_notified_block  # noqa: E402
 from core.util import extract_issue_number  # noqa: E402
 
@@ -63,19 +64,56 @@ _CONSULT_RESOLVED_MARKER_PREFIX = "<!-- daedalus:consult-resolved:"
 _BLOCKER_CARD_COMMENT_PREFIX = "blocker-card: "
 
 
-def _is_consult_resolved(slug: str, card_id: str, issue_n: int) -> bool:
+def _is_consult_resolved(
+    slug: str,
+    card_id: str,
+    issue_n: int,
+    *,
+    workdir: str = "",
+) -> bool:
     """Return True if the blocked card has a consult-resolved stamp for this issue.
 
     Fetches the card via ``kanban.show_card`` and checks its comments for the
     ``<!-- daedalus:consult-resolved:{n} -->`` marker.  Returns False when the
     card cannot be fetched or the marker is absent.
+
+    Phase 2 (#1170): when *workdir* is supplied, check ``dispatch_state``
+    FIRST before scanning card comments.  On a comment-scan hit, backfill the
+    state record for future ticks (lazy migration).
     """
+    # ── Phase 2 dual-read: state-first ────────────────────────────────────────
+    if workdir:
+        try:
+            if _ds.is_consult_resolved_for_card(workdir, card_id, issue_n):
+                return True
+        except Exception as exc:
+            logger.warning(
+                "dispatch: _is_consult_resolved state-read failed for "
+                "card %s issue #%s: %s",
+                card_id,
+                issue_n,
+                exc,
+            )
+
+    # ── Comment-scan fallback (original behaviour) ─────────────────────────────
     marker = _CONSULT_RESOLVED_MARKER_TMPL.format(n=issue_n)
     card = kanban.show_card(slug, card_id)
     if not card:
         return False
     for c in card.get("comments") or []:
         if (c.get("body") or "").strip() == marker:
+            # ── lazy backfill into state on comment-scan hit ───────────────────
+            if workdir:
+                try:
+                    _ds.mark_consult_resolved_for_card(workdir, card_id, issue_n)
+                except Exception as exc:
+                    logger.warning(
+                        "dispatch: _is_consult_resolved backfill failed for "
+                        "card %s issue #%s: %s",
+                        card_id,
+                        issue_n,
+                        exc,
+                    )
             return True
     return False
 
@@ -83,6 +121,8 @@ def _is_consult_resolved(slug: str, card_id: str, issue_n: int) -> bool:
 def _stamp_resolved_consultations(
     slug: str,
     pm_profile: str = "project-manager-daedalus",
+    *,
+    workdir: str = "",
 ) -> int:
     """Stamp blocked cards whose PM consultations have completed with CLARIFIED/ESCALATED.
 
@@ -91,6 +131,9 @@ def _stamp_resolved_consultations(
     those whose summary begins with ``clarified:`` or ``escalated:``, stamps the
     original blocked card with a ``consult-resolved:`` marker so that
     ``_check_team_blockers`` skips re-creation on subsequent ticks (#1125 F4).
+
+    Phase 2 (#1170): when *workdir* is supplied, also writes the resolved state
+    to ``dispatch_state`` (dual-write) alongside the existing comment stamp.
 
     Returns the count of newly-stamped blocked cards.
     """
@@ -135,6 +178,20 @@ def _stamp_resolved_consultations(
             )
             if not already:
                 kanban.comment(slug, blocked_card_id, marker)
+                # Phase 2 (#1170): dual-write to dispatch_state.
+                if workdir:
+                    try:
+                        _ds.mark_consult_resolved_for_card(
+                            workdir, blocked_card_id, issue_n
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "dispatch: _stamp_resolved_consultations state-write "
+                            "failed for card %s / issue #%s: %s",
+                            blocked_card_id,
+                            issue_n,
+                            exc,
+                        )
                 logger.info(
                     "dispatch: consult-resolved #%s stamped on card %s",
                     issue_n,
