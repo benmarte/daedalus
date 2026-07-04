@@ -1916,13 +1916,17 @@ function App() {
 
   function syncProfilesModel() {
     setSyncProfiles(true); setSyncResult(null);
-    fetchJSON("/profiles/model/sync", { method: "POST" })
+    fetchJSON("/api/plugins/daedalus/profiles/model/sync", { method: "POST" })
       .then(function (r) {
         setSyncProfiles(false);
         setSyncResult(r || { ok: false, error: "no response" });
         if (r && r.ok) {
-          // Clear result after 5 seconds
-          setTimeout(function () { setSyncResult(null); }, 5000);
+          // Refresh roster-status so profile counts stay accurate after sync.
+          fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function (d) {
+            setRosterStatus(d || null);
+          }).catch(function () {});
+          // Clear result after 8 seconds.
+          setTimeout(function () { setSyncResult(null); }, 8000);
         }
       })
       .catch(function (err) {
@@ -1980,6 +1984,15 @@ function App() {
         })
       )
     ),
+
+    // Sync-profiles result line — right-aligned, fades after 8s on success
+    syncResult ? React.createElement("div", {
+      style: { textAlign: "right", fontSize: "12px", marginBottom: "8px",
+               color: syncResult.ok ? "#4ade80" : "#f87171" },
+    }, syncResult.ok
+      ? "Synced " + syncResult.updated + " profile(s) to " + (syncResult.model || "global model")
+      : "Sync error: " + (syncResult.error || "failed")
+    ) : null,
 
     // Roster provisioning banner — shown when any of the 9 profiles are missing
     rosterStatus && !rosterStatus.all_provisioned ? React.createElement("div", {
