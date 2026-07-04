@@ -179,6 +179,14 @@ _kill_child() {
 # byte-identical to the developer SOUL signal table so classify_blocked() routes
 # correctly. Retries the block call once; on failure logs and returns 1 so the
 # caller can exit nonzero (sweeper stale-running detection remains the backstop).
+#
+# #1288 metadata transport: this is a BLOCKED handoff (review-required /
+# coding-agent-failed), NOT a completion — `hermes kanban block` has no
+# `--metadata` flag and a blocked card has no closing run to attach metadata to.
+# So the outcome stays encoded as free-text in the block reason here. The native
+# `complete --metadata` transport only applies to COMPLETION handoffs (see
+# core/iterate/executors.py::_execute_advance). Eliminating free-text transport
+# on this blocked/gate path awaits the #1290 DAG work (Phase 2).
 _do_transition() {
   local _status="$1" _ec="$2"
   local _reason

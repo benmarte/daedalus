@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from core import kanban
 from core.dispatch.bodies import _pm_consultation_body, _resolve_howtos
 from core.iterate.outcomes import parse as _parse_outcome
+from core.iterate.outcomes import parse_dict as _parse_outcome_dict
 from core.iterate.classify import _ASSIGNEE_TO_ROLE as _ASSIGNEE_TO_ROLE_MAP
 from core.dispatch.dedup import (
     _RETRY_CAP_MARKER,
@@ -2567,6 +2568,7 @@ def _guard_prefix_on_done(
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
     provider=None,
     prefix_fallback: bool = True,
+    metadata_transport: bool = False,
 ) -> int:
     """Mechanical backstop: archive done cards that lack the expected role prefix (#1125 F5).
 
@@ -2598,6 +2600,13 @@ def _guard_prefix_on_done(
       JSON) are treated as non-compliant and are archived+recreated.
       Driven by ``protocol.prefix_fallback: false`` (#1170 Phase 3).
 
+    When ``metadata_transport=True`` (#1288, default OFF):
+      A done card is ALSO well-formed if its closing run carries a valid native
+      outcome record (``kanban.run_outcome``) whose role matches the assignee —
+      even when neither the prefix nor a free-text JSON block is present. This
+      accepts the native transport emitted by ``complete(metadata=)``. Flag OFF
+      → no ``run_outcome`` calls → behaviour is byte-identical.
+
     Returns: count of guards triggered.
     """
     p = profiles or _DEFAULT_PROFILES
@@ -2621,6 +2630,19 @@ def _guard_prefix_on_done(
 
         summary_raw = _get_task_summary(task, slug)
         summary_check = (summary_raw or "").lower().lstrip()
+
+        # #1288: native run metadata satisfies the guard when metadata_transport
+        # is ON — the closing run carries the structured outcome even if the
+        # human-readable summary prefix is absent.  Checked before the prefix/
+        # JSON summary checks so a metadata-only completion is not flagged.
+        if metadata_transport:
+            _tid = task.get("id") or task.get("task_id")
+            _expected_role_md = _ASSIGNEE_TO_ROLE_MAP.get(assignee)
+            if _tid and _expected_role_md:
+                _meta = _kanban().run_outcome(slug, str(_tid))
+                _meta_rec = _parse_outcome_dict(_meta) if _meta else None
+                if _meta_rec is not None and _meta_rec.role == _expected_role_md:
+                    continue
 
         # Well-formed completion check depends on protocol.prefix_fallback.
         if prefix_fallback:

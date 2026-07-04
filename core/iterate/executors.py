@@ -483,6 +483,7 @@ def _execute_advance(
     *,
     dry_run: bool = False,
     pr_number: int | None = None,
+    metadata_transport: bool = False,
     **_kwargs: Any,
 ) -> bool:
     """Complete a developer card to advance the chain (CI no longer gates this).
@@ -505,7 +506,25 @@ def _execute_advance(
     if dry_run:
         logger.info("[dry-run] would advance %s (PR #%s)", tid, pr)
         return True
-    if not kanban.complete(slug, tid):
+    # #1288: completion handoff — emit the developer outcome onto the closing
+    # run as native metadata when metadata_transport is ON.  This is the
+    # developer→QA completion; blocked handoffs (review-required, awaiting-pr)
+    # cannot carry metadata and keep their free-text reason (see
+    # scripts/daedalus-delegate.sh; full elimination awaits #1290).
+    if metadata_transport:
+        issue_n = _extract_issue_number_from_card(card)
+        _metadata = {
+            "daedalus_outcome": 1,
+            "role": "developer",
+            "verdict": "pr_opened",
+            "refs": {"issue": issue_n, "pr": pr},
+        }
+        _completed = kanban.complete(slug, tid, metadata=_metadata)
+    else:
+        # Flag OFF: byte-identical to the pre-#1288 call — no metadata kwarg, so
+        # existing kanban doubles / signatures are unaffected.
+        _completed = kanban.complete(slug, tid)
+    if not _completed:
         return False
     logger.info("iterate: advanced %s — PR #%s (CI gated at merge-time)", tid, pr)
 

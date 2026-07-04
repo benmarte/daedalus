@@ -312,6 +312,12 @@ def run_iterate(
     _protocol = (resolved or {}).get("protocol") or {}
     _pf_raw = _protocol.get("prefix_fallback", True)
     _prefix_fallback = True if _pf_raw is None else bool(_pf_raw)
+    # Phase-1 (#1288): metadata_transport flag.  Default FALSE (behaviour
+    # unchanged).  When ON, routing reads the native closing-run outcome
+    # (kanban.run_outcome) with fall-through to free-text JSON then prefix, and
+    # completion handoffs emit the outcome via complete(metadata=).  When OFF,
+    # native_outcome is always None so classify_blocked is byte-identical.
+    _metadata_transport = bool(_protocol.get("metadata_transport", False))
 
     blocked_cards = kanban.list_blocked(slug)
 
@@ -424,6 +430,13 @@ def run_iterate(
         if pr is not None and provider is not None:
             skip_qa = bool(provider.has_label(pr, "skip-qa"))
 
+        # #1288: when metadata_transport is ON, read the native closing-run
+        # outcome so classify_blocked can route from it first (falls through to
+        # free-text JSON / prefix when absent).  Flag OFF → None → no change.
+        native_outcome = None
+        if _metadata_transport and tid:
+            native_outcome = kanban.run_outcome(slug, tid)
+
         action = classify_blocked(assignee, handoff, ci_green,
                                   fix_attempts=fix_attempts, pr_number=pr,
                                   raw_ci=raw_ci, pr_is_open=pr_is_open,
@@ -431,7 +444,8 @@ def run_iterate(
                                   skip_qa=skip_qa,
                                   max_fix_attempts=max_fix_attempts,
                                   _source_collector=_outcome_sources,
-                                  prefix_fallback=_prefix_fallback)
+                                  prefix_fallback=_prefix_fallback,
+                                  native_outcome=native_outcome)
 
         # ── Phase-2 ground-truth verification (#1170) ─────────────────────
         # Only runs when:
@@ -612,6 +626,7 @@ def run_iterate(
                 pr_number=pr,
                 provider=provider,
                 max_fix_attempts=max_fix_attempts,
+                metadata_transport=_metadata_transport,
             )
 
             # Gate on ok=True: prevents notification when the executor fails

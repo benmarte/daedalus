@@ -58,6 +58,7 @@ from typing import Any
 
 from core.iterate.outcomes import OutcomeRecord
 from core.iterate.outcomes import parse as _parse_outcome
+from core.iterate.outcomes import parse_dict as _parse_outcome_dict
 from core.util import extract_pr_number_from_summary
 
 logger = logging.getLogger("daedalus.iterate.classify")
@@ -267,6 +268,7 @@ def classify_blocked(
     max_fix_attempts: int = MAX_FIX_ATTEMPTS,
     _source_collector: list[str] | None = None,
     prefix_fallback: bool = True,
+    native_outcome: dict | None = None,
 ) -> str:
     """Classify a blocked card into an action.
 
@@ -314,6 +316,14 @@ def classify_blocked(
                  the conservative choice aligned with the guard philosophy.
                  Driven by ``protocol.prefix_fallback`` in the project config
                  (#1170 Phase 3).
+        native_outcome: When supplied (``metadata_transport`` ON — #1288), the
+                 structured outcome dict read from the card's closing run via
+                 ``kanban.run_outcome``. It takes precedence over the free-text
+                 ``handoff_text`` JSON: a valid record whose role matches the
+                 card assignee routes directly (telemetry source ``"metadata"``).
+                 When ``None`` (default / flag OFF) or invalid, routing is
+                 byte-identical to the free-text path — the caller passes ``None``
+                 whenever the flag is off, guaranteeing zero behaviour change.
 
     Returns one of: {advance, qa_fix, pending_signal, pm_route, approve_advance,
     escalate, reconcile_merged}.
@@ -356,8 +366,38 @@ def classify_blocked(
                 _source_collector.append("prefix")
         return ADVANCE
 
-    _outcome = _parse_outcome(handoff_text or "")
     _expected_role = _ASSIGNEE_TO_ROLE.get(assignee)
+
+    # ── #1288: native run metadata takes precedence over free-text JSON ──────
+    # When metadata_transport is ON the caller passes the closing-run outcome
+    # dict (via kanban.run_outcome).  A valid record whose role matches the card
+    # assignee routes directly — the native transport, no free-text parse needed.
+    # Invalid / role-mismatched / absent metadata falls through UNCHANGED to the
+    # free-text handoff JSON path below, so flag-OFF behaviour (native_outcome is
+    # always None) is byte-identical to before.
+    if native_outcome is not None and _expected_role is not None:
+        _native = _parse_outcome_dict(native_outcome)
+        if _native is not None and _native.role == _expected_role:
+            _native_action = _classify_by_outcome(
+                _native,
+                handoff_text or "",
+                fix_attempts,
+                max_fix_attempts,
+                effective_pr,
+                pr_is_open,
+                pr_is_merged,
+            )
+            if _native_action is not None:
+                if _source_collector is not None:
+                    _source_collector.append("metadata")
+                return _native_action
+            logger.debug(
+                "classify: native metadata role=%r not in mapping table — "
+                "falling back to free-text routing",
+                _native.role,
+            )
+
+    _outcome = _parse_outcome(handoff_text or "")
     _use_json = (
         _outcome is not None
         and _expected_role is not None

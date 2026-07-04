@@ -217,6 +217,26 @@ execution:
 protocol:
   # prefix_fallback: true
 
+  # ── Outcome metadata transport (#1288, Phase 1 of epic #1276) ──────────────
+  # metadata_transport (default: false — behaviour unchanged)
+  #   false — outcomes travel as free-text (legacy prefix + JSON block in the
+  #            handoff summary). Routing parses that text. This is the default.
+  #   true  — COMPLETION handoffs additionally emit the structured outcome as
+  #            NATIVE run metadata via `hermes kanban complete --metadata`
+  #            (stored on the closing run, read back with `hermes kanban runs
+  #            --json`). Routing (classify_blocked) then reads the native
+  #            closing-run outcome FIRST, falling through to the free-text JSON
+  #            block, then to the legacy prefix — so no behaviour is lost.
+  #            _guard_prefix_on_done also accepts a metadata-only completion.
+  #
+  #   BLOCKED handoffs (review-required, awaiting-pr, changes-requested,
+  #   needs_input) still carry their outcome as FREE-TEXT JSON in the block
+  #   reason, because `hermes kanban block` has NO `--metadata` option — a
+  #   blocked card has no closing run to attach metadata to. Full elimination
+  #   of free-text transport on the blocked/gate paths awaits the #1290 DAG
+  #   work (Phase 2). Keep prefix_fallback: true while soaking this flag.
+  # metadata_transport: false
+
   # ── Crash retry (issue #1205) ──────────────────────────────────────────────
   # A card whose worker CRASHED (agent process died, session/usage limit,
   # provider connection error) is automatically unblocked and re-dispatched on
