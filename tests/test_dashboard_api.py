@@ -28,7 +28,7 @@ _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from dashboard.plugin_api import router
+from dashboard.plugin_api import router  # noqa: E402  (import follows sys.path bootstrap above)
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +62,7 @@ def registry_repo(tmp_path):
         "sources": {"github": {"enabled": True}, "local_specs": {"enabled": False}},
     }
     (repo / ".hermes" / "daedalus.yaml").write_text(yaml.dump(cfg))
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(repo)]
         yield repo
 
@@ -387,7 +387,7 @@ def test_get_projects_empty_registry(registry_repo, monkeypatch):
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/daedalus")
     c = TestClient(app)
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = []
         resp = c.get("/api/plugins/daedalus/projects")
     assert resp.status_code == 200
@@ -396,7 +396,7 @@ def test_get_projects_empty_registry(registry_repo, monkeypatch):
 
 def test_get_projects_registry_only_entries(client, registry_repo):
     """Registered repos without a config appear as lightweight entries."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [
             str(registry_repo),
             "/repos/sampleproj",
@@ -462,7 +462,7 @@ def project_client(project_repo_dir, monkeypatch):
 def test_get_project_config_returns_resolved_config(project_client, project_repo_dir):
     """GET /project/{name}/config returns stripped config for a known project."""
     project_name = "test-project"
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         resp = project_client.get(
@@ -485,7 +485,7 @@ def test_get_project_config_strips_secrets(project_client, project_repo_dir):
     cfg["webhook"] = {"enabled": True, "secret": "super-secret-value"}
     (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
 
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         resp = project_client.get(
@@ -504,7 +504,7 @@ def test_get_project_config_strips_secrets(project_client, project_repo_dir):
 
 def test_get_project_config_unknown_project_returns_404(project_client):
     """GET /project/{name}/config returns 404 for an unknown project."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = []
 
         resp = project_client.get(
@@ -520,7 +520,7 @@ def test_post_project_config_persists_editable_fields(project_client, project_re
     # `hermes cron create test-project-daedalus`, firing a real cron job on every
     # test run (issue #61). This test only asserts field persistence to YAML, which
     # happens independently of cron reconciliation.
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+    with mock.patch("dashboard._shared.registry") as mock_registry, \
          mock.patch("dashboard.plugin_api._reconcile_cron",
                     return_value={"cron": "updated"}):
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
@@ -548,7 +548,7 @@ def test_post_project_config_persists_editable_fields(project_client, project_re
 
 def test_post_project_config_rejects_repo_change(project_client, project_repo_dir):
     """POST /project/{name}/config rejects attempts to change repo — 422."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         payload = {
@@ -567,7 +567,7 @@ def test_post_project_config_rejects_repo_change(project_client, project_repo_di
 
 def test_post_project_config_rejects_workdir_change(project_client, project_repo_dir):
     """POST /project/{name}/config rejects attempts to change workdir — 422."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         payload = {
@@ -586,7 +586,7 @@ def test_post_project_config_rejects_workdir_change(project_client, project_repo
 
 def test_post_project_config_rejects_name_change(project_client, project_repo_dir):
     """POST /project/{name}/config rejects attempts to change name — 422."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         payload = {
@@ -605,7 +605,7 @@ def test_post_project_config_rejects_name_change(project_client, project_repo_di
 
 def test_post_project_config_unknown_project_returns_404(project_client):
     """POST /project/{name}/config returns 404 for an unknown project."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = []
 
         payload = {"cron": {"schedule": "15m"}}
@@ -619,7 +619,7 @@ def test_post_project_config_unknown_project_returns_404(project_client):
 
 def test_post_project_config_rejects_invalid_yaml_values(project_client, project_repo_dir):
     """POST /project/{name}/config rejects payloads with invalid field types — 422."""
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         payload = {"vcs": "not-a-dict"}
@@ -646,7 +646,7 @@ class TestCreateProject:
         return {"name": "new-proj", "repo": "org/new-proj", "workdir": str(workdir)}
 
     def test_create_success(self, project_client, tmp_path):
-        with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+        with mock.patch("dashboard._shared.registry") as mock_registry, \
              mock.patch("dashboard.plugin_api.ensure_board", return_value=True) as mock_board, \
              mock.patch("dashboard.plugin_api._reconcile_cron",
                         return_value={"cron": "created", "name": "new-proj-daedalus",
@@ -675,7 +675,7 @@ class TestCreateProject:
 
     def test_create_adopts_existing_config(self, project_client, project_repo_dir):
         """When daedalus.yaml already exists, adopt it (200 + status=adopted) instead of 409."""
-        with mock.patch("dashboard.plugin_api.registry") as mock_registry, \
+        with mock.patch("dashboard._shared.registry") as mock_registry, \
              mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
              mock.patch("dashboard.plugin_api._reconcile_cron",
                         return_value={"cron": "ok", "name": "x-daedalus", "error": None}):
@@ -725,7 +725,7 @@ class TestCreateProject:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
         subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
                         "https://gitlab.corp.io/team/app.git"], check=True)
-        with mock.patch("dashboard.plugin_api.registry"), \
+        with mock.patch("dashboard._shared.registry"), \
              mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
              mock.patch("dashboard.plugin_api._reconcile_cron",
                         return_value={"cron": "created", "name": "x", "error": None}):
@@ -743,7 +743,7 @@ class TestCreateProject:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
         subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
                         "https://gitlab.com/group/proj.git"], check=True)
-        with mock.patch("dashboard.plugin_api.registry"), \
+        with mock.patch("dashboard._shared.registry"), \
              mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
              mock.patch("dashboard.plugin_api._reconcile_cron",
                         return_value={"cron": "created", "name": "x", "error": None}):
@@ -763,7 +763,7 @@ class TestCreateProject:
 
     def test_create_scaffolds_all_sources_enabled(self, project_client, tmp_path):
         """Template defaults: VCS issues + spec/plan drops + kanban triage all on."""
-        with mock.patch("dashboard.plugin_api.registry"), \
+        with mock.patch("dashboard._shared.registry"), \
              mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
              mock.patch("dashboard.plugin_api._reconcile_cron",
                         return_value={"cron": "created", "name": "x", "error": None}):
@@ -775,7 +775,7 @@ class TestCreateProject:
         assert cfg["sources"]["kanban_triage"]["enabled"] is True
 
     def test_create_gitlab_project(self, project_client, tmp_path):
-        with mock.patch("dashboard.plugin_api.registry"), \
+        with mock.patch("dashboard._shared.registry"), \
              mock.patch("dashboard.plugin_api.ensure_board", return_value=True), \
              mock.patch("dashboard.plugin_api._reconcile_cron",
                         return_value={"cron": "created", "name": "x", "error": None}):
@@ -899,7 +899,7 @@ class TestReconcileCron:
         """One existing job → `hermes cron edit <id>` updates it; no duplicate."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -925,7 +925,7 @@ class TestReconcileCron:
     def test_updates_cron_with_deliver(self):
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron(
                 "test-project",
@@ -944,7 +944,7 @@ class TestReconcileCron:
         """Older hermes without `cron edit` → remove by id + create fresh."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(
                 _CRON_LIST_ONE_MATCH, edit_ok=False
             )
@@ -971,7 +971,7 @@ class TestReconcileCron:
         """cron.notifications[] → dispatcher self-delivers, cron gets no --deliver."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
             result = _reconcile_cron(
                 "test-project",
@@ -995,7 +995,7 @@ class TestReconcileCron:
 
         # create path (no existing job). Use a crontab schedule so the function
         # never tries to write the schedule back to the (fake) cfg_path.
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
             _reconcile_cron("myproj", {"schedule": "0 * * * *"}, cfg_path)
         create_args = mock_run.call_args_list[-1][0][0]
@@ -1004,7 +1004,7 @@ class TestReconcileCron:
         assert expected in create_args
 
         # edit path (one existing "test-project-daedalus" job → edited in place).
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             _reconcile_cron("test-project", {"schedule": "0 * * * *"}, cfg_path)
         edit_args = mock_run.call_args_list[1][0][0]
@@ -1018,7 +1018,7 @@ class TestReconcileCron:
         """Two jobs with same name → both removed by hex id, then one created."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_TWO_MATCHES)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -1041,7 +1041,7 @@ class TestReconcileCron:
         """No matching job in list → no remove calls, still creates."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -1059,7 +1059,7 @@ class TestReconcileCron:
     def test_removes_cron_when_schedule_empty(self):
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": ""})
 
@@ -1071,7 +1071,7 @@ class TestReconcileCron:
     def test_removes_cron_when_cron_cfg_none(self):
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {})
 
@@ -1085,7 +1085,7 @@ class TestReconcileCron:
         """If 'hermes cron list' fails, we still attempt create."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(
                 _CRON_LIST_ONE_MATCH, create_ok=True
             )
@@ -1108,7 +1108,7 @@ class TestReconcileCron:
         """A cron create failure is captured, not raised."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(
                 _CRON_LIST_NO_MATCH, create_ok=False
             )
@@ -1123,7 +1123,7 @@ class TestReconcileCron:
         # _hermes_cli (and thus _cron_cli) catches FileNotFoundError internally
         # and returns (-1, "hermes CLI not found") — it never raises. The
         # reconcile path must surface that string as the result error.
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.return_value = (-1, "hermes CLI not found")
             result = _reconcile_cron("test-project", {"schedule": "60m"})
 
@@ -1133,7 +1133,7 @@ class TestReconcileCron:
         """Schedule with leading/trailing whitespace is stripped, then converted."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "  60m  "})
 
@@ -1150,7 +1150,7 @@ class TestReconcileCron:
         """Edit path: interval schedule reaches hermes as crontab, never one-shot."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             _reconcile_cron("test-project", {"schedule": "every 2h"})
 
@@ -1163,7 +1163,7 @@ class TestReconcileCron:
         """Create path: interval schedule reaches hermes as crontab, never one-shot."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_NO_MATCH)
             result = _reconcile_cron("test-project", {"schedule": "30m"})
 
@@ -1178,7 +1178,7 @@ class TestReconcileCron:
         """An already-crontab schedule is sent verbatim (no double conversion)."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             _reconcile_cron("test-project", {"schedule": "0 9 * * *"})
 
@@ -1195,7 +1195,7 @@ class TestReconcileCron:
         with tempfile.TemporaryDirectory() as td:
             cfg_path = _Path(td) / "daedalus.yaml"
             cfg_path.write_text("cron:\n  schedule: 60m\n  deliver: slack:#eng\n")
-            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
                 mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
                 _reconcile_cron("test-project", {"schedule": "60m"}, cfg_path)
 
@@ -1215,7 +1215,7 @@ class TestReconcileCron:
             cfg_path = _Path(td) / "daedalus.yaml"
             original = "cron:\n  schedule: 0 9 * * *\n"
             cfg_path.write_text(original)
-            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
                 mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
                 _reconcile_cron("test-project", {"schedule": "0 9 * * *"}, cfg_path)
 
@@ -1226,7 +1226,7 @@ class TestReconcileCron:
         second job — each save either edits in place or recreates exactly one."""
         from dashboard.plugin_api import _reconcile_cron
 
-        with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+        with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
             mock_run.side_effect = self._make_dispatcher(_CRON_LIST_ONE_MATCH)
             r1 = _reconcile_cron("test-project", {"schedule": "30m"})
             r2 = _reconcile_cron("test-project", {"schedule": "45m"})
@@ -1301,9 +1301,9 @@ class TestPostProjectConfigCron:
 
     def test_save_returns_cron_result(self, cron_client, cron_project_dir):
         """POST /project/{name}/config returns cron result in response."""
-        with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        with mock.patch("dashboard._shared.registry") as mock_registry:
             mock_registry.list_projects.return_value = [str(cron_project_dir)]
-            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
                 mock_run.return_value = (0, "created: job j1")
 
                 payload = {
@@ -1324,9 +1324,9 @@ class TestPostProjectConfigCron:
 
     def test_save_clearing_schedule_removes_cron(self, cron_client, cron_project_dir):
         """Clearing the schedule in the payload removes the cron job."""
-        with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+        with mock.patch("dashboard._shared.registry") as mock_registry:
             mock_registry.list_projects.return_value = [str(cron_project_dir)]
-            with mock.patch("dashboard.plugin_api._cron_cli") as mock_run:
+            with mock.patch("dashboard.cron_helpers._cron_cli") as mock_run:
                 mock_run.return_value = (0, "")
 
                 payload = {"cron": {"schedule": ""}}
@@ -1950,7 +1950,7 @@ def test_router_mount_exposes_all_endpoints(registry_repo, project_repo_dir, mon
 
     # ── /project/{name}/config (GET) ─────────────────────────────────────
     project_name = "test-project"
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
 
         resp = client.get(
@@ -2052,7 +2052,7 @@ def test_all_sub_routers_mounted_and_resolve(registry_repo, project_repo_dir, mo
         assert resp.status_code == 200, f"/projects: {resp.status_code}"
 
     # ── /project/{name}/config (GET) ─────────────────────────────────────
-    with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+    with mock.patch("dashboard._shared.registry") as mock_registry:
         mock_registry.list_projects.return_value = [str(project_repo_dir)]
         resp = client.get(
             "/api/plugins/daedalus/project/test-project/config"
@@ -2266,7 +2266,7 @@ class TestRegistryNameResolution:
             }
             (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
 
-            with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+            with mock.patch("dashboard._shared.registry") as mock_registry:
                 mock_registry.list_projects.return_value = [str(repo)]
                 with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
                     mock_list.return_value = []
@@ -2299,7 +2299,7 @@ class TestRegistryNameResolution:
             }
             (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
 
-            with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+            with mock.patch("dashboard._shared.registry") as mock_registry:
                 mock_registry.list_projects.return_value = [str(repo)]
 
                 # Look up by config name — should find it
@@ -2320,7 +2320,7 @@ class TestRegistryNameResolution:
             repo = Path(tmpdir)
             # No .hermes/daedalus.yaml — just a bare directory
 
-            with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+            with mock.patch("dashboard._shared.registry") as mock_registry:
                 mock_registry.list_projects.return_value = [str(repo)]
                 with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
                     mock_list.return_value = []
@@ -2351,7 +2351,7 @@ class TestRegistryNameResolution:
             }
             (hermes_dir / "daedalus.yaml").write_text(yaml.dump(cfg))
 
-            with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+            with mock.patch("dashboard._shared.registry") as mock_registry:
                 mock_registry.list_projects.return_value = [str(repo)]
                 with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
                     mock_list.return_value = []
@@ -2400,12 +2400,12 @@ class TestCronHealthBatched:
                     list_all_calls.append(args)
                 return (0, "[]")
 
-            with mock.patch("dashboard.plugin_api.registry") as mock_registry:
+            with mock.patch("dashboard._shared.registry") as mock_registry:
                 mock_registry.list_projects.return_value = repos
                 with mock.patch("dashboard.plugin_api.list_tasks") as mock_list:
                     mock_list.return_value = []
                     with mock.patch(
-                        "dashboard.plugin_api._cron_cli", side_effect=fake_cron_cli
+                        "dashboard.cron_helpers._cron_cli", side_effect=fake_cron_cli
                     ):
                         resp = client.get("/api/plugins/daedalus/projects")
                         assert resp.status_code == 200, resp.text
@@ -2444,5 +2444,58 @@ def test_plugin_routes_need_no_plugin_level_auth(client, monkeypatch):
         mock_list.return_value = []
         resp = client.get("/api/plugins/daedalus/projects")
     assert resp.status_code == 200, resp.text
+
+
+# ── Route-path snapshot (issue #1155 refactor guard) ──────────────────────────
+
+# Frozen set of every (path, sorted-methods) pair exposed by the unified router.
+# The #1155 helper-extraction PRs (split plugin_api.py into _shared/cron_helpers
+# and, later, route modules) MUST NOT add, drop, or re-verb any endpoint. This
+# snapshot fails loudly if the mounted surface changes.
+_EXPECTED_ROUTER_ENDPOINTS = frozenset({
+    ("/meta/branches", ("GET",)),
+    ("/meta/check-update", ("GET",)),
+    ("/meta/detect", ("GET",)),
+    ("/meta/labels", ("GET",)),
+    ("/meta/notifications", ("GET",)),
+    ("/meta/pick-directory", ("GET",)),
+    ("/meta/projects", ("GET",)),
+    ("/meta/provision-roster", ("POST",)),
+    ("/meta/restart", ("GET",)),
+    ("/meta/roster-status", ("GET",)),
+    ("/meta/statuses", ("GET",)),
+    ("/meta/test-deliver", ("POST",)),
+    ("/meta/uninstall", ("POST",)),
+    ("/meta/update-plugin", ("POST",)),
+    ("/meta/version", ("GET",)),
+    ("/profiles/model", ("GET",)),
+    ("/profiles/model/sync", ("POST",)),
+    ("/project/create", ("POST",)),
+    ("/project/{name}", ("DELETE",)),
+    ("/project/{name}/config", ("GET",)),
+    ("/project/{name}/config", ("POST",)),
+    ("/project/{name}/run", ("POST",)),
+    ("/projects", ("GET",)),
+})
+
+
+def test_router_path_snapshot_unchanged():
+    """The full set of router paths + methods is frozen (issue #1155).
+
+    Enumerate ``router.routes`` and assert the (path, methods) surface exactly
+    matches the pre-refactor snapshot — proving the helper extraction is
+    behaviour-neutral at the HTTP layer.
+    """
+    from dashboard.plugin_api import router
+
+    actual = frozenset(
+        (r.path, tuple(sorted(m for m in (getattr(r, "methods", None) or ()))))
+        for r in router.routes
+    )
+    assert actual == _EXPECTED_ROUTER_ENDPOINTS, (
+        "router endpoint surface changed:\n"
+        f"  added:   {sorted(actual - _EXPECTED_ROUTER_ENDPOINTS)}\n"
+        f"  removed: {sorted(_EXPECTED_ROUTER_ENDPOINTS - actual)}"
+    )
 
 

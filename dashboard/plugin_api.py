@@ -30,179 +30,55 @@ from typing import Any
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 
-# ConfigLoader + deep_merge live in the daedalus package root (config/__init__.py).
-# When the dashboard host runs, it adds the plugin dir to sys.path so
-# relative imports work. Fall back to absolute import for testing.
-try:
-    from config import ConfigLoader, deep_merge, validate_failover, validate_vcs
-except ImportError:
-    import sys
+# The graceful-degradation import blocks (config + core helpers), module
+# logger, provider-env bootstrap, secret-stripping, and project-resolution
+# helpers now live in dashboard/_shared.py; the cron reconcile machinery lives
+# in dashboard/cron_helpers.py (issue #1155, PR 1/3, behaviour-neutral). They
+# are re-imported here so every historical ``dashboard.plugin_api._X`` import
+# path and test patch keeps resolving unchanged.
+from dashboard._shared import (  # noqa: F401  (re-exported for import-path / test-patch compatibility)
+    ConfigLoader,
+    _SECRET_KEYS,
+    _board_slug,
+    _bootstrap_provider_env,
+    _hermes_cli,
+    _parse_env_file,
+    _project_repo,
+    _project_resolved,
+    _real_home,
+    _resolve_project_path,
+    _schedule_to_crontab,
+    _strip_secrets,
+    deep_merge,
+    detect_repo_vcs,
+    ensure_board,
+    get_provider,
+    kanban_diagnostics,
+    list_tasks,
+    logger,
+    parse_cron_jobs,
+    validate_failover,
+    validate_vcs,
+)
+from dashboard.cron_helpers import (  # noqa: F401  (re-exported for import-path / test-patch compatibility)
+    NOTIFY_EVENTS,
+    _parse_cron_jobs,
+    _reconcile_cron,
+    _validate_notifications,
+    _write_schedule_to_config,
+)
 
-    _repo_root = Path(__file__).resolve().parent.parent
-    if str(_repo_root) not in sys.path:
-        sys.path.insert(0, str(_repo_root))
-    from config import ConfigLoader  # type: ignore[no-redef]
-    from config import deep_merge  # type: ignore[no-redef]
-    from config import validate_failover  # type: ignore[no-redef]
-    from config import validate_vcs  # type: ignore[no-redef]
-
-# Shared cron-list parser (single implementation, issue #1148). Importable once
-# the config block above has ensured the plugin root is on sys.path.
-from core.cron_parser import parse_cron_jobs
-
-# Core helpers (degrade gracefully — never raise on missing data).
-try:
-    from core.cli import hermes_cli as _hermes_cli
-except ImportError:
-    def _hermes_cli(args, timeout=30):  # type: ignore[misc]
-        try:
-            r = subprocess.run(["hermes"] + list(args), capture_output=True,
-                               text=True, timeout=timeout)
-            return r.returncode, (r.stdout + r.stderr).strip()
-        except Exception as exc:
-            return -1, str(exc)
-
-try:
-    from core.util import (
-        board_slug as _board_slug,
-        parse_env_file as _parse_env_file,
-        schedule_to_crontab as _schedule_to_crontab,
-    )
-except ImportError:
-    def _board_slug(repo, name=""):  # type: ignore[misc]
-        slug = repo.replace("/", "-") if repo else name
-        return re.sub(r"[^a-zA-Z0-9_-]", "-", slug).strip("-").lower() or name
-
-    def _schedule_to_crontab(schedule):  # type: ignore[misc]
-        s = re.sub(r"^every\s+", "", schedule.strip().lower())
-        if re.match(r"^[\d*/,\-]+(\s+[\d*/,\-]+){4}$", s):
-            return schedule.strip()
-        m = re.match(r"^(\d+)m$", s)
-        if m:
-            minutes = int(m.group(1))
-            if minutes >= 60 and minutes % 60 == 0:
-                hours = minutes // 60
-                return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
-            return f"*/{minutes} * * * *"
-        m = re.match(r"^(\d+)h$", s)
-        if m:
-            hours = int(m.group(1))
-            return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
-        return schedule.strip()
-
-    def _parse_env_file(path):  # type: ignore[misc]
-        try:
-            result = {}
-            for line in Path(path).read_text().split("\n"):
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                result[k.strip()] = v.strip().strip('"').strip("'")
-            return result
-        except OSError:
-            return {}
-
-try:
-    from core import registry
-except ImportError:
-    registry = None  # type: ignore[assignment]
-try:
-    from core.kanban import (list_tasks, ensure_board,
-                             diagnostics as kanban_diagnostics)
-except ImportError:
-    list_tasks = None  # type: ignore[assignment]
-    ensure_board = None  # type: ignore[assignment]
-    kanban_diagnostics = None  # type: ignore[assignment]
-try:
-    from core.providers import get_provider
-    from core.providers.detect import detect_repo_vcs
-except ImportError:
-    get_provider = None  # type: ignore[assignment]
-    detect_repo_vcs = None  # type: ignore[assignment]
+# ``registry`` (from ``core``) and ``_cron_cli`` are the two dependency-injection
+# seams exercised by BOTH the extracted helpers (_shared / cron_helpers) and the
+# route handlers still living here. They are referenced module-qualified
+# (``_shared.registry`` / ``cron_helpers._cron_cli``) so a single patch target in
+# the authoritative module reaches every caller — see issue #1155 PR 1/3.
+from dashboard import _shared, cron_helpers  # noqa: F401
 
 projects_router = APIRouter(prefix="/projects", tags=["daedalus-projects"])
 project_config_router = APIRouter(prefix="/project", tags=["daedalus-project-config"])
 meta_router = APIRouter(prefix="/meta", tags=["daedalus-meta"])
 profiles_router = APIRouter(prefix="/profiles", tags=["daedalus-profiles"])
-
-
-# ── Authentication ───────────────────────────────────────────────────────────
-# Auth is a Hermes-host concern, not a plugin one. The daedalus plugin API is
-# mounted under /api/plugins/daedalus/* in the dashboard host, whose global
-# /api/ auth middleware already gates every plugin route with the session token
-# (hermes_cli/web_server.py). Harden at the host layer (loopback bind + tunnel,
-# or OAuth/password gated mode); the plugin does not re-implement auth. See #1231.
-
-# Module logger for degrade-gracefully paths. These handlers intentionally return
-# a fallback ([], {}, None) so the dashboard keeps rendering, but a silent swallow
-# hides the root cause (malformed config, missing token, CLI failure). Log the
-# exception detail at each site so failures are diagnosable. See #1133.
-logger = logging.getLogger("daedalus.dashboard.plugin_api")
-
-def _bootstrap_provider_env() -> None:
-    """Inject provider tokens from ~/.hermes/.env into os.environ.
-
-    The Hermes gateway process is typically started without the user's shell
-    environment, so provider tokens (GITHUB_TOKEN, GITLAB_TOKEN, etc.) that
-    live in ~/.hermes/.env are invisible to resolve_token() which only checks
-    os.environ. This runs once at module load using setdefault so it never
-    overwrites tokens that were already exported into the process environment.
-    """
-    _TOKEN_KEYS = {
-        "GITHUB_TOKEN", "GH_TOKEN",
-        "GITLAB_TOKEN", "AZURE_DEVOPS_PAT",
-        "BITBUCKET_TOKEN",
-    }
-    import pathlib as _pl
-    _home = _pl.Path.home()
-    _parts = _home.parts
-    if ".hermes" in _parts and "profiles" in _parts:
-        _idx = _parts.index(".hermes")
-        _home = _pl.Path(*_parts[:_idx])
-    _env_path = _home / ".hermes" / ".env"
-    for k, v in _parse_env_file(_env_path).items():
-        if k in _TOKEN_KEYS and v:
-            os.environ.setdefault(k, v)
-
-
-_bootstrap_provider_env()
-
-
-def _real_home() -> Path:
-    """Return the real macOS user home, even when HOME is sandboxed.
-
-    When running under Hermes, HOME is set to
-    ~/.hermes/profiles/<profile>/home. Detect this and return the
-    actual user home directory instead.
-    """
-    home = Path.home()
-    parts = home.parts
-    # Sandbox detection: path ends with .hermes/profiles/<name>/home
-    if ".hermes" in parts and "profiles" in parts:
-        idx = parts.index(".hermes")
-        # Real home is everything before .hermes
-        return Path(*parts[:idx])
-    return home
-
-
-# ── secret keys to strip before returning ──────────────────────────────────
-_SECRET_KEYS = {"secret", "api_key", "password", "token"}
-
-
-def _strip_secrets(obj: Any) -> Any:
-    """Recursively remove secret keys from a dict or list. Returns a new object."""
-    if isinstance(obj, dict):
-        return {
-            k: _strip_secrets(v)
-            for k, v in obj.items()
-            if k not in _SECRET_KEYS
-        }
-    if isinstance(obj, list):
-        return [_strip_secrets(item) for item in obj]
-    return obj
-
-
 
 
 def _channel_target_and_label(platform_name: str, channel: dict) -> tuple[str, str]:
@@ -598,9 +474,9 @@ async def get_projects(request: Request) -> list[dict[str, Any]]:
     import asyncio
 
     registry_repos: list[str] = []
-    if registry is not None:
+    if _shared.registry is not None:
         try:
-            registry_repos = registry.list_projects()
+            registry_repos = _shared.registry.list_projects()
         except Exception as exc:
             logger.warning("registry: list_projects failed — project list will be empty: %s", exc)
             registry_repos = []
@@ -729,212 +605,6 @@ _CONFIG_SECTION_KEYS = {
 }
 
 
-def _resolve_project_path(name: str) -> Path:
-    """Look up a project by name. Iterates registry entries, resolves each
-    per-repo config via ConfigLoader.resolve_repo_config, and matches on
-    the ``name`` field from the on-disk config.
-
-    Raises HTTPException(404) if not found.
-    """
-    if registry is None:
-        raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
-
-    try:
-        repo_paths = registry.list_projects()
-    except Exception as exc:
-        logger.warning("registry: list_projects failed while locating workdir: %s", exc)
-        repo_paths = []
-
-    loader = ConfigLoader()
-    for rp in repo_paths:
-        try:
-            resolved = loader.resolve_repo_config(rp)
-        except Exception as exc:
-            logger.warning("config: resolve_repo_config failed for %r — skipping: %s", rp, exc)
-            continue
-        if resolved.get("name") == name:
-            return Path(rp)
-
-    raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
-
-
-# Notification event types a cron.notifications[] entry can subscribe to.
-# Keep in sync with NOTIFY_EVENTS in scripts/daedalus_dispatch.py.
-NOTIFY_EVENTS = ("doc-report", "dispatch-summary", "pipeline-failure", "pr-ready")
-
-
-def _validate_notifications(value: Any) -> list[str]:
-    """Validate a cron.notifications payload. Returns human-readable errors."""
-    if not isinstance(value, list):
-        return ["cron.notifications must be a list"]
-    errors: list[str] = []
-    for i, entry in enumerate(value):
-        if not isinstance(entry, dict):
-            errors.append(f"cron.notifications[{i}] must be a mapping")
-            continue
-        target = entry.get("target")
-        if not isinstance(target, str) or not target.strip():
-            errors.append(f"cron.notifications[{i}].target must be a non-empty string "
-                          "(e.g. 'slack:C123', 'discord:#general')")
-        platform = entry.get("platform")
-        if platform is not None and not isinstance(platform, str):
-            errors.append(f"cron.notifications[{i}].platform must be a string")
-        events = entry.get("events")
-        if events is not None and (
-            not isinstance(events, list)
-            or any(e not in NOTIFY_EVENTS for e in events)
-        ):
-            errors.append(f"cron.notifications[{i}].events must be a list drawn from: "
-                          + ", ".join(NOTIFY_EVENTS))
-    return errors
-
-
-# Canonical parser lives in core/cron_parser.py (issue #1148); this alias keeps
-# the historical private name used by call sites and tests.
-_parse_cron_jobs = parse_cron_jobs
-
-
-def _cron_cli(args: list[str]) -> tuple[int, str]:
-    """Run a ``hermes cron`` subcommand via the shared CLI wrapper."""
-    return _hermes_cli(["cron"] + args, timeout=10)
-
-
-def _write_schedule_to_config(cfg_path: Path, crontab_schedule: str) -> None:
-    """Rewrite the ``cron.schedule`` value in a daedalus.yaml in place.
-
-    Used after ``_reconcile_cron`` normalises an interval schedule to crontab
-    syntax so the persisted YAML matches the live cron (mirrors the write-back
-    in ``_ensure_dispatch_crons``). Never raises — a write failure just leaves
-    the YAML on the interval value, which the plugin-load self-heal corrects.
-    """
-    try:
-        raw_cfg = cfg_path.read_text()
-        new_cfg = re.sub(
-            r"(schedule\s*:\s*).*",
-            lambda m: f'{m.group(1)}"{crontab_schedule}"',
-            raw_cfg,
-            count=1,
-        )
-        if new_cfg != raw_cfg:
-            cfg_path.write_text(new_cfg)
-    except OSError:
-        pass
-
-
-def _reconcile_cron(
-    project_name: str, cron_cfg: dict, cfg_path: Path | None = None
-) -> dict:
-    """Reconcile the real ``hermes cron`` job with the config on save.
-
-    Cron job name = ``f"{project_name}-daedalus"``. Each project owns exactly
-    one job. Editing a project UPDATES the existing job in place via the
-    native ``hermes cron edit <id>`` — it never stacks a duplicate:
-
-    - one existing job  → ``hermes cron edit <id> --schedule <s>``
-      (falls back to remove+create if the installed hermes lacks ``edit``)
-    - no existing job   → ``hermes cron create``
-    - duplicates found  → keep none, remove all by hex ID, create fresh
-    - empty schedule    → remove all matches
-
-    The schedule is normalised to crontab syntax via ``_schedule_to_crontab``
-    BEFORE it reaches hermes (issue #134). Hermes treats interval syntax like
-    ``60m`` as a *one-shot* job — it runs once, moves to ``[completed]`` and the
-    dispatcher silently stops. Crontab syntax (``0 * * * *``) repeats forever.
-    This mirrors what ``_ensure_dispatch_crons`` already does on plugin load, so
-    a dashboard Save can never produce a one-shot cron.
-
-    A cron CLI failure is captured as an error string; this function NEVER
-    raises, so a broken ``hermes`` binary cannot fail the config save.
-
-    Args:
-        project_name: The project name from the config.
-        cron_cfg: The ``cron`` dict from the resolved project config.
-            Keys used: ``schedule`` (str), ``deliver`` (str, optional),
-            ``notifications`` (list, optional — when set, the dispatcher
-            self-delivers and the cron gets NO --deliver target).
-        cfg_path: Optional path to the project's ``daedalus.yaml``. When given
-            and the schedule was normalised (interval → crontab), the new
-            crontab schedule is written back so the YAML stays consistent with
-            the live cron (mirrors ``_ensure_dispatch_crons``).
-
-    Returns:
-        ``{"cron": "<created|updated|removed|skipped>", "name": "<cron_name>",
-        "error": <str|None>}``
-    """
-    cron_name = f"{project_name}-daedalus"
-    result: dict[str, Any] = {
-        "cron": "skipped",
-        "name": cron_name,
-        "error": None,
-    }
-
-    raw_schedule = cron_cfg.get("schedule", "").strip() if cron_cfg else ""
-    # Convert interval syntax ("60m", "every 2h") to crontab so the job repeats
-    # forever — otherwise hermes creates a one-shot job (issue #134).
-    schedule = _schedule_to_crontab(raw_schedule) if raw_schedule else ""
-    # Keep the YAML in step with the live cron when we normalised the schedule.
-    if cfg_path is not None and schedule and schedule != raw_schedule:
-        _write_schedule_to_config(cfg_path, schedule)
-    # With notifications[] the dispatcher fans out itself — the cron job must
-    # not double-deliver its stdout.
-    has_notifications = bool(cron_cfg.get("notifications")) if cron_cfg else False
-    deliver = "" if has_notifications else (cron_cfg.get("deliver", "").strip() if cron_cfg else "")
-
-    # Run the dispatcher from this repo's root so it auto-scopes to this project
-    # instead of sweeping every registered repo (issue #137). The repo root is the
-    # parent of the project's ``.hermes/`` dir, where daedalus.yaml lives.
-    workdir = str(cfg_path.parent.parent.resolve()) if cfg_path is not None else ""
-
-    # 1. Find existing jobs by name.
-    matching_ids: list[str] = []
-    rc, out = _cron_cli(["list", "--all"])
-    if rc == 0:
-        matching_ids = [j["job_id"] for j in _parse_cron_jobs(out) if j.get("name") == cron_name]
-
-    # 2. Empty schedule → remove all matches.
-    if not schedule:
-        for job_id in matching_ids:
-            _cron_cli(["remove", job_id])
-        result["cron"] = "removed"
-        return result
-
-    # 3. Exactly one job → update it in place (native `hermes cron edit`).
-    if len(matching_ids) == 1:
-        edit_args = ["edit", matching_ids[0], "--schedule", schedule]
-        if workdir:
-            edit_args += ["--workdir", workdir]
-        if deliver:
-            edit_args += ["--deliver", deliver]
-        rc, out = _cron_cli(edit_args)
-        if rc == 0:
-            result["cron"] = "updated"
-            return result
-        # Older hermes without `cron edit` (or edit failure): fall through to
-        # remove+create so the save still converges on one correct job.
-
-    # 4. Zero, several, or un-editable → remove all matches, create fresh.
-    for job_id in matching_ids:
-        _cron_cli(["remove", job_id])
-
-    cmd = [
-        "create", schedule,
-        "--name", cron_name,
-        "--script", "daedalus-cron.sh",
-        "--no-agent",
-    ]
-    if workdir:
-        cmd += ["--workdir", workdir]
-    if deliver:
-        cmd += ["--deliver", deliver]
-
-    rc, out = _cron_cli(cmd)
-    if rc != 0:
-        result["error"] = out.strip()[:500] or f"exit code {rc}"
-    else:
-        result["cron"] = "created" if "created" in out.lower() else "updated"
-    return result
-
-
 _PLUGIN_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "daedalus.yaml"
 
 
@@ -1060,9 +730,9 @@ async def create_project(request: Request) -> dict[str, Any]:
 
     # Register in the daedalus registry (idempotent).
     registered = False
-    if registry is not None:
+    if _shared.registry is not None:
         try:
-            registry.add_project(str(workdir_path))
+            _shared.registry.add_project(str(workdir_path))
             registered = True
         except Exception as exc:
             logger.warning("registry: add_project failed for %s: %s", workdir_path, exc)
@@ -1243,9 +913,9 @@ async def delete_project(name: str) -> dict[str, Any]:
         skipped.append(f"kanban board: {slug} (not found or already removed)")
 
     # 3. Remove from registry — do this last so lookups above still work.
-    if registry is not None:
+    if _shared.registry is not None:
         try:
-            registry.remove_project(str(workdir))
+            _shared.registry.remove_project(str(workdir))
             removed.append(f"registry entry: {workdir}")
         except Exception as exc:
             skipped.append(f"registry entry: {exc}")
@@ -1347,33 +1017,6 @@ async def test_deliver(request: Request) -> dict[str, Any]:
 
 
 # ── Meta helpers ─────────────────────────────────────────────────────────────
-
-
-def _project_resolved(name: str) -> dict[str, Any]:
-    """Resolve a project name to its full per-repo config dict.
-
-    Raises HTTPException(404) if the project is not found or has no repo.
-    """
-    repo_path = _resolve_project_path(name)
-    loader = ConfigLoader()
-    try:
-        resolved = loader.resolve_repo_config(str(repo_path))
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No daedalus config found for project '{name}'",
-        )
-    if not resolved.get("repo", ""):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Project '{name}' has no repo configured",
-        )
-    return resolved
-
-
-def _project_repo(name: str) -> str:
-    """Resolve a project name to its owner/repo string (404 on missing)."""
-    return _project_resolved(name).get("repo", "")
 
 
 @meta_router.get("/branches")
@@ -1479,7 +1122,7 @@ async def get_meta_statuses(
 
 def _cron_health_all() -> dict[str, dict[str, Any]]:
     """Run ``hermes cron list --all`` once and return a map of {cron_name: health}."""
-    rc, out = _cron_cli(["list", "--all"])
+    rc, out = cron_helpers._cron_cli(["list", "--all"])
     if rc != 0:
         return {}
     return {j["name"]: {**j, "found": True} for j in _parse_cron_jobs(out) if j.get("name")}
@@ -1817,7 +1460,7 @@ async def post_uninstall() -> dict[str, Any]:
     hermes_home = _real_home() / ".hermes"
 
     # ── 1. Cron jobs ────────────────────────────────────────────────────────
-    rc_cron, cron_out = _cron_cli(["list", "--all"])
+    rc_cron, cron_out = cron_helpers._cron_cli(["list", "--all"])
     if rc_cron == 0 and cron_out:
         daedalus_jobs = [
             j["name"] for j in _parse_cron_jobs(cron_out)
