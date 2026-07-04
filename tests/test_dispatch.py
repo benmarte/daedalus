@@ -2734,6 +2734,257 @@ def test_check_team_blockers_creates_consult_for_changes_requested():
     check("issue number in triggered list for changes-requested", 1142 in triggered)
 
 
+# ── consult-resolved dedup (#1125 F4) ─────────────────────────────────────────
+
+
+def test_check_team_blockers_posts_blocker_card_comment_on_consult_creation():
+    """When a PM consultation is created, a blocker-card: comment is posted on the consult."""
+    card = _make_blocked_card(
+        "t_dev_bc",
+        "developer-daedalus",
+        "blocked: cannot resolve dependency",
+        title="#200 Developer: fix dependency",
+    )
+    issue = {"number": 200, "title": "fix dependency", "body": ""}
+    created_consult_id = "t_consult_bc"
+    commented: list = []
+
+    def _comment(slug, task_id, body):
+        commented.append((task_id, body))
+
+    with (
+        mock.patch.object(disp.kanban, "list_blocked", return_value=[card]),
+        mock.patch.object(
+            disp.kanban, "get_latest_summary", return_value=card["summary"]
+        ),
+        mock.patch.object(disp.kanban, "list_tasks", return_value=[]),
+        mock.patch.object(disp.kanban, "show_card", return_value={"comments": []}),
+        mock.patch.object(
+            disp.kanban, "create_task", return_value=created_consult_id
+        ),
+        mock.patch.object(disp.kanban, "comment", side_effect=_comment),
+    ):
+        triggered = disp._check_team_blockers(
+            "slug",
+            "org/repo",
+            {200: issue},
+            "/w",
+            "dev",
+            "github",
+        )
+    check("consultation created", 200 in triggered)
+    blocker_comments = [b for (tid, b) in commented if tid == created_consult_id]
+    check(
+        "blocker-card comment posted on consult",
+        any(b == f"blocker-card: {card['id']}" for b in blocker_comments),
+    )
+
+
+def test_check_team_blockers_skips_when_consult_resolved_marker_present():
+    """Blocked card with consult-resolved stamp → no new PM consultation (#1125 F4)."""
+    card = _make_blocked_card(
+        "t_dev_cr",
+        "developer-daedalus",
+        "blocked: cannot resolve dependency",
+        title="#201 Developer: fix dependency",
+    )
+    issue = {"number": 201, "title": "fix dependency", "body": ""}
+    # The blocked card already has the consult-resolved marker
+    resolved_card = {
+        "id": "t_dev_cr",
+        "comments": [{"body": "<!-- daedalus:consult-resolved:201 -->"}],
+    }
+    with (
+        mock.patch.object(disp.kanban, "list_blocked", return_value=[card]),
+        mock.patch.object(
+            disp.kanban, "get_latest_summary", return_value=card["summary"]
+        ),
+        mock.patch.object(disp.kanban, "list_tasks", return_value=[]),
+        mock.patch.object(disp.kanban, "show_card", return_value=resolved_card),
+        mock.patch.object(disp.kanban, "create_task") as mk_create,
+    ):
+        triggered = disp._check_team_blockers(
+            "slug",
+            "org/repo",
+            {201: issue},
+            "/w",
+            "dev",
+            "github",
+        )
+    check("no new consult when resolved marker present", mk_create.call_count == 0)
+    check("issue not in triggered list", 201 not in triggered)
+
+
+def test_stamp_resolved_consultations_stamps_blocked_card():
+    """Done PM consult with CLARIFIED summary → blocked card gets consult-resolved stamp."""
+    done_consult = {
+        "id": "t_consult_done",
+        "title": "consult: #202 fix timeout",
+        "assignee": "project-manager-daedalus",
+        "status": "done",
+    }
+    # show_card for the done consult returns summary + blocker-card comment
+    consult_card_full = {
+        "id": "t_consult_done",
+        "summary": "CLARIFIED: timeout is expected, increase the budget to 120s",
+        "latest_summary": "CLARIFIED: timeout is expected, increase the budget to 120s",
+        "comments": [{"body": "blocker-card: t_blocked_dev"}],
+    }
+    # show_card for the blocked card returns no marker yet
+    blocked_card_full = {
+        "id": "t_blocked_dev",
+        "comments": [],
+    }
+    commented: list = []
+
+    def _show_card(slug, task_id):
+        if task_id == "t_consult_done":
+            return consult_card_full
+        if task_id == "t_blocked_dev":
+            return blocked_card_full
+        return None
+
+    def _comment(slug, task_id, body):
+        commented.append((task_id, body))
+        return True
+
+    with (
+        mock.patch.object(
+            disp.kanban,
+            "list_tasks",
+            side_effect=lambda slug, status=None: (
+                [done_consult] if status == "done" else []
+            ),
+        ),
+        mock.patch.object(disp.kanban, "show_card", side_effect=_show_card),
+        mock.patch.object(disp.kanban, "comment", side_effect=_comment),
+    ):
+        stamped = disp._stamp_resolved_consultations("slug")
+
+    check("one card stamped", stamped == 1)
+    check(
+        "consult-resolved marker posted on blocked card",
+        any(
+            tid == "t_blocked_dev"
+            and body == "<!-- daedalus:consult-resolved:202 -->"
+            for (tid, body) in commented
+        ),
+    )
+
+
+def test_stamp_resolved_consultations_idempotent():
+    """Already-stamped blocked card is not double-stamped."""
+    done_consult = {
+        "id": "t_consult_done2",
+        "title": "consult: #203 fix import",
+        "assignee": "project-manager-daedalus",
+        "status": "done",
+    }
+    consult_card_full = {
+        "id": "t_consult_done2",
+        "summary": "CLARIFIED: use absolute import",
+        "latest_summary": "CLARIFIED: use absolute import",
+        "comments": [{"body": "blocker-card: t_already_stamped"}],
+    }
+    # Blocked card ALREADY has the marker
+    blocked_card_full = {
+        "id": "t_already_stamped",
+        "comments": [{"body": "<!-- daedalus:consult-resolved:203 -->"}],
+    }
+
+    def _show_card(slug, task_id):
+        if task_id == "t_consult_done2":
+            return consult_card_full
+        return blocked_card_full
+
+    mk_comment = mock.MagicMock(return_value=True)
+    with (
+        mock.patch.object(
+            disp.kanban,
+            "list_tasks",
+            side_effect=lambda slug, status=None: (
+                [done_consult] if status == "done" else []
+            ),
+        ),
+        mock.patch.object(disp.kanban, "show_card", side_effect=_show_card),
+        mock.patch.object(disp.kanban, "comment", mk_comment),
+    ):
+        stamped = disp._stamp_resolved_consultations("slug")
+
+    check("zero stamped when already present", stamped == 0)
+    check("comment not re-posted", mk_comment.call_count == 0)
+
+
+def test_stamp_resolved_consultations_skips_non_clarified():
+    """Done PM consult without CLARIFIED/ESCALATED summary does not stamp blocked card."""
+    done_consult = {
+        "id": "t_consult_incomplete",
+        "title": "consult: #204 ambiguous spec",
+        "assignee": "project-manager-daedalus",
+        "status": "done",
+    }
+    consult_card_full = {
+        "id": "t_consult_incomplete",
+        "summary": "",  # empty — PM crashed before completing properly
+        "latest_summary": "",
+        "comments": [{"body": "blocker-card: t_blocked_incomplete"}],
+    }
+
+    def _show_card(slug, task_id):
+        return consult_card_full
+
+    mk_comment = mock.MagicMock(return_value=True)
+    with (
+        mock.patch.object(
+            disp.kanban,
+            "list_tasks",
+            side_effect=lambda slug, status=None: (
+                [done_consult] if status == "done" else []
+            ),
+        ),
+        mock.patch.object(disp.kanban, "show_card", side_effect=_show_card),
+        mock.patch.object(disp.kanban, "comment", mk_comment),
+    ):
+        stamped = disp._stamp_resolved_consultations("slug")
+
+    check("zero stamped for non-clarified consult", stamped == 0)
+    check("comment not posted for empty summary", mk_comment.call_count == 0)
+
+
+def test_is_consult_resolved_true_when_marker_present():
+    """_is_consult_resolved returns True when the blocked card has the marker."""
+    card_with_marker = {
+        "id": "t_check_cr",
+        "comments": [{"body": "<!-- daedalus:consult-resolved:99 -->"}],
+    }
+    with mock.patch.object(
+        disp.kanban, "show_card", return_value=card_with_marker
+    ):
+        result = disp._is_consult_resolved("slug", "t_check_cr", 99)
+    check("_is_consult_resolved True when marker present", result is True)
+
+
+def test_is_consult_resolved_false_when_marker_absent():
+    """_is_consult_resolved returns False when the blocked card has no marker."""
+    card_no_marker = {"id": "t_check_no_cr", "comments": []}
+    with mock.patch.object(disp.kanban, "show_card", return_value=card_no_marker):
+        result = disp._is_consult_resolved("slug", "t_check_no_cr", 99)
+    check("_is_consult_resolved False when marker absent", result is False)
+
+
+def test_is_consult_resolved_false_when_wrong_issue():
+    """_is_consult_resolved returns False when the marker is for a different issue."""
+    card_other_issue = {
+        "id": "t_check_wrong_issue",
+        "comments": [{"body": "<!-- daedalus:consult-resolved:100 -->"}],
+    }
+    with mock.patch.object(
+        disp.kanban, "show_card", return_value=card_other_issue
+    ):
+        result = disp._is_consult_resolved("slug", "t_check_wrong_issue", 99)
+    check("_is_consult_resolved False for wrong issue number", result is False)
+
+
 # ── _count_active_issue_tasks (issue #109: accidental-close guard) ────────────
 
 
