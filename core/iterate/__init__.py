@@ -90,10 +90,10 @@ from core.iterate.classify import (  # noqa: E402
 # Re-exported so ``from core.iterate import X`` and
 # ``mock.patch("core.iterate.X")`` continue to resolve for tests.
 from core.iterate.outcomes import (  # noqa: E402
-    SCHEMA_VERSION as _OUTCOME_SCHEMA_VERSION,
-    VERDICT_TABLE as _OUTCOME_VERDICT_TABLE,
+    SCHEMA_VERSION as SCHEMA_VERSION,
+    VERDICT_TABLE as VERDICT_TABLE,
     OutcomeRecord as OutcomeRecord,
-    parse as _parse_outcome,
+    parse as parse,
 )
 
 # Source-reading fallback counter for observability.
