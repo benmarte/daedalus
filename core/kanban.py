@@ -241,17 +241,42 @@ def review_handoff_pr(slug: str, task_id: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def complete(slug: str, task_id: str, summary: str = "") -> bool:
+def heartbeat(slug: str, task_id: str, note: str = "") -> bool:
+    """Record a liveness heartbeat for a running task (``hermes kanban heartbeat``).
+
+    Keeps a long-running card from looking stale while its delegated coding agent
+    works (issue #1280). The script-owned delegation wrapper
+    (``scripts/daedalus-delegate.sh``) heartbeats directly via the CLI during its
+    in-shell wait; this Python helper is the same primitive for dispatcher/library
+    callers. Degrades gracefully (logs + returns False) like every helper here.
+    """
+    args = ["--board", slug, "heartbeat", task_id]
+    if note:
+        args += ["--note", note]
+    rc, out, err = _hk(args)
+    if rc != 0:
+        logger.warning("kanban: heartbeat %s failed: %s", task_id, (err or out or "").strip())
+        return False
+    return True
+
+
+def complete(slug: str, task_id: str, summary: str = "", metadata: dict | None = None) -> bool:
     """Mark a task complete (advances any children that were blocked on it).
-    
+
     Args:
         slug: Board slug
         task_id: Task ID to complete
         summary: Optional summary message to record with the completion
+        metadata: Optional structured outcome dict recorded via ``--metadata``
+                  (JSON-encoded). Added for the dispatcher's structured-outcome
+                  path (issue #1280); the runtime worker completion path stays
+                  block-based, so this is inert until the dispatcher supplies it.
     """
     args = ["--board", slug, "complete", task_id]
     if summary:
         args += ["--summary", summary]
+    if metadata is not None:
+        args += ["--metadata", json.dumps(metadata)]
     rc, out, err = _hk(args)
     _invalidate_tick_cache()
     if rc != 0:

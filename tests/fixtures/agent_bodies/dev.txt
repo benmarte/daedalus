@@ -50,6 +50,7 @@ Do NOT post a GitHub comment yourself — the dispatcher posts your completion s
 ### 5. Block your kanban card
 Block with: `review-required: PR #<pr_number> — fix/issue-1234-<slug>`
 ⛔ Do NOT complete your card — the dispatcher completes it after QA passes.
+⛔ Do NOT poll for the PR or run a wait loop. If you were spawned by the delegation wrapper (`daedalus-delegate.sh`), just print your `PR URL: ... PR number: <n>` line and exit — the wrapper owns the wait and the outer orchestrator relays the block for you.
 
 ---
 

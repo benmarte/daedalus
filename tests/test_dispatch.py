@@ -1743,11 +1743,17 @@ def test_wait_for_agent_cmd_no_pr_detection_by_default():
 
 
 def test_delegation_pr_detection_is_developer_only():
-    """Through the public builder: developer gets PR detection, others don't."""
+    """Developer delegates the whole lifecycle (incl. PR detection) to the wrapper.
+
+    Since #1280 the developer block invokes ``daedalus-delegate.sh``, which owns
+    the detect-pr handshake internally — so the block references the wrapper, not
+    ``daedalus-detect-pr.sh`` directly. Other roles keep the in-place poll and
+    still must NOT run PR detection (it would kill their agent early).
+    """
     dev = disp._build_delegation_instructions(
         "claude-code", cmd="", role="developer", issue_number=146
     )
-    assert "daedalus-detect-pr.sh" in dev, "developer delegation must detect the PR"
+    assert "daedalus-delegate.sh" in dev, "developer delegation must use the wrapper"
     for role in ("validator", "pm", "qa", "reviewer", "security", "documentation"):
         body = disp._build_delegation_instructions(
             "claude-code", cmd="", role=role, issue_number=146
@@ -1755,52 +1761,59 @@ def test_delegation_pr_detection_is_developer_only():
         assert "daedalus-detect-pr.sh" not in body, (
             f"{role}: must not run PR detection (would kill its agent early)"
         )
+        assert "daedalus-delegate.sh" not in body, (
+            f"{role}: only the developer uses the lifecycle wrapper"
+        )
 
 
-def test_delegation_spawn_captures_pid_and_separate_stderr():
-    """Spawn line must record the agent PID and route stderr to its own log."""
+def test_delegation_spawn_wires_wrapper_with_separate_stderr():
+    """Developer spawn is ONE blocking wrapper call wired to its own stderr log.
+
+    Since #1280 the developer no longer backgrounds the agent and manages the PID
+    from the block — the lifecycle wrapper (``daedalus-delegate.sh``) owns the
+    spawn, PID, liveness, and stderr routing. The block therefore passes the
+    err-log path to the wrapper, runs in the FOREGROUND (no ``background=True``),
+    and does not merge stderr into out.txt.
+    """
     for agent in ("claude-code", "codex", "opencode"):
         body = disp._build_delegation_instructions(agent, cmd="", issue_number=141)
-        assert "echo $$ > /tmp/dev-141-pid.txt" in body, (
-            f"{agent}: spawn must capture the PID for the liveness check, got:\n{body}"
+        assert "daedalus-delegate.sh" in body, (
+            f"{agent}: developer must delegate the lifecycle to the wrapper, got:\n{body}"
         )
-        # The current Hermes terminal tool rejects nohup/&/disown/setsid in a
-        # foreground call, so the agent must spawn via terminal(background=True);
-        # otherwise the coding agent never launches and the card hangs (#141).
-        assert "background=True" in body, (
-            f"{agent}: spawn must use terminal(background=True); nohup/& is rejected by Hermes"
+        # Wrapper is invoked with the per-issue err-log path (it wires stderr there).
+        assert "/tmp/dev-141-err.txt" in body, (
+            f"{agent}: stderr log must still be wired to its own file, got:\n{body}"
+        )
+        # Foreground blocking call — the wrapper waits in-shell, not in model turns.
+        assert "background=True" not in body, (
+            f"{agent}: developer wrapper call must be foreground/blocking"
         )
         assert "nohup" not in body and "background=False" not in body, (
             f"{agent}: must not use the Hermes-rejected nohup/& foreground spawn"
         )
-        # Developer spawns now run inside a per-issue worktree via
-        # daedalus-worktree-spawn.sh, which is passed the err-log path as an
-        # argument and writes the agent's stderr there (`2>> "$err"`). The
-        # separate-stderr guarantee is preserved; the redirection just moved into
-        # the wrapper (worktree isolation fix).
-        assert "/tmp/dev-141-err.txt" in body, (
-            f"{agent}: stderr log must still be wired to its own file, got:\n{body}"
+        # The block no longer manages the PID or the worktree directly — the
+        # wrapper does both internally.
+        assert "echo $$ >" not in body, (
+            f"{agent}: PID capture moved into the wrapper"
         )
-        assert "daedalus-worktree-spawn.sh" in body, (
-            f"{agent}: developer must spawn inside an isolated per-issue worktree"
+        assert "daedalus-worktree-spawn.sh" not in body, (
+            f"{agent}: worktree spawn moved into the wrapper"
         )
-        # stderr must NOT be merged into out.txt anymore
+        # stderr must NOT be merged into out.txt.
         assert "out.txt 2>&1' >" not in body, (
             f"{agent}: stderr must not be merged into out.txt"
         )
 
 
 def test_delegation_instructions_fail_fast_on_dead_agent():
-    """Every delegating role is told to block (not complete) when the agent dies."""
-    for role in (
-        "developer",
-        "validator",
-        "pm",
-        "qa",
-        "reviewer",
-        "security",
-        "documentation",
-    ):
+    """Every delegating role is told to block (not complete) when the agent dies.
+
+    Polling roles keep the inline ``kill -0`` liveness check in the block; the
+    developer (since #1280) delegates liveness to the wrapper, so its block does
+    not contain ``kill -0`` — but it still surfaces the death marker and the
+    agent-failed block instruction.
+    """
+    for role in ("validator", "pm", "qa", "reviewer", "security", "documentation"):
         body = disp._build_delegation_instructions(
             "claude-code", cmd="", role=role, issue_number=141
         )
@@ -1811,14 +1824,28 @@ def test_delegation_instructions_fail_fast_on_dead_agent():
         )
         assert "until [ -s" not in body, f"{role}: no infinite poll loop"
 
+    dev = disp._build_delegation_instructions(
+        "claude-code", cmd="", role="developer", issue_number=141
+    )
+    # Developer liveness lives in the wrapper, not the block…
+    assert "kill -0" not in dev, "developer liveness moved into the wrapper"
+    # …but the block still surfaces the death marker and the agent-failed block.
+    assert "CODING_AGENT_DIED" in dev, "developer must surface the death marker"
+    assert "coding-agent-failed:" in dev, (
+        "developer must block the card with a clear error on agent failure"
+    )
+    assert "until [ -s" not in dev, "developer: no infinite poll loop in the block"
+
 
 def test_delegation_wait_uses_configured_max_wait():
-    """The configured coding_agent_max_wait is baked into the generated wait."""
+    """The configured coding_agent_max_wait threads through to the developer wrapper."""
     with mock.patch.object(disp, "_CODING_AGENT_MAX_WAIT", 600):
         body = disp._build_delegation_instructions(
             "claude-code", cmd="", role="developer", issue_number=141
         )
-    assert "600s" in body, f"expected configured 600s ceiling in wait, got:\n{body}"
+    assert "DAEDALUS_MAX_WAIT=600" in body, (
+        f"expected configured 600s ceiling passed to the wrapper, got:\n{body}"
+    )
 
 
 def test_resolve_coding_agent_max_wait_default():
@@ -2398,8 +2425,10 @@ def test_role_delegation_wait_command_is_issue_scoped():
         "o/r", issue, 1, "/tmp", "main", "github", coding_agent="claude-code"
     )
     assert "/tmp/dev-42-out.txt" in dev_body
-    assert "/tmp/dev-42-pid.txt" in dev_body
     assert "/tmp/dev-42-err.txt" in dev_body
+    # The PID file is now derived and managed inside daedalus-delegate.sh (#1280),
+    # so it no longer appears in the developer block itself.
+    assert "/tmp/dev-42-pid.txt" not in dev_body
     assert "until [ -s" not in dev_body  # the hang-forever loop is gone (#141)
     assert "/tmp/dev-out.txt" not in dev_body
     # validator wait must be scoped too.

@@ -8,21 +8,17 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 
 0. Load the delegation skill: `skill_view(name='autonomous-ai-agents/claude-code')`
 1. Read the task body from your kanban card using `kanban_show`.
-2. Save it to a temp file:
+2. Save the INNER task body (only the text below the delegation block's separator) to a temp file:
    ```
-   write_file("/tmp/dev-<issue_number>-task.txt", "<full task body>")
+   write_file("/tmp/dev-<issue_number>-task.txt", "<inner task body>")
    ```
-3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
+3. Run the delegation wrapper in ONE blocking `terminal(...)` call (use the exact command from the delegation block). The wrapper spawns the coding agent in an isolated worktree, waits in-shell for it to finish or open a PR, heartbeats your card, and prints the outcome — you do NOT poll or wait for the PR yourself:
    ```
-   terminal("cat /tmp/dev-<issue_number>-task.txt | <command from delegation block> > /tmp/dev-<issue_number>-out.txt 2>&1", background=True)
+   terminal("bash $HOME/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh <issue_number> <base_branch> /tmp/dev-<issue_number>-task.txt /tmp/dev-<issue_number>-out.txt /tmp/dev-<issue_number>-err.txt <command from delegation block>")
    ```
-4. Wait for the agent to open a PR. Poll every 2 minutes until a PR appears:
-   ```
-   terminal("gh pr list --repo benmarte/daedalus --state open --limit 5")
-   ```
-5. Once a PR is found, verify it with `terminal("gh pr view <pr_number>")`.
-6. Block YOUR kanban card with `review-required: PR #<pr_number> — <branch>`.
-⛔ **DO NOT write any code yourself. DO NOT open any PR yourself.**
+4. Inspect the printed output. If it contains `CODING_AGENT_DIED` or `CODING_AGENT_TIMEOUT`, block YOUR card with `coding-agent-failed: <marker> — see stderr above` and STOP (the dispatcher retries on your next session end). If it has no `PR URL:` line, block with `coding-agent-failed: inner agent produced no PR URL` and STOP.
+5. On success the output contains `PR URL: ... PR number: <n>`. Block YOUR kanban card with `review-required: PR #<pr_number> — <branch>` using the real PR number.
+⛔ **DO NOT write any code yourself. DO NOT open any PR yourself. DO NOT poll for the PR — the wrapper owns the wait.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
 # Communication

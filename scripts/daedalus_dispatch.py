@@ -226,6 +226,7 @@ from core.dispatch.bodies import (  # noqa: F401, E402
     _pm_consultation_body,
     _render_agent_body,
     _resolve_howtos,
+    _spawn_and_after,
     _spawn_step3,
     _wait_for_agent_cmd,
 )
@@ -468,8 +469,7 @@ def _build_delegation_instructions(
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
             + copy_steps
-            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
-            + after
+            + _spawn_and_after(role, pfx, issue_number, run_cmd, base_branch, after, _CODING_AGENT_MAX_WAIT)
             + separator_tail
         )
     if agent == "codex":
@@ -479,8 +479,7 @@ def _build_delegation_instructions(
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
             + copy_steps
-            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
-            + after
+            + _spawn_and_after(role, pfx, issue_number, run_cmd, base_branch, after, _CODING_AGENT_MAX_WAIT)
             + separator_tail
         )
     if agent == "opencode":
@@ -490,8 +489,7 @@ def _build_delegation_instructions(
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
             + copy_steps
-            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
-            + after
+            + _spawn_and_after(role, pfx, issue_number, run_cmd, base_branch, after, _CODING_AGENT_MAX_WAIT)
             + separator_tail
         )
     return ""

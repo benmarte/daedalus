@@ -312,6 +312,85 @@ _ROLE_AFTER_SPAWN: Dict[str, str] = {
     ),
 }
 
+# Developer post-spawn steps (issue #1280). Unlike the polling ``_ROLE_AFTER_SPAWN``
+# entries, the developer no longer runs a separate wait step in model turns — the
+# wrapper (``daedalus-delegate.sh``) owns the entire wait in-shell, so there is NO
+# ``gh pr list``/``sleep`` poll instruction here. ``{failed_note}`` is filled in by
+# ``_build_delegation_instructions``. Steps continue from the single wrapper call
+# built by ``_delegate_spawn_wait_step`` (step 3).
+_DEVELOPER_AFTER_DELEGATE = (
+    "  4. {failed_note}\n"
+    "  5. On success the printed output contains 'PR URL: ... PR number: <n>'. If it does NOT "
+    "contain 'PR URL:', the inner agent ran but failed to open a PR — block the card with "
+    'kanban_block("coding-agent-failed: inner agent produced no PR URL") and STOP. '
+    "Do NOT attempt to implement or fix the issue yourself.\n"
+    '  6. Block your card with the REAL PR number from the output: '
+    'kanban_block("review-required: PR #<n> — fix/issue-<N>")\n'
+    "  STOP — do NOT open the PR yourself, do NOT poll, and do NOT attempt the implementation "
+    "yourself. The task body below is for the INNER coding agent only.\n"
+)
+
+
+def _delegate_spawn_wait_step(
+    pfx: str, issue_number: int, run_cmd: str, base_branch: str, max_wait: int
+) -> str:
+    """Build the developer's single blocking spawn+wait ``terminal(...)`` line (#1280).
+
+    Replaces the old two-call flow (``_spawn_step3`` background spawn + a separate
+    ``_wait_for_agent_cmd`` poll step). ``daedalus-delegate.sh`` backgrounds the
+    coding agent inside its isolated per-issue worktree, then waits IN-SHELL on the
+    first of {inner exit, detect-pr handshake, stop-hook signal, max_wait},
+    heartbeats the card, and prints the structured outcome — so the outer LLM
+    spends at most two turns and the wait is a bash ``wait`` loop, not model turns.
+
+    ``run_cmd`` is passed as opaque trailing args (same contract as
+    ``daedalus-worktree-spawn.sh``), so every ``coding_agents`` failover entry
+    works with no per-agent branching.
+    """
+    tmp = f"/tmp/{pfx}-{issue_number}-task.txt"
+    outf = f"/tmp/{pfx}-{issue_number}-out.txt"
+    errf = f"/tmp/{pfx}-{issue_number}-err.txt"
+    delegate = "$HOME/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh"
+    # No double quotes anywhere — the whole line is embedded in terminal("...").
+    # The configured wall-clock ceiling is passed as an env prefix (the wrapper
+    # reads DAEDALUS_MAX_WAIT); this keeps the config-driven ceiling visible in
+    # the block and threads through to the wrapper's in-shell timeout.
+    spawn = (
+        f"DAEDALUS_MAX_WAIT={max_wait} bash {delegate} "
+        f"{issue_number} {base_branch} {tmp} {outf} {errf} {run_cmd}"
+    )
+    return (
+        f'  3. terminal("{spawn}")\n'
+        "     This ONE blocking call spawns the coding agent in an isolated worktree, waits "
+        "in-shell for it to finish or open a PR, heartbeats your card, and prints the outcome. "
+        "Run it in the FOREGROUND and let it block — do NOT detach it, do NOT poll for the PR "
+        "yourself, and do NOT add your own wait loop; the wrapper owns the entire wait.\n"
+    )
+
+
+def _spawn_and_after(
+    role: str,
+    pfx: str,
+    issue_number: int,
+    run_cmd: str,
+    base_branch: str,
+    after: str,
+    max_wait: int,
+) -> str:
+    """Assemble the spawn + post-spawn steps for a role's delegation block.
+
+    Developer (issue #1280) uses the script-owned lifecycle: ONE blocking wrapper
+    call + non-polling block steps. Every other role keeps the original path — a
+    background ``_spawn_step3`` spawn followed by the polling ``_ROLE_AFTER_SPAWN``
+    wait steps in ``after``.
+    """
+    if role == "developer":
+        return _delegate_spawn_wait_step(
+            pfx, issue_number, run_cmd, base_branch, max_wait
+        ) + _DEVELOPER_AFTER_DELEGATE.format(failed_note=_AGENT_FAILED_NOTE)
+    return _spawn_step3(pfx, issue_number, run_cmd, role, base_branch) + after
+
+
 _CLOUD_AGENT_LABELS: Dict[str, str] = {
     "claude-code": "Claude Code",
     "codex": "Codex",

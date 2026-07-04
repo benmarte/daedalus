@@ -46,31 +46,38 @@ def _dev_body(base_branch: str = "dev") -> str:
 # ── delegation spawn wraps developer in a per-issue worktree ──────────────────
 
 
-def test_developer_spawn_uses_worktree_script():
+def test_developer_spawn_uses_delegate_wrapper():
+    # Since #1280 the developer block invokes the lifecycle wrapper
+    # (daedalus-delegate.sh), which itself spawns the isolated worktree — so the
+    # worktree-isolation guarantee is preserved one level down (asserted in
+    # test_delegate_wrapper.py against the wrapper's source).
     block = disp._build_delegation_instructions(
         "claude-code", "claude -p", role="developer", issue_number=42, base_branch="dev"
     )
-    assert "daedalus-worktree-spawn.sh" in block
+    assert "daedalus-delegate.sh" in block
     # The wrapper is invoked with the issue number and base branch as its args.
-    assert "daedalus-worktree-spawn.sh 42 dev" in block
+    assert "daedalus-delegate.sh 42 dev" in block
+    # The outer block no longer spawns the worktree directly (the wrapper does).
+    assert "daedalus-worktree-spawn.sh" not in block
 
 
 def test_developer_spawn_passes_configured_base_branch():
-    # A non-default target branch must flow through to the worktree wrapper.
+    # A non-default target branch must flow through to the wrapper.
     block = disp._build_delegation_instructions(
         "claude-code", "claude -p", role="developer", issue_number=7, base_branch="main"
     )
-    assert "daedalus-worktree-spawn.sh 7 main" in block
+    assert "daedalus-delegate.sh 7 main" in block
 
 
-def test_non_developer_role_does_not_use_worktree_script():
+def test_non_developer_role_does_not_use_worktree_or_delegate_script():
     # QA/reviewer/etc run against an existing PR and already isolate themselves;
-    # they must keep the original in-place spawn (no worktree wrapper).
+    # they keep the original in-place spawn (no worktree wrapper, no delegate wrapper).
     for role in ("qa", "reviewer", "security", "documentation", "validator", "pm"):
         block = disp._build_delegation_instructions(
             "claude-code", "claude -p", role=role, issue_number=42, base_branch="dev"
         )
         assert "daedalus-worktree-spawn.sh" not in block, role
+        assert "daedalus-delegate.sh" not in block, role
 
 
 # ── PR detection is race-free (explicit deterministic branch) ─────────────────
