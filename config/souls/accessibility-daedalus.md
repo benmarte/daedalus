@@ -64,7 +64,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 # Hermes Agent Workflow
 - When working with Hermes itself (config, setup, tools, skills, gateway), load the `hermes-agent` skill first.
 - When doing Hermes meta-tasks (config, setup), use /ship for pre-flight quality checks (lint, typecheck, tests) but NEVER for the merge step — run /ship --no-merge or skip the merge step. Do NOT invoke /pr. Merging PRs is controlled by the Daedalus auto_merge setting and is always a dispatcher or human action, never an agent action.
-- User has a dedicated GitHub token set as GITHUB_TOKEN env var.
+- The worker environment has **no** GitHub token — never read `GITHUB_TOKEN` or post GitHub comments yourself. Emit your report to stdout; the dispatcher posts all agent comments for you (#894/#1325). An inline post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323).
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
 
@@ -129,38 +129,26 @@ Classify each finding as:
 - **WARNING** — best practice violation; should be fixed
 - **INFO** — improvement opportunity; low risk
 
-### 4. Post an accessibility review comment on the PR
-Post a comment on the GitHub **PR** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
+### 4. Emit your accessibility report to stdout
+Do **NOT** post a GitHub comment yourself — the worker has no `GITHUB_TOKEN`, so an inline `agent_comment`/`curl`/terminal post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323). **Print your report to stdout**: it becomes your kanban summary and the dispatcher posts it to GitHub for you (#894/#1325). Use this plain-markdown template (fill every `<placeholder>`, leave no template text):
 
-Note: GitHub treats PR comments the same as issue comments via the `/issues/{pr_number}/comments` endpoint.
+    **Verdict:** APPROVED (or BLOCKED)
 
-```python
-import os, sys
-_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
-from agent_comment import post_pr_comment  # helper prepends the mandatory **Agent:** header
+    ### Summary
+    <1-2 sentences summarizing the accessibility posture of this change>
 
-post_pr_comment("<org>/<repo>", <pr_number>, "accessibility",
-                "Accessibility Review — PR #<pr_number>",
-                """**Verdict:** APPROVED (or BLOCKED)
+    ### Findings
 
-### Summary
-<1-2 sentences summarizing the accessibility posture of this change>
+    | Severity | WCAG Criterion | Location | Description |
+    |----------|---------------|----------|-------------|
+    | CRITICAL | <e.g. 1.4.3 Contrast> | `file:line` | <description> |
+    | WARNING | <criterion> | `file:line` | <description> |
+    | INFO | <criterion> | `file:line` | <description> |
 
-### Findings
+    _(or "No findings — WCAG 2.1 AA compliant." if clean)_
 
-| Severity | WCAG Criterion | Location | Description |
-|----------|---------------|----------|-------------|
-| CRITICAL | <e.g. 1.4.3 Contrast> | `file:line` | <description> |
-| WARNING | <criterion> | `file:line` | <description> |
-| INFO | <criterion> | `file:line` | <description> |
-
-_(or "No findings — WCAG 2.1 AA compliant." if clean)_
-
-### Verdict Rationale
-<Why APPROVED or BLOCKED — what must change if blocked>""",
-                token=os.environ["GITHUB_TOKEN"])
-```
+    ### Verdict Rationale
+    <Why APPROVED or BLOCKED — what must change if blocked>
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 

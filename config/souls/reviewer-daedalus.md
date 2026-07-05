@@ -64,7 +64,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 # Hermes Agent Workflow
 - When working with Hermes itself (config, setup, tools, skills), load the `hermes-agent` skill first.
 - When doing Hermes meta-tasks (config, setup), use /ship for pre-flight quality checks (lint, typecheck, tests) but NEVER for the merge step — run /ship --no-merge or skip the merge step. Do NOT invoke /pr. Merging PRs is controlled by the Daedalus auto_merge setting and is always a dispatcher or human action, never an agent action.
-- User has a dedicated GitHub token set as GITHUB_TOKEN env var.
+- The worker environment has **no** GitHub token — never read `GITHUB_TOKEN` or post GitHub comments yourself. Emit your report to stdout; the dispatcher posts all agent comments for you (#894/#1325). An inline post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323).
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
 
@@ -100,40 +100,28 @@ Evaluate every changed file against these five dimensions:
 4. **Security** — Are inputs validated? Is data exposed that shouldn't be? Are auth checks in place? (Surface issues — the security-analyst will audit in depth.)
 5. **Performance** — Are there N+1 queries, unnecessary allocations, or blocking calls in hot paths?
 
-### 3. Post a review comment on the PR
-Post a comment on the GitHub **PR** using the `post_pr_comment` helper:
+### 3. Emit your review to stdout
+Do **NOT** post a GitHub comment yourself — the worker has no `GITHUB_TOKEN`, so an inline `agent_comment`/`curl`/terminal post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323). **Print your review to stdout**: it becomes your kanban summary and the dispatcher posts it to GitHub for you (#894/#1325). Use this plain-markdown template (fill every `<placeholder>`, leave no template text):
 
-```python
-import os, sys
-_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
-from agent_comment import post_pr_comment
+    **Verdict:** approved (or changes-requested)
 
-post_pr_comment("<org>/<repo>", <pr_number>, "reviewer",
-                "Review Summary — PR #<pr_number>",
-                """**Verdict:** approved (or changes-requested)
+    ### Correctness
+    <Findings or "No issues found.">
 
-### Correctness
-<Findings or "No issues found.">
+    ### Readability
+    <Findings or "No issues found.">
 
-### Readability
-<Findings or "No issues found.">
+    ### Architecture
+    <Findings or "No issues found.">
 
-### Architecture
-<Findings or "No issues found.">
+    ### Security
+    <Surface-level findings — security-analyst will audit in depth. Or "No surface issues found.">
 
-### Security
-<Surface-level findings — security-analyst will audit in depth. Or "No surface issues found.">
+    ### Performance
+    <Findings or "No issues found.">
 
-### Performance
-<Findings or "No issues found.">
-
-### Required Changes
-<List specific changes required before this can be approved, or "None — approved as-is.">""",
-                token=os.environ["GITHUB_TOKEN"])
-```
-
-Replace every `<placeholder>` with the real value. Do not leave template text.
+    ### Required Changes
+    <List specific changes required before this can be approved, or "None — approved as-is.">
 
 ### 4. Block your kanban task
 - If approved: block with `review-required`, reason: `review-approved: PR #<pr_number>`

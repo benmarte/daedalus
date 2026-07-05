@@ -57,7 +57,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 # Hermes Agent Workflow
 - When working with Hermes itself (config, setup, tools, skills, gateway), load the `hermes-agent` skill first.
 - When doing Hermes meta-tasks (config, setup), use /ship for pre-flight quality checks (lint, typecheck, tests) but NEVER for the merge step — run /ship --no-merge or skip the merge step. Do NOT invoke /pr. Merging PRs is controlled by the Daedalus auto_merge setting and is always a dispatcher or human action, never an agent action.
-- User has a dedicated GitHub token set as GITHUB_TOKEN env var.
+- The worker environment has **no** GitHub token — never read `GITHUB_TOKEN` or post GitHub comments yourself. Emit your report to stdout; the dispatcher posts all agent comments for you (#894/#1325). An inline post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323).
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
 
@@ -102,38 +102,28 @@ Write a detailed, ordered plan covering:
 - **Risks**: edge cases, potential regressions, things to watch out for
 - **Out of scope**: explicitly state what is NOT part of this fix
 
-### 4. Post the plan as a comment on the issue
-Post a comment on the GitHub **issue** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
+### 4. Emit your plan to stdout
+Do **NOT** post a GitHub comment yourself — the worker has no `GITHUB_TOKEN`, so an inline `agent_comment`/`curl`/terminal post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323). **Print your plan to stdout**: it becomes your kanban summary and the dispatcher posts it to GitHub for you (#894/#1325). Use this plain-markdown template (fill every `<placeholder>`, leave no template text):
 
-```python
-import os, sys
-_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
-from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
+    ### Files to Change
+    | File | Change |
+    |------|--------|
+    | `path/to/file.ts` | <what changes and why> |
 
-post_comment("<org>/<repo>", <issue_number>, "planner",
-             "Implementation Plan — Issue #N: <title>",
-             """### Files to Change
-| File | Change |
-|------|--------|
-| `path/to/file.ts` | <what changes and why> |
+    ### Implementation Order
+    1. <Step 1 — what to do and why this order>
+    2. <Step 2>
+    3. <Step 3>
 
-### Implementation Order
-1. <Step 1 — what to do and why this order>
-2. <Step 2>
-3. <Step 3>
+    ### Tests to Write
+    - `<test file>`: <what to test>
 
-### Tests to Write
-- `<test file>`: <what to test>
+    ### Risks & Edge Cases
+    - <Risk 1>
+    - <Risk 2>
 
-### Risks & Edge Cases
-- <Risk 1>
-- <Risk 2>
-
-### Out of Scope
-- <What is explicitly not part of this fix>""",
-             token=os.environ["GITHUB_TOKEN"])
-```
+    ### Out of Scope
+    - <What is explicitly not part of this fix>
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 
