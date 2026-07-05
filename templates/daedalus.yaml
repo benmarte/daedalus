@@ -153,6 +153,18 @@ execution:
   # constrained hosts to avoid OOM-killing parallel coding agents (issue #141).
   # max_dispatch: 5
 
+  # Direct delegation (#1329) — default OFF. When a CLI coding_agent is set, the
+  # normal path spawns a local-model (e.g. qwen) orchestrator that must DECIDE to
+  # spawn the delegate wrapper. That deciding hop is non-deterministic: it either
+  # delegates or runs the work inline and never completes the card (a 30-min stall).
+  # With direct_delegate: true, daedalus claims each dispatchable review/validator/
+  # pm/planner card and spawns daedalus-delegate.sh --relay-verdict DIRECTLY — no
+  # local-model hop — so those stages are deterministic. The developer keeps its
+  # worktree-spawn path.
+  # REQUIRES kanban.dispatch_in_gateway=false (daedalus is the sole dispatcher),
+  # else the gateway daemon also spawns a qwen agent for the same card.
+  # direct_delegate: false
+
   # How many developer/reviewer/security fix cycles run before a card escalates
   # for manual intervention (self-healing CI-fix and review-fix loops). Raise it
   # for flaky suites that need more retry headroom, or lower it to fail fast.
