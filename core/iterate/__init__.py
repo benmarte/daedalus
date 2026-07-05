@@ -326,6 +326,14 @@ def run_iterate(
     # per-tick path runs exactly as today — byte-identical.
     _pipeline_cfg = (resolved or {}).get("pipeline") or {}
     _upfront_dag = bool(_pipeline_cfg.get("upfront_dag", False))
+    # Phase-5 (#1294): planner.native_decompose flag.  Default FALSE (unchanged).
+    # When ON, the post-developer reviewer/security/accessibility(+docs) fan-out
+    # is emitted as ONE native `hermes kanban swarm` (gated behind the QA card)
+    # instead of individual per-role cards.  When OFF the per-tick path runs
+    # exactly as today — byte-identical.  Only consulted when upfront_dag is OFF
+    # (upfront_dag no-ops the per-tick fan-out entirely).
+    _planner_cfg = (resolved or {}).get("planner") or {}
+    _native_decompose = bool(_planner_cfg.get("native_decompose", False))
     # Phase-3 (#1291): native_gates flag.  Default FALSE (behaviour unchanged).
     # When ON, in-pipeline human gates (currently the developer review-required
     # re-block) are tagged with `--kind needs_input` so an awaiting-human card is
@@ -644,6 +652,7 @@ def run_iterate(
                 metadata_transport=_metadata_transport,
                 upfront_dag=_upfront_dag,
                 native_gates=_native_gates,
+                native_decompose=_native_decompose,
             )
 
             # Gate on ok=True: prevents notification when the executor fails

@@ -485,6 +485,7 @@ def _execute_advance(
     pr_number: int | None = None,
     metadata_transport: bool = False,
     upfront_dag: bool = False,
+    native_decompose: bool = False,
     **_kwargs: Any,
 ) -> bool:
     """Complete a developer card to advance the chain (CI no longer gates this).
@@ -550,6 +551,7 @@ def _execute_advance(
         _pkg()._create_downstream_review_tasks(
             slug, issue_number, card,
             pr_number=pr, dry_run=dry_run, upfront_dag=upfront_dag,
+            native_decompose=native_decompose,
         )
     else:
         logger.warning(
@@ -648,6 +650,116 @@ def _downstream_parents(
     return [qa_id] if qa_id else None
 
 
+def _create_downstream_swarm(
+    slug: str,
+    issue_number: int,
+    card: dict,
+    *,
+    pr_number: int | None = None,
+    dry_run: bool = False,
+) -> list[str]:
+    """Native #1294 QA fan-out: one ``hermes kanban swarm`` for the review+docs stage.
+
+    Preserves the QA gate — the QA card is created first (parented to the developer
+    card, key ``qa-{n}``) exactly as the legacy path, then the reviewer/security/
+    accessibility(+docs) stage is emitted as a single swarm whose root is linked
+    under the QA card and blocked ``--kind dependency`` so Hermes auto-promotes it
+    only once QA completes. Idempotent via ``qa-{n}`` and ``swarm-{n}`` keys.
+
+    On any swarm failure, falls back to the legacy per-role fan-out so a swarm
+    hiccup degrades to today's behaviour rather than stranding the issue.
+    """
+    kanban = _pkg().kanban
+    tid = card.get("id") or ""
+    workspace = card.get("workspace") or ""
+    pr_ref = f"PR #{pr_number}" if pr_number else "(PR number unknown)"
+
+    # Idempotency scan: key → id for every existing card on the board.
+    existing: dict[str, str] = {}
+    for task in kanban.list_tasks(slug):
+        ikey = task.get("idempotency_key") or ""
+        if ikey:
+            existing[ikey] = task.get("id") or ""
+
+    created: list[str] = []
+
+    # 1. QA gate card (parented to dev) — same key/shape as the legacy path.
+    qa_key = f"qa-{issue_number}"
+    qa_id = existing.get(qa_key)
+    if qa_id:
+        logger.info("iterate: QA gate card '%s' already exists — skip", qa_key)
+    elif dry_run:
+        logger.info(
+            "[dry-run] would create QA gate card for issue #%s (key=%s)",
+            issue_number, qa_key,
+        )
+    else:
+        qa_id = kanban.create_task(
+            slug,
+            f"#{issue_number} Qa review",
+            body=(
+                f"QA gate for issue #{issue_number} ({pr_ref}). The reviews swarm "
+                f"is blocked on this card and auto-promotes when QA completes.\n\n"
+                f"Developer card: {tid}\nWorkspace: {workspace}\n"
+            ),
+            assignee="qa-daedalus",
+            workspace=workspace,
+            idempotency_key=qa_key,
+            parents=[tid] if tid else None,
+        )
+        if qa_id:
+            created.append(qa_id)
+
+    # 2. Reviews+docs swarm, gated behind QA.
+    swarm_key = f"swarm-{issue_number}"
+    if swarm_key in existing:
+        logger.info("iterate: reviews swarm '%s' already exists — skip", swarm_key)
+        return created
+    if dry_run:
+        logger.info(
+            "[dry-run] would emit reviews swarm for issue #%s (key=%s)",
+            issue_number, swarm_key,
+        )
+        return created
+
+    workers = [
+        f"reviewer-daedalus:#{issue_number} Reviewer review ({pr_ref})",
+        f"security-analyst-daedalus:#{issue_number} Security review ({pr_ref})",
+        f"accessibility-daedalus:#{issue_number} Accessibility review ({pr_ref})",
+    ]
+    root = kanban.swarm(
+        slug,
+        f"Review + document {pr_ref} for issue #{issue_number}",
+        workers=workers,
+        verifier="qa-daedalus",
+        synthesizer="documentation-daedalus",
+        idempotency_key=swarm_key,
+    )
+    if not root:
+        logger.warning(
+            "iterate: reviews swarm for issue #%s failed — falling back to legacy fan-out",
+            issue_number,
+        )
+        # Legacy path skips the already-created QA card (qa-{n} exists) and creates
+        # the individual reviewer/security/accessibility/docs cards.
+        return created + _create_downstream_review_tasks(
+            slug, issue_number, card, pr_number=pr_number, dry_run=dry_run,
+        )
+    created.append(root)
+
+    # Gate the swarm behind QA: link the root under the QA card and dependency-block
+    # it so Hermes auto-promotes the whole swarm only once QA completes.
+    if qa_id:
+        kanban.link(slug, qa_id, root)
+        kanban.block_task(slug, root, "awaiting QA gate", kind="dependency")
+    if tid:
+        kanban.comment(
+            slug, tid,
+            f"Created native reviews swarm {root} (gated behind QA {qa_id or '?'})",
+        )
+    return created
+
+
 def _create_downstream_review_tasks(
     slug: str,
     issue_number: int,
@@ -656,6 +768,7 @@ def _create_downstream_review_tasks(
     pr_number: int | None = None,
     dry_run: bool = False,
     upfront_dag: bool = False,
+    native_decompose: bool = False,
 ) -> list[str]:
     """Create qa/reviewer/security/accessibility/docs tasks after a developer card completes.
 
@@ -678,6 +791,11 @@ def _create_downstream_review_tasks(
             "issue #%s no-ops (upfront DAG owns the stages)", issue_number,
         )
         return []
+    # #1294: native QA swarm fan-out (only when upfront_dag is OFF).
+    if native_decompose:
+        return _create_downstream_swarm(
+            slug, issue_number, card, pr_number=pr_number, dry_run=dry_run,
+        )
     kanban = _pkg().kanban
     created: list[str] = []
     tid = card.get("id") or ""

@@ -202,6 +202,69 @@ def decompose(slug: str, task_id: str) -> bool:
     return True
 
 
+def swarm(
+    slug: str,
+    goal: str,
+    workers: list[str],
+    verifier: str,
+    synthesizer: str,
+    idempotency_key: str = "",
+    priority: int | None = None,
+    created_by: str = "",
+) -> str | None:
+    """Create a Kanban Swarm v1 graph (parallel workers → verifier → synthesizer).
+
+    Thin wrapper over ``hermes kanban swarm``. Each ``workers`` entry is a
+    ``PROFILE:TITLE[:SKILL,SKILL]`` string passed as a repeated ``--worker``.
+    The ``verifier`` runs after all workers complete; the ``synthesizer`` runs
+    after the verifier. ``idempotency_key`` dedups the root card so a re-tick
+    re-roots zero duplicate swarms.
+
+    Returns the root card id (``t_…``) on success, or ``None`` on failure.
+    Never raises — logs a warning and returns ``None`` so the caller can fall
+    back to its legacy per-role fan-out rather than stranding the pipeline.
+    """
+    args = ["--board", slug, "swarm"]
+    for w in workers:
+        args += ["--worker", w]
+    args += ["--verifier", verifier, "--synthesizer", synthesizer]
+    if idempotency_key:
+        args += ["--idempotency-key", idempotency_key]
+    if priority is not None:
+        args += ["--priority", str(priority)]
+    if created_by:
+        args += ["--created-by", created_by]
+    # positional goal LAST
+    args += [goal]
+    rc, out, err = _hk(args, timeout=180)
+    _invalidate_tick_cache()
+    if rc != 0:
+        logger.warning("kanban: swarm '%s' failed: %s", goal, (err or out or "").strip())
+        return None
+    m = re.search(r"\bt_[0-9a-f]+\b", out or "")
+    tid = m.group(0) if m else None
+    logger.info("kanban: created swarm %s (goal=%s) on board %s", tid, goal, slug)
+    return tid
+
+
+def link(slug: str, parent_id: str, child_id: str) -> bool:
+    """Attach ``child_id`` as a dependency child of ``parent_id`` post-hoc.
+
+    Wraps ``hermes kanban link <parent> <child>``. Used to gate an
+    already-created card (e.g. a swarm root) behind a predecessor after the
+    fact, so a subsequent ``block_task(kind="dependency")`` auto-promotes it when
+    the parent completes. Never raises — logs + returns False on failure.
+    """
+    rc, out, err = _hk(["--board", slug, "link", parent_id, child_id])
+    _invalidate_tick_cache()
+    if rc != 0:
+        logger.warning("kanban: link %s -> %s failed: %s",
+                       parent_id, child_id, (err or out or "").strip())
+        return False
+    logger.info("kanban: linked %s -> %s", parent_id, child_id)
+    return True
+
+
 def list_blocked(slug: str) -> list[dict]:
     """Cards currently in the 'blocked' column (full --json dicts)."""
     rc, out, _ = _hk(["--board", slug, "list", "--status", "blocked", "--json"])

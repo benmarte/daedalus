@@ -218,6 +218,8 @@ class FakeKanban:
         self.comments: List[tuple] = []
         self.archived: List[str] = []
         self.decomposed: List[str] = []
+        self.swarmed: List[Dict[str, Any]] = []  # #1294 swarm() calls
+        self.linked: List[tuple] = []  # #1294 (parent_id, child_id) link() calls
 
     # ---- seeding (not counted as pipeline mutations) ----
 
@@ -421,6 +423,56 @@ class FakeKanban:
         self.decomposed.append(task_id)
         return True
 
+    def swarm(
+        self,
+        slug: str,
+        goal: str,
+        workers: List[str],
+        verifier: str,
+        synthesizer: str,
+        idempotency_key: str = "",
+        priority: Optional[int] = None,
+        created_by: str = "",
+    ) -> Optional[str]:
+        """Create a swarm graph root card and record the call (#1294).
+
+        Honours ``idempotency_key`` like the real CLI so a re-tick returns the
+        existing root rather than a duplicate.
+        """
+        if idempotency_key:
+            for t in self.tasks.values():
+                if t.get("idempotency_key") == idempotency_key:
+                    return t["id"]
+        self._counter += 1
+        tid = f"t{self._counter}"
+        self.tasks[tid] = {
+            "id": tid,
+            "title": goal,
+            "assignee": created_by,
+            "status": "running",
+            "idempotency_key": idempotency_key,
+            "parents": [],
+            "reason": "",
+            "comments": [],
+        }
+        self.swarmed.append({
+            "root": tid,
+            "goal": goal,
+            "workers": list(workers),
+            "verifier": verifier,
+            "synthesizer": synthesizer,
+            "idempotency_key": idempotency_key,
+        })
+        return tid
+
+    def link(self, slug: str, parent_id: str, child_id: str) -> bool:
+        """Attach child as a dependency child of parent post-hoc (#1294)."""
+        c = self.tasks.get(child_id)
+        if c is not None:
+            c.setdefault("parents", []).append(parent_id)
+        self.linked.append((parent_id, child_id))
+        return True
+
     def run_outcome(self, slug: str, task_id: str) -> Optional[Dict[str, Any]]:
         """Return the structured outcome metadata on a card's closing run (#1288).
 
@@ -518,6 +570,8 @@ def kanban_as(kanban_mod: Any, fk: "FakeKanban"):
         "archive_task",
         "create_triage",
         "decompose",
+        "swarm",
+        "link",
         "run_outcome",
         "close_issue_tasks",
         "edit_body",
