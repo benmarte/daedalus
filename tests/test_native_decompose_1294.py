@@ -174,3 +174,67 @@ def test_native_fanout_falls_back_when_swarm_fails():
     assert any("Security-Analyst review" in t for t in titles)
     # exactly one QA card despite the native attempt + legacy fallback both running
     assert sum(1 for c in fk.created if c["idempotency_key"] == "qa-7") == 1
+
+
+# ── Part A: native planner decompose via kanban decompose ───────────────────
+
+from core.iterate.executors import _execute_planner_decompose_inner  # noqa: E402
+from conftest import FakeProvider  # noqa: E402
+
+
+def test_native_planner_decompose_uses_kanban_decompose():
+    """Flag ON: epic → ONE triage card (epic-{n}) + native decompose, NO GitHub
+    sub-issues; marker + epic label posted, planner card completed."""
+    fk = FakeKanban()
+    prov = FakeProvider()
+    plan_tid = fk.create_task(SLUG, "#50 Planner", assignee="planner-daedalus")
+    with kanban_as(kanban, fk):
+        ok = _execute_planner_decompose_inner(
+            SLUG, plan_tid, 50, "Epic: big feature", "Body with scope.",
+            [], "", False, prov, native_decompose=True,
+        )
+
+    assert ok is True
+    # exactly one native decompose, on a triage card keyed epic-50
+    assert len(fk.decomposed) == 1
+    assert any(t.get("idempotency_key") == "epic-50" for t in fk.tasks.values())
+    # NO GitHub sub-issues created (the whole point of D1a full-native)
+    assert prov.created_issues == []
+    # idempotency marker comment + epic label on the parent
+    assert any(n == 50 for (n, _b) in prov.posted_issue_comments)
+    assert "epic" in prov.labels.get(50, [])
+    # planner card completed
+    assert any(tid == plan_tid for (tid, _s) in fk.completed)
+
+
+def test_native_planner_decompose_flag_off_is_legacy_subissues():
+    """Flag OFF: the legacy path creates GitHub sub-issues (byte-identical)."""
+    fk = FakeKanban()
+    prov = FakeProvider()
+    plan_tid = fk.create_task(SLUG, "#51 Planner", assignee="planner-daedalus")
+    body = "Epic body\n\n- [ ] First chunk\n- [ ] Second chunk\n"
+    with kanban_as(kanban, fk):
+        _execute_planner_decompose_inner(
+            SLUG, plan_tid, 51, "Epic: two chunks", body,
+            [], "", False, prov, native_decompose=False,
+        )
+    # legacy path DID create GitHub sub-issues
+    assert len(prov.created_issues) >= 1
+
+
+def test_native_planner_decompose_failure_leaves_epic_retryable():
+    """Flag ON + decompose fails → returns False, no marker posted (retryable)."""
+    fk = FakeKanban()
+    fk.decompose = lambda *a, **k: False  # force decompose failure
+    prov = FakeProvider()
+    plan_tid = fk.create_task(SLUG, "#52 Planner", assignee="planner-daedalus")
+    with kanban_as(kanban, fk):
+        ok = _execute_planner_decompose_inner(
+            SLUG, plan_tid, 52, "Epic", "Body", [], "", False, prov,
+            native_decompose=True,
+        )
+    assert ok is False
+    # no decomposed marker → a later tick can retry
+    assert prov.posted_issue_comments == []
+    # planner card NOT completed
+    assert not any(tid == plan_tid for (tid, _s) in fk.completed)

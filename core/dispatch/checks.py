@@ -1766,6 +1766,11 @@ def _check_completed_planner(
         # appear inside test-code examples in the task body.
         card = dict(task)
         card["body"] = f"Issue #{n}"
+        # #1294 Part A: route epic decomposition through native `kanban decompose`
+        # when planner.native_decompose is ON (default OFF → legacy sub-issue path).
+        _native_decompose = bool(
+            ((resolved or {}).get("planner") or {}).get("native_decompose", False)
+        )
         ok = _execute_planner_decompose(
             slug,
             card,
@@ -1774,6 +1779,7 @@ def _check_completed_planner(
             workdir=workdir,
             dry_run=dry_run,
             provider=provider,
+            native_decompose=_native_decompose,
         )
         if ok:
             triggered.append(n)
