@@ -29,6 +29,7 @@ set -uo pipefail
 out="${1:-}"
 pidfile="${2:-}"
 branch="${3:-}"
+repo="${4:-}"
 [ -n "$out" ] || exit 0
 
 command -v gh >/dev/null 2>&1 || exit 0
@@ -45,6 +46,10 @@ br="$branch"
 case "$br" in
   HEAD|main|master|dev|develop|trunk) exit 0 ;;  # never fire on a base branch
 esac
+
+# When an explicit repo is passed (e.g. from daedalus-delegate.sh running in a
+# non-git directory), export GH_REPO so gh can resolve the remote without git.
+[ -n "$repo" ] && export GH_REPO="$repo"
 
 # .[0] guards against multiple matches; select(.number) drops the null case so a
 # branch with no open PR yields empty output (and we exit without touching OUT).

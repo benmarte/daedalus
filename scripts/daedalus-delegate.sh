@@ -45,6 +45,8 @@
 # Style: consistent with daedalus-worktree-spawn.sh and daedalus-detect-pr.sh.
 # set -u: never unset variables. No set -e: must preserve child exit code and
 # distinguish timeout (124) from agent failure; -e traps would mask both.
+# CWE-377: ensure all sidecar files are private (mode 600/700).
+umask 077
 set -uo pipefail
 
 # ── defaults ─────────────────────────────────────────────────────────────────
@@ -103,6 +105,7 @@ fi
 # On trap: reap the inner agent's process group cleanly, then emit a
 # DELEGATE_RESULT line for forensic log analysis.  Kanban transition is
 # intentionally SKIPPED — Hermes owns the requeue when --max-runtime fires.
+# EXIT trap below handles RUNDIR cleanup after exit 124.
 _term_handler() {
   if [ -n "${_child_pgid:-}" ]; then
     kill -TERM -"$_child_pgid" 2>/dev/null || kill -TERM "${_child_pid:-0}" 2>/dev/null || true
@@ -122,6 +125,20 @@ _term_handler() {
 }
 trap '_term_handler' TERM
 
+# ── private sidecar directory ──────────────────────────────────────────────────
+# CWE-59 / CWE-377: create all wrapper-internal files in a per-run private dir
+# (mode 0700 from umask 077 + mktemp). EXIT trap fires on any exit — including
+# exit 124 from _term_handler — so RUNDIR is always cleaned up.
+RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/daedalus-delegate-$$.XXXXXX")"
+echo "[delegate] RUNDIR=$RUNDIR"
+trap 'rm -rf "${RUNDIR:-}"' EXIT
+_pid_file="${RUNDIR}/agent.pid"
+
+# Detect-pr cadence: call daedalus-detect-pr.sh every _detect_pr_every iterations
+# (default 6 ≈ 30s at 5s poll) so gh API calls are throttled. PID-liveness,
+# timeout, and heartbeat checks remain per-iteration.
+_detect_pr_every="${DETECT_PR_EVERY:-6}"
+
 # ── ensure output directory exists ───────────────────────────────────────────
 # Finding 5: an unwritable out-dir would look like a crashed agent. Create it
 # upfront; emit a distinguishable wrapper-error if we can't.
@@ -134,6 +151,16 @@ if ! mkdir -p "$_out_dir" 2>/dev/null; then
     hermes kanban --board "$_board" block "$_card" \
       "coding-agent-failed: wrapper-error: $_err" 2>/dev/null || true
   fi
+  exit 2
+fi
+
+# ── symlink guard on out-file ─────────────────────────────────────────────────
+# CWE-59: refuse to spawn if the caller-specified out-file is already a symlink.
+# A pre-planted symlink would redirect the agent's stdout to an attacker-chosen
+# path (arbitrary-file-write via redirect).
+if [ -L "$_out" ]; then
+  echo "[delegate] SECURITY: --out is a symlink — refusing to write (CWE-59): $_out" >&2
+  printf 'DELEGATE_RESULT: {"status":"wrapper-error","exit":2,"out":"","duration_s":0}\n'
   exit 2
 fi
 
@@ -162,6 +189,7 @@ fi
 _child_pid=$!
 # After setsid the child is its own process group leader (pgid == pid).
 _child_pgid="$_child_pid"
+printf '%s\n' "$_child_pid" > "$_pid_file"
 echo "[delegate] spawned PID=$_child_pid PGID=$_child_pgid"
 
 # ── helper: send heartbeat in background (non-blocking) ──────────────────────
@@ -237,6 +265,11 @@ _do_transition() {
                     --jq '.[0] | select(.number) | .number' \
                     2>/dev/null || echo "")"
       _pr_num="$(printf '%s' "$_pr_num" | tr -d '[:space:]')"
+      # Numeric-only validation: reject any non-integer to prevent injection
+      # into the block-reason string (CWE-74).
+      case "$_pr_num" in
+        *[!0-9]*|'') _pr_num="" ;;
+      esac
     fi
     if [ -n "$_pr_num" ] && [ "$_pr_num" != "null" ]; then
       _reason="review-required: PR #${_pr_num} — ${_branch}"
@@ -267,8 +300,11 @@ _do_transition() {
 # ── main wait loop ────────────────────────────────────────────────────────────
 _exit_code=0
 _timed_out=0
+_loop_iter=0
 
 while true; do
+  _loop_iter=$(( _loop_iter + 1 ))
+
   # 1. Push-based early completion (C3 done-marker written by inner-agent hook)
   # Finding 4: kill the pgid (not just the pid) and include SIGKILL follow-up
   # after grace, same as _kill_child().
@@ -301,6 +337,20 @@ while true; do
   _hb_elapsed=$(( _now_ts - _last_hb_ts ))
   if [ "$_hb_elapsed" -ge "$_heartbeat_interval" ]; then
     _heartbeat
+  fi
+
+  # 5. detect-pr cadence (throttled gh API polling for early PR detection)
+  # Only when --transition is active (we expect a PR to be opened) and every
+  # _detect_pr_every iterations. On finding a PR, detect-pr.sh writes the
+  # handshake line to _out and kills the agent; the next PID-liveness check
+  # then breaks the loop naturally.
+  if [ "$_transition" -eq 1 ] && [ -n "$_branch" ] && \
+     [ $(( _loop_iter % _detect_pr_every )) -eq 0 ]; then
+    _script_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "${_script_dir}/daedalus-detect-pr.sh" ]; then
+      "${_script_dir}/daedalus-detect-pr.sh" \
+        "$_out" "$_pid_file" "$_branch" "${_repo:-}" 2>/dev/null || true
+    fi
   fi
 
   sleep "$_poll_interval"
