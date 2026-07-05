@@ -71,6 +71,28 @@ REQUIRED_LABELS: list[dict[str, str]] = [
     },
 ]
 
+# Labels created by ensure_labels() when label_projection is bootstrapped.
+# Colors: yellow=stage (active work), blue=state-running, red=state-blocked,
+# green=state-done, orange=gate.  All use hex WITHOUT the leading '#' (GitHub format).
+DAEDALUS_PROJECTION_LABELS: list[dict[str, str]] = [
+    {"name": "daedalus:stage/validator",     "color": "e4e669", "description": "Pipeline stage: validator"},
+    {"name": "daedalus:stage/pm",            "color": "e4e669", "description": "Pipeline stage: project-manager"},
+    {"name": "daedalus:stage/developer",     "color": "e4e669", "description": "Pipeline stage: developer"},
+    {"name": "daedalus:stage/qa",            "color": "e4e669", "description": "Pipeline stage: qa"},
+    {"name": "daedalus:stage/reviewer",      "color": "e4e669", "description": "Pipeline stage: reviewer"},
+    {"name": "daedalus:stage/security",      "color": "e4e669", "description": "Pipeline stage: security-analyst"},
+    {"name": "daedalus:stage/accessibility", "color": "e4e669", "description": "Pipeline stage: accessibility"},
+    {"name": "daedalus:stage/docs",          "color": "e4e669", "description": "Pipeline stage: documentation"},
+    {"name": "daedalus:state/running",       "color": "0052cc", "description": "Pipeline: stage actively running"},
+    {"name": "daedalus:state/blocked",       "color": "b60205", "description": "Pipeline: blocked, waiting for action"},
+    {"name": "daedalus:state/done",          "color": "0e8a16", "description": "Pipeline: all stages complete"},
+    {"name": "daedalus:gate/needs-human",    "color": "ff6b35", "description": "Gate: human review required (block_for_review)"},
+    {"name": "daedalus:gate/needs-info",     "color": "ff6b35", "description": "Gate: reporter info needed (needs_more_info)"},
+]
+# Extend the core REQUIRED_LABELS with projection labels so ensure_labels()
+# bootstraps them.  Providers filter their own REQUIRED_LABELS by name.
+REQUIRED_LABELS.extend(DAEDALUS_PROJECTION_LABELS)
+
 # Canonical pipeline statuses → default provider-facing names. Overridable per
 # project via vcs.status_map (values are board columns / labels / WI states).
 DEFAULT_STATUS_MAP = {
@@ -380,6 +402,16 @@ class VCSProvider(abc.ABC):
         # Populated by enroll_repo(); surfaced in dispatch summary under enrollment_failures.
         # Defined here so getattr(provider, "enrollment_failures", []) is never needed.
         self.enrollment_failures: list[int] = []
+        # Namespace collision guard: daedalus:* label prefix must not collide
+        # with status_map values (on GitLab, labels are board columns).
+        for _k, _v in self._status_map.items():
+            if (_v or "").startswith("daedalus:"):
+                self._log.warning(
+                    "status_map key %r has value %r which starts with 'daedalus:' "
+                    "— this will collide with the label-projection namespace; "
+                    "rename the status_map value to avoid conflicts",
+                    _k, _v,
+                )
 
     # ── status mapping ───────────────────────────────────────────────────────
     def status_name(self, canonical: str) -> str:
@@ -418,6 +450,10 @@ class VCSProvider(abc.ABC):
 
     def add_label(self, issue_number: int, label_name: str) -> bool:
         """Apply a label to an issue. Returns True on success. Default no-op."""
+        return False
+
+    def remove_label(self, issue_number: int, label_name: str) -> bool:
+        """Remove a label from an issue. Returns True on success. Default no-op."""
         return False
 
     def has_label(self, issue_number: int, label_name: str) -> bool:

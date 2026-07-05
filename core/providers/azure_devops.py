@@ -331,6 +331,20 @@ class AzureDevOpsProvider(VCSProvider):
     def display_repo(self) -> str:
         return f"{self.org}/{self.project}/{self.repo}"
 
+    def remove_label(self, issue_number: int, label_name: str) -> bool:
+        """Azure DevOps tag removal is not yet implemented for label projection.
+
+        Tags on work items don't have a per-tag DELETE endpoint; removal requires
+        a PATCH with the full updated tag list.  This is a known gap — label_projection
+        on Azure DevOps currently supports add-only.  Falls back to the base no-op.
+        """
+        self._log.debug(
+            "remove_label: Azure DevOps per-tag removal not implemented "
+            "(issue #%s, label %r) — label_projection writes are add-only on ADO",
+            issue_number, label_name,
+        )
+        return False
+
     def list_labels(self) -> list[LabelDef]:
         """Work-item tags (closest Azure analogue to labels)."""
         try:

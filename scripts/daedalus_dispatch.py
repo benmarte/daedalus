@@ -3973,6 +3973,12 @@ def _run_tick(
     if board_mode:
         _global_reconcile_orphan_cards(slug, provider, dry_run=dry_run)
 
+    # ── Label-projection: project canonical pipeline state to VCS labels ──────
+    # Gated on pipeline.label_projection (default False).  Reuses the already-
+    # cached kanban.list_tasks result — no new kanban API calls.
+    if board_mode and provider is not None:
+        _reconcile_label_projections(resolved, provider, slug, dry_run=dry_run)
+
     # ── Tier promotion: re-evaluate sub-issue Ready labels after merges ──────
     # When sub-issues declare ``Depends on:`` dependencies (via the body convention),
     # closure of a blocker should promote its dependents to Ready idempotently.
@@ -4036,6 +4042,57 @@ def _run_tick(
 
 
 
+
+
+def _reconcile_label_projections(
+    resolved: Dict[str, Any],
+    provider,
+    slug: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Project canonical kanban state to daedalus:* VCS labels for all active issues.
+
+    Gated on pipeline.label_projection (default False).  Uses the already-
+    cached kanban.list_tasks result — no new kanban API calls per tick.
+    Never raises — errors are logged and swallowed.
+    """
+    from core.label_projection import reconcile_label_projection
+
+    pipeline_cfg = (resolved.get("pipeline") or {})
+    if not pipeline_cfg.get("label_projection"):
+        return
+
+    # list_tasks is cached per tick (PR #1142) — this is a free call.
+    all_cards = kanban.list_tasks(slug)
+    if not all_cards:
+        return
+
+    # Collect unique issue numbers from card titles.
+    issue_numbers: set[int] = set()
+    for c in all_cards:
+        n = extract_issue_number(c.get("title") or "")
+        if n is not None:
+            issue_numbers.add(n)
+
+    for issue_n in sorted(issue_numbers):
+        cards_for_issue = [
+            c for c in all_cards
+            if extract_issue_number(c.get("title") or "") == issue_n
+        ]
+        if not cards_for_issue:
+            continue
+        try:
+            adds, removes = reconcile_label_projection(
+                slug, issue_n, provider, cards=cards_for_issue, dry_run=dry_run,
+            )
+            if adds or removes:
+                logger.info(
+                    "label_projection #%s: +%d -%d labels",
+                    issue_n, adds, removes,
+                )
+        except Exception as e:
+            logger.warning("label_projection #%s: error (non-fatal): %s", issue_n, e)
 
 
 def _mirror_issue_threads(

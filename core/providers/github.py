@@ -521,6 +521,30 @@ class GitHubProvider(VCSProvider):
             self._log.warning("add_label #%s %r failed: %s", issue_number, label_name, e)
             return False
 
+    def remove_label(self, issue_number: int, label_name: str) -> bool:
+        """DELETE /repos/{repo}/issues/{n}/labels/{label}."""
+        try:
+            from urllib.parse import quote as _quote
+            self._http.request(
+                "DELETE",
+                f"/repos/{self.repo}/issues/{issue_number}/labels/{_quote(label_name, safe='')}",
+            )
+            return True
+        except ProviderError as e:
+            if getattr(e, "status_code", None) == 404:
+                return True  # already removed — idempotent
+            self._log.warning("remove_label #%s %r failed: %s", issue_number, label_name, e)
+            return False
+
+    def list_issue_labels(self, issue_number: int) -> list[str]:
+        """Return label names currently applied to ``issue_number``."""
+        try:
+            data = self._http.get_json(f"/repos/{self.repo}/issues/{issue_number}/labels")
+            return [lbl.get("name", "") for lbl in (data or []) if lbl.get("name")]
+        except ProviderError as e:
+            self._log.debug("list_issue_labels #%s failed: %s", issue_number, e)
+            return []
+
     def has_label(self, issue_number: int, label_name: str) -> bool:
         """Return True if ``issue_number`` has ``label_name`` applied.
 
