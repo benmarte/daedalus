@@ -1,3 +1,5 @@
+## [provision_roster.sh: persist per-role platform_toolsets.cli so the toolset trim survives re-provisioning](https://github.com/benmarte/daedalus/issues/1319) — [PR #1322](https://github.com/benmarte/daedalus/pull/1322)
+
 ## [docs: document that daedalus operators must set gateway kanban.dispatch_in_gateway=false](https://github.com/benmarte/daedalus/issues/1320) — [PR #1321](https://github.com/benmarte/daedalus/pull/1321)
 
 ## fix: native QA swarm fan-out — remove ineffective external gating (planner.native_decompose), found by live dogfooding
