@@ -252,17 +252,18 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When completing your kanban card, append a fenced JSON block **after** your prefix line.
-Both lines are required throughout Phase 1.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the block reason and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: "approved" | "changes_requested"
+Signal mapping: `security-approved:` → `approved` | `security-changes-requested:` → `changes_requested`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `approved` | `changes_requested`
 
-```json
-{"daedalus_outcome": 0, "role": "security", "verdict": "approved",
- "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"owasp": "top10 checked", "findings": "none"},
- "note": ""}
-```
+Example full block reason (APPROVED — JSON block must come last):
+
+    security-approved: PR #7
+
+    ```json
+    {"daedalus_outcome": 1, "role": "security", "verdict": "approved", "refs": {"issue": 42, "pr": 7}, "note": "OWASP Top 10 checked — no findings"}
+    ```

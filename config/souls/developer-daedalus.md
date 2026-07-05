@@ -267,28 +267,18 @@ This SOUL is consumed by the `developer-daedalus` branch of `classify_blocked()`
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When blocking your kanban card with `review-required: PR #N`, also append a fenced JSON block.
-Both lines are required throughout Phase 1.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the block reason and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: `pr_opened` | `blocked`
+Signal mapping: blocking with `review-required: PR #N` → `pr_opened` | blocking without a linked PR (infrastructure/environment issue) → `blocked`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `pr_opened` | `blocked`
 
-```json
-{"daedalus_outcome": 0, "role": "developer", "verdict": "pr_opened",
- "refs": {"issue": <N>, "pr": <pr_number>},
- "evidence": {"branch": "fix/issue-<N>-<slug>"},
- "note": ""}
-```
-
-Example full block reason:
+Example full block reason (PR opened — JSON block must come last):
 
     review-required: PR #42 — fix/issue-42-widget-crash
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
-
     ```json
-    {"daedalus_outcome": 0, "role": "developer", "verdict": "pr_opened", "refs": {"issue": 42, "pr": 42}, "evidence": {"branch": "fix/issue-42-widget-crash"}, "note": ""}
+    {"daedalus_outcome": 1, "role": "developer", "verdict": "pr_opened", "refs": {"issue": 42, "pr": 42}, "note": "fix: null deref in widget.click()"}
     ```

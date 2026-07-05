@@ -332,17 +332,18 @@ This SOUL is consumed by the `accessibility-daedalus` branch of `classify_blocke
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When completing your kanban card, append a fenced JSON block **after** your prefix line.
-Both lines are required throughout Phase 1.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the prefix line/block reason and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: "approved" | "na" | "skipped" | "changes_requested"
+Signal mapping: `a11y-approved:` → `approved` | `accessibility-na:` → `na` | `a11y-skipped:` → `skipped` | `changes requested:` → `changes_requested`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `approved` | `na` | `skipped` | `changes_requested`
 
-```json
-{"daedalus_outcome": 0, "role": "a11y", "verdict": "approved",
- "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"wcag": "2.1 AA compliant"},
- "note": ""}
-```
+Example full block reason (APPROVED — JSON block must come last):
+
+    a11y-approved: PR #7
+
+    ```json
+    {"daedalus_outcome": 1, "role": "a11y", "verdict": "approved", "refs": {"issue": 42, "pr": 7}, "note": "WCAG 2.1 AA compliant — no findings"}
+    ```

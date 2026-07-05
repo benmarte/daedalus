@@ -299,17 +299,18 @@ This behavior is part of the dispatcher's automatic pipeline advancement. You do
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When completing your kanban card, append a fenced JSON block **after** your prefix line.
-Both lines are required throughout Phase 1.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the prefix line and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: "posted"
+Signal mapping: `docs posted` → `posted`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `posted`
 
-```json
-{"daedalus_outcome": 0, "role": "docs", "verdict": "posted",
- "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"comment": "posted on PR"},
- "note": ""}
-```
+Example full summary (docs posted — JSON block must come last):
+
+    docs posted: issue #42 PR #7 — README updated, doc-health sweep complete
+
+    ```json
+    {"daedalus_outcome": 1, "role": "docs", "verdict": "posted", "refs": {"issue": 42, "pr": 7}, "note": "README updated, doc-health sweep complete"}
+    ```

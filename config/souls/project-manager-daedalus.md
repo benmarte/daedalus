@@ -262,17 +262,18 @@ If the PM blocks (which should not happen under normal operation), `classify_blo
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When completing your kanban card, append a fenced JSON block **after** your prefix line.
-Both lines are required throughout Phase 1.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the prefix line and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: "spec" | "assigned" | "clarified" | "escalated"
+Signal mapping: `spec:` → `spec` | routing/assigning a task → `assigned` | resolving a consultation → `clarified` | escalating to human → `escalated`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `spec` | `assigned` | `clarified` | `escalated`
 
-```json
-{"daedalus_outcome": 0, "role": "pm", "verdict": "spec",
- "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"ac_count": "3"},
- "note": ""}
-```
+Example full summary (spec posted — JSON block must come last):
+
+    spec: fix null deref in widget.click() — 3 ACs
+
+    ```json
+    {"daedalus_outcome": 1, "role": "pm", "verdict": "spec", "refs": {"issue": 42, "pr": null}, "note": "3 ACs — fix null deref in widget.click()"}
+    ```

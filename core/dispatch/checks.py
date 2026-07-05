@@ -760,7 +760,17 @@ def _check_confirmed_validators(
         # with summary pre-populated still work without calling show_card.
         summary_raw = _get_task_summary(task, slug)
         summary = summary_raw.lower()
-        if not summary.startswith("confirmed"):
+        # Honor a structured JSON outcome record as equivalent to the human
+        # ``CONFIRMED:`` prefix — robust to models that paraphrase the prefix
+        # (a local model may emit prose + the JSON block instead of the exact
+        # token). The record is authoritative when present (#dogfood 2026-07-05).
+        _v_rec = _parse_outcome(summary_raw or "")
+        _is_confirmed = summary.startswith("confirmed") or (
+            _v_rec is not None
+            and _v_rec.role == "validator"
+            and _v_rec.verdict == "confirmed"
+        )
+        if not _is_confirmed:
             # Non-CONFIRMED validator done cards: re-triage instead of silent drop.
             n_nr = extract_issue_number(task.get("title") or "")
             if n_nr is None:
@@ -2762,6 +2772,16 @@ def _guard_prefix_on_done(
                 _meta_rec = _parse_outcome_dict(_meta) if _meta else None
                 if _meta_rec is not None and _meta_rec.role == _expected_role_md:
                     continue
+
+        # A valid structured JSON outcome record ALWAYS satisfies the guard,
+        # regardless of prefix_fallback / metadata_transport — a machine-readable
+        # outcome is the strongest signal and is robust to models that paraphrase
+        # the human-readable prefix (#dogfood 2026-07-05). Checked before the
+        # prefix path so a JSON-emitting card never trips the guard.
+        _rec_json = _parse_outcome(summary_raw or "")
+        _expected_role_json = _ASSIGNEE_TO_ROLE_MAP.get(assignee)
+        if _rec_json is not None and _expected_role_json and _rec_json.role == _expected_role_json:
+            continue
 
         # Well-formed completion check depends on protocol.prefix_fallback.
         if prefix_fallback:

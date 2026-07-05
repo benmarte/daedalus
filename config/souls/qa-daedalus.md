@@ -327,17 +327,18 @@ This SOUL is consumed by the `qa-daedalus` branch of `classify_blocked()` in `co
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When completing your kanban card, append a fenced JSON block **after** your prefix line.
-Both lines are required throughout Phase 1.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the block reason and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: "passed" | "failed"
+Signal mapping: `qa-passed:` → `passed` | `qa-failed:` → `failed`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `passed` | `failed`
 
-```json
-{"daedalus_outcome": 0, "role": "qa", "verdict": "passed",
- "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"ci": "green", "suite": "3389 passed"},
- "note": ""}
-```
+Example full block reason (PASSED — JSON block must come last):
+
+    qa-passed: PR #7 verified
+
+    ```json
+    {"daedalus_outcome": 1, "role": "qa", "verdict": "passed", "refs": {"issue": 42, "pr": 7}, "note": "CI green, all ACs verified, no regressions"}
+    ```
