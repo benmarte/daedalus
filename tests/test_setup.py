@@ -404,3 +404,25 @@ def test_setup_scaffolds_all_sources_enabled(tmp_path):
     cfg = yaml.safe_load((repo / ".hermes" / "daedalus.yaml").read_text())
     for source in ("github_issues", "local_specs", "kanban_triage"):
         assert cfg["sources"][source]["enabled"] is True, source
+
+
+# ── Gateway dispatch_in_gateway=false requirement docs (#1320) ────────────────
+def test_setup_md_documents_dispatch_in_gateway_requirement():
+    """SETUP.md must document the required `kanban.dispatch_in_gateway: false`
+    gateway setting: the flag, the double-dispatch failure mode, the required
+    value, and the restart-to-apply caveat (#1320)."""
+    text = (_ORCH_ROOT / "SETUP.md").read_text()
+    assert "dispatch_in_gateway" in text, "flag name missing"
+    assert "false" in text, "required value missing"
+    lowered = text.lower()
+    assert "double-dispatch" in lowered, "failure mode not explained"
+    assert "gateway restart" in lowered, "restart-to-apply caveat missing"
+    assert "once at startup" in lowered, "read-once caveat missing"
+
+
+def test_installation_guide_links_dispatch_in_gateway_requirement():
+    """INSTALLATION_GUIDE.md must surface the requirement in the install steps
+    and point operators to SETUP.md for the full explanation (#1320)."""
+    text = (_ORCH_ROOT / "docs" / "INSTALLATION_GUIDE.md").read_text()
+    assert "dispatch_in_gateway" in text, "flag not mentioned in install guide"
+    assert "SETUP.md" in text, "no pointer to SETUP.md"
