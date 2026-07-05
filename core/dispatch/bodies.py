@@ -367,7 +367,7 @@ def _spawn_step3(
         "     <CARD_ID> with your kanban card id and <BOARD_SLUG> with the board slug:\n"
         "       terminal('$HOME/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh "
         f"--task-file {tmp} --cmd \"{run_cmd}\" --card <CARD_ID> --board <BOARD_SLUG> "
-        f"--out {outf} --relay-verdict', background=True)\n"
+        f"--out {outf} --role {role} --relay-verdict', background=True)\n"
         "     Do NOT wait, read the output, or complete the card yourself — "
         "--relay-verdict does it.\n"
     )

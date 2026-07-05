@@ -75,6 +75,7 @@ def _run_delegate(
     poll_interval: int = 5,
     transition: bool = False,
     relay: bool = False,
+    role: str = "",
     repo: str = "owner/repo",
     branch: str = "fix/issue-42-test",
     hermes_body: str = "",
@@ -116,6 +117,8 @@ def _run_delegate(
         cmd += ["--transition", "--repo", repo, "--branch", branch]
     if relay:
         cmd += ["--relay-verdict"]
+    if role:
+        cmd += ["--role", role]
 
     result = subprocess.run(
         cmd,
@@ -806,3 +809,54 @@ def test_relay_verdict_no_verdict_blocks_coding_agent_failed(tmp_path):
     block = [ln for ln in _log_lines(hermes_log) if "block" in ln and "t_test123" in ln]
     assert block, "expected a kanban block call even with no verdict"
     assert "no verdict emitted" in "\n".join(block)
+
+
+def _validator_agent(tmp_path: Path) -> str:
+    script = tmp_path / "fake_validator_agent.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'Validation done.'\n"
+        "echo 'CONFIRMED: reproduced on main at abc1234'\n"
+    )
+    return f"bash {script}"
+
+
+def test_relay_verdict_validator_role_completes_card(tmp_path):
+    """#1329 D2: a validator card must be COMPLETED (not blocked) on relay — the
+    dispatcher advances validators via _check_confirmed_validators, which scans
+    DONE cards, and classify_blocked treats a *blocked* validator as an ESCALATE
+    error that stalls the pipeline."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd=_validator_agent(tmp_path), relay=True, role="validator"
+    )
+    assert result.returncode == 0, result.stderr
+    full = "\n".join(_log_lines(hermes_log))
+    assert "complete t_test123" in full, f"validator must COMPLETE, not block: {full}"
+    assert "block t_test123" not in full, f"validator wrongly blocked: {full}"
+    assert "CONFIRMED" in full
+
+
+def test_relay_verdict_review_role_still_blocks_card(tmp_path):
+    """Gate roles (qa/reviewer/security/…) must still BLOCK on relay so
+    classify_blocked routes the emitted signal — the role-aware branch only
+    completes validator/pm/planner."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd=_validator_agent(tmp_path), relay=True, role="qa"
+    )
+    assert result.returncode == 0, result.stderr
+    full = "\n".join(_log_lines(hermes_log))
+    assert "block t_test123" in full, f"qa must BLOCK, not complete: {full}"
+    assert "complete t_test123" not in full
+
+
+def test_relay_verdict_validator_crash_still_blocks(tmp_path):
+    """Even for a complete-role, a crash (no verdict → coding-agent-failed) must
+    BLOCK so crash-retry owns the card, not falsely complete it."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd="bash -c 'echo noise'", relay=True, role="validator"
+    )
+    assert result.returncode == 0, result.stderr
+    full = "\n".join(_log_lines(hermes_log))
+    assert "block t_test123" in full, f"crash must BLOCK: {full}"
+    assert "coding-agent-failed" in full
+    assert "complete t_test123" not in full

@@ -63,6 +63,10 @@ _branch=""
 _transition=0
 _relay=0            # --relay-verdict: transition a review/validator card by relaying
                     # the inner agent's emitted verdict/JSON (no PR detection)
+_role=""            # --role <role>: the pipeline role of THIS card. Roles that
+                    # COMPLETE (validator/pm/planner) are completed on relay; roles
+                    # that gate (qa/reviewer/security/accessibility/documentation)
+                    # are blocked so classify_blocked routes the signal (#1329 D2).
 _start_ts=0         # initialised here so _term_handler can always reference it
 
 # ── argument parsing ──────────────────────────────────────────────────────────
@@ -80,6 +84,7 @@ while [ $# -gt 0 ]; do
     --poll-interval)      _poll_interval="${2:?--poll-interval requires a value}";    shift 2 ;;
     --transition)         _transition=1;                                              shift 1 ;;
     --relay-verdict)      _relay=1;                                                    shift 1 ;;
+    --role)               _role="${2:-}";                                              shift 2 ;;
     *) echo "[delegate] unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -314,12 +319,34 @@ PYEOF
     _reason="coding-agent-failed: exited with code ${_ec}"
   fi
 
-  echo "[delegate] transition: block card $_card with: $_reason"
-  local _ok=0
-  hermes kanban --board "$_board" block "$_card" "$_reason" 2>/dev/null && _ok=1
+  # Role-aware transition (#1329 D2): validator/pm/planner cards must COMPLETE —
+  # the dispatcher advances them via _check_confirmed_validators /
+  # _check_completed_{pm,planner}, which scan DONE cards; a *blocked* validator is
+  # an ESCALATE error and a blocked pm/planner is a no-op, either of which stalls
+  # the pipeline. Gate roles (qa/reviewer/security/accessibility/documentation)
+  # must BLOCK so classify_blocked routes the emitted signal. A crash reason
+  # (coding-agent-failed:) always blocks so crash-retry owns the card.
+  local _do_complete=0
+  case "$_role" in
+    validator|pm|project-manager|planner) _do_complete=1 ;;
+  esac
+  case "$_reason" in
+    coding-agent-failed:*) _do_complete=0 ;;
+  esac
+  local _ok=0 _verb="block"
+  _kanban_transition() {
+    if [ "$_do_complete" -eq 1 ]; then
+      hermes kanban --board "$_board" complete "$_card" --result "$_reason" 2>/dev/null
+    else
+      hermes kanban --board "$_board" block "$_card" "$_reason" 2>/dev/null
+    fi
+  }
+  [ "$_do_complete" -eq 1 ] && _verb="complete"
+  echo "[delegate] transition: $_verb card $_card (role=${_role:-?}) with: $_reason"
+  _kanban_transition && _ok=1
   if [ "$_ok" -eq 0 ]; then
     sleep 5
-    hermes kanban --board "$_board" block "$_card" "$_reason" 2>/dev/null && _ok=1
+    _kanban_transition && _ok=1
   fi
   if [ "$_ok" -eq 0 ]; then
     echo "[delegate] WARNING: kanban transition failed — sweeper stale-running detection is the backstop" >&2
