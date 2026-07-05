@@ -103,6 +103,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
 
 from config import ConfigLoader  # noqa: E402
 from core import crash_retry  # noqa: E402
+from core import goal_mode  # noqa: E402
 from core import native_bounds  # noqa: E402
 from core import dispatch_state  # noqa: E402
 from core import provider_failover  # noqa: E402
@@ -2810,6 +2811,10 @@ def _run_tick(
     # execution.native_bounds is off (default) bounds["enabled"] is False and
     # bounds_kwargs() emits nothing, so CLI args stay byte-identical.
     bounds = native_bounds.resolve_bounds(execution)
+    # Goal-mode (#1296) — resolved once per tick alongside bounds.  When
+    # execution.goal_mode is off (default) goal_cfg["enabled"] is False and
+    # create_with_goal_fallback emits byte-identical args (no --goal).
+    _goal_cfg = goal_mode.resolve_goal_mode(execution)
     # Phase-3 (#1170): prefix_fallback flag — default true (current behaviour).
     # Treat None (e.g. `protocol: {prefix_fallback: null}` in YAML) as True so
     # a null value is never silently coerced to False via bool(None).
@@ -3353,6 +3358,7 @@ def _run_tick(
         provider=provider,
         closed_issue_cache=_tick_closed_cache,
         bounds=bounds,
+        goal_cfg=_goal_cfg,
     )
     if pm_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)
@@ -3380,6 +3386,7 @@ def _run_tick(
         resolved=resolved,
         closed_issue_cache=_tick_closed_cache,
         bounds=bounds,
+        goal_cfg=_goal_cfg,
     )
     if dev_retry_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

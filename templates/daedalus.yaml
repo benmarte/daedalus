@@ -208,13 +208,42 @@ execution:
   # wall-clock timeouts, so crash_retry SKIPS timeout-class cards (no
   # double-handling of CODING_AGENT_TIMEOUT); other crash classes (session
   # limit, quota, generic crash) still flow through crash_retry unchanged.
-  # NOTE: goal-mode (--goal judge-LLM adjudication) is a separate follow-up and
-  # is NOT configured here. Defaults shown:
+  # Defaults shown:
   # native_bounds: false
   # native_max_retries: 2
   # native_max_runtime: "30m"
   # native_bounds_by_role:
   #   developer: {max_runtime: "1h"}
+
+  # ── Goal-mode outcome verification (#1296) ────────────────────────────────
+  # OFF by default.  When enabled, machine-verifiable pipeline stages
+  # (developer, QA, documentation) are created with Hermes goal-mode
+  # (--goal + --goal-max-turns).  A judge LLM evaluates the worker's outputs
+  # against a ground-truth goal string derived from each SOUL's completion
+  # signal, rather than relying on the worker's self-report alone.
+  #
+  # COST WARNING: goal-mode incurs an extra LLM call (the judge) per card
+  # turn.  Enable only when you have a model brain configured and want
+  # stronger completion verification.
+  #
+  # DELEGATION BYPASS: when the effective coding-agent for a role is not
+  # 'none' or 'hermes' (e.g. coding_agent: claude-code), the outer Hermes
+  # worker delegates to an external agent and has ~1 turn.  Goal-mode is
+  # automatically skipped for those roles to avoid evaluating the wrapper
+  # turn rather than the inner agent's artifact.
+  #
+  # FALLBACK: if hermes kanban create --goal returns non-zero (judge brain
+  # unavailable), the card is still created in normal mode — the pipeline
+  # never stalls.
+  #
+  # Goal strings (ground-truth, derived from SOUL completion signals):
+  #   developer    — "an open PR for issue #N exists; card blocked review-required"
+  #   qa           — "QA card blocked with qa-passed or qa-failed verdict"
+  #   documentation — "docs posted comment exists on issue #N; card completed"
+  #
+  # Default: false (opt-in — adds judge LLM cost per card turn)
+  # goal_mode: false
+  # goal_max_turns: 30            # judge turn budget per eligible card
 
 # ── Protocol migration (#1170 Phase 3) ───────────────────────────────────────
 # Controls how the dispatcher handles pipeline-stage completion signals.

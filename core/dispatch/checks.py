@@ -17,6 +17,7 @@ import sys
 import types as _types
 from typing import Any, Dict, List, Optional
 
+from core import goal_mode
 from core import kanban
 from core import native_bounds
 from core.dispatch.bodies import _pm_consultation_body, _resolve_howtos
@@ -2027,6 +2028,7 @@ def _check_completed_pm(
     provider=None,
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
     bounds: Optional[Dict[str, Any]] = None,
+    goal_cfg: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-3 trigger: for every PM task completed with 'SPEC:' summary,
     create the downstream triage (Developer + Reviewer + Security + Docs).
@@ -2163,7 +2165,13 @@ def _check_completed_pm(
 
         dev_id = None
         if not skip_developer:
-            dev_id = _kanban().create_task(
+            _dev_agent = ra.get("developer", coding_agent)
+            dev_id = goal_mode.create_with_goal_fallback(
+                _kanban().create_task,
+                goal_cfg,
+                "developer",
+                n,
+                _dev_agent,
                 slug,
                 f"#{n} Developer: {issue_title}",
                 body=_dev_body(
@@ -2173,7 +2181,7 @@ def _check_completed_pm(
                     workdir,
                     base_branch,
                     provider_name,
-                    ra.get("developer", coding_agent),
+                    _dev_agent,
                     coding_agent_cmd,
                     profiles=p,
                     label_overrides=label_overrides,
@@ -2186,7 +2194,13 @@ def _check_completed_pm(
             )
             created_ids["developer"] = dev_id
 
-        qa_id = _kanban().create_task(
+        _qa_agent = ra.get("qa", coding_agent)
+        qa_id = goal_mode.create_with_goal_fallback(
+            _kanban().create_task,
+            goal_cfg,
+            "qa",
+            n,
+            _qa_agent,
             slug,
             f"#{n} QA: {issue_title}",
             body=_qa_body(
@@ -2195,7 +2209,7 @@ def _check_completed_pm(
                 workdir,
                 provider_name,
                 profiles=p,
-                coding_agent=ra.get("qa", coding_agent),
+                coding_agent=_qa_agent,
                 coding_agent_cmd=coding_agent_cmd,
             ) if _qa_body is not None else "",
             assignee=p.get("qa", _DEFAULT_PROFILES["qa"]),
@@ -2259,7 +2273,13 @@ def _check_completed_pm(
             ]
             if x
         ]
-        _kanban().create_task(
+        _docs_agent = ra.get("documentation", coding_agent)
+        goal_mode.create_with_goal_fallback(
+            _kanban().create_task,
+            goal_cfg,
+            "documentation",
+            n,
+            _docs_agent,
             slug,
             f"#{n} Docs: {issue_title}",
             body=_docs_body(
@@ -2269,7 +2289,7 @@ def _check_completed_pm(
                 provider_name,
                 notify_target,
                 profiles=p,
-                coding_agent=ra.get("documentation", coding_agent),
+                coding_agent=_docs_agent,
                 coding_agent_cmd=coding_agent_cmd,
             ) if _docs_body is not None else "",
             assignee=p.get("documentation", _DEFAULT_PROFILES["documentation"]),
@@ -2312,6 +2332,7 @@ def _check_completed_developer(
     resolved: Optional[Dict[str, Any]] = None,
     closed_issue_cache: Optional[Dict[int, Optional[bool]]] = None,
     bounds: Optional[Dict[str, Any]] = None,
+    goal_cfg: Optional[Dict[str, Any]] = None,
 ) -> List[int]:
     """Phase-4 retry: when a developer task completes with no PR in its summary,
     retry up to ``max_developer_retries`` times before surfacing a cap-exhausted
@@ -2518,7 +2539,13 @@ def _check_completed_developer(
             continue
         workspace_arg = f"dir:{workdir}" if workdir else None
         issue_title = issue.get("title", "")[:60]
-        dev_id = _kanban().create_task(
+        _dev_agent_retry = ra.get("developer", coding_agent)
+        dev_id = goal_mode.create_with_goal_fallback(
+            _kanban().create_task,
+            goal_cfg,
+            "developer",
+            n,
+            _dev_agent_retry,
             slug,
             f"#{n} Developer: {issue_title}",
             body=_dev_body(
@@ -2528,7 +2555,7 @@ def _check_completed_developer(
                 workdir,
                 base_branch,
                 provider_name,
-                ra.get("developer", coding_agent),
+                _dev_agent_retry,
                 coding_agent_cmd,
                 profiles=p,
                 label_overrides=label_overrides,
