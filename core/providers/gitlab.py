@@ -264,6 +264,18 @@ class GitLabProvider(VCSProvider):
                 out.add(issue.number)
         return out
 
+    def remove_label(self, issue_number: int, label_name: str) -> bool:
+        """PUT /projects/{id}/issues/{iid} with remove_labels."""
+        try:
+            self._http.put_json(
+                f"{self._proj}/issues/{issue_number}",
+                {"remove_labels": label_name},
+            )
+            return True
+        except ProviderError as e:
+            self._log.warning("remove_label #%s %r failed: %s", issue_number, label_name, e)
+            return False
+
     def board_set_status(self, issue_number: int, status_name: str) -> bool:
         """Add the target status label; remove the other status_map labels.
 

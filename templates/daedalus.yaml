@@ -349,6 +349,20 @@ pipeline:
   # upfront_dag: false
   # native_gates: false
 
+  # ── Label-protocol projection (#1292) ────────────────────────────────────
+  # label_projection (default: false — behaviour unchanged)
+  #   false — no VCS label writes; the reconciler is byte-inert (no provider
+  #            calls at all).  Safe default for repos that don't want
+  #            daedalus:* labels or haven't bootstrapped them yet.
+  #   true  — projects canonical kanban pipeline state to namespaced VCS labels
+  #            on every tick: daedalus:stage/<role>, daedalus:state/{running,
+  #            blocked,done}, daedalus:gate/{needs-human,needs-info}.
+  #            Labels are write-through — pipeline advancement NEVER reads them;
+  #            they exist for human visibility only.  Run ensure_labels() once
+  #            (dispatched automatically on first tick) to pre-create the 13
+  #            projection labels in your repo.
+  # label_projection: false
+
 protocol:
   # prefix_fallback: true
 
