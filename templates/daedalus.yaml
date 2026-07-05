@@ -232,6 +232,25 @@ execution:
   # automatically skipped for those roles to avoid evaluating the wrapper
   # turn rather than the inner agent's artifact.
   #
+  # NOTE: if you configure coding_agents (the chain) without also setting
+  # coding_agent (singular), the primary chain agent is used for the bypass
+  # check — no extra config needed.  If you use ONLY coding_agents, set
+  # coding_agent too so the bypass fires correctly on older dispatcher builds:
+  #
+  #   coding_agent: claude-code       # primary — governs delegation bypass
+  #   coding_agents:                  # full failover chain
+  #     - name: claude-code
+  #       cmd: CLAUDE_CONFIG_DIR=$HOME/.claude claude ...
+  #     - name: codex
+  #       cmd: codex exec --full-auto
+  #
+  # TURN EXHAUSTION: if the judge turn budget (goal_max_turns) is reached
+  # without a PASS verdict, Hermes escalates the card — it does NOT retry
+  # the worker automatically.  The dispatcher's retry-cap logic still applies
+  # (the escalated card counts as a retry), so the normal cap-exhaustion
+  # notification fires if the issue exceeds max retries.  Increase
+  # goal_max_turns or disable goal_mode if turn exhaustion is frequent.
+  #
   # FALLBACK: if hermes kanban create --goal returns non-zero (judge brain
   # unavailable), the card is still created in normal mode — the pipeline
   # never stalls.

@@ -338,6 +338,62 @@ def test_check_completed_pm_goal_off_no_goal_args():
         assert "goal" not in kw, f"unexpected goal in kwargs: {kw}"
 
 
+# ── resolve_primary_coding_agent — chain-only config (#1296 polish) ──────────
+
+
+def test_resolve_primary_coding_agent_chain_only():
+    """When only coding_agents chain is set (no coding_agent singular key),
+    resolve_primary_coding_agent returns the first chain entry's name,
+    NOT "hermes" (the _resolve_coding_agent fallback).
+    """
+    execution = {
+        "coding_agents": [
+            {"name": "claude-code", "cmd": "claude -p"},
+            {"name": "codex", "cmd": "codex exec --full-auto"},
+        ]
+    }
+    agent = goal_mode.resolve_primary_coding_agent(execution)
+    assert agent == "claude-code", f"expected claude-code, got {agent!r}"
+
+
+def test_resolve_primary_coding_agent_singular_key_wins():
+    """When coding_agent (singular) is present alongside coding_agents,
+    the chain still provides the correct primary (chain[0]).
+    """
+    execution = {
+        "coding_agent": "claude-code",
+        "coding_agents": [
+            {"name": "claude-code", "cmd": "claude -p"},
+        ]
+    }
+    agent = goal_mode.resolve_primary_coding_agent(execution)
+    assert agent == "claude-code"
+
+
+def test_resolve_primary_coding_agent_empty_falls_back_to_hermes():
+    """Empty execution dict → "hermes" (same as _resolve_coding_agent default)."""
+    agent = goal_mode.resolve_primary_coding_agent({})
+    assert agent == "hermes"
+
+
+def test_goal_kwargs_delegation_bypass_chain_only_config():
+    """Chain-only config: goal_kwargs correctly bypasses for delegation targets.
+
+    This tests the misfiring bug: when only coding_agents is set, the old
+    code resolved "hermes" as effective_coding_agent and goal_kwargs fired
+    incorrectly.  With resolve_primary_coding_agent, the chain's primary
+    ("claude-code") is used and the bypass fires.
+    """
+    on = goal_mode.resolve_goal_mode({"goal_mode": True})
+    # Chain-only config — no coding_agent singular key.
+    primary = goal_mode.resolve_primary_coding_agent({
+        "coding_agents": [{"name": "claude-code", "cmd": "claude -p"}]
+    })
+    for role in ("developer", "qa", "documentation"):
+        kw = goal_mode.goal_kwargs(on, role, 42, effective_coding_agent=primary)
+        assert kw == {}, f"role={role}: expected bypass, got {kw!r}"
+
+
 _TESTS = [
     test_resolve_goal_mode_default_disabled,
     test_resolve_goal_mode_enabled,
@@ -350,6 +406,10 @@ _TESTS = [
     test_goal_kwargs_uses_default_max_turns_when_not_set,
     test_goal_kwargs_delegation_bypass_for_all_roles,
     test_goal_kwargs_ineligible_roles_always_empty,
+    test_resolve_primary_coding_agent_chain_only,
+    test_resolve_primary_coding_agent_singular_key_wins,
+    test_resolve_primary_coding_agent_empty_falls_back_to_hermes,
+    test_goal_kwargs_delegation_bypass_chain_only_config,
     test_create_task_goal_flag_off_byte_identical,
     test_create_task_goal_flag_on_args_present,
     test_create_task_goal_without_max_turns,
