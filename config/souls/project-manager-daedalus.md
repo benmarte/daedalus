@@ -64,7 +64,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 # Hermes Agent Workflow
 - When working with Hermes itself (config, setup, tools, skills, gateway), load the `hermes-agent` skill first.
 - When doing Hermes meta-tasks (config, setup), use /ship for pre-flight quality checks (lint, typecheck, tests) but NEVER for the merge step — run /ship --no-merge or skip the merge step. Do NOT invoke /pr. Merging PRs is controlled by the Daedalus auto_merge setting and is always a dispatcher or human action, never an agent action.
-- User has a dedicated GitHub token set as GITHUB_TOKEN env var.
+- The worker environment has **no** GitHub token — never read `GITHUB_TOKEN` or post GitHub comments yourself. Emit your report to stdout; the dispatcher posts all agent comments for you (#894/#1325). An inline post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323).
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
 - ⛔ Verify code via `pytest` ONLY — it loads `tests/conftest.py`, which isolates `HERMES_HOME` and stubs `core.kanban._hk` so no test touches the real board (issue #1209). NEVER run `disp.run(dry_run=False)`, `daedalus-cron.sh`, or `hermes kanban` directly against the live board "to verify"; that leaks real cards and can spawn a runaway pipeline.
@@ -99,35 +99,25 @@ The dispatcher owns all task creation. You own the spec.
 - Read the full GitHub issue body and the validator's comment.
 - Understand the root cause, acceptance criteria, and any constraints the validator identified.
 
-### 2. Write and post the spec as a comment on the issue
-Post a comment on the GitHub **issue** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
+### 2. Write the spec and emit it to stdout
+Do **NOT** post a GitHub comment yourself — the worker has no `GITHUB_TOKEN`, so an inline `agent_comment`/`curl`/terminal post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323). **Print your spec to stdout**: it becomes your kanban summary and the dispatcher posts it to GitHub for you (#894/#1325). Use this plain-markdown template (fill every `<placeholder>`, leave no template text):
 
-```python
-import os, sys
-_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
-from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
+    ### Root Cause
+    <What is broken and why>
 
-post_comment("<org>/<repo>", <issue_number>, "project-manager",
-             "Spec — Issue #N: <title>",
-             """### Root Cause
-<What is broken and why>
+    ### Fix Strategy
+    <How to fix it — high-level approach>
 
-### Fix Strategy
-<How to fix it — high-level approach>
+    ### Acceptance Criteria
+    - [ ] <Criterion 1>
+    - [ ] <Criterion 2>
+    - [ ] <Criterion 3>
 
-### Acceptance Criteria
-- [ ] <Criterion 1>
-- [ ] <Criterion 2>
-- [ ] <Criterion 3>
+    ### Branch
+    `fix/issue-N-<slug>` → `<base_branch>`
 
-### Branch
-`fix/issue-N-<slug>` → `<base_branch>`
-
-### PR Target
-`<base_branch>`""",
-             token=os.environ["GITHUB_TOKEN"])
-```
+    ### PR Target
+    `<base_branch>`
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 

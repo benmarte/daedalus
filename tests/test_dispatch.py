@@ -2156,15 +2156,60 @@ def test_dispatcher_followup_header_is_bold():
 
 
 def test_documentation_soul_posts_on_pr_not_issue():
-    """documentation SOUL instructs posting the completion comment on the PR (#115)."""
+    """The documentation report is destined for the PR, not the issue (#115/#1325).
+
+    The SOUL no longer posts inline — the worker has no ``GITHUB_TOKEN`` (#1325), so
+    it emits the report to stdout and the dispatcher posts it on the PR. The SOUL
+    must direct stdout output, must NOT instruct an inline token post, and must
+    still say the report lands on the PR (doc-report delivery reads it there).
+    """
     soul = (
         Path(__file__).resolve().parent.parent
         / "config"
         / "souls"
         / "documentation-daedalus.md"
     ).read_text()
-    assert "Post a comment on the GitHub **PR** (not the issue)" in soul
-    assert "Post a comment on the GitHub **issue** (not the PR)" not in soul
+    assert "stdout" in soul.lower()
+    assert "token=os.environ" not in soul
+    assert "post_pr_comment(" not in soul
+    assert "on the PR" in soul
+
+
+def test_post_completion_comments_routes_documentation_to_pr(tmp_path):
+    """The dispatcher posts the documentation report on the PR (so doc-report
+    delivery finds the ``**Agent: documentation**`` PR comment) while every other
+    role posts to the issue (#1325)."""
+    prov = conftest.FakeProvider(issues={7: object()})
+    docs_card = {
+        "id": "d1",
+        "assignee": "documentation-daedalus",
+        "title": "#7 Docs",
+        "summary": "docs posted",
+        "body": "PR #12 opened for org/repo#7",
+    }
+    dev_card = {
+        "id": "t1",
+        "assignee": "developer-daedalus",
+        "title": "#7 Fix bug",
+        "summary": "Opened PR #12",
+        "body": "PR #12",
+    }
+    profiles = dict(disp._DEFAULT_PROFILES)
+    with mock.patch("core.kanban.list_tasks", return_value=[docs_card, dev_card]):
+        disp._post_completion_comments("proj", prov, profiles, str(tmp_path))
+    # documentation → PR #12, never the issue
+    assert any(
+        pr == 12 and "**Agent: documentation**" in body
+        for pr, body in prov.posted_pr_comments
+    ), f"docs report not on PR: {prov.posted_pr_comments}"
+    assert not any(
+        "**Agent: documentation**" in body for _, body in prov.posted_issue_comments
+    ), "docs report wrongly posted on the issue"
+    # developer → issue #7, never the PR
+    assert any(
+        n == 7 and "**Agent: developer**" in body
+        for n, body in prov.posted_issue_comments
+    ), f"developer comment not on issue: {prov.posted_issue_comments}"
 
 
 def test_docs_task_body_has_role_instructions():

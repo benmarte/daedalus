@@ -64,7 +64,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 # Hermes Agent Workflow
 - When working with Hermes itself (config, setup, tools, skills, gateway), load the `hermes-agent` skill first.
 - When doing Hermes meta-tasks (config, setup), use /ship for pre-flight quality checks (lint, typecheck, tests) but NEVER for the merge step — run /ship --no-merge or skip the merge step. Do NOT invoke /pr. Merging PRs is controlled by the Daedalus auto_merge setting and is always a dispatcher or human action, never an agent action.
-- User has a dedicated GitHub token set as GITHUB_TOKEN env var.
+- The worker environment has **no** GitHub token — never read `GITHUB_TOKEN` or post GitHub comments yourself. Emit your report to stdout; the dispatcher posts all agent comments for you (#894/#1325). An inline post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323).
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
 
@@ -141,68 +141,56 @@ Keep this **lightweight** — it is bounded by the number of recent PRs, not the
    state_path.write_text(json.dumps({"last_doc_sweep_sha": head}, indent=2))
    ```
 
-### 4. Write and post a completion report to the GitHub PR
-Post a comment on the GitHub **PR** (not the issue) using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl — markdown with backticks breaks shell escaping.
+### 4. Emit your completion report to stdout
+Do **NOT** post a GitHub comment yourself — the worker has no `GITHUB_TOKEN`, so an inline `agent_comment`/`curl`/terminal post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323). **Print your report to stdout**: it becomes your kanban summary, and the dispatcher posts it as an `**Agent: documentation**` comment **on the PR** for you (#894/#1325) — which is where the doc-report delivery step reads it to mirror to Slack/Discord. Use this plain-markdown template (fill every `<placeholder>`, leave no template text):
 
-```python
-import os, sys
-_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
-from agent_comment import post_pr_comment  # helper prepends the mandatory **Agent:** header
+    **Issue:** [#N <title>](https://github.com/<org>/<repo>/issues/N)
+    **PR:** [#<pr_number> <pr_title>](<pr_url>)
 
-post_pr_comment("<org>/<repo>", <pr_number>, "documentation",
-                "Documentation Report — Issue #N · PR #<pr_number>",
-                """**Issue:** [#N <title>](https://github.com/<org>/<repo>/issues/N)
-**PR:** [#<pr_number> <pr_title>](<pr_url>)
+    ---
 
----
+    ## Summary
 
-## Summary
+    <What was done and why — 2–3 sentences>
 
-<What was done and why — 2–3 sentences>
+    ## Files Changed
 
-## Files Changed
+    | File | Description |
+    |------|-------------|
+    | `path/to/file.py` | What changed and why |
 
-| File | Description |
-|------|-------------|
-| `path/to/file.py` | What changed and why |
+    ## Docs Updated
 
-## Docs Updated
+    | File | What was updated |
+    |------|-----------------|
+    | `README.md` | Updated X section to reflect Y |
 
-| File | What was updated |
-|------|-----------------|
-| `README.md` | Updated X section to reflect Y |
+    ## Docs Health (project-wide sweep)
 
-## Docs Health (project-wide sweep)
+    Swept all root + `docs/` markdown against PRs merged since `last_doc_sweep_sha` (`<short_sha>..<base_head>`).
 
-Swept all root + `docs/` markdown against PRs merged since `last_doc_sweep_sha` (`<short_sha>..<base_head>`).
+    | Doc | Checked? | Stale? | Action |
+    |-----|----------|--------|--------|
+    | `README.md` | ✅ | No | — |
+    | `docs/INSTALLATION_GUIDE.md` | ✅ | Yes (PR #83) | Refreshed feature-X section |
+    | `SETUP.md` | ✅ | No | — |
 
-| Doc | Checked? | Stale? | Action |
-|-----|----------|--------|--------|
-| `README.md` | ✅ | No | — |
-| `docs/INSTALLATION_GUIDE.md` | ✅ | Yes (PR #83) | Refreshed feature-X section |
-| `SETUP.md` | ✅ | No | — |
+    New sweep cursor: `last_doc_sweep_sha = <base_head>` (written to `.hermes/doc_sweep_state.json`).
 
-New sweep cursor: `last_doc_sweep_sha = <base_head>` (written to `.hermes/doc_sweep_state.json`).
+    ## Resolution
 
-## Resolution
+    <Root cause of the issue and exactly how the fix addresses it>
 
-<Root cause of the issue and exactly how the fix addresses it>
+    ## Testing Instructions
 
-## Testing Instructions
+    1. <Step 1>
+    2. <Step 2>
 
-1. <Step 1>
-2. <Step 2>
+    Expected result: <what should happen>
 
-Expected result: <what should happen>
+    ## Notes
 
-## Notes
-
-<Caveats, known limitations, follow-up issues filed, or "None.">""",
-                token=os.environ["GITHUB_TOKEN"])
-```
-
-Replace every `<placeholder>` with the real value. Do not leave template text.
+    <Caveats, known limitations, follow-up issues filed, or "None.">
 
 ### 5. Send a notification to the team channels
 Send the same completion summary to both `slack:daedalus` and `discord:#general` using `hermes send`:
