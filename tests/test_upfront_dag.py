@@ -257,6 +257,127 @@ def test_arbiter_block_for_review_human_gate():
     check("board Blocked", prov.board_status_calls == [(42, "Blocked")])
 
 
+def _seed_full_pipeline(fk: FakeKanban, *,
+                        run_metadata: dict | None = None) -> dict:
+    """Seed a FULL 8-stage pipeline for issue #42 (validator done, rest blocked).
+
+    Unlike ``_seed_pipeline``, this includes all review roles so that
+    ``close_issue_tasks`` has the complete downstream set to cancel.
+
+    Simulates Hermes auto-promotion: after the validator card is "done",
+    Hermes unblocks the PM dependency-block and sets it to "ready" — the PM
+    card is the first to dispatch next tick unless the arbiter cancels it.
+    This makes the test non-vacuous: without the ``close_issue_tasks`` fix,
+    PM stays "ready" and dispatches even though human input is required.
+    """
+    ids: dict[str, str] = {}
+    ids["validator"] = fk.seed(
+        assignee=VALIDATOR, title="#42 Something broken", status="done",
+        summary="", idempotency_key="validator-42")
+    if run_metadata is not None:
+        fk.tasks[ids["validator"]]["run_metadata"] = run_metadata
+
+    # All downstream roles — same set that build_pipeline_dag creates.
+    downstream_roles = [
+        ("pm",            "project-manager-daedalus"),
+        ("developer",     "developer-daedalus"),
+        ("qa",            "qa-daedalus"),
+        ("reviewer",      "reviewer-daedalus"),
+        ("security",      "security-analyst-daedalus"),
+        ("accessibility", "accessibility-daedalus"),
+        ("docs",          "documentation-daedalus"),
+    ]
+    for role, assignee in downstream_roles:
+        ids[role] = fk.seed(
+            assignee=assignee, title="#42 Something broken",
+            status="blocked", idempotency_key=f"{role}-42")
+
+    # Simulate Hermes dependency auto-promotion: validator "done" → Hermes
+    # unblocks PM's dependency block and sets it "ready" before the arbiter
+    # runs.  Without the close_issue_tasks fix the arbiter ignores PM in
+    # this state, leaving it runnable next tick.
+    fk.tasks[ids["pm"]]["status"] = "ready"
+    return ids
+
+
+def test_arbiter_needs_more_info_cancels_all_downstream():
+    """HUMAN gate (needs_more_info) must cancel ALL downstream stages (#1300 fix).
+
+    Scenario: full 8-stage DAG, validator done with NEEDS_MORE_INFO.
+    Hermes auto-promotes PM to "ready" before the arbiter runs.
+    The arbiter must call close_issue_tasks to cancel PM (now "ready") and
+    every other non-terminal downstream stage before any dispatch happens.
+    """
+    fk = FakeKanban()
+    ids = _seed_full_pipeline(fk, run_metadata=_validator_meta("needs_more_info"))
+    prov = FakeProvider(board_configured=True)
+
+    with kanban_as(kanban, fk):
+        enforced = stages._arbitrate_validator_outcome(
+            SLUG, prov, {42}, validator_profile=VALIDATOR)
+
+    check("needs_more_info → notifies once", enforced == [42])
+    check("board set to Blocked", prov.board_status_calls == [(42, "Blocked")])
+    check("validator tagged needs_input",
+          fk.tasks[ids["validator"]]["block_kind"] == "needs_input")
+    # Every downstream stage must be terminal (deferred) after arbitration.
+    for role in ("pm", "developer", "qa", "reviewer", "security", "accessibility", "docs"):
+        check(f"downstream {role} is done (not still running)",
+              fk.tasks[ids[role]]["status"] == "done")
+
+
+def test_arbiter_block_for_review_cancels_all_downstream():
+    """HUMAN gate (block_for_review) must cancel ALL downstream stages (#1300 fix)."""
+    fk = FakeKanban()
+    ids = _seed_full_pipeline(fk, run_metadata=_validator_meta("block_for_review"))
+    prov = FakeProvider(board_configured=True)
+
+    with kanban_as(kanban, fk):
+        enforced = stages._arbitrate_validator_outcome(
+            SLUG, prov, {42}, validator_profile=VALIDATOR)
+
+    check("block_for_review → notifies once", enforced == [42])
+    check("board set to Blocked", prov.board_status_calls == [(42, "Blocked")])
+    for role in ("pm", "developer", "qa", "reviewer", "security", "accessibility", "docs"):
+        check(f"downstream {role} is done after block_for_review",
+              fk.tasks[ids[role]]["status"] == "done")
+
+
+def test_arbiter_safe_park_cancels_all_downstream():
+    """PARK (unparseable verdict) must also cancel downstream — same HUMAN path."""
+    fk = FakeKanban()
+    ids = _seed_full_pipeline(fk, run_metadata=None)
+    # Give the validator a summary with no recognisable verdict token.
+    fk.tasks[ids["validator"]]["summary"] = "all good, moving on"
+    prov = FakeProvider(board_configured=True)
+
+    with kanban_as(kanban, fk):
+        enforced = stages._arbitrate_validator_outcome(
+            SLUG, prov, {42}, validator_profile=VALIDATOR)
+
+    check("safe-park → notifies once", enforced == [42])
+    for role in ("pm", "developer", "qa", "reviewer", "security", "accessibility", "docs"):
+        check(f"downstream {role} is done after safe-park",
+              fk.tasks[ids[role]]["status"] == "done")
+
+
+def test_arbiter_human_gate_does_not_cancel_validator_itself():
+    """close_issue_tasks must NOT cancel the validator card (it's already done)."""
+    fk = FakeKanban()
+    ids = _seed_full_pipeline(fk, run_metadata=_validator_meta("needs_more_info"))
+    prov = FakeProvider(board_configured=True)
+
+    with kanban_as(kanban, fk):
+        stages._arbitrate_validator_outcome(SLUG, prov, {42}, validator_profile=VALIDATOR)
+
+    # Validator is already "done" before arbitration — status must not change.
+    check("validator itself not cancelled (already done)",
+          fk.tasks[ids["validator"]]["status"] == "done")
+    # And it must retain the needs_input block tag (not be re-done).
+    check("validator still tagged needs_input",
+          fk.tasks[ids["validator"]]["block_kind"] == "needs_input")
+
+
 def test_arbiter_security_threat_escalates_and_cancels():
     fk = FakeKanban()
     ids = _seed_pipeline(fk, run_metadata=_validator_meta("security_threat"))
@@ -485,6 +606,10 @@ if __name__ == "__main__":
         test_arbiter_duplicate_cancels,
         test_arbiter_needs_more_info_human_gate,
         test_arbiter_block_for_review_human_gate,
+        test_arbiter_needs_more_info_cancels_all_downstream,
+        test_arbiter_block_for_review_cancels_all_downstream,
+        test_arbiter_safe_park_cancels_all_downstream,
+        test_arbiter_human_gate_does_not_cancel_validator_itself,
         test_arbiter_security_threat_escalates_and_cancels,
         test_arbiter_unknown_safe_parks,
         test_arbiter_skips_running_validator,
