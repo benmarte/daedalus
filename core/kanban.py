@@ -439,6 +439,18 @@ def dispatch(slug: str, max_spawns: int = 5) -> bool:
     return True
 
 
+def claim(slug: str, task_id: str, *, ttl: int = 900) -> bool:
+    """Claim a task, starting its run (moves it to ``running`` with a run_id) so a
+    directly-spawned wrapper (direct_dispatch, #1329) has a run to complete/block.
+    Returns False if the claim fails (e.g. already running/claimed)."""
+    rc, out, err = _hk(["--board", slug, "claim", str(task_id), "--ttl", str(ttl)])
+    _invalidate_tick_cache()
+    if rc != 0:
+        logger.info("kanban: claim %s failed: %s", task_id, (err or out or "").strip())
+        return False
+    return True
+
+
 # ── iterate helpers ─────────────────────────────────────────────────────────
 
 

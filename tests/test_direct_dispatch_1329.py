@@ -1,0 +1,101 @@
+"""Tests for core.dispatch.direct_dispatch (#1329 structural delegation)."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core.dispatch import direct_dispatch as dd  # noqa: E402
+
+_DELEG_BODY = (
+    "Validate issue benmarte/daedalus#42\n"
+    + dd._DELEGATION_MARKER
+    + " CLAUDE CODE:\n  ... spawn delegate.sh ...\n"
+)
+
+_EXEC_ON = {
+    "direct_delegate": True,
+    "coding_agent": "claude-code",
+    "coding_agent_cmd": "claude --dangerously-skip-permissions -p",
+}
+
+
+def _wire(monkeypatch, tasks, cards, claimed):
+    monkeypatch.setattr(dd.kanban, "list_tasks", lambda slug, status="": tasks)
+    monkeypatch.setattr(dd.kanban, "show_card", lambda slug, cid: cards.get(cid))
+    monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: claimed.append(cid) or True)
+
+
+def test_flag_off_is_noop(monkeypatch):
+    calls = []
+    _wire(monkeypatch, [{"id": "t1", "assignee": "validator-daedalus"}], {}, calls)
+    n = dd.direct_dispatch("b", {"execution": {}}, spawn=lambda **k: None)
+    assert n == 0 and calls == []  # nothing claimed, byte-identical fallback
+
+
+def test_local_agent_is_noop(monkeypatch):
+    calls = []
+    _wire(monkeypatch, [{"id": "t1", "assignee": "validator-daedalus"}], {}, calls)
+    n = dd.direct_dispatch("b", {"execution": {"direct_delegate": True, "coding_agent": "hermes"}},
+                           spawn=lambda **k: None)
+    assert n == 0 and calls == []
+
+
+def test_validator_card_is_direct_spawned(monkeypatch):
+    claimed, spawned = [], []
+    tasks = [{"id": "t1", "assignee": "validator-daedalus", "title": "#42 x"}]
+    cards = {"t1": {"id": "t1", "title": "#42 x", "body": _DELEG_BODY}}
+    _wire(monkeypatch, tasks, cards, claimed)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=5,
+                           spawn=lambda **k: spawned.append(k))
+    assert n == 1
+    assert claimed == ["t1"]  # claimed before spawn
+    s = spawned[0]
+    assert s["role"] == "validator" and s["card"] == "t1" and s["board"] == "b"
+    assert s["role"] in dd._DIRECT_ROLES
+    assert "--relay-verdict" not in str(s)  # spawn callback gets structured kwargs, not raw argv
+
+
+def test_developer_card_is_skipped(monkeypatch):
+    claimed, spawned = [], []
+    tasks = [{"id": "t1", "assignee": "developer-daedalus", "title": "#42 dev"}]
+    cards = {"t1": {"id": "t1", "title": "#42 dev", "body": _DELEG_BODY}}
+    _wire(monkeypatch, tasks, cards, claimed)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, spawn=lambda **k: spawned.append(k))
+    assert n == 0 and claimed == [] and spawned == []  # developer keeps worktree-spawn path
+
+
+def test_non_delegation_body_is_skipped(monkeypatch):
+    claimed, spawned = [], []
+    tasks = [{"id": "t1", "assignee": "validator-daedalus", "title": "#42 x"}]
+    cards = {"t1": {"id": "t1", "title": "#42 x", "body": "plain body, no delegation block"}}
+    _wire(monkeypatch, tasks, cards, claimed)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, spawn=lambda **k: spawned.append(k))
+    assert n == 0 and claimed == [] and spawned == []
+
+
+def test_max_spawns_caps(monkeypatch):
+    claimed, spawned = [], []
+    tasks = [
+        {"id": f"t{i}", "assignee": "reviewer-daedalus", "title": f"#4{i} r"} for i in range(4)
+    ]
+    cards = {t["id"]: {"id": t["id"], "title": t["title"], "body": _DELEG_BODY} for t in tasks}
+    _wire(monkeypatch, tasks, cards, claimed)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=2,
+                           spawn=lambda **k: spawned.append(k))
+    assert n == 2 and len(claimed) == 2  # capped
+
+
+def test_claim_failure_skips_spawn(monkeypatch):
+    spawned = []
+    tasks = [{"id": "t1", "assignee": "qa-daedalus", "title": "#42 q"}]
+    cards = {"t1": {"id": "t1", "title": "#42 q", "body": _DELEG_BODY}}
+    monkeypatch.setattr(dd.kanban, "list_tasks", lambda slug, status="": tasks)
+    monkeypatch.setattr(dd.kanban, "show_card", lambda slug, cid: cards.get(cid))
+    monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: False)  # already running
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, spawn=lambda **k: spawned.append(k))
+    assert n == 0 and spawned == []  # no double-spawn when claim fails

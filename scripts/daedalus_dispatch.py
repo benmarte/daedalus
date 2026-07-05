@@ -110,6 +110,7 @@ from core import provider_failover  # noqa: E402
 from core import iterate  # noqa: E402
 from core import providers  # noqa: E402
 from core import kanban  # noqa: E402
+from core.dispatch.direct_dispatch import direct_dispatch as _direct_dispatch  # noqa: E402
 from core import registry  # noqa: E402
 from core import source_specs  # noqa: E402
 from core import sweeper  # noqa: E402
@@ -2819,6 +2820,20 @@ def run(
         kanban.disable_tick_cache()
 
 
+def _direct_then_dispatch(slug, resolved, max_dispatch, *, dry_run=False):
+    """#1329 structural delegation: when ``execution.direct_delegate`` is on, first
+    spawn ``delegate.sh`` DIRECTLY for dispatchable non-developer delegated cards
+    (no local-model deciding hop), claiming each so it goes ``running``; then run the
+    normal ``kanban.dispatch`` for the developer + non-delegated cards — it skips the
+    cards direct-dispatch already claimed. Flag off → direct-dispatch is a no-op and
+    this is byte-identical to a bare ``kanban.dispatch``."""
+    try:
+        _direct_dispatch(slug, resolved, max_spawns=max_dispatch, dry_run=dry_run)
+    except Exception as exc:  # never let direct-dispatch break a tick
+        logger.warning("dispatch: direct-dispatch failed: %s", exc)
+    return kanban.dispatch(slug, max_spawns=max_dispatch)
+
+
 def _run_tick(
     resolved: Dict[str, Any],
     *,
@@ -3174,7 +3189,7 @@ def _run_tick(
     # the crash-retry reconciler just returned card(s) to ready and they must
     # re-run within this same trigger (#1205).
     if (any(c > 0 for c in iterate_counts.values()) or crash_retried) and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     # ── doc-report delivery ──────────────────────────────────────────────────
     # The dispatcher delivers documentation reports (PR comments prefixed
@@ -3204,7 +3219,7 @@ def _run_tick(
             )
         else:
             kanban.decompose_all_triage(slug)
-            kanban.dispatch(slug, max_spawns=max_dispatch)
+            _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
         summary = {
             "board": slug,
             "mode": "kanban",
@@ -3340,7 +3355,7 @@ def _run_tick(
         bounds=bounds,
     )
     if confirmed_triggered and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     planner_triggered = _check_completed_planner(
         slug,
@@ -3358,7 +3373,7 @@ def _run_tick(
         bounds=bounds,
     )
     if planner_triggered and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     planner_not_suitable_triggered = _check_planner_not_suitable(
         slug,
@@ -3378,7 +3393,7 @@ def _run_tick(
         bounds=bounds,
     )
     if planner_not_suitable_triggered and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     pm_triggered = _check_completed_pm(
         slug,
@@ -3403,7 +3418,7 @@ def _run_tick(
         goal_cfg=_goal_cfg,
     )
     if pm_triggered and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     # ── developer empty-summary retry (issue #1104) ────────────────────────
     # When a developer task completes with no PR in its summary (agent crash,
@@ -3431,7 +3446,7 @@ def _run_tick(
         goal_cfg=_goal_cfg,
     )
     if dev_retry_triggered and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     # ── F5: mechanical prefix guard for done cards with unexpected summaries ──
     # Catches outer-agent LLM non-compliance: when a QA/reviewer/security/
@@ -3449,7 +3464,7 @@ def _run_tick(
         metadata_transport=_metadata_transport,
     )
     if guard_triggered and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     # Mirror each completed role's kanban summary to its GitHub issue (#894).
     # Agents no longer post their own comments (GITHUB_TOKEN is absent in the
@@ -3466,7 +3481,7 @@ def _run_tick(
         dry_run=dry_run,
     )
     if follow_up_count and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     # (#1125 F4) Stamp blocked cards whose PM consultations completed with
     # CLARIFIED/ESCALATED so _check_team_blockers skips re-creating the same
@@ -3488,7 +3503,7 @@ def _run_tick(
         prefix_fallback=_prefix_fallback,
     )
     if blocker_triggered and not dry_run:
-        kanban.dispatch(slug, max_spawns=max_dispatch)
+        _direct_then_dispatch(slug, resolved, max_dispatch, dry_run=dry_run)
 
     for issue in issues:
         n = issue["number"]
