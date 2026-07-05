@@ -345,6 +345,25 @@ execution:
 #   (auto_merge=false) needs_input marker is a documented follow-up — the docs
 #   card is terminal by merge-time so there is no non-fragile card to block; see
 #   issue #1291. See issue #1291.
+# ── Planner native decomposition (epic #1276, Phase 5 — #1294) ───────────────
+# planner.native_decompose (default: false — behaviour byte-identical when off)
+#   false — the planner decomposes epics into GitHub sub-issues (custom
+#            checklist extraction + `provider.create_issue`) and the post-
+#            developer reviewer/security/accessibility(+docs) fan-out is created
+#            as individual parented cards. This is the default.
+#   true  — planner epic decomposition routes through native `hermes kanban
+#            decompose` (role-routed kanban child cards instead of GitHub sub-
+#            issues) and the QA fan-out is emitted as ONE native `hermes kanban
+#            swarm` (parallel reviewer/security/accessibility workers → qa
+#            verifier → documentation synthesizer). The swarm root is linked
+#            under the QA card and dependency-blocked so it auto-promotes only
+#            once QA completes — preserving the QA gate. Idempotent via `qa-{n}`
+#            and `swarm-{n}` keys; any swarm failure falls back to the legacy
+#            per-role fan-out. Only consulted when pipeline.upfront_dag is OFF.
+#   Phase 5 of epic #1276. See issue #1294.
+planner:
+  # native_decompose: false
+
 pipeline:
   # upfront_dag: false
   # native_gates: false

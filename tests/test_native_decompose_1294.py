@@ -90,3 +90,87 @@ def test_swarm_never_raises_returns_none_on_failure():
             synthesizer="documentation-daedalus",
         )
     assert tid is None
+
+
+# ── AC4/AC6/AC7: native QA swarm fan-out branch ─────────────────────────────
+
+import core.iterate as iterate  # noqa: E402
+import core.kanban as kanban  # noqa: E402
+from conftest import FakeKanban, kanban_as  # noqa: E402
+
+SLUG = "board-x"
+DEV_CARD = {"id": "t_dev", "workspace": "dir:/tmp/wt", "title": "#7 Developer"}
+
+
+def test_native_fanout_emits_single_swarm_gated_behind_qa():
+    """AC4/AC7: flag ON → QA gate card + ONE swarm, gated behind QA via
+    link + dependency-block. No per-role reviewer/security/docs create_task."""
+    fk = FakeKanban()
+    with kanban_as(kanban, fk):
+        created = iterate._create_downstream_review_tasks(
+            SLUG, 7, DEV_CARD, pr_number=42, native_decompose=True,
+        )
+
+    # exactly one swarm, mapped per D2
+    assert len(fk.swarmed) == 1
+    sw = fk.swarmed[0]
+    assert sw["verifier"] == "qa-daedalus"
+    assert sw["synthesizer"] == "documentation-daedalus"
+    assert len(sw["workers"]) == 3
+    assert any(w.startswith("reviewer-daedalus:") for w in sw["workers"])
+    assert any(w.startswith("security-analyst-daedalus:") for w in sw["workers"])
+    assert any(w.startswith("accessibility-daedalus:") for w in sw["workers"])
+    assert sw["idempotency_key"] == "swarm-7"
+
+    # QA gate card created (parented to dev), keyed qa-7
+    qa = fk.tasks.get(next(t["id"] for t in fk.created if t["idempotency_key"] == "qa-7"))
+    assert qa["parents"] == ["t_dev"]
+
+    # swarm gated behind QA: link(qa → root) + dependency block on root
+    root = sw["root"]
+    assert (qa["id"], root) in fk.linked
+    assert any(tid == root and kind == "dependency" for (tid, _r, kind) in fk.block_kind_calls)
+
+    # NO individual reviewer/security/docs cards (only the QA gate was create_task'd)
+    role_titles = [c["title"] for c in fk.created]
+    assert not any("Reviewer review" in t for t in role_titles)
+    assert not any("Security review" in t for t in role_titles)
+    assert root in created
+
+
+def test_flag_off_is_legacy_fanout_no_swarm():
+    """AC6: flag OFF → individual per-role cards, zero swarm calls (byte-identical)."""
+    fk = FakeKanban()
+    with kanban_as(kanban, fk):
+        iterate._create_downstream_review_tasks(
+            SLUG, 7, DEV_CARD, pr_number=42, native_decompose=False,
+        )
+    assert fk.swarmed == []
+    # legacy path creates the five role cards
+    assert len(fk.created) == 5
+
+
+def test_native_fanout_idempotent_re_tick():
+    """Re-tick with the swarm already present creates zero duplicate swarms."""
+    fk = FakeKanban()
+    with kanban_as(kanban, fk):
+        iterate._create_downstream_review_tasks(SLUG, 7, DEV_CARD, pr_number=42, native_decompose=True)
+        iterate._create_downstream_review_tasks(SLUG, 7, DEV_CARD, pr_number=42, native_decompose=True)
+    assert len(fk.swarmed) == 1  # not 2
+
+
+def test_native_fanout_falls_back_when_swarm_fails():
+    """A swarm failure degrades to the legacy per-role fan-out rather than
+    stranding the issue."""
+    fk = FakeKanban()
+    fk.swarm = lambda *a, **k: None  # force swarm failure
+    with kanban_as(kanban, fk):
+        iterate._create_downstream_review_tasks(
+            SLUG, 7, DEV_CARD, pr_number=42, native_decompose=True,
+        )
+    # QA card was created natively, then legacy fan-out filled the rest.
+    titles = [c["title"] for c in fk.created]
+    assert any("Reviewer review" in t for t in titles)
+    assert any("Security-Analyst review" in t for t in titles)
+    # exactly one QA card despite the native attempt + legacy fallback both running
+    assert sum(1 for c in fk.created if c["idempotency_key"] == "qa-7") == 1

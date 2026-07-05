@@ -247,6 +247,24 @@ def swarm(
     return tid
 
 
+def link(slug: str, parent_id: str, child_id: str) -> bool:
+    """Attach ``child_id`` as a dependency child of ``parent_id`` post-hoc.
+
+    Wraps ``hermes kanban link <parent> <child>``. Used to gate an
+    already-created card (e.g. a swarm root) behind a predecessor after the
+    fact, so a subsequent ``block_task(kind="dependency")`` auto-promotes it when
+    the parent completes. Never raises — logs + returns False on failure.
+    """
+    rc, out, err = _hk(["--board", slug, "link", parent_id, child_id])
+    _invalidate_tick_cache()
+    if rc != 0:
+        logger.warning("kanban: link %s -> %s failed: %s",
+                       parent_id, child_id, (err or out or "").strip())
+        return False
+    logger.info("kanban: linked %s -> %s", parent_id, child_id)
+    return True
+
+
 def list_blocked(slug: str) -> list[dict]:
     """Cards currently in the 'blocked' column (full --json dicts)."""
     rc, out, _ = _hk(["--board", slug, "list", "--status", "blocked", "--json"])

@@ -38,9 +38,9 @@ Under the flag, epic decomposition routes through a single triage card + `hermes
 - `<goal>` = "Review + document PR for issue #N"
 (Rejected alternative: "reviews-only" swarm — impossible, `swarm` mandates a verifier + synthesizer.)
 
-## Structure decision — ONE PR (behind the flag)
+## Structure decision — split by part (behind the one flag)
 
-Single PR, following #1290's precedent: every new path gated by `planner.native_decompose` (default `False`) → flag-off diff is inert and merge-safe. Organized as reviewable commits: (1) additive `kanban.swarm()` wrapper, (2) native planner decompose branch, (3) native QA swarm branch + template/config/tests.
+Both parts are gated by `planner.native_decompose` (default `False`) → flag-off is inert. **Shipped now (PR #1312): Part B — the native QA swarm fan-out** (`kanban.swarm()`/`kanban.link()` wrappers + the `_create_downstream_swarm` branch + flag plumbing + tests). **Part A — native planner epic decomposition via `hermes kanban decompose`** (D1a: kanban child cards replacing GitHub sub-issue creation in `_execute_planner_decompose_inner`) is a tracked follow-up PR under the same flag, because it is an independent change to a different code path (the planner) and warrants its own focused review. #1294 stays open until Part A lands.
 
 ## Acceptance criteria (each testable)
 
