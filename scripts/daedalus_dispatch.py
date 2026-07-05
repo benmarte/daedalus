@@ -1155,27 +1155,55 @@ def _post_completion_comments(
             card.get("title") or "",
             _get_task_summary(card, slug),
         )
+        # The documentation report must land on the PR, not the issue (#1325):
+        # ``_deliver_doc_reports`` mirrors the ``**Agent: documentation**`` *PR*
+        # comment to Slack/Discord, so posting it on the issue would silently break
+        # doc delivery. Every other role posts to the issue. If no PR is resolvable
+        # yet, fall back to the issue so the report is never dropped (retried next
+        # tick once the PR exists).
+        target_pr = None
+        if role == "documentation":
+            target_pr = _parse_pr_from_card(card) or _resolve_pr_from_parents(
+                slug, provider, card
+            )
+        target_num = target_pr if target_pr is not None else n
+        target_kind = "PR" if target_pr is not None else "issue"
         if dry_run:
             logger.info(
-                "dispatch: [dry-run] would post %s completion comment on #%s", role, n
+                "dispatch: [dry-run] would post %s completion comment on %s #%s",
+                role,
+                target_kind,
+                target_num,
             )
             posted.append(n)
             continue
+        post_comment = (
+            provider.post_pr_comment
+            if target_pr is not None
+            else provider.post_issue_comment
+        )
         try:
-            if provider.post_issue_comment(n, body):
+            if post_comment(target_num, body):
                 dispatch_state.set_pr_flag(workdir, n, flag)
                 posted.append(n)
-                logger.info("dispatch: posted %s completion comment on #%s", role, n)
+                logger.info(
+                    "dispatch: posted %s completion comment on %s #%s",
+                    role,
+                    target_kind,
+                    target_num,
+                )
             else:
                 logger.warning(
-                    "dispatch: post_issue_comment #%s (%s) returned falsy — will retry next tick",
-                    n,
+                    "dispatch: post comment on %s #%s (%s) returned falsy — will retry next tick",
+                    target_kind,
+                    target_num,
                     role,
                 )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "dispatch: post_issue_comment #%s (%s) raised %s — will retry next tick",
-                n,
+                "dispatch: post comment on %s #%s (%s) raised %s — will retry next tick",
+                target_kind,
+                target_num,
                 role,
                 exc,
             )
