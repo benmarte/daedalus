@@ -2559,6 +2559,7 @@ def _check_team_blockers(
     *,
     dry_run: bool = False,
     provider=None,
+    prefix_fallback: bool = True,
 ) -> List[int]:
     """PM re-activation trigger: for every blocked team triage card, create a PM
     consultation task if no active one already exists.
@@ -2616,7 +2617,7 @@ def _check_team_blockers(
         # (#1125 F4) Skip if a completed consultation has already resolved this
         # blocker.  The consult-resolved marker is stamped on the blocked card by
         # _stamp_resolved_consultations (runs each tick before this function).
-        if _is_consult_resolved(slug, card["id"], n):
+        if _is_consult_resolved(slug, card["id"], n, workdir=workdir, prefix_fallback=prefix_fallback):
             logger.debug(
                 "dispatch: consult-resolved marker on %s for #%s — skipping re-creation",
                 card["id"],
@@ -3222,6 +3223,8 @@ def _run_tick(
             existing,
             validator_profile=profiles["validator"],
             dry_run=dry_run,
+            workdir=workdir,
+            prefix_fallback=_prefix_fallback,
         )
     else:
         blocked_issues = _enforce_validator_blocks(
@@ -3230,6 +3233,8 @@ def _run_tick(
             existing,
             validator_profile=profiles["validator"],
             dry_run=dry_run,
+            workdir=workdir,
+            prefix_fallback=_prefix_fallback,
         )
 
     _follow_up_cfg: Dict[str, Any] = resolved.get("follow_up_extraction") or {}
@@ -3431,7 +3436,7 @@ def _run_tick(
     # consultation.  Must run before _check_team_blockers each tick.
     _pm_profile = (profiles or _DEFAULT_PROFILES).get("pm", _DEFAULT_PROFILES["pm"])
     if not dry_run:
-        _stamp_resolved_consultations(slug, _pm_profile)
+        _stamp_resolved_consultations(slug, _pm_profile, workdir=workdir)
 
     blocker_triggered = _check_team_blockers(
         slug,
@@ -3443,6 +3448,7 @@ def _run_tick(
         profiles=profiles,
         role_skills=role_skills,
         dry_run=dry_run,
+        prefix_fallback=_prefix_fallback,
     )
     if blocker_triggered and not dry_run:
         kanban.dispatch(slug, max_spawns=max_dispatch)

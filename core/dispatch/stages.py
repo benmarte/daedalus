@@ -299,6 +299,8 @@ def _enforce_validator_blocks(
     *,
     validator_profile: str = "validator-daedalus",
     dry_run: bool = False,
+    workdir: str = "",
+    prefix_fallback: bool = True,
 ) -> List[int]:
     """For every blocked kanban card that is a validator card for a managed issue:
     set the VCS board status to 'Blocked' (auto-creating the column if needed),
@@ -354,9 +356,14 @@ def _enforce_validator_blocks(
             )
         # Only include in the returned list (which triggers notifications) once —
         # subsequent ticks still enforce board/kanban state but stay silent.
-        if not _has_notified_block(slug, n, validator_profile=validator_profile):
+        if not _has_notified_block(
+            slug, n,
+            validator_profile=validator_profile,
+            workdir=workdir,
+            prefix_fallback=prefix_fallback,
+        ):
             enforced.append(n)
-            _mark_notified_block(slug, n, validator_profile=validator_profile)
+            _mark_notified_block(slug, n, validator_profile=validator_profile, workdir=workdir)
     return enforced
 
 
@@ -483,6 +490,8 @@ def _arbitrate_validator_outcome(
     *,
     validator_profile: str = "validator-daedalus",
     dry_run: bool = False,
+    workdir: str = "",
+    prefix_fallback: bool = True,
 ) -> List[int]:
     """6-outcome DAG pruner for the upfront-DAG world (#1290).
 
@@ -572,7 +581,12 @@ def _arbitrate_validator_outcome(
                 n, verdict)
 
         # Notify once per issue (human-gate + escalation), deduped.
-        if not _has_notified_block(slug, n, validator_profile=validator_profile):
+        if not _has_notified_block(
+            slug, n,
+            validator_profile=validator_profile,
+            workdir=workdir,
+            prefix_fallback=prefix_fallback,
+        ):
             enforced.append(n)
-            _mark_notified_block(slug, n, validator_profile=validator_profile)
+            _mark_notified_block(slug, n, validator_profile=validator_profile, workdir=workdir)
     return enforced
