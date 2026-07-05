@@ -385,6 +385,12 @@ ARBITER_HUMAN = "human"
 ARBITER_ESCALATE = "escalate"
 ARBITER_PARK = "park"
 
+# Summary prefixes written by close_issue_tasks() on arbiter-cancelled/deferred cards.
+# Used by _guard_prefix_on_done to exempt these cards from the "unexpected completion"
+# detection — they are intentional orchestrator cancellations, not agent failures.
+# Shared with core/dispatch/checks.py to avoid a magic-string ×2.
+ARBITER_CLOSED_SUMMARY_PREFIXES = ("cancelled: validator", "deferred: validator")
+
 # Validator verdict → arbiter action.  Any verdict not in this table (including
 # None / unparseable) safe-parks — the pipeline never auto-proceeds on ambiguity.
 _VALIDATOR_ARBITER_MAP: dict[str, str] = {
@@ -538,6 +544,20 @@ def _arbitrate_validator_outcome(
                 n, len(cancelled))
         else:  # ARBITER_HUMAN or ARBITER_PARK
             provider.board_set_status(n, "Blocked")
+            # Cancel any DAG stages that Hermes auto-promoted once the validator
+            # completed (#1300 audit fix): mirrors the CANCEL/ESCALATE branches.
+            # Without this, Hermes' dependency auto-promotion unblocks the PM
+            # stage between the validator completing and the arbiter running, and
+            # that PM card dispatches next tick even though the issue explicitly
+            # requires human/reporter input.
+            cancelled = kanban.close_issue_tasks(
+                slug, n,
+                summary=f"deferred: validator {verdict or 'unparseable'} — awaiting human",
+            )
+            logger.info(
+                "dispatch: arbiter #%s — verdict=%s → human gate; "
+                "cancelled %d downstream card(s)",
+                n, verdict, len(cancelled))
             tid = card.get("id") or card.get("task_id")
             if tid:
                 # Tag the validator card as awaiting human input (degrades if the

@@ -828,6 +828,17 @@ def build_pipeline_dag(
 
     # Idempotency: recover the id of any stage card that already exists so a
     # re-tick both skips creation AND can still resolve parent edges.
+    #
+    # NOTE: Human-gate resume path — known limitation shared with CANCEL/ESCALATE.
+    # When a human re-marks an issue Ready after a needs_more_info/block_for_review
+    # verdict, build_pipeline_dag recovers existing cards by idempotency key and will
+    # NOT recreate cards that are already "done" (including the arbiter-deferred
+    # downstream stages from the previous run). This means those deferred cards never
+    # get reset, and the pipeline will be missing those stages.
+    # Operator workaround: archive the deferred cards before re-marking Ready,
+    # which allows build_pipeline_dag to recreate them fresh.
+    # A proper reset mechanism (auto-archive on re-Ready) is a follow-up item
+    # shared with the CANCEL/ESCALATE branch cleanup.
     existing_keys: dict[str, str] = {}
     for task in kanban.list_tasks(slug):
         ikey = (task.get("idempotency_key") or "")
