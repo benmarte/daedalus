@@ -637,10 +637,22 @@ execution:
 
 - `coding_agent_cmd` is the **full shell command** the agent pipes the task body into (not a
   shell alias). Use the absolute binary path + flags. When omitted, sensible per-agent
-  defaults are used (`claude --dangerously-skip-permissions -p`, `codex exec --full-auto`,
-  `opencode run`).
-- Optional: `coding_agent_model` passes through to the agent's `--model` flag, and
-  `coding_agent_max_turns` (default `10`) caps runaway loops.
+  defaults are used (`claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p`,
+  `codex exec --full-auto`, `opencode run`).
+- **Pass any CLI flags you want** — `coding_agent_cmd` is run **verbatim**, so anything the
+  agent's CLI accepts works here. For Claude Code that includes e.g. `--model`, `--add-dir`,
+  `--permission-mode`, `--allowedTools` / `--disallowedTools`, `--mcp-config`,
+  `--append-system-prompt`, `--fallback-model`, and the plugin/MCP-bypass flags above. Prepend
+  env vars too (e.g. `CLAUDE_CONFIG_DIR=…`). The same applies to Codex/OpenCode — put their
+  native flags in the command string. (Run `claude --help` for the full list.)
+- The dispatcher only **appends two things**, and each is skipped if you already set it: it adds
+  `--max-turns <coding_agent_max_turns>` (default `10`) unless your command already has
+  `--max-turns`, and — when `coding_agent_model` is set and Anthropic-compatible — `--model`
+  unless your command already has `--model`. So you keep full control: specify `--model` /
+  `--max-turns` yourself in `coding_agent_cmd` to override the injected values.
+- Optional convenience keys: `coding_agent_model` (→ appended as `--model`) and
+  `coding_agent_max_turns` (→ appended as `--max-turns`, caps runaway loops) — shorthands for
+  the two flags above if you'd rather not put them in the command string.
 
 > [!WARNING]
 > **Disable plugins and MCP servers in the delegated command.** Daedalus spawns the coding

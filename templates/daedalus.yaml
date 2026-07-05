@@ -517,6 +517,11 @@ protocol:
   # Shell command used by the developer agent to spawn the external coding agent
   # via terminal(background=True). Must be the full command (not a shell alias).
   # For Claude Code: use the absolute binary path + flags.
+  #
+  # Passed VERBATIM — add ANY CLI flags the agent accepts (claude --help), e.g.
+  # --model, --add-dir, --permission-mode, --allowedTools, --mcp-config,
+  # --append-system-prompt, and leading env vars. The dispatcher only appends
+  # --max-turns (and a compatible --model) IF you haven't already set them here.
   # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
   #
   # IMPORTANT — keep `--strict-mcp-config --setting-sources project`. Delegated
