@@ -158,6 +158,38 @@ def _fn(name: str, fallback=None):
 # ── pure query helpers ────────────────────────────────────────────────────────
 
 
+# Local models frequently prefix the SOUL completion signal with their own role
+# label — e.g. ``VALIDATOR: CONFIRMED — …`` or ``QA: qa-passed …`` — instead of
+# emitting the bare signal. Every stage transition below matches with
+# ``startswith``, so a stray ``<role>:`` prefix silently breaks the whole
+# pipeline on any model that isn't perfectly signal-compliant (found by live
+# dogfooding on a local qwen model, 2026-07-05). Strip a single leading
+# ``<role>:`` label before matching. Colon-separator ONLY, so tokens like
+# ``qa-passed`` (a signal, no colon after ``qa``) are left intact.
+# Only PROFILE labels whose name differs from their signal word are listed, so
+# stripping never eats a real signal. Notably ``security[-\s]analyst`` REQUIRES
+# the ``-analyst`` suffix — bare ``security:`` is itself a valid security signal
+# (``security: cleared``) and must be preserved.
+_ROLE_LABEL_RE = re.compile(
+    r"^\s*(?:validator|project[-\s]?manager|pm|developer|dev|qa|reviewer|"
+    r"security[-\s]analyst|accessibility|a11y|documentation|docs|planner)"
+    r"\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_role_label(summary: str) -> str:
+    """Strip a single leading ``<role>:`` label a worker may prepend to its signal.
+
+    No-op when the summary already starts with a bare signal (the common /
+    Claude-emitted case), so it never alters compliant output. Non-string
+    inputs (e.g. test Mocks) pass through unchanged.
+    """
+    if not isinstance(summary, str):
+        return summary
+    return _ROLE_LABEL_RE.sub("", summary, count=1)
+
+
 def _get_task_summary(task: Dict[str, Any], slug: str) -> str:
     """Return a task's latest summary, falling back to ``show_card``.
 
@@ -166,6 +198,10 @@ def _get_task_summary(task: Dict[str, Any], slug: str) -> str:
     read ``latest_summary``. Mirrors the inline fallback previously copy-pasted
     into ``_pm_task_state``, ``_check_confirmed_validators`` and
     ``_check_completed_pm``.
+
+    A leading ``<role>:`` label (emitted by less signal-compliant local models)
+    is stripped so the SOUL-signal ``startswith`` checks downstream are robust
+    across models.
     """
     summary_raw = (task.get("summary") or task.get("last_summary") or "").strip()
     if not summary_raw:
@@ -173,7 +209,7 @@ def _get_task_summary(task: Dict[str, Any], slug: str) -> str:
         if tid:
             card = _kanban().show_card(slug, tid) or {}
             summary_raw = (card.get("latest_summary") or "").strip()
-    return summary_raw
+    return _strip_role_label(summary_raw)
 
 
 def _pm_task_state(
