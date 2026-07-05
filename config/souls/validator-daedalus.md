@@ -169,29 +169,18 @@ This SOUL is consumed by the `validator-daedalus` branch of `classify_blocked()`
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When completing your kanban card, append a fenced JSON block **after** your prefix line.
-Both lines are required throughout Phase 1.  The prefix provides backwards compatibility;
-the JSON enables structured routing.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable verdict prefix. Both the prefix line and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: `confirmed` | `already_fixed` | `duplicate` | `needs_more_info` | `security_threat` | `block_for_review`
+Signal mapping: `CONFIRMED:` → `confirmed` | `ALREADY_FIXED:` → `already_fixed` | `DUPLICATE:` → `duplicate` | `NEEDS_MORE_INFO:` → `needs_more_info` | `SECURITY_THREAT:` → `security_threat` | `BLOCK_FOR_REVIEW:` → `block_for_review`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `confirmed` | `already_fixed` | `duplicate` | `needs_more_info` | `security_threat` | `block_for_review`
 
-```json
-{"daedalus_outcome": 0, "role": "validator", "verdict": "confirmed",
- "refs": {"issue": <N>, "pr": null},
- "evidence": {"check": "pytest tests/test_widget.py fails"},
- "note": ""}
-```
-
-Example full summary (CONFIRMED outcome):
+Example full summary (CONFIRMED outcome — JSON block must come last):
 
     CONFIRMED: reproduced on main — null deref in widget.click()
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
-
     ```json
-    {"daedalus_outcome": 0, "role": "validator", "verdict": "confirmed", "refs": {"issue": 42, "pr": null}, "evidence": {"check": "pytest -k test_click fails"}, "note": ""}
+    {"daedalus_outcome": 1, "role": "validator", "verdict": "confirmed", "refs": {"issue": 42, "pr": null}, "note": "null deref in widget.click() — reproduced on main"}
     ```

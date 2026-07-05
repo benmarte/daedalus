@@ -229,17 +229,18 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 
 ---
 
-## Structured Outcome Block (#1170 Phase 1 — dual-write required)
+## Structured Outcome Block (MANDATORY)
 
-When completing your kanban card, append a fenced JSON block **after** your prefix line.
-Both lines are required throughout Phase 1.
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the prefix line and the JSON block are required — they are complementary, not alternatives.
 
-Valid verdicts: "plan" | "not_suitable"
+Signal mapping: `PLAN:` → `plan` | `NOT SUITABLE FOR DECOMPOSITION:` → `not_suitable`
 
-_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+Allowed verdicts: `plan` | `not_suitable`
 
-```json
-{"daedalus_outcome": 0, "role": "planner", "verdict": "plan",
- "refs": {"issue": <N>, "pr": <pr_number>}, "evidence": {"sub_issues": "5"},
- "note": ""}
-```
+Example full summary (plan posted — JSON block must come last):
+
+    PLAN: decomposed into 5 sub-issues with dependency DAG
+
+    ```json
+    {"daedalus_outcome": 1, "role": "planner", "verdict": "plan", "refs": {"issue": 42, "pr": null}, "note": "5 sub-issues decomposed with dependency DAG"}
+    ```
