@@ -29,7 +29,6 @@ from core.dispatch.dedup import (
     _mark_notified_block as _mark_notified_block_impl,
     record_pending_block_notification,  # NEW: #1275 sent-ledger
 )
-import core.dispatch_state as _ds
 from core.dispatch.delivery import _build_security_notify_cmds, _validator_summary_burns_cap
 from core.dispatch.housekeeping import (
     _fetch_issue_with_retry as _fetch_issue_with_retry_impl,

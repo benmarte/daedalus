@@ -20,7 +20,6 @@ The dispatcher re-exports every symbol so the public surface is unchanged.
 from __future__ import annotations
 
 import logging
-import time
 
 from core import kanban
 import core.dispatch_state as _ds

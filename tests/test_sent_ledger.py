@@ -64,7 +64,8 @@ def test_ledger_finalize_from_nothing(tmp_path):
 
 def test_ledger_corrupt_entry_returns_false(tmp_path):
     """A corrupt (non-dict) entry is treated as not-finalized."""
-    import json, os
+    import json
+    import os
     wd = str(tmp_path)
     state_dir = Path(wd) / ".hermes"
     state_dir.mkdir(parents=True, exist_ok=True)
