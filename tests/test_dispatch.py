@@ -1608,7 +1608,7 @@ def test_coding_agent_defaults_dict_exists():
     assert (
         defaults.get("claude-code")
         == "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions "
-        "--setting-sources project -p"
+        "--strict-mcp-config --setting-sources project -p"
     ), f"claude-code default wrong: {defaults.get('claude-code')!r}"
     assert defaults.get("codex") == "codex exec --full-auto", (
         f"codex default wrong: {defaults.get('codex')!r}"

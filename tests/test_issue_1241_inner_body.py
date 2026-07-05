@@ -234,6 +234,8 @@ def test_default_claude_cmd_skips_user_scope_settings():
     disp = _load_dispatch()
     cmd = disp._CODING_AGENT_DEFAULTS["claude-code"]
     assert "--setting-sources project" in cmd
+    # --strict-mcp-config keeps headless workers from hanging on MCP init (daedalus#1323)
+    assert "--strict-mcp-config" in cmd, "must disable MCP servers for headless workers"
     assert "CLAUDE_CONFIG_DIR=$HOME/.claude" in cmd, "auth dir must stay untouched"
     assert cmd.rstrip().endswith("-p"), "stdin prompt mode must remain last"
 

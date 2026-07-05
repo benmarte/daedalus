@@ -517,7 +517,23 @@ protocol:
   # Shell command used by the developer agent to spawn the external coding agent
   # via terminal(background=True). Must be the full command (not a shell alias).
   # For Claude Code: use the absolute binary path + flags.
-  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions --setting-sources project -p"
+  #
+  # Passed VERBATIM — add ANY CLI flags the agent accepts (claude --help), e.g.
+  # --model, --add-dir, --permission-mode, --allowedTools, --mcp-config,
+  # --append-system-prompt, and leading env vars. The dispatcher only appends
+  # --max-turns (and a compatible --model) IF you haven't already set them here.
+  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
+  #
+  # IMPORTANT — keep `--strict-mcp-config --setting-sources project`. Delegated
+  # workers run headless, once per role per issue. If CLAUDE_CONFIG_DIR has
+  # plugins/MCP servers enabled (Cortex, Context-Mode, Playwright, LSPs, …) the
+  # agent re-initializes ALL of them on every spawn — adding minutes of startup,
+  # or hanging indefinitely with zero output if any MCP server is slow/unreachable
+  # (that frozen `running` card holds the max_dispatch slot and stalls the whole
+  # pipeline). --strict-mcp-config loads NO MCP servers; --setting-sources project
+  # skips the user settings.json where plugins live. Auth still comes from
+  # CLAUDE_CONFIG_DIR (keychain). Measured: 5+ min hang → ~3s. See README
+  # "Delegating to Claude Code (or Codex)".
   #
   # coding_agent_cmd: ""
 
@@ -567,10 +583,10 @@ protocol:
   #   # Two accounts of the same agent, tried in order on a session limit:
   #   - name: claude-code
   #     account: rizq
-  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude-rizq claude --dangerously-skip-permissions --setting-sources project -p'
+  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude-rizq claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p'
   #   - name: claude-code
   #     account: personal
-  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --setting-sources project -p'
+  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p'
   #   # …then a different agent as the last resort:
   #   - name: codex
   #     cmd: 'codex exec --full-auto'
