@@ -181,6 +181,16 @@ for legacy in builder probe-role; do
   hermes profile delete "$legacy" -y >/dev/null 2>&1 || true
 done
 
+# ── Per-role effective CLI toolset (issue #1319) ─────────────────────────────
+# Workers resolve their effective CLI tools from platform_toolsets.cli
+# (kanban_db.py::_resolve_worker_cli_toolsets), NOT the top-level `toolsets`
+# key. During dogfooding we trimmed each -daedalus profile from the ~20-tool
+# default down to this 8-tool base (browser added for the two UI-touching
+# roles). Persist it here — single source of truth — so a re-provision or clean
+# install reproduces the trim deterministically instead of silently reverting to
+# the full default. setup_role overwrites (never appends) => idempotent.
+PLATFORM_CLI_TOOLSETS_BASE=(kanban terminal file code_execution delegation skills todo memory)
+
 setup_role() {
   local name="$1"; local desc="$2"; shift 2
   local skills=("$@")
@@ -304,15 +314,26 @@ PY
     env HOME="$home_dir" git config --global user.email "$ROSTER_BOT_EMAIL"
   fi
 
+  # Derive this role's effective CLI toolset from the shared base (issue #1319):
+  # the two UI-touching roles additionally get the browser tool.
+  local cli_toolsets=("${PLATFORM_CLI_TOOLSETS_BASE[@]}")
+  case "$name" in
+    developer-daedalus|accessibility-daedalus) cli_toolsets+=(browser) ;;
+  esac
+
   # CRITICAL: the worker's `terminal` tool only inherits env vars listed in
   # terminal.env_passthrough (default []). Without this, the provider tokens
   # in the profile .env are invisible to the shell the agent runs curl in —
   # API calls (open PR / comment) would silently see an empty token.
-  python3 - "$PROFILES/$name/config.yaml" <<'PY'
+  #
+  # Same block also persists platform_toolsets.cli (issue #1319) so the trimmed
+  # toolset survives re-provisioning. Overwrite (not append) => idempotent.
+  python3 - "$PROFILES/$name/config.yaml" "${cli_toolsets[@]}" <<'PY'
 import sys
 import yaml
 
 path = sys.argv[1]
+cli_toolsets = sys.argv[2:]
 try:
     with open(path) as f:
         cfg = yaml.safe_load(f) or {}
@@ -324,6 +345,10 @@ for var in ("GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_PAT"):
     if var not in passthrough:
         passthrough.append(var)
 term["env_passthrough"] = passthrough
+# Overwrite the effective CLI toolset with the intended trimmed list. This is
+# the real lever (resolved by kanban_db._resolve_worker_cli_toolsets); the
+# top-level `toolsets` key has no effect on worker CLI tools.
+cfg.setdefault("platform_toolsets", {})["cli"] = cli_toolsets
 with open(path, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
