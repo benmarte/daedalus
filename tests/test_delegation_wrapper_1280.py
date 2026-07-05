@@ -74,6 +74,7 @@ def _run_delegate(
     heartbeat_interval: int = 300,
     poll_interval: int = 5,
     transition: bool = False,
+    relay: bool = False,
     repo: str = "owner/repo",
     branch: str = "fix/issue-42-test",
     hermes_body: str = "",
@@ -113,6 +114,8 @@ def _run_delegate(
     ]
     if transition:
         cmd += ["--transition", "--repo", repo, "--branch", branch]
+    if relay:
+        cmd += ["--relay-verdict"]
 
     result = subprocess.run(
         cmd,
@@ -764,3 +767,42 @@ def test_numeric_pr_validation_blocks_injection(tmp_path):
             f"Injection string 'rm -rf' found in block reason — numeric guard failed.\n"
             f"Block calls: {blocks}"
         )
+
+
+# ── (m) --relay-verdict: relay the inner agent's emitted verdict ──────────────
+
+def test_relay_verdict_blocks_card_with_emitted_verdict(tmp_path):
+    """--relay-verdict extracts the inner agent's emitted verdict (SOUL signal +
+    JSON OutcomeRecord) from its output and blocks the card with it — so the
+    outer (possibly weak) model never has to wait/parse/complete the card."""
+    agent_script = tmp_path / "fake_security_agent.sh"
+    agent_script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'Security review complete. No vulnerabilities found.'\n"
+        "echo\n"
+        "echo '```json'\n"
+        "echo '{\"daedalus_outcome\":1,\"role\":\"security\",\"verdict\":\"approved\","
+        "\"refs\":{\"issue\":3,\"pr\":4}}'\n"
+        "echo '```'\n"
+    )
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd=f"bash {agent_script}", relay=True
+    )
+    assert result.returncode == 0, result.stderr
+    full = "\n".join(_log_lines(hermes_log))
+    # the wrapper called hermes kanban block on the card, relaying the JSON verdict
+    # (the multi-line reason spans several log lines, so check the whole log).
+    assert "block t_test123" in full, f"expected a kanban block call, got: {full}"
+    assert "daedalus_outcome" in full
+
+
+def test_relay_verdict_no_verdict_blocks_coding_agent_failed(tmp_path):
+    """No parseable verdict in output → the card is blocked coding-agent-failed
+    (a safe halt), never silently advanced."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd="bash -c 'echo just some noise output'", relay=True
+    )
+    assert result.returncode == 0, result.stderr
+    block = [ln for ln in _log_lines(hermes_log) if "block" in ln and "t_test123" in ln]
+    assert block, "expected a kanban block call even with no verdict"
+    assert "no verdict emitted" in "\n".join(block)

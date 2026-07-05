@@ -61,6 +61,8 @@ _out=""
 _repo=""
 _branch=""
 _transition=0
+_relay=0            # --relay-verdict: transition a review/validator card by relaying
+                    # the inner agent's emitted verdict/JSON (no PR detection)
 _start_ts=0         # initialised here so _term_handler can always reference it
 
 # ── argument parsing ──────────────────────────────────────────────────────────
@@ -77,6 +79,7 @@ while [ $# -gt 0 ]; do
     --heartbeat-interval) _heartbeat_interval="${2:?--heartbeat-interval requires a value}"; shift 2 ;;
     --poll-interval)      _poll_interval="${2:?--poll-interval requires a value}";    shift 2 ;;
     --transition)         _transition=1;                                              shift 1 ;;
+    --relay-verdict)      _relay=1;                                                    shift 1 ;;
     *) echo "[delegate] unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -147,7 +150,7 @@ if ! mkdir -p "$_out_dir" 2>/dev/null; then
   _err="cannot create output directory: $_out_dir"
   echo "[delegate] WRAPPER_ERROR: $_err" >&2
   printf 'DELEGATE_RESULT: {"status":"wrapper-error","exit":2,"out":"%s","duration_s":0}\n' "$_out"
-  if [ "$_transition" -eq 1 ]; then
+  if [ "$_transition" -eq 1 ] || [ "$_relay" -eq 1 ]; then
     hermes kanban --board "$_board" block "$_card" \
       "coding-agent-failed: wrapper-error: $_err" 2>/dev/null || true
   fi
@@ -255,7 +258,36 @@ _do_transition() {
   local _status="$1" _ec="$2"
   local _reason
 
-  if [ "$_status" = "ok" ]; then
+  if [ "$_status" = "ok" ] && [ "$_relay" -eq 1 ]; then
+    # Review/validator/pm role: relay the inner agent's emitted verdict (the SOUL
+    # signal line and/or the structured JSON OutcomeRecord) from its output file,
+    # so the outer (possibly weak) model never has to parse-and-transition itself.
+    _reason="$(
+      python3 - "$_out" <<'PYEOF' 2>/dev/null || true
+import sys, re
+try:
+    t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except Exception:
+    sys.exit(0)
+# Prefer a fenced JSON outcome block (authoritative; parsed by outcomes.py).
+m = re.search(r"```(?:json)?\s*\{[^`]*daedalus_outcome[^`]*\}\s*```", t, re.S)
+if m:
+    print(m.group(0)); sys.exit(0)
+# Else the last line that starts with a canonical SOUL signal.
+_sig = ("confirmed", "already_fixed", "duplicate", "needs_more_info",
+        "security_threat", "block_for_review", "spec:", "assigned:",
+        "qa-passed", "qa-failed", "review-approved", "review-changes",
+        "security-approved", "security-changes", "security:", "approved:",
+        "a11y", "accessibility", "changes requested", "docs posted",
+        "planning complete", "plan:", "escalate:", "blocked:", "stop:")
+for line in reversed(t.splitlines()):
+    s = line.strip()
+    if s and any(s.lower().startswith(p) for p in _sig):
+        print(s); sys.exit(0)
+PYEOF
+    )"
+    [ -n "$_reason" ] || _reason="coding-agent-failed: no verdict emitted"
+  elif [ "$_status" = "ok" ]; then
     # Detect open PR for the deterministic feature branch (mirrors daedalus-detect-pr.sh).
     export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
     local _pr_num=""
@@ -360,21 +392,21 @@ done
 if [ "$_timed_out" -eq 1 ]; then
   _emit_result "timeout" 124
   echo "[delegate] done (timeout)"
-  if [ "$_transition" -eq 1 ]; then
+  if [ "$_transition" -eq 1 ] || [ "$_relay" -eq 1 ]; then
     _do_transition "timeout" 124 || exit 1
   fi
   exit 124
 elif [ "$_exit_code" -eq 0 ]; then
   _emit_result "ok" 0
   echo "[delegate] done (ok)"
-  if [ "$_transition" -eq 1 ]; then
+  if [ "$_transition" -eq 1 ] || [ "$_relay" -eq 1 ]; then
     _do_transition "ok" 0 || exit 1
   fi
   exit 0
 else
   _emit_result "failed" "$_exit_code"
   echo "[delegate] done (failed exit=$_exit_code)"
-  if [ "$_transition" -eq 1 ]; then
+  if [ "$_transition" -eq 1 ] || [ "$_relay" -eq 1 ]; then
     _do_transition "failed" "$_exit_code" || exit 1
   fi
   exit "$_exit_code"

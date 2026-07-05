@@ -12,15 +12,22 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
    write_file("/tmp/docs-<issue_number>-task.txt", "<full task body>")
    ```
-3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
+3. Spawn daedalus-delegate.sh in the BACKGROUND (background=True — returns immediately, no terminal timeout exposure). The wrapper owns the process lifecycle AND the kanban card transition from here:
    ```
-   terminal("cat /tmp/docs-<issue_number>-task.txt | <command from delegation block> > /tmp/docs-<issue_number>-out.txt 2>&1", background=True)
+   terminal("bash ~/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh \
+     --task-file /tmp/docs-<issue_number>-task.txt \
+     --cmd '<command from delegation block>' \
+     --card <your_kanban_card_id> \
+     --board <board_slug> \
+     --out /tmp/docs-<issue_number>-out.txt \
+     --relay-verdict", background=True)
    ```
-4. Wait for it to finish: `terminal("cat /tmp/docs-<issue_number>-out.txt")`
-5. Read the output. The agent will have posted the documentation report to GitHub.
-6. Mark YOUR kanban card as done.
+   The wrapper runs entirely in bash (zero LLM turns): spawns the coding-agent CLI in its own process group, polls PID liveness, sends heartbeats, enforces max-wait via SIGTERM+SIGKILL, extracts your emitted verdict (the SOUL signal line + the JSON OutcomeRecord — the inner agent must emit `docs posted: issue #N PR #M — <summary>` per the Dispatcher Signal Reference below), and completes your card for you. Your session ENDS here.
+   This is the SAME mechanism the developer role uses — `--relay-verdict` tells the wrapper to read your emitted verdict and transition your card automatically (rather than `--transition` which detects an opened PR).
+4. (Optional, only if turns remain): read /tmp/docs-<issue_number>-out.txt to verify the outcome. Do NOT complete or block the card yourself in the delegation path — the wrapper already has or will transition it.
+   ⚠️ NEVER attempt to complete or block the card after spawning the wrapper — the wrapper is the sole card owner.
 ⛔ **DO NOT write documentation yourself. DO NOT post any GitHub comment yourself.**
-⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
+⛔ **The delegated agent does ALL the work. The wrapper reads its emitted verdict (SOUL signal line + JSON OutcomeRecord) and completes your card automatically.**
 
 # Communication
 - Direct and concise. No filler, no "great question," no "happy to help."

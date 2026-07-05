@@ -354,9 +354,22 @@ def _spawn_step3(
             f"{issue_number} {base_branch} {tmp} {outf} {errf} {run_cmd}"
         )
         return f"  3. terminal(\"bash -c 'echo $$ > {pidf}; exec {spawn}'\", background=True)\n"
+    # Non-developer roles (validator/pm/qa/reviewer/security/accessibility/docs):
+    # spawn the SAME one-shot delegate wrapper the developer uses, in
+    # `--relay-verdict` mode. The wrapper spawns the coding-agent CLI, waits, and
+    # transitions YOUR card by relaying the verdict the agent emits (SOUL signal
+    # line + JSON OutcomeRecord) — so the outer model never has to wait/parse/
+    # complete the card itself (which weak local models fail at). Substitute
+    # <CARD_ID> with your own kanban card id and <BOARD_SLUG> with the board slug.
     return (
-        f"  3. terminal(\"bash -c 'echo $$ > {pidf}; "
-        f"{run_cmd} < {tmp} > {outf} 2> {errf}'\", background=True)\n"
+        "  3. Spawn the one-shot delegate wrapper in the BACKGROUND, then your\n"
+        "     session ENDS (the wrapper owns spawn→wait→transition). Substitute\n"
+        "     <CARD_ID> with your kanban card id and <BOARD_SLUG> with the board slug:\n"
+        "       terminal('$HOME/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh "
+        f"--task-file {tmp} --cmd \"{run_cmd}\" --card <CARD_ID> --board <BOARD_SLUG> "
+        f"--out {outf} --relay-verdict', background=True)\n"
+        "     Do NOT wait, read the output, or complete the card yourself — "
+        "--relay-verdict does it.\n"
     )
 
 
