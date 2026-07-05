@@ -46,6 +46,32 @@ def _retry_cap_marker_for_role(role: str) -> str:
 # ── Dedup check / stamp ───────────────────────────────────────────────────────
 
 
+def _block_ledger_key(issue_number: int, role: str = "") -> str:
+    """Stable ledger event_key for a block notification.
+
+    Format: 'block-notified:<issue>:<role>' for role-scoped (retry-cap),
+            'escalation-notified:<issue>' for un-scoped (escalation).
+    """
+    if role:
+        return f"block-notified:{issue_number}:{role}"
+    return f"escalation-notified:{issue_number}"
+
+
+def record_pending_block_notification(
+    workdir: str,
+    issue_number: int,
+    role: str,
+    slug: str,
+) -> None:
+    """Record 'pending' in the sent-ledger BEFORE firing a block notification.
+
+    Call this BEFORE ``_send_retry_cap_notification`` / ``_send_escalation_notification``
+    so a crash between send and stamp is recoverable without a duplicate re-fire.
+    When *workdir* is empty this is a no-op (old behaviour unchanged).
+    """
+    _ds.ledger_record_pending(workdir, _block_ledger_key(issue_number, role), target=slug)
+
+
 def _has_notified_block(
     slug: str,
     issue_number: int,
@@ -80,6 +106,46 @@ def _has_notified_block(
     for human visibility; only the READ path changes.  When *workdir* is empty
     the flag has no effect (comment-scan is the only available path).
     """
+    # ── Ledger check (most authoritative — survives card archival) ──────────
+    if workdir:
+        _ledger_key = _block_ledger_key(issue_number, role)
+        if _ds.ledger_is_finalized(workdir, _ledger_key):
+            return True
+        # Stale-pending: a prior tick recorded pending but crashed before
+        # finalizing.  Verify via card-comment scan: if the marker is found,
+        # finalize and return True.  If the card is GONE (the #1167 case),
+        # finalize with a note and return True — the notification was sent
+        # (pending was recorded before the send) so we must not re-fire.
+        if _ds.ledger_is_pending(workdir, _ledger_key):
+            markers_to_check: set[str] = {marker}
+            if role:
+                markers_to_check.add(_retry_cap_marker_for_role(role))
+            found_in_card = False
+            pattern = f"#{issue_number}"
+            for _task in kanban.list_tasks(slug):
+                if pattern not in (_task.get("title") or ""):
+                    continue
+                _tid = str(_task.get("id") or _task.get("task_id") or "")
+                if not _tid:
+                    continue
+                _card = kanban.show_card(slug, _tid)
+                if not _card:
+                    continue
+                for _c in _card.get("comments") or []:
+                    if any(m in (_c.get("body") or "") for m in markers_to_check):
+                        found_in_card = True
+                        break
+                if found_in_card:
+                    break
+            # Either marker found (sent + stamped) or not found (card may be gone).
+            # In both cases finalize: at-most-once bound for the #1167 path.
+            _ds.ledger_finalize(
+                workdir,
+                _ledger_key,
+                note="verified-from-card" if found_in_card else "card-missing-assumed-sent",
+            )
+            return True
+
     # ── Phase 2 dual-read: state-first, comment-scan fallback ─────────────────
     if workdir:
         try:
@@ -241,6 +307,17 @@ def _mark_notified_block(
         except Exception as exc:
             logger.warning(
                 "dispatch: _mark_notified_block state-write failed for #%s: %s",
+                issue_number,
+                exc,
+            )
+
+    # ── Ledger finalize (most authoritative) ──────────────────────────────────
+    if workdir:
+        try:
+            _ds.ledger_finalize(workdir, _block_ledger_key(issue_number, role))
+        except Exception as exc:
+            logger.warning(
+                "dispatch: _mark_notified_block ledger_finalize failed for #%s: %s",
                 issue_number,
                 exc,
             )

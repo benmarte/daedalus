@@ -76,6 +76,14 @@ def deliver_event(
     Returns ``"sent"``, ``"skipped"`` (empty body or already mirrored) or
     ``"failed"`` (delivery failed; left unmarked so a later tick retries).
 
+    Crash safety (pending→finalize protocol, #1275):
+    * ``ledger_record_pending`` is written BEFORE the send.
+    * ``ledger_finalize`` is written AFTER successful send + ``mark_thread_event``.
+    * On resume after a crash, a stale ``pending`` entry means the event MAY
+      have been sent.  Because we cannot cheaply verify thread messages were
+      received, we re-send at most once (at-least-once delivery bound —
+      documented behaviour for the crash recovery path).
+
     Anchor handling:
       * no stored anchor  → post a root, store the returned anchor;
       * stored anchor     → post a reply; on failure fall back to a new root and
@@ -84,10 +92,28 @@ def deliver_event(
     """
     if not body or not body.strip():
         return "skipped"
-    if dispatch_state.has_thread_event(workdir, issue_number, target, event_key):
+
+    # ── Dedup: ledger-first (survives card archival, crash-safe) ──────────────
+    if dispatch_state.ledger_is_finalized(workdir, event_key):
         return "skipped"
+
+    # ── Dedup: thread_events (pre-#1275 compat) — backfill ledger on hit ──────
+    if dispatch_state.has_thread_event(workdir, issue_number, target, event_key):
+        dispatch_state.ledger_finalize(workdir, event_key, note="backfilled-from-thread-events")
+        return "skipped"
+
+    # ── Detect stale-pending (at-least-once bound for the crash-recovery path) ─
+    _was_pending = dispatch_state.ledger_is_pending(workdir, event_key)
+
     if dry_run:
         return "sent"
+
+    # Record pending BEFORE the send (crash safety).
+    if not _was_pending:
+        dispatch_state.ledger_record_pending(workdir, event_key, target)
+    # If already pending from a prior crashed tick: proceed with the re-send.
+    # This is at-most-one-extra delivery — verified-delivery would require
+    # querying the platform API, which is too expensive to do per-event per-tick.
 
     anchor = dispatch_state.get_thread_anchor(workdir, issue_number, target)
     if anchor:
@@ -99,12 +125,12 @@ def deliver_event(
             supports_broadcast = len(sig.parameters) >= 4
         except (ValueError, TypeError):
             supports_broadcast = False
-        
+
         if supports_broadcast and broadcast:
             ok, _ = send(target, body, anchor, broadcast)
         else:
             ok, _ = send(target, body, anchor)
-        
+
         if not ok:
             # Anchor may be stale/deleted — fall back to a fresh root thread.
             if supports_broadcast:
@@ -120,7 +146,7 @@ def deliver_event(
             supports_broadcast = len(sig.parameters) >= 4
         except (ValueError, TypeError):
             supports_broadcast = False
-        
+
         if supports_broadcast:
             ok, new_anchor = send(target, body, None, False)
         else:
@@ -130,6 +156,7 @@ def deliver_event(
 
     if ok:
         dispatch_state.mark_thread_event(workdir, issue_number, target, event_key)
+        dispatch_state.ledger_finalize(workdir, event_key)
         return "sent"
     return "failed"
 

@@ -119,6 +119,20 @@ def _isolate_hermes_home(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "test-isolated")
 
+    # Clean up any dispatch state that prior tests may have written to shared
+    # paths (e.g. "/tmp", "/tmp/wt") via hardcoded workdir arguments.
+    # The state persists across test runs (#1275) which causes tests that check
+    # notification call counts to fail on the second run if state says "already sent".
+    # We delete the entire state file — tests that use "/tmp" as workdir do not
+    # pre-seed any state and recreate what they need each time.
+    for _shared_wd in ("/tmp", "/tmp/wt"):
+        _p = Path(_shared_wd) / ".hermes" / "daedalus_dispatch_state.json"
+        if _p.exists():
+            try:
+                _p.unlink()
+            except Exception:
+                pass
+
     # Reset the per-tick list_tasks cache (issue #1142) around every test. It is a
     # module-level global enabled by the dispatcher's run() for the duration of a
     # tick; without this a test that enables it (or a real disp.run()) could leak

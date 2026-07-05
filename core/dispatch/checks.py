@@ -28,6 +28,7 @@ from core.dispatch.dedup import (
     _RETRY_CAP_MARKER,
     _has_notified_block as _has_notified_block_impl,
     _mark_notified_block as _mark_notified_block_impl,
+    record_pending_block_notification,  # NEW: #1275 sent-ledger
 )
 from core.dispatch.delivery import _build_security_notify_cmds, _validator_summary_burns_cap
 from core.dispatch.housekeeping import (
@@ -949,6 +950,7 @@ def _check_confirmed_validators(
                                     validator_profile=p["validator"],
                                     marker=_RETRY_CAP_MARKER,
                                     role="pm",
+                                    workdir=workdir,
                                 ):
                                     if _rsr(
                                         slug,
@@ -963,6 +965,7 @@ def _check_confirmed_validators(
                                             n_nr,
                                         )
                                     else:
+                                        record_pending_block_notification(workdir, n_nr, "pm", slug)
                                         if _send_retry_cap is not None:
                                             _send_retry_cap(
                                                 role="pm",
@@ -979,6 +982,7 @@ def _check_confirmed_validators(
                                                 validator_profile=p["validator"],
                                                 marker=_RETRY_CAP_MARKER,
                                                 role="pm",
+                                                workdir=workdir,
                                             )
                                         # Post a GitHub comment only when not suppressed
                                         # by stage recovery (#1167).
@@ -1111,6 +1115,7 @@ def _check_confirmed_validators(
                     validator_profile=p["validator"],
                     marker=_RETRY_CAP_MARKER,
                     role="validator",
+                    workdir=workdir,
                 ):
                     if _rsr(
                         slug,
@@ -1125,6 +1130,7 @@ def _check_confirmed_validators(
                             n_nr,
                         )
                     else:
+                        record_pending_block_notification(workdir, n_nr, "validator", slug)
                         if _send_retry_cap is not None:
                             _send_retry_cap(
                                 role="validator",
@@ -1141,6 +1147,7 @@ def _check_confirmed_validators(
                                 validator_profile=p["validator"],
                                 marker=_RETRY_CAP_MARKER,
                                 role="validator",
+                                workdir=workdir,
                             )
                         # Post a GitHub comment only when not suppressed by stage
                         # recovery (#1167).  Matches the pattern used in all other
@@ -1185,6 +1192,7 @@ def _check_confirmed_validators(
                         validator_profile=p["validator"],
                         marker=_RETRY_CAP_MARKER,
                         role="validator",
+                        workdir=workdir,
                     ):
                         if _rsr(
                             slug,
@@ -1199,6 +1207,7 @@ def _check_confirmed_validators(
                                 n_nr,
                             )
                         else:
+                            record_pending_block_notification(workdir, n_nr, "validator", slug)
                             if _send_retry_cap is not None:
                                 _send_retry_cap(
                                     role="validator",
@@ -1215,6 +1224,7 @@ def _check_confirmed_validators(
                                     validator_profile=p["validator"],
                                     marker=_RETRY_CAP_MARKER,
                                     role="validator",
+                                    workdir=workdir,
                                 )
                 continue
             # Intermediate retry — send a distinct "retry-attempt" notification before retrying (#287).
@@ -1306,6 +1316,7 @@ def _check_confirmed_validators(
                     validator_profile=p["validator"],
                     marker=_RETRY_CAP_MARKER,
                     role="pm",
+                    workdir=workdir,
                 ):
                     if _rsr(
                         slug,
@@ -1320,6 +1331,7 @@ def _check_confirmed_validators(
                             n,
                         )
                     else:
+                        record_pending_block_notification(workdir, n, "pm", slug)
                         if _send_retry_cap is not None:
                             _send_retry_cap(
                                 role="pm",
@@ -1336,6 +1348,7 @@ def _check_confirmed_validators(
                                 validator_profile=p["validator"],
                                 marker=_RETRY_CAP_MARKER,
                                 role="pm",
+                                workdir=workdir,
                             )
                         # Post a GitHub comment only when not suppressed by stage
                         # recovery (#1167).  Matches the pattern used in all other
@@ -1531,7 +1544,8 @@ def _retry_or_escalate_planner_stall(
             retry_count,
             max_planner_retries,
         )
-        if not _has_notified(slug, n, marker=_RETRY_CAP_MARKER, role="planner"):
+        if not _has_notified(slug, n, marker=_RETRY_CAP_MARKER, role="planner", workdir=workdir):
+            record_pending_block_notification(workdir, n, "planner", slug)
             if _send_retry_cap is not None:
                 _send_retry_cap(
                     role="planner",
@@ -1548,6 +1562,7 @@ def _retry_or_escalate_planner_stall(
                     marker=_RETRY_CAP_MARKER,
                     role="planner",
                     fallback_task_id=str(task.get("id") or ""),
+                    workdir=workdir,
                 )
             if provider is not None and not dry_run:
                 try:
@@ -2443,6 +2458,7 @@ def _check_completed_developer(
                 validator_profile=p.get("validator", _DEFAULT_PROFILES["validator"]),
                 marker=_RETRY_CAP_MARKER,
                 role="developer",
+                workdir=workdir,
             ):
                 if _rsr(
                     slug,
@@ -2457,6 +2473,7 @@ def _check_completed_developer(
                         n,
                     )
                 else:
+                    record_pending_block_notification(workdir, n, "developer", slug)
                     if _send_retry_cap is not None:
                         _send_retry_cap(
                             role="developer",
@@ -2478,6 +2495,7 @@ def _check_completed_developer(
                             fallback_task_id=str(
                                 task.get("id") or task.get("task_id") or ""
                             ),
+                            workdir=workdir,
                         )
                     # Post a GitHub comment only when not suppressed by stage
                     # recovery (#1167).
