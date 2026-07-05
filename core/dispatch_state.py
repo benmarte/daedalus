@@ -562,3 +562,128 @@ def append_stage_history(
         ps["stage_history"] = hist
     hist.append(dict(record))
     _save(workdir, state)
+
+
+# ── Sent ledger — pending→finalize dedup for outbound side effects (#1275) ────
+#
+# Records outbound side effects in two stages:
+#   "pending"  — written BEFORE the send (crash safety: prevents re-fire even if
+#                the dispatcher dies after sending but before stamping the receipt)
+#   "sent"     — finalized AFTER successful send + receipt-stamp
+#
+# Top-level "sent_ledger" key so it is NOT clobbered by per-issue helpers.
+# Schema:
+#   sent_ledger[event_key] = {
+#     "target": str,   # slug/channel/board the event targets
+#     "ts": float,     # wall-clock of the record_pending call
+#     "status": "pending" | "sent",
+#     "note": str,     # optional human-readable note (verification result, etc.)
+#   }
+#
+# Corrupt / missing entries are treated as "not sent" (fail open — may double
+# send but never silently suppress a needed notification). Never raises.
+
+
+def _ledger_section(state: dict[str, Any]) -> dict[str, Any]:
+    section = state.setdefault("sent_ledger", {})
+    if not isinstance(section, dict):
+        section = {}
+        state["sent_ledger"] = section
+    return section
+
+
+def ledger_record_pending(
+    workdir: str,
+    event_key: str,
+    target: str,
+    ts: float | None = None,
+    note: str = "",
+) -> None:
+    """Write a 'pending' entry for event_key BEFORE the outbound send.
+
+    Safe to call when an entry already exists (idempotent overwrite is fine —
+    we only record the FIRST pending time if already pending, to avoid
+    resetting the timestamp on a second tick).  Never raises.
+    """
+    if not workdir:
+        return
+    try:
+        state = _load(workdir)
+        section = _ledger_section(state)
+        existing = section.get(event_key)
+        if isinstance(existing, dict) and existing.get("status") == "sent":
+            return  # already finalized — don't downgrade
+        section[event_key] = {
+            "target": str(target),
+            "ts": ts if isinstance(ts, (int, float)) else time.time(),
+            "status": "pending",
+            "note": str(note),
+        }
+        _save(workdir, state)
+    except Exception:
+        pass  # never raise from ledger ops
+
+
+def ledger_finalize(
+    workdir: str, event_key: str, note: str = ""
+) -> None:
+    """Upgrade a 'pending' entry to 'sent' AFTER successful send + receipt."""
+    if not workdir:
+        return
+    try:
+        state = _load(workdir)
+        section = _ledger_section(state)
+        existing = section.get(event_key)
+        ts = (
+            existing["ts"]
+            if isinstance(existing, dict) and isinstance(existing.get("ts"), (int, float))
+            else time.time()
+        )
+        section[event_key] = {
+            "target": str(existing.get("target", "")) if isinstance(existing, dict) else "",
+            "ts": ts,
+            "status": "sent",
+            "note": str(note) if note else (existing.get("note", "") if isinstance(existing, dict) else ""),
+        }
+        _save(workdir, state)
+    except Exception:
+        pass
+
+
+def ledger_get(workdir: str, event_key: str) -> dict[str, Any] | None:
+    """Return the ledger entry for event_key, or None if absent/corrupt."""
+    try:
+        section = _load(workdir).get("sent_ledger")
+        if not isinstance(section, dict):
+            return None
+        entry = section.get(event_key)
+        return dict(entry) if isinstance(entry, dict) else None
+    except Exception:
+        return None
+
+
+def ledger_is_finalized(workdir: str, event_key: str) -> bool:
+    """True when event_key has status='sent' in the ledger. Never raises."""
+    entry = ledger_get(workdir, event_key)
+    return isinstance(entry, dict) and entry.get("status") == "sent"
+
+
+def ledger_is_pending(workdir: str, event_key: str) -> bool:
+    """True when event_key has status='pending' in the ledger. Never raises."""
+    entry = ledger_get(workdir, event_key)
+    return isinstance(entry, dict) and entry.get("status") == "pending"
+
+
+def ledger_all_pending(workdir: str) -> list[tuple[str, dict[str, Any]]]:
+    """Return [(event_key, entry)] for all pending ledger entries. Never raises."""
+    try:
+        section = _load(workdir).get("sent_ledger")
+        if not isinstance(section, dict):
+            return []
+        return [
+            (str(k), dict(v))
+            for k, v in section.items()
+            if isinstance(v, dict) and v.get("status") == "pending"
+        ]
+    except Exception:
+        return []
