@@ -1579,9 +1579,15 @@ def _execute_planner_decompose(
     workdir: str = "",
     dry_run: bool = False,
     provider: Any = None,
+    native_decompose: bool = False,
     **_kwargs: Any,
 ) -> bool:
-    """Create sub-issues from an epic when the planner completes with PLANNING COMPLETE."""
+    """Create sub-issues from an epic when the planner completes with PLANNING COMPLETE.
+
+    When ``native_decompose`` is ON (#1294 Part A, D1a), the epic is routed
+    through a single triage card + native ``hermes kanban decompose`` instead of
+    custom GitHub sub-issue creation (see :func:`_execute_planner_decompose_inner`).
+    """
     kanban = _pkg().kanban
     tid: str = card.get("id") or ""  # kanban task id; always a str at runtime
     parent_n = _extract_issue_number_from_card(card)
@@ -1637,7 +1643,7 @@ def _execute_planner_decompose(
     try:
         return _execute_planner_decompose_inner(
             slug, tid, parent_n, parent_title, parent_body, parent_labels,
-            workdir, dry_run, provider,
+            workdir, dry_run, provider, native_decompose=native_decompose,
         )
     finally:
         _release_decompose_lock(workdir)
@@ -1653,15 +1659,72 @@ def _execute_planner_decompose_inner(
     workdir: str,
     dry_run: bool,
     provider: Any,
+    native_decompose: bool = False,
 ) -> bool:
     """Inner implementation of planner decomposition, called while lock is held.
 
     Functions from the source-reading layer (PR 3/3, still in __init__.py) are
     accessed through ``_pkg()`` so that ``mock.patch("core.iterate.X")`` patches
     applied in tests take effect here as well.
+
+    ``native_decompose`` (#1294 Part A, D1a): when ON, the epic is routed through
+    a single triage card + native ``hermes kanban decompose`` (Hermes fans it out
+    into role-routed kanban child cards by profile description) instead of the
+    custom checklist-extraction → ``provider.create_issue`` sub-issue path. The
+    legacy path (flag OFF, the default) is byte-identical.
     """
     _p = _pkg()
     kanban = _p.kanban
+
+    if native_decompose:
+        ws = f"dir:{workdir}" if workdir else ""
+        if dry_run:
+            logger.info(
+                "[dry-run] planner_decompose #%s: would create epic triage card + native decompose",
+                parent_n,
+            )
+            return True
+        triage_tid = kanban.create_triage(
+            slug,
+            parent_n,
+            parent_title or f"epic #{parent_n}",
+            body=f"{parent_title}\n\n{parent_body}",
+            idempotency_key=f"epic-{parent_n}",
+            workspace=ws,
+        )
+        if not triage_tid:
+            logger.warning(
+                "iterate: planner_decompose #%s (native) — create_triage failed", parent_n,
+            )
+            return False
+        decomposed = kanban.decompose(slug, triage_tid)
+        if not decomposed:
+            # Leave the epic un-marked so a later tick can retry; do NOT complete
+            # the planner card (avoid stranding the epic as "decomposed" with no
+            # children).
+            logger.warning(
+                "iterate: planner_decompose #%s (native) — decompose(%s) failed; will retry next tick",
+                parent_n, triage_tid,
+            )
+            return False
+        # Idempotency marker on the parent epic (same format the legacy path uses,
+        # so has_decomposed_marker() short-circuits re-decompose).
+        provider.post_issue_comment(
+            parent_n,
+            f"{_build_decomposed_marker()}\n"
+            f"Daedalus decomposed epic #{parent_n} natively via `kanban decompose` "
+            f"(triage {triage_tid}).",
+        )
+        provider.add_label(parent_n, "epic")
+        kanban.complete(
+            slug, tid,
+            summary=f"Decomposed epic #{parent_n} natively via kanban decompose (triage {triage_tid})",
+        )
+        logger.info(
+            "iterate: planner_decompose #%s — native decompose complete (triage %s)",
+            parent_n, triage_tid,
+        )
+        return True
 
     checklist_items = _extract_sub_issues_from_body(parent_body)
     if checklist_items:

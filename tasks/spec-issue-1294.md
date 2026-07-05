@@ -40,7 +40,9 @@ Under the flag, epic decomposition routes through a single triage card + `hermes
 
 ## Structure decision — split by part (behind the one flag)
 
-Both parts are gated by `planner.native_decompose` (default `False`) → flag-off is inert. **Shipped now (PR #1312): Part B — the native QA swarm fan-out** (`kanban.swarm()`/`kanban.link()` wrappers + the `_create_downstream_swarm` branch + flag plumbing + tests). **Part A — native planner epic decomposition via `hermes kanban decompose`** (D1a: kanban child cards replacing GitHub sub-issue creation in `_execute_planner_decompose_inner`) is a tracked follow-up PR under the same flag, because it is an independent change to a different code path (the planner) and warrants its own focused review. #1294 stays open until Part A lands.
+Both parts are gated by `planner.native_decompose` (default `False`) → flag-off is inert.
+- **Part B — native QA swarm fan-out** (`kanban.swarm()`/`kanban.link()` + `_create_downstream_swarm` in `core/iterate/executors.py`). **Shipped: PR #1312 (merged).**
+- **Part A — native planner epic decomposition via `hermes kanban decompose`** (D1a: one epic triage card + `decompose` → role-routed kanban child cards, replacing the `provider.create_issue` sub-issue loop in `_execute_planner_decompose_inner`). Flag threaded through both entry points: the `classify_blocked` executor path (`core/iterate/__init__.py`) and the per-tick trigger `core/dispatch/checks.py::check_planner_decompose_trigger`. **Shipped: this PR.** With both parts landed, **#1294 closes.**
 
 ## Acceptance criteria (each testable)
 
