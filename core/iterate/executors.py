@@ -995,6 +995,7 @@ def _execute_pending_pr(
     *,
     provider=None,
     dry_run: bool = False,
+    native_gates: bool = False,
     **_kwargs: Any,
 ) -> bool:
     """Search VCS for a PR linked to this card's issue number; update block reason when found.
@@ -1034,16 +1035,27 @@ def _execute_pending_pr(
         return False
 
     new_handoff = f"review-required: PR #{found_pr}"
+    # Phase-3 (#1291): tag the review-required developer gate with the native
+    # `needs_input` kind when pipeline.native_gates is on.  The PR is open and
+    # awaiting human review/merge (QA/reviewer/security run in the meantime), so
+    # this is the in-pipeline human gate.  The kind is advisory metadata only —
+    # classify_blocked still routes off the "review-required:" reason string
+    # (→ ADVANCE), so the card never strands and flag-off omits --kind entirely
+    # (plain block, byte-identical).
+    gate_kind = "needs_input" if native_gates else None
     if dry_run:
-        logger.info("[dry-run] pending_pr %s — would update block reason to '%s'", tid, new_handoff)
+        logger.info("[dry-run] pending_pr %s — would update block reason to '%s'%s",
+                    tid, new_handoff,
+                    f" (kind={gate_kind})" if gate_kind else "")
         return True
 
     # hermes kanban block refuses to re-block an already-blocked card ("cannot block").
     # Unblock first so the new reason takes effect.
     kanban.unblock_task(slug, tid, "pending-pr: PR found, updating block reason")
-    kanban.block_task(slug, tid, new_handoff)
-    logger.info("iterate: pending_pr %s — PR #%s found for issue #%s, updated block reason",
-                tid, found_pr, issue_n)
+    kanban.block_task(slug, tid, new_handoff, kind=gate_kind)
+    logger.info("iterate: pending_pr %s — PR #%s found for issue #%s, updated block reason%s",
+                tid, found_pr, issue_n,
+                f" (kind={gate_kind})" if gate_kind else "")
     return True
 
 
