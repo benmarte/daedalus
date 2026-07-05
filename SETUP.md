@@ -29,6 +29,16 @@ GitHub issue after completing their step.
 
 ## Prerequisites (each colleague, once)
 1. **Hermes Agent** installed + gateway running (`hermes gateway` / `hermes gateway install`).
+
+   > **⚠️ Required gateway setting — `kanban.dispatch_in_gateway: false`.**
+   > The Hermes gateway ships its own kanban dispatch daemon. Left at its default,
+   > that daemon *and* the Daedalus dispatcher both tick the same board — the daemon
+   > preempts Daedalus, causing **double-dispatch**: cards advance out from under the
+   > pipeline and workers get spawned twice. For any Hermes install that runs Daedalus,
+   > set `kanban.dispatch_in_gateway = false` so **Daedalus is the sole dispatcher**.
+   > This is a Hermes-core gateway setting (not a `daedalus.yaml` key). The gateway
+   > reads it **once at startup**, so run `hermes gateway restart` after changing it
+   > for the new value to take effect.
 2. The **`agent-skills` plugin** (provides the lifecycle skills at
    `~/.hermes/plugins/agent-skills/skills/`) — installed **automatically** by
    `provision_roster.sh` if missing; no manual step needed.

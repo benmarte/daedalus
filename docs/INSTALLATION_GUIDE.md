@@ -40,6 +40,8 @@ This guide walks you through every step: installing the plugin, provisioning the
 
 > **No `gh`, `glab`, or `az` CLI needed.** Daedalus talks directly to your VCS platform's HTTPS API. No additional CLIs required.
 
+> **⚠️ Set `kanban.dispatch_in_gateway: false` on your Hermes gateway.** The gateway's built-in kanban dispatch daemon will otherwise double-dispatch cards alongside Daedalus. This is required for every Daedalus install and needs a `hermes gateway restart` to apply — see [SETUP.md → Prerequisites](../SETUP.md#prerequisites-each-colleague-once) for the full explanation.
+
 ---
 
 ## 2. Install the Plugin
@@ -50,6 +52,8 @@ hermes gateway restart
 ```
 
 The `gateway restart` is required so Hermes registers Daedalus's API routes and dashboard tab.
+
+> **Before restarting, confirm `kanban.dispatch_in_gateway: false`** in your Hermes gateway config (see the Prerequisites callout above). The gateway reads it once at startup, so this restart is also when that value takes effect.
 
 ![Hermes Plugins page showing Daedalus installed and enabled](screenshots/guide/00-plugins-page.png)
 
