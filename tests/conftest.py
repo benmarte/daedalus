@@ -454,6 +454,14 @@ class FakeKanban:
                 return t
         return None
 
+    def edit_body(self, slug: str, task_id: str, body: str) -> bool:
+        """Rewrite a task's body field in-memory (mirrors core.kanban.edit_body)."""
+        t = self.tasks.get(task_id)
+        if t is None:
+            return False
+        t["body"] = body
+        return True
+
     def comments_on(self, task_id: str) -> List[str]:
         return [body for (tid, body) in self.comments if tid == task_id]
 
@@ -496,6 +504,7 @@ def kanban_as(kanban_mod: Any, fk: "FakeKanban"):
         "decompose",
         "run_outcome",
         "close_issue_tasks",
+        "edit_body",
     ]
     patches = [
         mock.patch.object(kanban_mod, m, side_effect=getattr(fk, m))

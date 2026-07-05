@@ -671,6 +671,29 @@ def run_iterate(
                 if action == ADVANCE and pr is not None:
                     advance_prs.append(pr)
 
+                # Phase-3 (#1301): upfront-DAG stage body enrichment.
+                # When the flag is ON, enrich child stage card bodies now that
+                # upstream artifacts (PR number, PM spec) are available.  This
+                # runs synchronously (body write is a fast SQLite UPDATE) and
+                # never raises — see core.dag_enrichment for design rationale.
+                if _upfront_dag:
+                    _issue_n_enrich = _extract_issue_number_from_card(card)
+                    if _issue_n_enrich is not None:
+                        try:
+                            from core.dag_enrichment import enrich_promoted_dag_stages
+                            enrich_promoted_dag_stages(
+                                slug, _issue_n_enrich, assignee, pr,
+                                provider=provider,
+                                resolved=resolved,
+                                workdir=workdir,
+                                dry_run=dry_run,
+                            )
+                        except Exception as _enrich_exc:
+                            logger.warning(
+                                "iterate: dag_enrichment failed for %s issue #%s: %s",
+                                assignee, _issue_n_enrich, _enrich_exc,
+                            )
+
                 # Auto-merge: when the docs card completes and auto_merge is enabled,
                 # the dispatcher merges the PR via the VCS API. This is the ONLY path
                 # that can trigger a merge — agents never merge directly.
