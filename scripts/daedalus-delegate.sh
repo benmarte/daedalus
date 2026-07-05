@@ -59,6 +59,7 @@ _out=""
 _repo=""
 _branch=""
 _transition=0
+_start_ts=0         # initialised here so _term_handler can always reference it
 
 # ── argument parsing ──────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -90,6 +91,36 @@ if [ "$_transition" -eq 1 ]; then
   [ -n "$_repo"   ] || { echo "[delegate] --transition requires --repo"   >&2; exit 2; }
   [ -n "$_branch" ] || { echo "[delegate] --transition requires --branch" >&2; exit 2; }
 fi
+
+# ── SIGTERM trap ──────────────────────────────────────────────────────────────
+# Hermes enforces --max-runtime by sending SIGTERM to the wrapper process.
+# Without this trap the wrapper dies while the setsid-isolated inner agent
+# survives as an orphan — recreating the concurrent-dispatch hazard (#1289).
+# The handler must be registered before the spawn so it fires even if the
+# signal arrives during wrapper startup.  It is self-contained (no calls to
+# helpers defined later) so forward-reference ordering is not an issue.
+#
+# On trap: reap the inner agent's process group cleanly, then emit a
+# DELEGATE_RESULT line for forensic log analysis.  Kanban transition is
+# intentionally SKIPPED — Hermes owns the requeue when --max-runtime fires.
+_term_handler() {
+  if [ -n "${_child_pgid:-}" ]; then
+    kill -TERM -"$_child_pgid" 2>/dev/null || kill -TERM "${_child_pid:-0}" 2>/dev/null || true
+    local _ti=0
+    while [ $_ti -lt 5 ] && kill -0 "${_child_pid:-0}" 2>/dev/null; do
+      sleep 1; _ti=$(( _ti + 1 ))
+    done
+    kill -KILL -"$_child_pgid" 2>/dev/null || kill -KILL "${_child_pid:-0}" 2>/dev/null || true
+  fi
+  local _now_ts; _now_ts="$(date +%s)"
+  local _dur=0
+  [ "${_start_ts:-0}" -gt 0 ] && _dur=$(( _now_ts - _start_ts ))
+  local _esc; _esc="$(printf '%s' "$_out" | sed 's/"/\\"/g')"
+  printf 'DELEGATE_RESULT: {"status":"terminated","exit":124,"out":"%s","duration_s":%d}\n' \
+    "$_esc" "$_dur"
+  exit 124
+}
+trap '_term_handler' TERM
 
 # ── ensure output directory exists ───────────────────────────────────────────
 # Finding 5: an unwritable out-dir would look like a crashed agent. Create it
@@ -164,6 +195,11 @@ _emit_result() {
 # Finding 2+6: targets the pgid (not just the direct child pid) so all
 # grandchildren are reaped. 5s grace period, then SIGKILL. Comment matches code.
 _kill_child() {
+  # Guard: no-op if the child was never spawned (TERM may arrive before spawn
+  # sets _child_pgid).  Also protects the main loop caller; in practice the
+  # loop only calls this after spawn, but the guard keeps the function safe
+  # at any call site.
+  [ -n "${_child_pgid:-}" ] || return 0
   kill -TERM -"$_child_pgid" 2>/dev/null || kill -TERM "$_child_pid" 2>/dev/null || true
   local _i=0
   while [ $_i -lt 5 ] && kill -0 "$_child_pid" 2>/dev/null; do

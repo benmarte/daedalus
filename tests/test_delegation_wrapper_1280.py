@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -439,6 +440,114 @@ def test_transition_failed(tmp_path):
     assert any("coding-agent-failed: exited with code 7" in b for b in blocks), (
         f"Expected 'coding-agent-failed: exited with code 7'.\nBlock calls: {blocks}"
     )
+
+
+# ── (m) SIGTERM to wrapper reaps child + grandchild, exits 124 ────────────────
+
+def test_term_signal_kills_child_and_grandchild(tmp_path):
+    """SIGTERM to the wrapper reaps the inner agent's process group.
+
+    Hermes sends SIGTERM to the wrapper when --max-runtime is enforced.
+    Without the trap the wrapper dies but the setsid-isolated child and its
+    grandchildren survive as orphans (concurrent-dispatch hazard #1289).
+
+    This test:
+      1. Starts the wrapper with an agent that spawns a grandchild and records
+         both PIDs.
+      2. SIGTERMs the wrapper once the grandchild PID file is written.
+      3. Asserts the wrapper exits 124.
+      4. Asserts DELEGATE_RESULT status is "terminated".
+      5. Asserts both child and grandchild are dead.
+    """
+    gc_pid_file = tmp_path / "grandchild.pid"
+    child_pid_file = tmp_path / "child.pid"
+
+    # Agent: record its own PID, spawn a grandchild, record that PID, then
+    # sleep.  All three processes share the agent's setsid process group so
+    # the wrapper's pgid-kill must reach the grandchild.
+    agent_cmd = (
+        f"bash -c '"
+        f"echo $$ > {child_pid_file}; "
+        f"sleep 999 & echo $! > {gc_pid_file}; disown; "
+        f"sleep 999"
+        f"'"
+    )
+
+    stub_dir, hermes_log, gh_log = _stub_bin_dir(tmp_path)
+    task_file = tmp_path / "task.txt"
+    task_file.write_text("task body\n")
+    out_file = tmp_path / "agent-out.txt"
+
+    env = {
+        **os.environ,
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "HERMES_HOME": str(tmp_path / "hermes-home"),
+        "GH_TOKEN": "stub-token",
+        "GITHUB_TOKEN": "stub-token",
+    }
+
+    cmd = [
+        "bash", str(_DELEGATE_SH),
+        "--task-file", str(task_file),
+        "--cmd", agent_cmd,
+        "--card", "t_term_test",
+        "--board", "test-board",
+        "--out", str(out_file),
+        "--max-wait", "60",
+        "--heartbeat-interval", "300",
+        "--poll-interval", "1",
+    ]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+
+    # Wait for the grandchild PID file to appear — confirms the agent is running
+    # and setsid has taken effect before we deliver the signal.
+    t0 = time.monotonic()
+    while not gc_pid_file.exists() and time.monotonic() - t0 < 10:
+        time.sleep(0.2)
+
+    assert gc_pid_file.exists(), "grandchild PID file never appeared — agent did not start"
+
+    # TERM the wrapper (simulating Hermes --max-runtime enforcement)
+    proc.send_signal(signal.SIGTERM)
+
+    stdout, stderr = proc.communicate(timeout=20)
+    assert proc.returncode == 124, (
+        f"expected exit 124 (terminated), got {proc.returncode}\n"
+        f"stdout:\n{stdout}\nstderr:\n{stderr}"
+    )
+
+    # DELEGATE_RESULT must report "terminated" status
+    data = _parse_result(stdout)
+    assert data["status"] == "terminated", (
+        f"expected status 'terminated', got {data['status']!r}\nfull stdout:\n{stdout}"
+    )
+    assert data["exit"] == 124
+
+    # Give the signal a moment to propagate through the process group
+    time.sleep(1.0)
+
+    for pid_file, label in [(child_pid_file, "child"), (gc_pid_file, "grandchild")]:
+        if not pid_file.exists():
+            continue
+        raw = pid_file.read_text().strip()
+        if not raw.isdigit():
+            continue
+        pid = int(raw)
+        try:
+            os.kill(pid, 0)
+            pytest.fail(
+                f"{label} PID {pid} still alive after SIGTERM to wrapper — "
+                "TERM trap did not reap the process group"
+            )
+        except ProcessLookupError:
+            pass  # expected: process is dead
 
 
 def test_transition_timeout(tmp_path):
