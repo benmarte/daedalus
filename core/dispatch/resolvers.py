@@ -59,11 +59,17 @@ _DEFAULT_PROFILES: Dict[str, str] = {
 }
 
 _CODING_AGENT_DEFAULTS: Dict[str, str] = {
-    # --setting-sources project skips the operator's user-scope settings and
-    # global CLAUDE.md (whose plan-mode / subagent-delegation mandates make a
-    # headless -p session re-delegate and exit empty, #1241) while
-    # CLAUDE_CONFIG_DIR stays on $HOME/.claude so credentials keep working.
-    "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --setting-sources project -p",
+    # --strict-mcp-config + --setting-sources project run the headless worker with
+    # NO MCP servers and NO plugins/hooks:
+    #   --setting-sources project skips the operator's user-scope settings and
+    #     global CLAUDE.md (whose plan-mode / subagent-delegation mandates make a
+    #     headless -p session re-delegate and exit empty, #1241) AND the
+    #     enabledPlugins list that lives there.
+    #   --strict-mcp-config loads no MCP servers, so a slow/unreachable/disconnected
+    #     MCP server can't hang startup (a plugin-heavy config hung headless for
+    #     5+ min with zero output, freezing the pipeline — daedalus#1323).
+    # CLAUDE_CONFIG_DIR stays on $HOME/.claude so credentials (keychain) keep working.
+    "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p",
     "codex": "codex exec --full-auto",
     "opencode": "opencode run",
 }

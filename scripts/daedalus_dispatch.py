@@ -465,7 +465,11 @@ def _build_delegation_instructions(
         )
         separator_tail = _INNER_BODY_SEPARATOR + "\n"
     if agent == "claude-code":
-        run_cmd = effective_cmd or "claude --dangerously-skip-permissions -p"
+        # Bare fallback keeps the plugin/MCP bypass flags so a headless worker never
+        # hangs on plugin/MCP init even when no coding_agent_cmd is configured (daedalus#1323).
+        run_cmd = effective_cmd or (
+            "claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
+        )
         return (
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"

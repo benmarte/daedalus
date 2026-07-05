@@ -629,7 +629,8 @@ process.
 ```yaml
 execution:
   coding_agent: claude-code
-  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
+  # --strict-mcp-config --setting-sources project are STRONGLY RECOMMENDED — see the warning below.
+  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
 ```
 
 ![.hermes/daedalus.yaml showing the execution block with coding_agent: claude-code and a per-role override (developer delegates to Claude Code, validator stays on the local Hermes LLM)](docs/screenshots/guide/14-coding-agent-config.png)
@@ -640,6 +641,32 @@ execution:
   `opencode run`).
 - Optional: `coding_agent_model` passes through to the agent's `--model` flag, and
   `coding_agent_max_turns` (default `10`) caps runaway loops.
+
+> [!WARNING]
+> **Disable plugins and MCP servers in the delegated command.** Daedalus spawns the coding
+> agent **headless** (`-p`), fresh, once per role, per issue. If the config dir you point
+> `CLAUDE_CONFIG_DIR` at has **plugins or MCP servers enabled** (e.g. Cortex, Context-Mode,
+> Playwright, Sentry, an LSP), the agent must initialize **all of them on every spawn**
+> before it does any work. In headless mode this routinely adds minutes of startup — and if
+> any MCP server is slow, unreachable, or disconnected, the worker can **hang indefinitely
+> producing zero output**, freezing the pipeline (the `running` card holds the
+> `max_dispatch` slot). This is a real failure we hit in production.
+>
+> **The fix — add two flags to `coding_agent_cmd`:**
+>
+> ```yaml
+> coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
+> ```
+>
+> | Flag | Effect |
+> |---|---|
+> | `--strict-mcp-config` | Ignores every MCP server except those passed via `--mcp-config`. With none passed, **no MCP servers load** — no init hang. |
+> | `--setting-sources project` | Loads **only** project-scoped settings, skipping the user `settings.json` where plugins are enabled. **No plugins/hooks load.** Auth still comes from `CLAUDE_CONFIG_DIR` (keychain), so the worker stays logged in. |
+>
+> Measured impact: with a plugin-heavy config, headless startup went from a **5+ minute hang
+> (0 bytes of output)** to **~3 seconds**, fully authenticated. These flags are the default
+> in the config template for exactly this reason. The same principle applies to Codex/OpenCode
+> — point delegated workers at a **minimal** agent config with no background integrations.
 
 **How it works:**
 
