@@ -7,8 +7,13 @@ and logs a warning for each:
   (default 48h) — optionally archived off the active board via the native
   ``hermes kanban archive`` command (issue #186).
 * **running** cards whose summary hasn't advanced for longer than a threshold
-  (default 24h) — a worker that has died or wedged, otherwise invisible since
-  the board still shows it as in-progress (issue #232).
+  (default 30 min) — a worker that has died, wedged, or suspended on a headless
+  permission prompt, otherwise invisible since the board still shows it as
+  in-progress (issue #232). When ``reset`` is enabled (issue #1323) the sweep
+  also self-heals: it re-blocks each stale running card with a crash-class
+  reason so the crash-retry reconciler re-dispatches it on the SAME tick,
+  freeing the ``execution.max_dispatch`` slot in minutes instead of stranding
+  the whole pipeline until a 24h warn or a human unblock.
 
 It runs each dispatch tick alongside ``kanban.diagnostics`` and degrades
 gracefully: any failure logs and returns, never breaking a run.
@@ -33,7 +38,18 @@ from core.db import connect_wal
 logger = logging.getLogger("daedalus.sweeper")
 
 DEFAULT_STALE_HOURS = 48
-DEFAULT_RUNNING_STALE_HOURS = 24
+# Shortened from 24h → 30 min (issue #1323): a suspended/dead worker holds the
+# ``execution.max_dispatch`` slot the whole time it sits ``running``, so a fast
+# threshold is the minimum needed for the pipeline to self-recover. The delegate
+# wrapper heartbeats every 300s, so 30 min without any heartbeat (6 missed) is a
+# confident dead-worker signal — a live worker never ages out.
+DEFAULT_RUNNING_STALE_HOURS = 0.5
+
+# Crash-class block reason stamped on a reclaimed stale-running card. Must begin
+# with a marker that ``core.crash_retry.classify`` maps to the ``crash`` class
+# (``coding-agent-failed:``) — and NOT a non-crash prefix — so the crash-retry
+# reconciler owns the card and re-dispatches it (issue #1323).
+STALE_RUNNING_RESET_REASON = "coding-agent-failed: STALE_RUNNING"
 
 # Timestamp columns to consult, in order of preference, for "last progress".
 _SINCE_KEYS = ("last_heartbeat_at", "started_at", "created_at")
@@ -246,14 +262,23 @@ def sweep_stale_running(
     slug: str,
     *,
     threshold_hours: float = DEFAULT_RUNNING_STALE_HOURS,
+    reset: bool = False,
     now: int | None = None,
 ) -> list[str]:
-    """Detect and warn about running cards stuck with no update for > N hours.
+    """Detect stale running cards; warn, and optionally self-heal via reset.
 
-    A card whose worker has died or wedged stays in ``running`` indefinitely and
-    is otherwise invisible. This warns (card id, assignee, hours elapsed) so a
-    human can intervene; unlike blocked cards, running cards are never archived
-    automatically. Returns the list of stale running card ids found.
+    A card whose worker has died, wedged, or suspended (e.g. on a headless
+    permission prompt, issue #1323) stays in ``running`` indefinitely and is
+    otherwise invisible — worse, it holds the ``execution.max_dispatch`` slot so
+    the whole pipeline stalls. This always warns (card id, assignee, hours
+    elapsed).
+
+    When ``reset`` is True (issue #1323) it also re-blocks each stale card with
+    a crash-class reason (``STALE_RUNNING_RESET_REASON``). Because the crash-retry
+    reconciler runs immediately after the sweep on the same dispatch tick, the
+    card is re-dispatched with a fresh worker and the ``max_dispatch`` slot is
+    freed in minutes — no human unblock needed. Unlike blocked cards, running
+    cards are never archived. Returns the list of stale running card ids found.
     """
     now = int(time.time()) if now is None else int(now)
     cards = kanban.list_tasks(slug, status="running") or []
@@ -276,10 +301,23 @@ def sweep_stale_running(
     for card, age in stale:
         tid = str(card.get("id") or "")
         assignee = card.get("assignee") or card.get("title") or "?"
+        action = (
+            "re-blocking crash-class so it re-dispatches and frees the slot"
+            if reset else "manual intervention may be required"
+        )
         logger.warning(
             "sweeper: card %s (%s) stuck in running for %.0fh (>%gh) with no "
-            "summary update — worker may have died; manual intervention may be required",
-            tid, assignee, age, threshold_hours,
+            "summary update — worker may have died; %s",
+            tid, assignee, age, threshold_hours, action,
         )
         stale_ids.append(tid)
+        if reset and tid:
+            reason = (
+                f"{STALE_RUNNING_RESET_REASON} — no summary update for "
+                f"{age:.0f}h (issue #1323 auto-reclaim)"
+            )
+            if kanban.block_task(slug, tid, reason):
+                logger.info("sweeper: reset stale-running card %s → %s", tid, reason)
+            else:
+                logger.warning("sweeper: failed to reset stale-running card %s", tid)
     return stale_ids
