@@ -26,6 +26,18 @@ tracking:
   #
   # Azure DevOps: board columns map to work-item states automatically — no key
   # needed; the status_map values below must match your states.
+  #
+  # Stale-running self-heal (issue #1323): a worker that dies, wedges, or
+  # suspends on a headless permission prompt leaves its card stuck `running`,
+  # holding the execution.max_dispatch slot and stalling the whole pipeline.
+  # Each tick the sweeper re-blocks such a card crash-class so the crash-retry
+  # reconciler re-dispatches it and frees the slot.
+  # stale_running:
+  #   hours: 0.5      # No-heartbeat age before a running card is stale (default
+  #                   # 0.5 = 30 min; the delegate wrapper heartbeats every 5 min,
+  #                   # so 30 min = 6 missed beats = a confident dead worker).
+  #   reset: true     # true (default): auto-reclaim (re-block crash-class →
+  #                   # re-dispatch). false: warn-only, no reclaim.
 
 # ── VCS provider ──────────────────────────────────────────────────────────────
 # All access is via token-authenticated HTTPS APIs. Tokens come ONLY from

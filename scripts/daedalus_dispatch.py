@@ -3036,9 +3036,13 @@ def _run_tick(
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-blocked sweep failed: %s", exc)
 
-    # Stale-running sweeper (#232): warn for running cards whose summary hasn't
-    # advanced in > N hours (default 24) — a dead/wedged worker that the board
-    # still shows as in-progress. Configurable via tracking.stale_running.hours.
+    # Stale-running sweeper (#232, self-heal #1323): warn for running cards whose
+    # summary hasn't advanced in > N hours (default 0.5 = 30 min) — a dead, wedged
+    # or headless-suspended worker the board still shows as in-progress, holding
+    # the max_dispatch slot. With reset on (default), each stale card is re-blocked
+    # crash-class so the crash-retry reconciler (which runs next, this same tick)
+    # re-dispatches it and frees the slot. Configurable via
+    # tracking.stale_running.{hours,reset}; reset skipped in dry-run.
     stale_running_cfg = (resolved.get("tracking") or {}).get("stale_running") or {}
     stale_running = 0
     try:
@@ -3048,6 +3052,7 @@ def _run_tick(
                 threshold_hours=float(
                     stale_running_cfg.get("hours", sweeper.DEFAULT_RUNNING_STALE_HOURS)
                 ),
+                reset=bool(stale_running_cfg.get("reset", True)) and not dry_run,
             )
         )
     except Exception as exc:  # never let the sweeper break a dispatch tick

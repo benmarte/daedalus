@@ -259,11 +259,21 @@ def test_find_stale_running_ignores_blocked():
           sweeper.find_stale_running(cards, now=NOW, threshold_hours=24) == [])
 
 
-def test_find_stale_running_default_threshold_is_24h():
-    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 25 * HOUR)]
-    check("25h running card stale at default threshold",
+def test_find_stale_running_default_threshold_is_30min():
+    # #1323: default cut from 24h → 0.5h (30 min) so a stuck card frees the
+    # max_dispatch slot in minutes. A card idle 1h is stale at the default.
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 1 * HOUR)]
+    check("1h running card stale at default threshold",
           len(sweeper.find_stale_running(cards, now=NOW)) == 1)
-    check("DEFAULT_RUNNING_STALE_HOURS is 24", sweeper.DEFAULT_RUNNING_STALE_HOURS == 24)
+    check("DEFAULT_RUNNING_STALE_HOURS is 0.5", sweeper.DEFAULT_RUNNING_STALE_HOURS == 0.5)
+
+
+def test_find_stale_running_fresh_under_30min_default():
+    # A card idle only 10 min (< 30 min default) is NOT stale — a live worker
+    # heartbeats every 5 min, so it never ages out.
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 600)]
+    check("10min running card not stale at default threshold",
+          sweeper.find_stale_running(cards, now=NOW) == [])
 
 
 def test_find_stale_running_skips_unaged_card():
@@ -296,8 +306,46 @@ def test_sweep_running_returns_stale_ids():
     cards = [_card("t1", status="running", last_heartbeat_at=NOW - 30 * HOUR),
              _card("t2", status="running", last_heartbeat_at=NOW - 1 * HOUR)]
     with mock.patch.object(kanban, "list_tasks", return_value=cards):
-        ids = sweeper.sweep_stale_running("daedalus", now=NOW)
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW, threshold_hours=24)
     check("only the 30h running card is returned", ids == ["t1"])
+
+
+# ── sweep_stale_running: self-heal via reset (issue #1323) ─────────────────────
+
+
+def test_sweep_running_reset_false_does_not_block():
+    """Default (reset=False) is warn-only — byte-identical to pre-#1323 behavior."""
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 2 * HOUR)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(kanban, "block_task") as bt:
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW)
+    check("stale card still returned", ids == ["t1"])
+    check("reset=False never blocks", bt.call_count == 0)
+
+
+def test_sweep_running_reset_blocks_stale_card():
+    """reset=True re-blocks each stale running card so it can be re-dispatched."""
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 2 * HOUR),
+             _card("fresh", status="running", last_heartbeat_at=NOW - 60)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(kanban, "block_task", return_value=True) as bt:
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW, reset=True)
+    check("only the stale card is returned", ids == ["t1"])
+    check("only the stale card is blocked", bt.call_count == 1)
+    check("block targets the stale card", bt.call_args[0][:2] == ("daedalus", "t1"))
+
+
+def test_sweep_running_reset_reason_is_crash_class():
+    """The reset reason must classify as crash-class so crash-retry re-dispatches it."""
+    from core import crash_retry
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 2 * HOUR)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(kanban, "block_task", return_value=True) as bt:
+        sweeper.sweep_stale_running("daedalus", now=NOW, reset=True)
+    reason = bt.call_args[0][2]
+    check("reason starts with the crash-class marker",
+          reason.startswith(sweeper.STALE_RUNNING_RESET_REASON))
+    check("crash_retry.classify → crash", crash_retry.classify(reason) == "crash")
 
 
 def test_sweep_running_queries_running_status():
@@ -463,11 +511,15 @@ ALL_TESTS = [
     test_find_stale_running_detects_old_running,
     test_find_stale_running_ignores_fresh_running,
     test_find_stale_running_ignores_blocked,
-    test_find_stale_running_default_threshold_is_24h,
+    test_find_stale_running_default_threshold_is_30min,
+    test_find_stale_running_fresh_under_30min_default,
     test_find_stale_running_skips_unaged_card,
     test_find_stale_running_sorts_oldest_first,
     test_find_stale_running_exactly_at_24h_is_not_stale,
     test_sweep_running_returns_stale_ids,
+    test_sweep_running_reset_false_does_not_block,
+    test_sweep_running_reset_blocks_stale_card,
+    test_sweep_running_reset_reason_is_crash_class,
     test_sweep_running_queries_running_status,
     test_sweep_running_empty_board,
     test_sweep_running_enriches_heartbeat_from_db,

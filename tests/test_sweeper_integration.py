@@ -37,6 +37,7 @@ def _dispatch_sweep_block(slug, resolved, dry_run=False):
         slug,
         threshold_hours=float(
             stale_running_cfg.get("hours", sweeper.DEFAULT_RUNNING_STALE_HOURS)),
+        reset=bool(stale_running_cfg.get("reset", True)) and not dry_run,
     )
     return stale_running
 
@@ -67,11 +68,11 @@ def test_dispatch_passes_dry_run_to_blocked_sweep():
 
 
 def test_dispatch_calls_sweep_stale_running_with_defaults():
-    """Dispatcher calls sweep_stale_running with default 24h threshold."""
+    """Dispatcher calls sweep_stale_running with default 30-min threshold + reset on (#1323)."""
     with mock.patch.object(sweeper, "sweep_stale_running", return_value=["t1", "t2"]) as running, \
          mock.patch.object(sweeper, "sweep_stale_blocked", return_value=[]):
         result = _dispatch_sweep_block("daedalus", {})
-    running.assert_called_once_with("daedalus", threshold_hours=24.0)
+    running.assert_called_once_with("daedalus", threshold_hours=0.5, reset=True)
     assert result == ["t1", "t2"]
 
 
@@ -81,7 +82,24 @@ def test_dispatch_calls_sweep_stale_running_with_custom_config():
     with mock.patch.object(sweeper, "sweep_stale_running", return_value=[]) as running, \
          mock.patch.object(sweeper, "sweep_stale_blocked", return_value=[]):
         _dispatch_sweep_block("daedalus", resolved)
-    running.assert_called_once_with("daedalus", threshold_hours=12.0)
+    running.assert_called_once_with("daedalus", threshold_hours=12.0, reset=True)
+
+
+def test_dispatch_stale_running_reset_disabled_by_config():
+    """tracking.stale_running.reset=false forwards reset=False (warn-only, #1323)."""
+    resolved = {"tracking": {"stale_running": {"reset": False}}}
+    with mock.patch.object(sweeper, "sweep_stale_running", return_value=[]) as running, \
+         mock.patch.object(sweeper, "sweep_stale_blocked", return_value=[]):
+        _dispatch_sweep_block("daedalus", resolved)
+    running.assert_called_once_with("daedalus", threshold_hours=0.5, reset=False)
+
+
+def test_dispatch_stale_running_reset_off_in_dry_run():
+    """dry_run never reclaims — reset is forced False even with the default (#1323)."""
+    with mock.patch.object(sweeper, "sweep_stale_running", return_value=[]) as running, \
+         mock.patch.object(sweeper, "sweep_stale_blocked", return_value=[]):
+        _dispatch_sweep_block("daedalus", {}, dry_run=True)
+    running.assert_called_once_with("daedalus", threshold_hours=0.5, reset=False)
 
 
 def test_dispatch_sweeper_exception_in_blocked_does_not_break_running():
@@ -109,13 +127,14 @@ def test_dispatch_sweeper_exception_in_blocked_does_not_break_running():
             slug,
             threshold_hours=float(
                 stale_running_cfg.get("hours", sweeper.DEFAULT_RUNNING_STALE_HOURS)),
+            reset=bool(stale_running_cfg.get("reset", True)) and not dry_run,
         )
         return stale_running
 
     with mock.patch.object(sweeper, "sweep_stale_blocked", side_effect=RuntimeError("boom")), \
          mock.patch.object(sweeper, "sweep_stale_running", return_value=["t3"]) as running:
         result = dispatch_with_guard("daedalus", {})
-    running.assert_called_once_with("daedalus", threshold_hours=24.0)
+    running.assert_called_once_with("daedalus", threshold_hours=0.5, reset=True)
     assert result == ["t3"]
 
 
@@ -141,6 +160,7 @@ def test_dispatch_sweeper_exception_in_running_does_not_break_tick():
                 slug,
                 threshold_hours=float(
                     stale_running_cfg.get("hours", sweeper.DEFAULT_RUNNING_STALE_HOURS)),
+                reset=bool(stale_running_cfg.get("reset", True)) and not dry_run,
             )
         except Exception:
             pass
@@ -168,12 +188,12 @@ def test_dispatch_calls_both_sweeps_in_order():
 
 
 def test_dispatch_with_empty_tracking_config_uses_defaults():
-    """Empty tracking config falls back to sweeper defaults (48h blocked, 24h running)."""
+    """Empty tracking config falls back to sweeper defaults (48h blocked, 30-min running)."""
     with mock.patch.object(sweeper, "sweep_stale_blocked", return_value=[]) as blocked, \
          mock.patch.object(sweeper, "sweep_stale_running", return_value=[]) as running:
         _dispatch_sweep_block("daedalus", {"tracking": {}})
     blocked.assert_called_once_with("daedalus", threshold_hours=48.0, archive=False, dry_run=False)
-    running.assert_called_once_with("daedalus", threshold_hours=24.0)
+    running.assert_called_once_with("daedalus", threshold_hours=0.5, reset=True)
 
 
 def test_dispatch_with_none_tracking_config_uses_defaults():
@@ -182,7 +202,7 @@ def test_dispatch_with_none_tracking_config_uses_defaults():
          mock.patch.object(sweeper, "sweep_stale_running", return_value=[]) as running:
         _dispatch_sweep_block("daedalus", {"tracking": None})
     blocked.assert_called_once_with("daedalus", threshold_hours=48.0, archive=False, dry_run=False)
-    running.assert_called_once_with("daedalus", threshold_hours=24.0)
+    running.assert_called_once_with("daedalus", threshold_hours=0.5, reset=True)
 
 
 def test_dispatch_archive_flag_propagates_correctly():
