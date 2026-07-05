@@ -52,6 +52,30 @@ _ELIGIBLE_ROLES = frozenset({"developer", "qa", "documentation"})
 _NATIVE_AGENTS = frozenset({"none", "hermes"})
 
 
+def resolve_primary_coding_agent(execution: Dict[str, Any]) -> str:
+    """Return the primary coding-agent name from the chain or singular key.
+
+    When only ``execution.coding_agents`` is configured (no ``execution.coding_agent``),
+    ``_resolve_coding_agent`` falls back to ``"hermes"``, causing the delegation
+    bypass in :func:`goal_kwargs` to misfire — goal-mode fires for roles that
+    delegate to an external agent and cannot produce a verifiable artifact.
+
+    This function reads the chain first (via
+    :func:`core.provider_failover.resolve_coding_agent_chain`) so the bypass
+    fires correctly for chain-only configs.
+
+    Never raises.
+    """
+    try:
+        from core import provider_failover
+        chain = provider_failover.resolve_coding_agent_chain(execution)
+        if chain:
+            return chain[0]["name"]
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("goal_mode: resolve_primary_coding_agent failed: %s", exc)
+    return "hermes"
+
+
 def resolve_goal_mode(execution: Dict[str, Any]) -> Dict[str, Any]:
     """Resolve the goal-mode policy from the ``execution:`` config block.
 
@@ -80,7 +104,11 @@ def resolve_goal_mode(execution: Dict[str, Any]) -> Dict[str, Any]:
         if cand > 0:
             max_turns = cand
 
-    return {"enabled": enabled, "max_turns": max_turns}
+    # Capture primary coding agent from chain so checks.py can resolve the
+    # delegation bypass without needing to re-read the chain from execution.
+    # Stored in goal_cfg so no signature changes are needed at call sites.
+    primary_agent = resolve_primary_coding_agent(execution)
+    return {"enabled": enabled, "max_turns": max_turns, "primary_agent": primary_agent}
 
 
 def goal_string(role: str, issue_number: int) -> str:

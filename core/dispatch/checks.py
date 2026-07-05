@@ -2044,6 +2044,10 @@ def _check_completed_pm(
     _closed_issue_cache: Dict[int, Optional[bool]] = (
         closed_issue_cache if closed_issue_cache is not None else {}
     )
+    # Resolve primary coding agent from goal_cfg (pre-computed by resolve_goal_mode
+    # via the chain); fall back to coding_agent when goal_cfg absent or pre-#1296.
+    # Fixes chain-only config delegation bypass misfiring (#1296 polish).
+    _primary_agent = (goal_cfg or {}).get("primary_agent") or coding_agent
 
     d = _disp()
     _has_downstream = (
@@ -2166,7 +2170,7 @@ def _check_completed_pm(
 
         dev_id = None
         if not skip_developer:
-            _dev_agent = ra.get("developer", coding_agent)
+            _dev_agent = ra.get("developer", _primary_agent)
             dev_id = goal_mode.create_with_goal_fallback(
                 _kanban().create_task,
                 goal_cfg,
@@ -2195,7 +2199,7 @@ def _check_completed_pm(
             )
             created_ids["developer"] = dev_id
 
-        _qa_agent = ra.get("qa", coding_agent)
+        _qa_agent = ra.get("qa", _primary_agent)
         qa_id = goal_mode.create_with_goal_fallback(
             _kanban().create_task,
             goal_cfg,
@@ -2274,7 +2278,7 @@ def _check_completed_pm(
             ]
             if x
         ]
-        _docs_agent = ra.get("documentation", coding_agent)
+        _docs_agent = ra.get("documentation", _primary_agent)
         goal_mode.create_with_goal_fallback(
             _kanban().create_task,
             goal_cfg,
@@ -2353,6 +2357,8 @@ def _check_completed_developer(
     _closed_issue_cache: Dict[int, Optional[bool]] = (
         closed_issue_cache if closed_issue_cache is not None else {}
     )
+    # Primary agent from goal_cfg (chain-aware); fall back to coding_agent.
+    _primary_agent = (goal_cfg or {}).get("primary_agent") or coding_agent
 
     d = _disp()
     _dev_state_fn = (
@@ -2540,7 +2546,7 @@ def _check_completed_developer(
             continue
         workspace_arg = f"dir:{workdir}" if workdir else None
         issue_title = issue.get("title", "")[:60]
-        _dev_agent_retry = ra.get("developer", coding_agent)
+        _dev_agent_retry = ra.get("developer", _primary_agent)
         dev_id = goal_mode.create_with_goal_fallback(
             _kanban().create_task,
             goal_cfg,
