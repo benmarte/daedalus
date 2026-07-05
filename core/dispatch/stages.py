@@ -385,6 +385,12 @@ ARBITER_HUMAN = "human"
 ARBITER_ESCALATE = "escalate"
 ARBITER_PARK = "park"
 
+# Summary prefixes written by close_issue_tasks() on arbiter-cancelled/deferred cards.
+# Used by _guard_prefix_on_done to exempt these cards from the "unexpected completion"
+# detection — they are intentional orchestrator cancellations, not agent failures.
+# Shared with core/dispatch/checks.py to avoid a magic-string ×2.
+ARBITER_CLOSED_SUMMARY_PREFIXES = ("cancelled: validator", "deferred: validator")
+
 # Validator verdict → arbiter action.  Any verdict not in this table (including
 # None / unparseable) safe-parks — the pipeline never auto-proceeds on ambiguity.
 _VALIDATOR_ARBITER_MAP: dict[str, str] = {

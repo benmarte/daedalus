@@ -242,8 +242,8 @@ def test_arbiter_needs_more_info_human_gate():
             SLUG, prov, {42}, validator_profile=VALIDATOR)
     check("needs_more_info → notifies once", enforced == [42])
     check("board set to Blocked", prov.board_status_calls == [(42, "Blocked")])
-    check("validator card tagged needs_input",
-          fk.tasks[ids["validator"]]["block_kind"] == "needs_input")
+    check("validator block_kind not mutated by no-op block_task (already done)",
+          fk.tasks[ids["validator"]].get("block_kind") is None)
 
 
 def test_arbiter_block_for_review_human_gate():
@@ -318,8 +318,8 @@ def test_arbiter_needs_more_info_cancels_all_downstream():
 
     check("needs_more_info → notifies once", enforced == [42])
     check("board set to Blocked", prov.board_status_calls == [(42, "Blocked")])
-    check("validator tagged needs_input",
-          fk.tasks[ids["validator"]]["block_kind"] == "needs_input")
+    check("validator block_kind not mutated by no-op block_task (already done)",
+          fk.tasks[ids["validator"]].get("block_kind") is None)
     # Every downstream stage must be terminal (deferred) after arbitration.
     for role in ("pm", "developer", "qa", "reviewer", "security", "accessibility", "docs"):
         check(f"downstream {role} is done (not still running)",
@@ -373,9 +373,9 @@ def test_arbiter_human_gate_does_not_cancel_validator_itself():
     # Validator is already "done" before arbitration — status must not change.
     check("validator itself not cancelled (already done)",
           fk.tasks[ids["validator"]]["status"] == "done")
-    # And it must retain the needs_input block tag (not be re-done).
-    check("validator still tagged needs_input",
-          fk.tasks[ids["validator"]]["block_kind"] == "needs_input")
+    # And block_task must have been a no-op — block_kind must not be set.
+    check("validator block_kind not mutated by no-op block_task",
+          fk.tasks[ids["validator"]].get("block_kind") is None)
 
 
 def test_arbiter_security_threat_escalates_and_cancels():
@@ -401,8 +401,8 @@ def test_arbiter_unknown_safe_parks():
             SLUG, prov, {42}, validator_profile=VALIDATOR)
     check("unknown → safe-park notifies (human)", enforced == [42])
     check("safe-park sets board Blocked", prov.board_status_calls == [(42, "Blocked")])
-    check("safe-park tags needs_input",
-          fk.tasks[ids["validator"]]["block_kind"] == "needs_input")
+    check("safe-park: validator block_kind not mutated by no-op block_task (already done)",
+          fk.tasks[ids["validator"]].get("block_kind") is None)
 
 
 def test_arbiter_skips_running_validator():
@@ -591,6 +591,58 @@ def test_flag_read_defaults_false():
           bool(({"pipeline": {"upfront_dag": True}}).get("pipeline", {}).get("upfront_dag")) is True)
 
 
+def test_guard_prefix_does_not_fire_on_deferred_cards():
+    """_guard_prefix_on_done must NOT flag arbiter-deferred/cancelled downstream cards.
+
+    After close_issue_tasks() runs, a qa/reviewer/docs card lands in done with
+    summary "deferred: validator needs_more_info — awaiting human" — this is an
+    intentional arbiter cancellation, not an agent failure. The guard must skip it.
+    """
+    from core.dispatch.checks import _guard_prefix_on_done
+    from core.dispatch.stages import ARBITER_CLOSED_SUMMARY_PREFIXES
+
+    fk = FakeKanban()
+    # Seed a done qa card with the exact deferred-summary the arbiter writes.
+    fk.seed(
+        assignee="qa-daedalus",
+        title="#42 Something broken",
+        status="done",
+        summary="deferred: validator needs_more_info — awaiting human",
+        idempotency_key="qa-42",
+    )
+    prov = FakeProvider(board_configured=True)
+    with kanban_as(kanban, fk):
+        count = _guard_prefix_on_done(SLUG, provider=prov)
+    check("guard does not fire on deferred card", count == 0)
+
+    # Same for cancelled: validator prefix (CANCEL/ESCALATE branch)
+    fk2 = FakeKanban()
+    fk2.seed(
+        assignee="reviewer-daedalus",
+        title="#42 Something broken",
+        status="done",
+        summary="cancelled: validator already_fixed",
+        idempotency_key="reviewer-42",
+    )
+    with kanban_as(kanban, fk2):
+        count2 = _guard_prefix_on_done(SLUG, provider=prov)
+    check("guard does not fire on cancelled card", count2 == 0)
+
+    # Verify the guard DOES still fire on a genuinely unexpected summary.
+    fk3 = FakeKanban()
+    fk3.seed(
+        assignee="qa-daedalus",
+        title="#42 Something broken",
+        status="done",
+        summary="looks good to me, all tests pass",
+        idempotency_key="qa-42b",
+    )
+    prov3 = FakeProvider(board_configured=True, issues={42: True})
+    with kanban_as(kanban, fk3):
+        count3 = _guard_prefix_on_done(SLUG, provider=prov3)
+    check("guard still fires on unexpected summary", count3 == 1)
+
+
 if __name__ == "__main__":
     import conftest
     tests = [
@@ -619,6 +671,7 @@ if __name__ == "__main__":
         test_prefix_plain_duplicate_still_resolves,
         test_prefix_confirmed_body_mentioning_duplicate_keeps_dag,
         test_arbiter_idempotent_re_run,
+        test_guard_prefix_does_not_fire_on_deferred_cards,
         test_per_tick_downstream_noops_when_flag_on,
         test_per_tick_downstream_runs_when_flag_off,
         test_per_tick_default_is_flag_off,

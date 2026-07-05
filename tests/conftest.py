@@ -324,6 +324,8 @@ class FakeKanban:
         t = self.tasks.get(task_id)
         if not t:
             return False
+        if t.get("status") in ("done", "complete", "completed", "cancelled"):
+            return False
         t["status"] = "blocked"
         t["reason"] = reason
         t["latest_summary"] = reason

@@ -43,6 +43,7 @@ from core.dispatch.resolvers import (
     _unpack_issue,
 )
 from core.dispatch.stages import (
+    ARBITER_CLOSED_SUMMARY_PREFIXES,
     _compute_planner_fallback_idempotency_key,
     _downstream_tasks_running_or_done,
 )
@@ -2649,6 +2650,12 @@ def _guard_prefix_on_done(
 
         summary_raw = _get_task_summary(task, slug)
         summary_check = (summary_raw or "").lower().lstrip()
+
+        # Arbiter-cancelled and arbiter-deferred cards are intentional orchestrator
+        # actions — not agent failures — so the guard must never fire on them.
+        # Exempting here handles CANCEL, ESCALATE, and HUMAN/PARK branches uniformly.
+        if any(summary_check.startswith(p.lower()) for p in ARBITER_CLOSED_SUMMARY_PREFIXES):
+            continue
 
         # #1288: native run metadata satisfies the guard when metadata_transport
         # is ON — the closing run carries the structured outcome even if the
