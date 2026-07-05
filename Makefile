@@ -23,6 +23,7 @@ PIP    ?= $(PYTHON) -m pip
 E2E_TESTS := tests/test_e2e_full_pipeline.py \
              tests/test_e2e_multi_tick.py \
              tests/test_e2e_regressions.py \
+             tests/test_e2e_regression_comprehensive.py \
              tests/test_e2e_smoke.py \
              tests/test_dispatch_selftest.py \
              tests/test_pipeline_scenarios.py
@@ -62,6 +63,13 @@ e2e: ## Run the offline E2E regression suite (seed issue -> full pipeline -> pas
 	@echo "--- Dispatcher --self-test (offline, no real GitHub) ---"
 	$(PYTHON) scripts/daedalus_dispatch.py --self-test
 	@echo "=== E2E suite PASSED ==="
+
+regression: ## Full "nothing breaks" gate — standalone + full pytest + self-test (run before shipping any change)
+	@echo "=== Daedalus regression gate ==="
+	$(PYTHON) tests/test_daedalus.py
+	$(PYTHON) -m pytest tests/ -q
+	$(PYTHON) scripts/daedalus_dispatch.py --self-test
+	@echo "=== Regression gate PASSED ==="
 
 e2e-live: ## Run the live smoke test against the REAL dispatcher (requires GITHUB_TOKEN)
 	@if [ -z "$$GITHUB_TOKEN" ]; then \
