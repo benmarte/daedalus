@@ -28,15 +28,15 @@ Epic-detection thresholds unchanged. Completion-signal substring matching + `cla
 **D1 — Full native (child cards). CONFIRMED.**
 Under the flag, epic decomposition routes through a single triage card + `hermes kanban decompose`, producing **role-routed kanban child cards** (no GitHub sub-issues). The custom checklist-extraction + `provider.create_issue()` path becomes the flag-off `else` branch. Matches #1276's "migrate to native primitives" thesis. Consequence: flag-on epics no longer emit trackable GitHub sub-issues (accepted).
 
-**D2 — Swarm the post-QA review+docs stage; preserve the QA-gate invariant. CONFIRMED (owner delegated the call).**
-`swarm` requires exactly one `--verifier` and one `--synthesizer`, with the verifier running **after** the parallel workers. Mapping:
-- **Root the swarm when the QA gate card completes** — preserves the documented "QA gates reviewer/security/accessibility" invariant. (Rejected alternative: rooting at dev-completion, which would move QA after the reviews and waste review effort on PRs QA would reject.)
-- workers = `reviewer-daedalus`, `security-analyst-daedalus`, `accessibility-daedalus` (UI issues only, same predicate as today)
-- `--verifier` = `qa-daedalus` — a post-review consolidation pass. The gate-QA card is already **complete** when the swarm roots, so at most one active `qa` card exists at a time → no `classify_blocked` assignee-substring collision.
-- `--synthesizer` = `documentation-daedalus` (docs = the terminal synthesis output; natural fit)
+**D2 — Swarm the review→qa→docs stage as its native shape (B1). REVISED by live dogfooding 2026-07-05.**
+`swarm` requires exactly one `--verifier` + one `--synthesizer`, with the verifier running **after** the parallel workers. The original plan tried to preserve the "QA gates reviews first" invariant by rooting the swarm behind a QA gate card (`link` + `block --kind dependency`). **Live dogfooding proved that impossible:** `hermes kanban block` is *rejected* on swarm-managed cards ("cannot block"), and workers promote off an auto-`done` swarm root immediately — a swarm cannot be externally gated. Revised mapping (shipped):
+- **Root the swarm at developer-card completion** (no external gate — it can't be built).
+- workers = `reviewer-daedalus`, `security-analyst-daedalus`, `accessibility-daedalus`
+- `--verifier` = `qa-daedalus` — QA runs as the swarm's verifier **after** the parallel reviews.
+- `--synthesizer` = `documentation-daedalus` (terminal synthesis)
 - `--idempotency-key` = `swarm-{issue_number}`
-- `<goal>` = "Review + document PR for issue #N"
-(Rejected alternative: "reviews-only" swarm — impossible, `swarm` mandates a verifier + synthesizer.)
+- Tradeoff: in native mode QA verifies **after** reviews rather than gating before them — a deliberate, default-off, flag-gated relaxation aligned with #1276's "let Hermes orchestrate" thesis. The legacy flag-off path keeps QA-gates-reviews-first, byte-identical.
+(Rejected: B2 "emit swarm at QA-completion" — QA-as-pre-gate leaves no natural role for the swarm's mandatory `--verifier`; and "reviews-only" swarm — impossible, `swarm` mandates a verifier + synthesizer.)
 
 ## Structure decision — split by part (behind the one flag)
 
