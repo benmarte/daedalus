@@ -168,6 +168,65 @@ def _heartbeats(slug: str, task_ids: list[str]) -> dict[str, int]:
         return {}
 
 
+def _worker_pids(slug: str, task_ids: list[str]) -> dict[str, int]:
+    """``{task_id: worker_pid}`` from the board DB for a fast dead-worker signal.
+
+    The board records the OS pid of the worker it spawned. When that process is
+    gone the card is a crash zombie *right now* — no need to wait out the
+    heartbeat threshold. Degrades to ``{}`` (callers fall back to heartbeat aging).
+    """
+    if not task_ids:
+        return {}
+    path = _db_path(slug)
+    if not os.path.exists(path):
+        return {}
+    try:
+        conn = connect_wal(path)
+        placeholders = ",".join("?" for _ in task_ids)
+        rows = conn.execute(
+            f"SELECT id, worker_pid FROM tasks WHERE id IN ({placeholders})",
+            task_ids,
+        ).fetchall()
+        conn.close()
+        return {r[0]: int(r[1]) for r in rows if r[1]}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("sweeper: worker_pid lookup failed for %s: %s", slug, exc)
+        return {}
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a local process with ``pid`` exists. ``os.kill(pid, 0)`` sends no
+    signal — it only probes existence/permission. Assumes the worker ran on THIS
+    host (true for local coding-agent / local-LLM workers); a cross-host pid can
+    only yield a false *alive* (→ safe heartbeat fallback), never a false reclaim."""
+    if pid <= 0:
+        return True  # unknown → don't treat as dead
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False  # no such process → worker is gone
+    except PermissionError:
+        return True  # exists but not ours → alive
+    except OSError:
+        return True  # inconclusive → don't reclaim on this signal
+
+
+def find_dead_worker_running(
+    cards: list[dict], pid_by_id: dict[str, int], *, alive_fn=_pid_alive,
+) -> list[dict]:
+    """Running cards whose recorded worker pid is DEAD — reclaim immediately,
+    independent of heartbeat age. Pure/testable: liveness is injected."""
+    dead: list[dict] = []
+    for card in cards:
+        if (card.get("status") or "").lower() != "running":
+            continue
+        pid = pid_by_id.get(str(card.get("id")))
+        if pid and not alive_fn(pid):
+            dead.append(card)
+    return dead
+
+
 def _archive_with_retry(
     slug: str,
     tid: str,
@@ -296,26 +355,53 @@ def sweep_stale_running(
             if beat is not None:
                 c["last_heartbeat_at"] = beat
 
+    # Fast dead-worker path: a running card whose recorded worker pid is gone is a
+    # crash zombie NOW — reclaim without waiting out the heartbeat threshold. This is
+    # what makes local-model self-heal fast instead of ~30 min (the qwen developer
+    # crashes mid-run; heartbeat aging alone is slow). Heartbeat aging below still
+    # catches wedged-but-alive workers and cross-host cases (dead-pid → safe fallback).
+    all_ids = [str(c.get("id")) for c in cards if c.get("id")]
+    dead_cards = find_dead_worker_running(cards, _worker_pids(slug, all_ids))
+    dead_ids = {str(c.get("id")) for c in dead_cards}
+
     stale = find_stale_running(cards, now=now, threshold_hours=threshold_hours)
+    # Reclaim the union: dead-pid cards (immediate) + heartbeat-stale cards. Dedup so a
+    # card that is both isn't reblocked twice.
+    seen: set = set()
     stale_ids: list[str] = []
-    for card, age in stale:
+    work: list[tuple[dict, float | None]] = (
+        [(c, None) for c in dead_cards] + [(c, age) for c, age in stale]
+    )
+    for card, age in work:
         tid = str(card.get("id") or "")
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
         assignee = card.get("assignee") or card.get("title") or "?"
+        is_dead = tid in dead_ids
         action = (
             "re-blocking crash-class so it re-dispatches and frees the slot"
             if reset else "manual intervention may be required"
         )
-        logger.warning(
-            "sweeper: card %s (%s) stuck in running for %.0fh (>%gh) with no "
-            "summary update — worker may have died; %s",
-            tid, assignee, age, threshold_hours, action,
-        )
+        if is_dead:
+            logger.warning(
+                "sweeper: card %s (%s) worker process is gone — crash zombie; %s",
+                tid, assignee, action,
+            )
+        else:
+            logger.warning(
+                "sweeper: card %s (%s) stuck in running for %.0fh (>%gh) with no "
+                "summary update — worker may have died; %s",
+                tid, assignee, age, threshold_hours, action,
+            )
         stale_ids.append(tid)
         if reset and tid:
-            reason = (
-                f"{STALE_RUNNING_RESET_REASON} — no summary update for "
-                f"{age:.0f}h (issue #1323 auto-reclaim)"
+            detail = (
+                "worker process gone (fast dead-worker reclaim)"
+                if is_dead
+                else f"no summary update for {age:.0f}h (issue #1323 auto-reclaim)"
             )
+            reason = f"{STALE_RUNNING_RESET_REASON} — {detail}"
             if kanban.block_task(slug, tid, reason):
                 logger.info("sweeper: reset stale-running card %s → %s", tid, reason)
             else:

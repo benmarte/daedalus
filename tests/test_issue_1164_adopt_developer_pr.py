@@ -150,6 +150,36 @@ class TestTryAdoptDeveloperPr(unittest.TestCase):
         self.assertEqual(tid, "t_dev0")
         self.assertTrue(summary.startswith("review-required: PR #101"))
 
+    def test_stuck_triage_card_archived_and_replaced(self):
+        """F10: a developer card stuck in triage (terminal & immovable) with an open PR
+        is recovered by archiving it (opens the gated QA child) and creating a fresh
+        developer card completed with the PR — decoupling progress from the crash-loop-
+        prone local-LLM developer's flaky card-signaling."""
+        triage_card = {
+            "id": "t_dev_triage", "assignee": "developer-daedalus",
+            "status": "triage", "title": "#42 Developer: feature", "summary": "",
+        }
+        with (
+            mock.patch.object(self.disp.kanban, "list_tasks", return_value=[triage_card]),
+            mock.patch.object(self.disp.kanban, "show_card", return_value={"latest_summary": ""}),
+            mock.patch.object(self.disp.kanban, "create_task", return_value="t_dev_new") as create,
+            mock.patch.object(self.disp.kanban, "claim", return_value=True) as claim,
+            mock.patch.object(self.disp.kanban, "complete", return_value=True) as complete,
+            mock.patch.object(self.disp.kanban, "archive_task", return_value=True) as archive,
+            mock.patch.object(self.disp.kanban, "edit_summary", return_value=True) as edit_summary,
+        ):
+            adopted = self.disp._try_adopt_developer_pr(
+                "slug", 42, "developer-daedalus", FakeProvider(pr=_pr(101)),
+            )
+        self.assertTrue(adopted)
+        create.assert_called_once()                       # replacement dev card created
+        claim.assert_called_once_with("slug", "t_dev_new")
+        complete.assert_called_once()                     # replacement completed with PR
+        self.assertEqual(complete.call_args[0][1], "t_dev_new")
+        self.assertIn("PR #101", complete.call_args.kwargs.get("summary", ""))
+        archive.assert_called_once_with("slug", "t_dev_triage")  # stuck card archived last
+        edit_summary.assert_not_called()                  # not a done card → not edited
+
     def test_adopted_summary_is_parseable(self):
         """The rewritten summary must satisfy extract_pr_number_from_summary so
         _developer_task_state reports 'complete' on the next tick."""
