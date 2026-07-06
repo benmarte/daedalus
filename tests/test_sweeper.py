@@ -106,6 +106,39 @@ def test_find_stale_respects_custom_threshold():
           len(sweeper.find_stale_blocked(cards, now=NOW, threshold_hours=6)) == 1)
 
 
+# ── fast dead-worker reclaim (worker_pid liveness) ──────────────────────────
+def test_find_dead_worker_detects_gone_pid():
+    cards = [_card("t1", status="running")]
+    dead = sweeper.find_dead_worker_running(cards, {"t1": 12345}, alive_fn=lambda p: False)
+    check("running card with dead worker pid is reclaimed immediately",
+          len(dead) == 1 and dead[0]["id"] == "t1")
+
+
+def test_find_dead_worker_ignores_live_pid():
+    cards = [_card("t1", status="running")]
+    check("live worker pid is not reclaimed",
+          sweeper.find_dead_worker_running(cards, {"t1": 999}, alive_fn=lambda p: True) == [])
+
+
+def test_find_dead_worker_ignores_missing_pid():
+    cards = [_card("t1", status="running")]
+    check("no recorded pid → skip (heartbeat fallback owns it)",
+          sweeper.find_dead_worker_running(cards, {}, alive_fn=lambda p: False) == [])
+
+
+def test_find_dead_worker_ignores_non_running():
+    cards = [_card("t1", status="blocked")]
+    check("non-running card is never dead-worker reclaimed",
+          sweeper.find_dead_worker_running(cards, {"t1": 12345}, alive_fn=lambda p: False) == [])
+
+
+def test_pid_alive_semantics():
+    import os as _os
+    check("own pid is alive", sweeper._pid_alive(_os.getpid()) is True)
+    check("pid<=0 treated as unknown/alive", sweeper._pid_alive(0) is True)
+    check("very high pid is dead", sweeper._pid_alive(2_000_000_000) is False)
+
+
 # ── find_stale_blocked: edge cases at the exact 48h boundary ─────────────────
 
 

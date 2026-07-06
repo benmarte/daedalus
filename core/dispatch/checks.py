@@ -521,36 +521,65 @@ def _try_adopt_developer_pr(
     # _developer_task_state). Use extract_issue_number instead of substring
     # matching so a task for issue #420 is NOT adopted as a target for #42
     # (substring bug, #1168).
+    # F10: adopt the PR for a developer card that is done-but-empty OR stuck
+    # (triage/blocked) — a crash-loop-prone local-LLM developer opens the PR then
+    # fails to complete its own card and escalates to triage. The work (open PR) is
+    # real, so adopting it decouples pipeline progress from the agent's flaky
+    # card-signaling. Exact issue-number match — not a substring check (#1168).
+    _DONE = ("done", "complete", "completed")
+    _ADOPTABLE = _DONE + ("triage", "blocked")
     target_tid = ""
+    target_status = ""
+    target_title = ""
     for t in _kanban().list_tasks(slug):
         title = t.get("title") or ""
-        # Exact issue-number match — not a substring check.
         if extract_issue_number(title) != issue_number:
             continue
         if (t.get("assignee") or "").strip() != developer_profile:
             continue
-        if (t.get("status") or "").lower() not in ("done", "complete", "completed"):
+        st = (t.get("status") or "").lower()
+        if st not in _ADOPTABLE:
             continue
         if extract_pr_number_from_summary(_get_task_summary(t, slug)) is not None:
             continue
         tid = str(t.get("id") or t.get("task_id") or "")
         if tid:
             target_tid = tid  # list order is creation order — keep the newest
+            target_status = st
+            target_title = title
     if not target_tid:
         return False
-    if not _kanban().edit_summary(
-        slug,
-        target_tid,
-        f"review-required: PR #{pr.number} (adopted from provider state — "
-        f"developer completed with empty summary, #1164)",
-    ):
-        return False
+    summary = (
+        f"review-required: PR #{pr.number} (adopted from provider state — developer "
+        f"opened the PR but crashed/stalled before completing, #1164/F10)"
+    )
+    if target_status in _DONE:
+        # Done-but-empty card: just rewrite the summary so the next tick reads it as
+        # complete-with-PR.
+        if not _kanban().edit_summary(slug, target_tid, summary):
+            return False
+    else:
+        # A triage/blocked card is TERMINAL and immovable (complete needs a running
+        # card; triage rejects unblock/promote/complete). So archive the stuck card —
+        # which, being terminal, opens the gated QA child — and create a fresh developer
+        # card completed with the PR, giving _developer_task_state a real 'complete'.
+        # Order: build the replacement first; only archive the stuck card once it lands,
+        # so a create/complete failure never loses the escalation record.
+        new_tid = _kanban().create_task(
+            slug, target_title or f"#{issue_number} Developer (adopted PR #{pr.number})",
+            assignee=developer_profile,
+            idempotency_key=f"developer-{issue_number}-adopt-pr-{pr.number}",
+        )
+        if not new_tid:
+            return False
+        _kanban().claim(slug, new_tid)
+        if not _kanban().complete(slug, new_tid, summary=summary):
+            return False
+        _kanban().archive_task(slug, target_tid)
     logger.warning(
-        "dispatch: developer card %s for #%s completed with no PR in summary "
-        "but provider shows PR #%s — auto-adopted it as the card summary (#1164)",
-        target_tid,
-        issue_number,
-        pr.number,
+        "dispatch: developer card %s for #%s was %r with no PR in summary but "
+        "provider shows PR #%s — adopted it (F10 universal PR-adoption)",
+        target_tid, issue_number, target_status, pr.number,
     )
     return True
 
@@ -2451,6 +2480,33 @@ def _check_completed_developer(
         if d else _fetch_issue_with_retry_impl
     )
     _dev_body = getattr(d, "_dev_task_body", None) if d else None
+
+    # F10: adopt an in-flight PR for a developer card stuck in triage/blocked. A
+    # crash-loop-prone local-LLM developer opens the PR (the real work) but fails to
+    # complete its own card and the block-loop breaker escalates it to triage. The
+    # done-loop below only sees `done` cards, so without this a stuck-but-productive
+    # developer never advances. Adopting the open PR completes the card and opens QA —
+    # decoupling pipeline progress from the agent's flaky card-signaling.
+    _dev_profile = p.get("developer", _DEFAULT_PROFILES["developer"])
+    for _stuck_status in ("triage", "blocked"):
+        for _stuck in _kanban().list_tasks(slug, status=_stuck_status):
+            # Re-check the actual status (don't rely solely on the list filter) so this
+            # pass only ever adopts genuinely stuck cards.
+            if (_stuck.get("status") or "").lower() != _stuck_status:
+                continue
+            if (_stuck.get("assignee") or "").strip() != _dev_profile:
+                continue
+            if extract_pr_number_from_summary(_get_task_summary(_stuck, slug)) is not None:
+                continue
+            _sn = extract_issue_number(_stuck.get("title") or "")
+            if _sn is None:
+                continue
+            if _is_issue_closed_cached(provider, _sn, _closed_issue_cache) is not False:
+                continue
+            _try_adopt_developer_pr(
+                slug, _sn, _dev_profile, provider,
+                base_branch=base_branch, dry_run=dry_run,
+            )
 
     for task in _kanban().list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p.get(
