@@ -90,6 +90,23 @@ def test_max_spawns_caps(monkeypatch):
     assert n == 2 and len(claimed) == 2  # capped
 
 
+def test_nested_show_card_body_is_read(monkeypatch):
+    """Regression: kanban.show_card nests the card fields under a `task` key
+    ({"task": {...body...}, "children":...}), NOT at the top level. direct_dispatch
+    must read task.body or it sees an empty body and skips every card."""
+    claimed, spawned = [], []
+    tasks = [{"id": "t1", "assignee": "validator-daedalus", "title": "#42 x"}]
+    # show_card returns the REAL nested shape
+    nested = {"t1": {"task": {"id": "t1", "title": "#42 x", "body": _DELEG_BODY},
+                     "children": [], "events": []}}
+    monkeypatch.setattr(dd.kanban, "list_tasks", lambda slug, status="": tasks if status == "ready" else [])
+    monkeypatch.setattr(dd.kanban, "show_card", lambda slug, cid: nested.get(cid))
+    monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: claimed.append(cid) or True)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=5,
+                           spawn=lambda **k: spawned.append(k))
+    assert n == 1 and claimed == ["t1"] and spawned[0]["role"] == "validator"
+
+
 def test_ready_status_card_is_found(monkeypatch):
     """#1333 regression: a freshly-created daedalus card sits in `ready` (not `todo`)
     with dispatch_in_gateway=false. direct_dispatch must scan `ready` or it no-ops

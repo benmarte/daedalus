@@ -123,12 +123,16 @@ def direct_dispatch(
         if not cid or cid in seen:
             continue  # dedup across status buckets
         seen.add(cid)
-        detail = kanban.show_card(slug, cid) or card
-        body = detail.get("body") or ""
+        # show_card nests the card fields under a "task" key
+        # ({"task": {...id,title,body...}, "children":..., "events":...}); the body is
+        # NOT at the top level. Read from task, falling back to the list_tasks card.
+        detail = kanban.show_card(slug, cid) or {}
+        task = detail.get("task") or detail or card
+        body = task.get("body") or card.get("body") or ""
         if _DELEGATION_MARKER not in body:
             continue  # not a delegated body → let the normal path handle it
         inner = _inner_task_body(body)
-        issue = extract_issue_number(detail.get("title") or card.get("title") or "") or 0
+        issue = extract_issue_number(task.get("title") or card.get("title") or "") or 0
         pfx = _ROLE_TMP_PREFIX.get(role, role)
         taskf = f"/tmp/{pfx}-{issue}-task.txt"
         outf = f"/tmp/{pfx}-{issue}-out.txt"
