@@ -468,6 +468,50 @@ class TestAutoMergeQAGateIntegration:
     @patch('core.iterate.kanban.list_blocked')
     @patch('core.iterate.kanban.show_card')
     @patch('core.iterate.kanban.complete')
+    def test_auto_merge_allowed_when_no_ci_configured(
+        self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed,
+        mock_reviewer_passed, mock_security_passed
+    ):
+        """F8: a repo with NO CI (CIStatus.NONE) must still auto-merge — 'no checks' is a
+        pass, not a block. Daedalus works with OR without a CI/CD pipeline."""
+        from core.iterate import run_iterate
+        from core.providers.base import CIStatus
+        from tests.conftest import FakeProvider
+
+        docs_card = {
+            'id': 'docs-card-no-ci',
+            'title': '#57 Docs: Issue',
+            'assignee': 'documentation-daedalus',
+            'status': 'blocked',
+            'latest_summary': 'docs posted: PR #57',
+            'body': 'Issue #57\nPR #57',
+        }
+        mock_list_blocked.return_value = [docs_card]
+        mock_show_card.return_value = docs_card
+        mock_complete.return_value = True
+        mock_qa_passed.return_value = True
+        mock_reviewer_passed.return_value = True
+        mock_security_passed.return_value = True
+
+        provider = FakeProvider()
+        provider._ci = CIStatus.NONE  # repo has no CI checks at all
+        provider._open_prs = {57}
+
+        run_iterate(
+            'test-board', 'test/repo',
+            resolved={'execution': {'auto_merge': True}},
+            provider=provider,
+        )
+        assert len(provider.merged) > 0, (
+            "Auto-merge should proceed when the repo has no CI (NONE = nothing to gate on)"
+        )
+
+    @patch('core.iterate._security_passed_for_issue')
+    @patch('core.iterate._reviewer_passed_for_issue')
+    @patch('core.iterate._qa_passed_for_issue')
+    @patch('core.iterate.kanban.list_blocked')
+    @patch('core.iterate.kanban.show_card')
+    @patch('core.iterate.kanban.complete')
     def test_auto_merge_deferred_then_merges_when_ci_passes(
         self, mock_complete, mock_show_card, mock_list_blocked, mock_qa_passed,
         mock_reviewer_passed, mock_security_passed

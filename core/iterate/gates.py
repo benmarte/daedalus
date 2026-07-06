@@ -236,10 +236,10 @@ def _try_merge_if_gates_pass(
         logger.warning(
             "iterate: Skipping merge: security has not cleared PR #%s (issue #%s).", pr, issue_n)
         return False
-    # CI gate: green required when the provider supports CI checks; UNKNOWN (no CI
-    # configured) is treated as green so CI-less repos aren't blocked.
+    # CI gate: green required when the provider supports CI checks. NONE (the PR has zero
+    # checks — repo has no CI) is treated as green so CI-less repos aren't blocked (F8).
     provider_supports_ci = getattr(provider, "supports_ci_status", False)
-    if provider_supports_ci and ci_status != CIStatus.GREEN:
+    if provider_supports_ci and ci_status not in (CIStatus.GREEN, CIStatus.NONE):
         logger.warning(
             "iterate: Skipping merge: CI not green for PR #%s (status: %s).", pr, ci_status)
         return False

@@ -60,13 +60,19 @@ def test_validator_card_is_direct_spawned(monkeypatch):
     assert "--relay-verdict" not in str(s)  # spawn callback gets structured kwargs, not raw argv
 
 
-def test_developer_card_is_skipped(monkeypatch):
+def test_developer_card_is_direct_spawned_with_branch(monkeypatch):
+    """#1339: the developer is now delegated too (uniform coding-agent delegation). It's
+    spawned with a deterministic branch (fix/issue-N) and base so delegate.sh can build
+    the isolated worktree and detect the PR."""
     claimed, spawned = [], []
     tasks = [{"id": "t1", "assignee": "developer-daedalus", "title": "#42 dev"}]
     cards = {"t1": {"id": "t1", "title": "#42 dev", "body": _DELEG_BODY}}
     _wire(monkeypatch, tasks, cards, claimed)
-    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, spawn=lambda **k: spawned.append(k))
-    assert n == 0 and claimed == [] and spawned == []  # developer keeps worktree-spawn path
+    resolved = {"execution": _EXEC_ON, "workdir": "/repos/x", "vcs": {"target_branch": "main"}}
+    n = dd.direct_dispatch("b", resolved, spawn=lambda **k: spawned.append(k))
+    assert n == 1 and claimed == ["t1"]
+    s = spawned[0]
+    assert s["role"] == "developer" and s["branch"] == "fix/issue-42" and s["base"] == "main"
 
 
 def test_non_delegation_body_is_skipped(monkeypatch):
@@ -149,6 +155,79 @@ def test_claim_failure_skips_spawn(monkeypatch):
     monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: False)  # already running
     n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, spawn=lambda **k: spawned.append(k))
     assert n == 0 and spawned == []  # no double-spawn when claim fails
+
+
+def test_developer_gets_dev_override_not_relay_override(monkeypatch):
+    """The developer's inner task must carry the DEV override (open a PR), not the review
+    relay override (emit a verdict) — but still be forbidden from touching kanban."""
+    claimed, spawned = [], []
+    tasks = [{"id": "t1", "assignee": "developer-daedalus", "title": "#42 dev"}]
+    cards = {"t1": {"id": "t1", "title": "#42 dev", "body": _DELEG_BODY}}
+    _wire(monkeypatch, tasks, cards, claimed)
+    dd.direct_dispatch("b", {"execution": _EXEC_ON, "workdir": "/r"},
+                       spawn=lambda **k: spawned.append(k))
+    written = Path(spawned[0]["taskf"]).read_text(encoding="utf-8")
+    assert dd._DEV_MODE_OVERRIDE in written
+    assert dd._RELAY_MODE_OVERRIDE not in written
+    assert "open the pr" in written.lower() and "hermes kanban complete" in written
+
+
+def test_repo_workdir_threaded_to_spawn_for_advance(monkeypatch):
+    """#1339 near-real-time advance: direct_dispatch must pass the repo path (workdir) to
+    the spawn so delegate.sh can fire the scoped advance dispatch (the delegated `claude -p`
+    is not a Hermes session and never fires the on_session_end hook)."""
+    claimed, spawned = [], []
+    tasks = [{"id": "t1", "assignee": "validator-daedalus", "title": "#42 x"}]
+    cards = {"t1": {"id": "t1", "title": "#42 x", "body": _DELEG_BODY}}
+    _wire(monkeypatch, tasks, cards, claimed)
+    resolved = {"execution": _EXEC_ON, "workdir": "/repos/dogfood"}
+    dd.direct_dispatch("b", resolved, max_spawns=5, spawn=lambda **k: spawned.append(k))
+    assert spawned and spawned[0]["repo"] == "/repos/dogfood"
+
+
+def test_gated_card_with_incomplete_parent_is_skipped(monkeypatch):
+    """#1339 gating: a QA card (parents=[developer]) must NOT be dispatched while its
+    developer parent is still running — otherwise the review roles fire before the PR
+    exists. direct_dispatch must honor parent-completion like the gateway path does."""
+    claimed, spawned = [], []
+    qa_card = {"id": "t_qa", "assignee": "qa-daedalus", "title": "#42 QA", "status": "todo"}
+    dev_card = {"id": "t_dev", "assignee": "developer-daedalus", "title": "#42 Dev", "status": "running"}
+    # list_tasks(status=...) returns the QA card for todo; the no-arg full scan returns both
+    def _list(slug, status=""):
+        if status == "todo":
+            return [qa_card]
+        if status == "":
+            return [qa_card, dev_card]
+        return []
+    monkeypatch.setattr(dd.kanban, "list_tasks", _list)
+    monkeypatch.setattr(dd.kanban, "show_card",
+                        lambda slug, cid: {"task": {"id": "t_qa", "title": "#42 QA", "body": _DELEG_BODY},
+                                           "parents": ["t_dev"]})
+    monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: claimed.append(cid) or True)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=5,
+                           spawn=lambda **k: spawned.append(k))
+    assert n == 0 and spawned == [] and claimed == []  # gated: developer parent not done
+
+
+def test_gated_card_dispatches_once_parent_done(monkeypatch):
+    """Once the developer parent is done, the QA card becomes dispatchable."""
+    claimed, spawned = [], []
+    qa_card = {"id": "t_qa", "assignee": "qa-daedalus", "title": "#42 QA", "status": "ready"}
+    dev_card = {"id": "t_dev", "assignee": "developer-daedalus", "title": "#42 Dev", "status": "done"}
+    def _list(slug, status=""):
+        if status == "ready":
+            return [qa_card]
+        if status == "":
+            return [qa_card, dev_card]
+        return []
+    monkeypatch.setattr(dd.kanban, "list_tasks", _list)
+    monkeypatch.setattr(dd.kanban, "show_card",
+                        lambda slug, cid: {"task": {"id": "t_qa", "title": "#42 QA", "body": _DELEG_BODY},
+                                           "parents": ["t_dev"]})
+    monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: claimed.append(cid) or True)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=5,
+                           spawn=lambda **k: spawned.append(k))
+    assert n == 1 and spawned[0]["role"] == "qa"  # parent done → dispatched
 
 
 def test_inner_task_file_carries_relay_override(monkeypatch):

@@ -241,7 +241,7 @@ class AzureDevOpsProvider(VCSProvider):
             return CIStatus.UNKNOWN
         statuses = (data or {}).get("value") or []
         if not statuses:
-            return CIStatus.UNKNOWN
+            return CIStatus.NONE  # no statuses → repo has no CI (F8): pass, don't gate
         latest: dict[str, str] = {}
         for s in statuses:  # API returns oldest→newest; keep the latest per context
             ctx = s.get("context") or {}
@@ -251,7 +251,7 @@ class AzureDevOpsProvider(VCSProvider):
         # Filter them out so they don't prevent a GREEN result or inflate PENDING.
         effective = {s for s in latest.values() if s not in ("notapplicable", "notset", "")}
         if not effective:
-            return CIStatus.UNKNOWN
+            return CIStatus.NONE  # only neutral statuses → nothing to gate on (F8)
         if effective & {"failed", "error"}:
             return CIStatus.RED
         if effective & {"pending"}:

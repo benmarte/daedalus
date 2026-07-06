@@ -284,7 +284,7 @@ def _verify_ci_green(
         )
         return VerifyResult("skipped", f"provider error: {exc}")
 
-    if ci != CIStatus.GREEN:
+    if ci not in (CIStatus.GREEN, CIStatus.NONE):  # NONE = no CI → nothing to verify (F8)
         # CANARY: confirm provider is healthy before declaring mismatch.
         # Use the PR lookup as the canary (independent of CI status).
         iss: int | None = record.issue_ref if record.issue_ref is not None else issue_number

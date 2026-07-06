@@ -157,7 +157,7 @@ def test_ci_status_pipeline_mapping(provider):
         provider._http.get_json.return_value = [{"status": gl_status}]
         assert provider.get_pr_ci_status(1) == expected, gl_status
     provider._http.get_json.return_value = []
-    assert provider.get_pr_ci_status(1) == CIStatus.UNKNOWN
+    assert provider.get_pr_ci_status(1) == CIStatus.NONE  # no pipelines → no CI (F8)
 
 
 def test_mr_notes_comments(provider):

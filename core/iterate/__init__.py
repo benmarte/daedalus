@@ -416,10 +416,14 @@ def run_iterate(
                 ci_cache[pr] = provider.get_pr_ci_status(pr)
             raw_ci = ci_cache[pr]
 
-            # No CI configured → no gate: treat UNKNOWN as green when the
-            # provider doesn't support CI status checks (e.g. no check runs).
-            if not getattr(provider, "supports_ci_status", False) and raw_ci == CIStatus.UNKNOWN:
-                logger.info("iterate: %s provider has no CI support — treating as green", tid)
+            # No CI to gate on → treat as green so Daedalus works WITH or WITHOUT CI:
+            #  • CIStatus.NONE — the PR was inspected and has zero checks (repo has no CI).
+            #  • UNKNOWN from a provider that can't report CI at all (no capability).
+            # A genuine UNKNOWN from a CI-capable provider (transient error) is NOT treated
+            # as green — it stays False so we wait rather than merge on an unclear signal.
+            no_ci_capability = not getattr(provider, "supports_ci_status", False)
+            if raw_ci == CIStatus.NONE or (no_ci_capability and raw_ci == CIStatus.UNKNOWN):
+                logger.info("iterate: %s no CI checks on PR — treating as green", tid)
                 ci_green = True
             else:
                 ci_green = (raw_ci == CIStatus.GREEN)
@@ -630,7 +634,12 @@ def run_iterate(
         ):
             ci_status_for_merge = ci_cache.get(pr, CIStatus.UNKNOWN)
             provider_supports_ci = getattr(provider, "supports_ci_status", False)
-            if provider_supports_ci and ci_status_for_merge != CIStatus.GREEN:
+            # NONE (repo has zero checks) is a pass — nothing to wait on. Only defer when
+            # CI exists and isn't green yet, so no-CI repos advance/merge (F8).
+            if (
+                provider_supports_ci
+                and ci_status_for_merge not in (CIStatus.GREEN, CIStatus.NONE)
+            ):
                 logger.info(
                     "iterate: deferring docs card %s — CI not green for PR #%s (status: %s). "
                     "Card stays blocked; next tick will retry when CI passes.",
