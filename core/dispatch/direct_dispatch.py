@@ -55,6 +55,27 @@ _DIRECT_ROLES = frozenset(
     {"validator", "pm", "planner", "qa", "reviewer", "security", "accessibility", "documentation"}
 )
 
+# Relay-mode override appended to every directly-spawned inner task body (#1329).
+# The shared role bodies instruct the agent to complete/block ITS OWN kanban card
+# (correct under the legacy `hermes -p` orchestrator, which owns the card). Under
+# direct-delegate the wrapper (delegate.sh --relay-verdict) owns the transition and
+# relays the verdict the agent EMITS. If the inner agent also runs a kanban state
+# command it races the relay: the agent's bare `complete` (no --result) usually wins,
+# leaving the card done with an empty result, which the dispatcher reads as an empty
+# completion and re-creates the card (duplicate loop). This directive supersedes the
+# self-completion step so the agent only emits its verdict and never touches kanban.
+_RELAY_MODE_OVERRIDE = (
+    "\n\n---\n"
+    "⚠️ RELAY MODE — THE DISPATCHER RECORDS YOUR VERDICT FOR YOU.\n"
+    "Do NOT run `hermes kanban complete`, `hermes kanban block`, or ANY other kanban "
+    "state command. Your card is transitioned automatically from the verdict you emit. "
+    "This OVERRIDES any step above that tells you to complete or block your own card.\n"
+    "Instead, emit your verdict as your FINAL assistant message, beginning with the EXACT "
+    "signal prefix the steps above specify (e.g. `CONFIRMED:`, `spec:`, `qa-passed`, "
+    "`review-approved`, `docs posted`, `ESCALATE:`, `BLOCKED:`). Any kanban command you "
+    "run will race the dispatcher and corrupt the pipeline.\n"
+)
+
 
 def _default_spawn(*, card: str, board: str, cmd: str, role: str, taskf: str, outf: str) -> None:
     """Spawn the one-shot delegate wrapper detached (its own session), so it
@@ -136,11 +157,15 @@ def direct_dispatch(
         body = task.get("body") or card.get("body") or ""
         if _DELEGATION_MARKER not in body:
             continue  # not a delegated body → let the normal path handle it
-        inner = _inner_task_body(body)
+        inner = _inner_task_body(body) + _RELAY_MODE_OVERRIDE
         issue = extract_issue_number(task.get("title") or card.get("title") or "") or 0
         pfx = _ROLE_TMP_PREFIX.get(role, role)
-        taskf = f"/tmp/{pfx}-{issue}-task.txt"
-        outf = f"/tmp/{pfx}-{issue}-out.txt"
+        # Include the card id in the temp paths: the dispatcher can create more than one
+        # card for the same (role, issue) — a retry after an empty completion, or a
+        # concurrent tick — and a path keyed only on {pfx}-{issue} lets two delegate.sh
+        # instances clobber each other's task/out files mid-run (#1329).
+        taskf = f"/tmp/{pfx}-{issue}-{cid}-task.txt"
+        outf = f"/tmp/{pfx}-{issue}-{cid}-out.txt"
 
         if dry_run:
             logger.info(

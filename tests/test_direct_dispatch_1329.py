@@ -149,3 +149,23 @@ def test_claim_failure_skips_spawn(monkeypatch):
     monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: False)  # already running
     n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, spawn=lambda **k: spawned.append(k))
     assert n == 0 and spawned == []  # no double-spawn when claim fails
+
+
+def test_inner_task_file_carries_relay_override(monkeypatch):
+    """#1329 race fix: the shared role bodies tell the agent to complete/block its OWN
+    card. Under relay mode delegate.sh owns the transition, so the inner task written to
+    disk MUST carry the relay-mode override that forbids the agent from running any
+    kanban state command — otherwise the agent's bare `complete` (no --result) races and
+    wins, the card completes empty, and the dispatcher re-creates it (duplicate loop)."""
+    claimed, spawned = [], []
+    tasks = [{"id": "t1", "assignee": "project-manager-daedalus", "title": "#42 x"}]
+    cards = {"t1": {"id": "t1", "title": "#42 x", "body": _DELEG_BODY}}
+    _wire(monkeypatch, tasks, cards, claimed)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=5,
+                           spawn=lambda **k: spawned.append(k))
+    assert n == 1 and spawned[0]["role"] == "pm"
+    written = Path(spawned[0]["taskf"]).read_text(encoding="utf-8")
+    # The override is appended verbatim and forbids kanban state writes.
+    assert dd._RELAY_MODE_OVERRIDE in written
+    assert "Do NOT run `hermes kanban complete`" in written
+    assert written.endswith(dd._RELAY_MODE_OVERRIDE)  # appended last, supersedes body steps
