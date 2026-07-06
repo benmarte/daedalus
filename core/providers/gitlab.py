@@ -217,7 +217,7 @@ class GitLabProvider(VCSProvider):
             self._log.warning("get_pr_ci_status MR !%s failed: %s", pr_number, e)
             return CIStatus.UNKNOWN
         if not data:
-            return CIStatus.UNKNOWN
+            return CIStatus.NONE  # no pipelines → repo has no CI (F8): pass, don't gate
         status = (data[0].get("status") or "").lower()
         if status == "success":
             return CIStatus.GREEN

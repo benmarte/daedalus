@@ -256,7 +256,10 @@ class GitHubProvider(VCSProvider):
             self._log.warning("get_pr_ci_status PR #%s failed: %s", pr_number, e)
             return CIStatus.UNKNOWN
         if not checks:
-            return CIStatus.UNKNOWN
+            # Fetch succeeded but the PR has zero checks → the repo has no CI. This is
+            # NOT "unknown" (which means we couldn't tell); it means there is nothing to
+            # gate on, so the pipeline should advance/merge. See CIStatus.NONE.
+            return CIStatus.NONE
         gate = [c for c in checks if c["name"] == "ci-complete"]
         if gate:
             c = gate[0]

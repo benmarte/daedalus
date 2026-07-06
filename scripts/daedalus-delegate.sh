@@ -60,6 +60,7 @@ _board=""
 _out=""
 _repo=""
 _branch=""
+_base="dev"           # --base <branch>: base to fork the developer worktree from
 _transition=0
 _relay=0            # --relay-verdict: transition a review/validator card by relaying
                     # the inner agent's emitted verdict/JSON (no PR detection)
@@ -79,6 +80,7 @@ while [ $# -gt 0 ]; do
     --out)                _out="${2:?--out requires a value}";                        shift 2 ;;
     --repo)               _repo="${2:?--repo requires a value}";                     shift 2 ;;
     --branch)             _branch="${2:?--branch requires a value}";                 shift 2 ;;
+    --base)               _base="${2:?--base requires a value}";                     shift 2 ;;
     --max-wait)           _max_wait="${2:?--max-wait requires a value}";              shift 2 ;;
     --heartbeat-interval) _heartbeat_interval="${2:?--heartbeat-interval requires a value}"; shift 2 ;;
     --poll-interval)      _poll_interval="${2:?--poll-interval requires a value}";    shift 2 ;;
@@ -179,6 +181,31 @@ echo "[delegate] starting — card=$_card board=$_board max-wait=${_max_wait}s h
 echo "[delegate] cmd: $_cmd"
 echo "[delegate] out: $_out"
 
+# ── developer role: isolated per-issue worktree (#1339 developer delegate) ────────
+# The developer writes code + opens a PR, so — unlike the review roles — it needs its
+# OWN git worktree on a deterministic branch (fix/issue-<N>) forked from the base. This
+# is the same isolation the legacy `daedalus-worktree-spawn.sh` gave it (fixes the
+# shared-workdir branch/PR cross-wire, #1131), but spawned DIRECTLY here (no qwen hop).
+# The coding-agent command then runs with the worktree as its cwd.
+if [ "$_role" = "developer" ] && [ -n "$_repo" ] && [ -n "$_branch" ]; then
+  _wt="$_repo/.worktrees/dev-${_branch##*issue-}"
+  {
+    echo "[delegate] developer worktree: repo=$_repo base=$_base branch=$_branch wt=$_wt"
+    git -C "$_repo" fetch origin "$_base" -q 2>&1 || true
+    git -C "$_repo" worktree remove -f "$_wt" 2>&1 || true
+    rm -rf "$_wt" 2>&1 || true
+    git -C "$_repo" worktree prune 2>&1 || true
+    git -C "$_repo" worktree add -f "$_wt" -B "$_branch" "origin/$_base" 2>&1 \
+      || git -C "$_repo" worktree add -f "$_wt" -B "$_branch" "$_base" 2>&1 \
+      || echo "[delegate] WORKTREE_SETUP_FAILED for $_wt (base=$_base)"
+  } >>"$_out" 2>&1
+  if [ -d "$_wt" ]; then
+    _cmd="cd $(printf '%q' "$_wt") && $_cmd"
+  else
+    echo "[delegate] WARNING: worktree $_wt missing — running in repo root" >>"$_out" 2>&1
+  fi
+fi
+
 # ── spawn coding agent in its own process group ───────────────────────────────
 # Finding 2: use setsid to create a new session (pgid = child pid) so that on
 # timeout we can kill -TERM/-KILL -$pgid to reach ALL grandchildren (sub-tools,
@@ -263,7 +290,25 @@ _do_transition() {
   local _status="$1" _ec="$2"
   local _reason
 
-  if [ "$_status" = "ok" ] && [ "$_relay" -eq 1 ]; then
+  if [ "$_status" = "ok" ] && [ "$_role" = "developer" ]; then
+    # Developer (#1339): the deliverable is an OPEN PR, not a verdict. Detect it on the
+    # deterministic branch (gh auto-detects the repo from the checkout); complete the
+    # card with it so the QA gate opens. No PR => the agent failed/crashed => block as
+    # coding-agent-failed so crash-retry re-spawns from a fresh worktree (self-heal).
+    export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    local _pr_num=""
+    if command -v gh >/dev/null 2>&1 && [ -n "$_repo" ]; then
+      _pr_num="$(cd "$_repo" 2>/dev/null && gh pr list --head "$_branch" --state open \
+                    --json number --jq '.[0] | select(.number) | .number' 2>/dev/null || echo "")"
+      _pr_num="$(printf '%s' "$_pr_num" | tr -d '[:space:]')"
+      case "$_pr_num" in *[!0-9]*|'') _pr_num="" ;; esac
+    fi
+    if [ -n "$_pr_num" ]; then
+      _reason="PR #${_pr_num} opened — ${_branch}"
+    else
+      _reason="coding-agent-failed: no PR detected on ${_branch}"
+    fi
+  elif [ "$_status" = "ok" ] && [ "$_relay" -eq 1 ]; then
     # Review/validator/pm role: relay the inner agent's emitted verdict (the SOUL
     # signal line and/or the structured JSON OutcomeRecord) from its output file,
     # so the outer (possibly weak) model never has to parse-and-transition itself.
@@ -328,7 +373,7 @@ PYEOF
   # (coding-agent-failed:) always blocks so crash-retry owns the card.
   local _do_complete=0
   case "$_role" in
-    validator|pm|project-manager|planner) _do_complete=1 ;;
+    validator|pm|project-manager|planner|developer) _do_complete=1 ;;
   esac
   case "$_reason" in
     coding-agent-failed:*) _do_complete=0 ;;
@@ -360,6 +405,21 @@ PYEOF
     return 1
   fi
   echo "[delegate] transition complete"
+  # Near-real-time advance (#1339): the direct-delegate path runs `claude -p` directly,
+  # NOT a `hermes -p <role>` session, so Hermes' profile `hooks.on_session_end`
+  # (daedalus-advance.sh) never fires for delegated roles — advance would otherwise
+  # wait for the next cron tick. Fire the scoped dispatch ourselves, detached, exactly
+  # as the session-end hook would, so the next stage starts in seconds.
+  if [ -n "$_repo" ]; then
+    _advance_cron="$HOME/.hermes/scripts/daedalus-cron.sh"
+    if [ -x "$_advance_cron" ] || [ -f "$_advance_cron" ]; then
+      echo "[delegate] firing scoped advance dispatch for $_repo (role=${_role:-?})"
+      # nohup (not setsid — absent on macOS) detaches from this wrapper so the dispatch
+      # survives delegate.sh exiting, without depending on a setsid/perl fallback.
+      nohup bash "$_advance_cron" --repo "$_repo" </dev/null \
+        >>"$HOME/.hermes/logs/daedalus-advance-dispatch.log" 2>&1 &
+    fi
+  fi
   return 0
 }
 

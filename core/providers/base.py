@@ -108,6 +108,10 @@ class CIStatus:
     RED = "red"
     PENDING = "pending"
     UNKNOWN = "unknown"
+    # NONE = the PR was inspected successfully and has ZERO checks configured (the repo
+    # has no CI). Distinct from UNKNOWN (couldn't determine — error/unsupported). Callers
+    # treat NONE as "nothing to gate on" → passing, so Daedalus works with OR without CI.
+    NONE = "none"
 
 
 @dataclass
