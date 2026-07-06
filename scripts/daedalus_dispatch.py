@@ -64,6 +64,9 @@ What INTENTIONALLY STAYS here:
   Rerun-contention helpers (_rerun_marker_path, _drain_rerun_requests, …) —
   _drain_rerun_requests calls _main_inner(), so the group cannot move without a
   cycle; splitting the group would fracture cohesion.
+
+Development: run ``make test`` for the full suite and ``make lint`` before
+pushing changes to this module.
 """
 
 from __future__ import annotations
