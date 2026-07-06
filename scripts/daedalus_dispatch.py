@@ -300,6 +300,7 @@ from core.dispatch.checks import (  # noqa: F401, E402
     _retry_cap_stage_recovered,
     _retry_or_escalate_planner_stall,
     _try_adopt_developer_pr,
+    _try_open_missing_developer_pr,
     _try_adopt_pm_spec_comment,
 )
 # ── End leaf-module re-exports ────────────────────────────────────────────────
