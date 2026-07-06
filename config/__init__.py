@@ -86,7 +86,30 @@ def validate_vcs(resolved: dict) -> list[str]:
                           "(expected ready/in_progress/in_review/done)")
         elif not isinstance(val, str) or not val.strip():
             errors.append(f"vcs.status_map.{key} must be a non-empty string")
+    # webhook_secret_env names the env var holding the HMAC secret (like
+    # token_env — never a raw secret in YAML). Absence is valid (verification
+    # off); when present it must be a non-empty string.
+    if "webhook_secret_env" in vcs:
+        wse = vcs.get("webhook_secret_env")
+        if not isinstance(wse, str) or not wse.strip():
+            errors.append("vcs.webhook_secret_env must be a non-empty string "
+                          "naming the environment variable that holds the "
+                          "webhook HMAC secret")
     return errors
+
+
+def validate_failover(resolved: dict) -> list[str]:
+    """Validate the provider-failover config of a resolved per-repo config.
+
+    Covers ``execution.coding_agents``, ``model.providers`` and the
+    ``failover`` block (issue #1207). Returns a list of human-readable errors
+    (empty when valid) — absence of every key is valid (single-provider
+    back-compat). Delegates to :mod:`core.provider_failover` (imported lazily
+    so this package stays importable standalone).
+    """
+    from core.provider_failover import validate_failover as _validate
+
+    return _validate(resolved)
 
 
 # ---------------------------------------------------------------------------

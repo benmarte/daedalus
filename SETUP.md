@@ -29,6 +29,16 @@ GitHub issue after completing their step.
 
 ## Prerequisites (each colleague, once)
 1. **Hermes Agent** installed + gateway running (`hermes gateway` / `hermes gateway install`).
+
+   > **⚠️ Required gateway setting — `kanban.dispatch_in_gateway: false`.**
+   > The Hermes gateway ships its own kanban dispatch daemon. Left at its default,
+   > that daemon *and* the Daedalus dispatcher both tick the same board — the daemon
+   > preempts Daedalus, causing **double-dispatch**: cards advance out from under the
+   > pipeline and workers get spawned twice. For any Hermes install that runs Daedalus,
+   > set `kanban.dispatch_in_gateway = false` so **Daedalus is the sole dispatcher**.
+   > This is a Hermes-core gateway setting (not a `daedalus.yaml` key). The gateway
+   > reads it **once at startup**, so run `hermes gateway restart` after changing it
+   > for the new value to take effect.
 2. The **`agent-skills` plugin** (provides the lifecycle skills at
    `~/.hermes/plugins/agent-skills/skills/`) — installed **automatically** by
    `provision_roster.sh` if missing; no manual step needed.
@@ -66,9 +76,13 @@ GitHub issue after completing their step.
 ## Provision the roster
 ```bash
 git clone <this-repo> && cd daedalus
+uv sync                                 # supported install path — resolves from the committed uv.lock
 bash scripts/provision_roster.sh        # idempotent — re-run any time to reset to spec
 hermes profile list                     # expect the 9 roles
 ```
+
+> **Python dependencies:** `uv sync` is the supported install path. `uv.lock`
+> is committed so every checkout resolves the exact same dependency versions.
 What it does: creates the 9 profiles (cloning config/keys from `default`), seeds each with **only**
 its matrix agent-skills, writes a **per-profile git credential store** (`~/.git-credentials`,
 0600, keychain-free) so `git push` works inside each isolated HOME, and drops the provider

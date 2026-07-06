@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from core.iterate import has_decomposed_marker, _execute_planner_decompose
+from core import kanban as _core_kanban
+from tests.conftest import kanban_as
 
 
 def iterate_module():
@@ -111,8 +113,9 @@ def test_old_marker_in_body_skips_decompose():
     issue = _make_issue_obj(number=5, body=body)
     prov = _make_provider(issue_obj=issue)
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban = mock.MagicMock()
+    mk_kanban.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(5), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -129,8 +132,9 @@ def test_old_marker_in_comment_skips_decompose():
     comments = [{"body": "<!-- daedalus:sub-issues:[20,21,22] -->\n3 issues"}]
     prov = _make_provider(issue_obj=issue, comments=comments)
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban = mock.MagicMock()
+    mk_kanban.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(7), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -159,8 +163,9 @@ def test_concurrent_decompose_lock_prevents_second_decompose(tmp_path):
     issue = _make_issue_obj(number=42, body="plain body")
     prov = _make_provider(issue_obj=issue)
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban = mock.MagicMock()
+    mk_kanban.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(42), "o/r", "PLANNING COMPLETE",
             provider=prov, workdir=str(workdir),
@@ -194,8 +199,9 @@ def test_stale_lock_is_ignored(tmp_path):
     prov.post_issue_comment.return_value = True
     prov.add_label.return_value = True
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban = mock.MagicMock()
+    mk_kanban.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(43), "o/r", "PLANNING COMPLETE",
             provider=prov, workdir=str(workdir),

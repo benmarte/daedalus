@@ -26,6 +26,18 @@ tracking:
   #
   # Azure DevOps: board columns map to work-item states automatically — no key
   # needed; the status_map values below must match your states.
+  #
+  # Stale-running self-heal (issue #1323): a worker that dies, wedges, or
+  # suspends on a headless permission prompt leaves its card stuck `running`,
+  # holding the execution.max_dispatch slot and stalling the whole pipeline.
+  # Each tick the sweeper re-blocks such a card crash-class so the crash-retry
+  # reconciler re-dispatches it and frees the slot.
+  # stale_running:
+  #   hours: 0.5      # No-heartbeat age before a running card is stale (default
+  #                   # 0.5 = 30 min; the delegate wrapper heartbeats every 5 min,
+  #                   # so 30 min = 6 missed beats = a confident dead worker).
+  #   reset: true     # true (default): auto-reclaim (re-block crash-class →
+  #                   # re-dispatch). false: warn-only, no reclaim.
 
 # ── VCS provider ──────────────────────────────────────────────────────────────
 # All access is via token-authenticated HTTPS APIs. Tokens come ONLY from
@@ -39,6 +51,13 @@ vcs:
   # token_env: "GITHUB_TOKEN"           # Override the env var holding the API token.
   #                                     # Defaults: GITHUB_TOKEN/GH_TOKEN (github),
   #                                     # GITLAB_TOKEN (gitlab), AZURE_DEVOPS_PAT (azuredevops)
+  # webhook_secret_env: "DAEDALUS_WEBHOOK_SECRET"
+  #                                     # Env var holding the shared HMAC secret used to
+  #                                     # verify inbound webhook signatures BEFORE dispatch
+  #                                     # (issue #1141). Applies to reverse-proxied receivers
+  #                                     # that forward HTTP_* headers. When unset, signature
+  #                                     # verification is DISABLED (a one-time warning is
+  #                                     # logged). Never put the raw secret in YAML.
   # verify_ssl: true                    # Set to false to disable SSL certificate verification.
   #                                     # Useful for self-hosted instances with self-signed certs.
   #                                     # Defaults to true.
@@ -107,12 +126,63 @@ cron:
   #     target: "discord:1234567890123456789"  # numeric channel ID (not name)
   #     events: ["dispatch-summary", "pr-ready", "comment-mirror"]
 
+# ── Notification delivery transport (#1293) ───────────────────────────────────
+notify:
+  # native_send (default: false) — DELIVERY-ONLY flag.
+  #
+  # false (default): behaviour is byte-identical to before. Escalation
+  #   notifications (retry-cap-exhausted, crash-retries-exhausted) fire on BOTH
+  #   transports: the native `hermes send` path (cron.notifications targets, with
+  #   threading) AND the legacy raw webhook path (core/notification_sender.py →
+  #   SLACK_WEBHOOK_URL / DISCORD_WEBHOOK_URL env vars, with Block Kit / embeds).
+  #
+  # true: skip the redundant legacy raw-webhook calls — the native `hermes send`
+  #   path already delivers the same notifications. Use this once your escalation
+  #   channels are configured under `cron.notifications`.
+  #   ⚠️ Tradeoff: `hermes send` delivers PLAIN MARKDOWN only (no Slack Block Kit,
+  #   no Discord embeds), and delivery follows `cron.notifications` targets rather
+  #   than the SLACK_WEBHOOK_URL / DISCORD_WEBHOOK_URL env webhooks. If you rely
+  #   ONLY on those env webhooks (no `cron.notifications` targets), keep this false
+  #   or add native targets first, or these escalations will not be delivered.
+  native_send: false
+
 # ── Execution tunables ────────────────────────────────────────────────────────
 execution:
   # How many issues the dispatcher spawns per tick (default: 5). Caps how many
   # coding agents can be launched at once — keep it low (e.g. 2-4) on memory-
   # constrained hosts to avoid OOM-killing parallel coding agents (issue #141).
   # max_dispatch: 5
+
+  # Direct delegation (#1329) — default OFF. When a CLI coding_agent is set, the
+  # normal path spawns a local-model (e.g. qwen) orchestrator that must DECIDE to
+  # spawn the delegate wrapper. That deciding hop is non-deterministic: it either
+  # delegates or runs the work inline and never completes the card (a 30-min stall).
+  # With direct_delegate: true, daedalus claims each dispatchable review/validator/
+  # pm/planner card and spawns daedalus-delegate.sh --relay-verdict DIRECTLY — no
+  # local-model hop — so those stages are deterministic. The developer keeps its
+  # worktree-spawn path.
+  # REQUIRES kanban.dispatch_in_gateway=false (daedalus is the sole dispatcher),
+  # else the gateway daemon also spawns a qwen agent for the same card.
+  #
+  # #1339: direct_delegate makes daedalus the SOLE dispatcher for delegated cards,
+  # so it runs an unconditional direct-dispatch pass each tick. Do NOT also run a
+  # standalone `hermes kanban daemon` while it is on — that daemon would dispatch a
+  # fresh card to a local-model (qwen) agent before direct-dispatch can, reintroducing
+  # the hop. Keep kanban.dispatch_in_gateway=false AND no standalone kanban daemon.
+  # direct_delegate: false
+
+  # How many developer/reviewer/security fix cycles run before a card escalates
+  # for manual intervention (self-healing CI-fix and review-fix loops). Raise it
+  # for flaky suites that need more retry headroom, or lower it to fail fast.
+  # Falls back to 3 when unset, non-numeric, or <= 0. (default: 3)
+  # max_fix_attempts: 3
+
+  # How many times the planner is retried when it completes WITHOUT a
+  # "PLANNING COMPLETE" signal (a silent stall — context overflow / agent
+  # crash). After the cap is exhausted the dispatcher posts an exhaustion
+  # comment on the issue so a human is pinged instead of the epic stalling
+  # silently. Falls back to 2 when unset, non-numeric, or <= 0. (default: 2)
+  # max_planner_retries: 2
 
   # Iterations per agent (how many back-and-forth steps each agent gets).
   # iterations: 5
@@ -136,6 +206,254 @@ execution:
   #   - ".env.*"
   #   - "*.secrets"
   #   - "secrets.*"
+
+  # ── Ground-truth outcome verification (#1170 Phase 2) ────────────────────
+  # When enabled, the dispatcher verifies the VCS claims in structured JSON
+  # outcome records BEFORE acting on stage completions.  Verification failures
+  # downgrade the action (blocked → hold; qa-passed → qa-failed) rather than
+  # crashing — provider errors skip verification entirely (fail-open).
+  #
+  # Rules applied when enabled:
+  #   developer/pr_opened  → PR must exist and reference the issue
+  #   qa/passed (ci green) → provider CI status must actually be green
+  #   docs/posted          → "**Agent: documentation**" comment must exist
+  #
+  # Default: false (opt-in for one release cycle; enable once agents reliably
+  # emit valid JSON outcome records — see outcome_source telemetry in history).
+  # verify_outcomes: false
+
+  # ── Native per-task bounds (issue #1289) ───────────────────────────────────
+  # OFF by default. When enabled, every dispatcher-created role card carries
+  # Hermes-native circuit breakers so a crashed or runaway worker self-bounds
+  # without help from the daedalus crash-retry reconciler:
+  #   * --max-retries N  — consecutive-failure breaker (Hermes parks the card
+  #     after N straight worker failures). Defaults to 2 (= kanban.failure_limit).
+  #     This is DISTINCT from the CI/review fix-loop (MAX_FIX_ATTEMPTS = 3): the
+  #     breaker retries a card whose WORKER died; the fix-loop retries a card
+  #     whose ARTIFACT failed review.
+  #   * --max-runtime <dur> — wall-clock cap after which Hermes
+  #     SIGTERM->SIGKILL->requeues the card. Short roles use the default; the
+  #     developer role gets a generous cap because it edits code + runs tests.
+  # With native_bounds ON, native --max-runtime requeue is authoritative for
+  # wall-clock timeouts, so crash_retry SKIPS timeout-class cards (no
+  # double-handling of CODING_AGENT_TIMEOUT); other crash classes (session
+  # limit, quota, generic crash) still flow through crash_retry unchanged.
+  # Defaults shown:
+  # native_bounds: false
+  # native_max_retries: 2
+  # native_max_runtime: "30m"
+  # native_bounds_by_role:
+  #   developer: {max_runtime: "1h"}
+
+  # ── Goal-mode outcome verification (#1296) ────────────────────────────────
+  # OFF by default.  When enabled, machine-verifiable pipeline stages
+  # (developer, QA, documentation) are created with Hermes goal-mode
+  # (--goal + --goal-max-turns).  A judge LLM evaluates the worker's outputs
+  # against a ground-truth goal string derived from each SOUL's completion
+  # signal, rather than relying on the worker's self-report alone.
+  #
+  # COST WARNING: goal-mode incurs an extra LLM call (the judge) per card
+  # turn.  Enable only when you have a model brain configured and want
+  # stronger completion verification.
+  #
+  # DELEGATION BYPASS: when the effective coding-agent for a role is not
+  # 'none' or 'hermes' (e.g. coding_agent: claude-code), the outer Hermes
+  # worker delegates to an external agent and has ~1 turn.  Goal-mode is
+  # automatically skipped for those roles to avoid evaluating the wrapper
+  # turn rather than the inner agent's artifact.
+  #
+  # NOTE: if you configure coding_agents (the chain) without also setting
+  # coding_agent (singular), the primary chain agent is used for the bypass
+  # check — no extra config needed.  If you use ONLY coding_agents, set
+  # coding_agent too so the bypass fires correctly on older dispatcher builds:
+  #
+  #   coding_agent: claude-code       # primary — governs delegation bypass
+  #   coding_agents:                  # full failover chain
+  #     - name: claude-code
+  #       cmd: CLAUDE_CONFIG_DIR=$HOME/.claude claude ...
+  #     - name: codex
+  #       cmd: codex exec --full-auto
+  #
+  # TURN EXHAUSTION: if the judge turn budget (goal_max_turns) is reached
+  # without a PASS verdict, Hermes escalates the card — it does NOT retry
+  # the worker automatically.  The dispatcher's retry-cap logic still applies
+  # (the escalated card counts as a retry), so the normal cap-exhaustion
+  # notification fires if the issue exceeds max retries.  Increase
+  # goal_max_turns or disable goal_mode if turn exhaustion is frequent.
+  #
+  # FALLBACK: if hermes kanban create --goal returns non-zero (judge brain
+  # unavailable), the card is still created in normal mode — the pipeline
+  # never stalls.
+  #
+  # Goal strings (ground-truth, derived from SOUL completion signals):
+  #   developer    — "an open PR for issue #N exists; card blocked review-required"
+  #   qa           — "QA card blocked with qa-passed or qa-failed verdict"
+  #   documentation — "docs posted comment exists on issue #N; card completed"
+  #
+  # Default: false (opt-in — adds judge LLM cost per card turn)
+  # goal_mode: false
+  # goal_max_turns: 30            # judge turn budget per eligible card
+
+# ── Protocol migration (#1170 Phase 3) ───────────────────────────────────────
+# Controls how the dispatcher handles pipeline-stage completion signals.
+#
+# During the Phase-1/2 dual-write soak period, agents write BOTH a legacy
+# role-prefix line (e.g. "review-required:") AND a structured JSON outcome
+# block.  The dispatcher reads the JSON first and falls back to the prefix.
+# This section governs the retirement of that fallback.
+#
+# prefix_fallback (default: true — behaviour unchanged from Phase 1/2)
+#   true  — dual-write mode: JSON outcome routed first; prefix is the fallback.
+#            All existing behaviour is byte-unchanged.  This is the safe default
+#            during the production soak period.
+#   false — JSON-primary mode (flip ONLY after the telemetry shows sustained
+#            _outcome_json-only cycles in dispatch history).  When false:
+#
+#            1. classify_blocked: a card with no valid JSON outcome record is
+#               treated as "unparseable completion" and routed to PENDING_SIGNAL
+#               (holds for next-tick re-evaluation) rather than falling through
+#               to prefix parsing.
+#            2. _guard_prefix_on_done: a done card must carry a valid JSON
+#               outcome record — a prefix line alone no longer satisfies the
+#               guard.  Cards with only a legacy prefix are archived and
+#               recreated as blocked (same as an unrecognised prefix today).
+#            3. Marker reads (dedup/stages): when workdir is supplied, the
+#               comment-scan fallback is skipped entirely — dispatch_state is
+#               the authoritative source.  Marker comments are still WRITTEN
+#               for human visibility; only the read path changes.
+#               NOTE: Fork 3 is currently inert — no existing check-function
+#               call site passes workdir to _has_notified_block or
+#               _is_consult_resolved, so comment-scan remains the operative
+#               read path regardless of this flag.  Threading workdir into
+#               those call sites is deferred as a separate follow-up; there
+#               is therefore no state-warmup precondition before flipping.
+#
+# Flip criteria:
+#   Inspect the `_outcome_json` and `_outcome_prefix` counters in the dispatch
+#   history JSONL (workdir/.hermes/daedalus/history.jsonl).  When _outcome_json
+#   accounts for ≥95% of all completions across at least 7 consecutive days of
+#   production ticks with no regressions, it is safe to set prefix_fallback: false.
+#   Fork 3 (marker-read optimisation) requires the separate workdir-threading
+#   follow-up before it takes effect.  Point at issue #1170 for the full checklist.
+#
+# ── Pipeline structure (epic #1276) ──────────────────────────────────────────
+# upfront_dag (default: false — behaviour byte-identical when off)
+#   false — the dispatcher creates ONLY the validator card at Ready-time and
+#            fans out the downstream stages per-tick after the validator emits
+#            CONFIRMED (the classic phased flow). This is the default.
+#   true  — the ENTIRE stage graph is built in one shot at Ready-time:
+#            validator → pm → developer → qa → [reviewer, security,
+#            accessibility] → docs, with every non-root stage created
+#            dependency-blocked (`block --kind dependency`) so Hermes
+#            auto-promotes it the moment ALL of its parents complete (docs is
+#            multi-parented to reviewer + security + accessibility). A 6-outcome
+#            arbiter then prunes the DAG by the validator's structured verdict:
+#            CONFIRMED keeps it; ALREADY_FIXED/DUPLICATE cancel every branch;
+#            NEEDS_MORE_INFO/BLOCK_FOR_REVIEW block for human input; SECURITY_THREAT
+#            escalates + cancels; anything unparseable safe-parks (never
+#            auto-proceeds). The per-tick downstream creation no-ops while this is
+#            on. Keep protocol.metadata_transport: true alongside so the arbiter
+#            can read the validator verdict from native run metadata.
+#
+#   KEYSTONE of epic #1276 (Phase 2). Highest-risk toggle — soak with the flag
+#   OFF; downstream work (#1291 gates, #1292 labels, #1294 decompose) builds on
+#   this. See issue #1290.
+#
+# native_gates (default: false — behaviour byte-identical when off)
+#   Phase 3 of epic #1276 (#1291). When true, in-pipeline human gates are tagged
+#   with the native Hermes block category `--kind needs_input` so an awaiting-
+#   human card is natively distinguishable on the board from a machine-wait.
+#   Currently applied to the developer `review-required: PR #N` re-block (the PR
+#   is open and awaiting human review/merge while QA/reviewer/security run). The
+#   `kind` is advisory metadata only — routing (classify_blocked) still reads the
+#   block-reason string, so flag-on adds the tag without changing flow and
+#   flag-off omits `--kind` entirely (plain block, byte-identical). Machine-wait
+#   blocks (`awaiting-fix:`, `awaiting-pr`) are deliberately NOT tagged — they
+#   have no --parent edges and must not be mistaken for a human gate.
+#   Not converted: the 3 GitHub-side gates (move-to-Ready, merge action, close-
+#   issue) stay human/assert-only, never card blocks. The native pending-merge
+#   (auto_merge=false) needs_input marker is a documented follow-up — the docs
+#   card is terminal by merge-time so there is no non-fragile card to block; see
+#   issue #1291. See issue #1291.
+# ── Planner native decomposition (epic #1276, Phase 5 — #1294) ───────────────
+# planner.native_decompose (default: false — behaviour byte-identical when off)
+#   false — the planner decomposes epics into GitHub sub-issues (custom
+#            checklist extraction + `provider.create_issue`) and the post-
+#            developer reviewer/security/accessibility(+docs) fan-out is created
+#            as individual parented cards. This is the default.
+#   true  — planner epic decomposition routes through native `hermes kanban
+#            decompose` (role-routed kanban child cards instead of GitHub sub-
+#            issues) and the QA fan-out is emitted as ONE native `hermes kanban
+#            swarm` (parallel reviewer/security/accessibility workers → qa
+#            verifier → documentation synthesizer). The swarm root is linked
+#            under the QA card and dependency-blocked so it auto-promotes only
+#            once QA completes — preserving the QA gate. Idempotent via `qa-{n}`
+#            and `swarm-{n}` keys; any swarm failure falls back to the legacy
+#            per-role fan-out. Only consulted when pipeline.upfront_dag is OFF.
+#   Phase 5 of epic #1276. See issue #1294.
+planner:
+  # native_decompose: false
+
+pipeline:
+  # upfront_dag: false
+  # native_gates: false
+
+  # ── Label-protocol projection (#1292) ────────────────────────────────────
+  # label_projection (default: false — behaviour unchanged)
+  #   false — no VCS label writes; the reconciler is byte-inert (no provider
+  #            calls at all).  Safe default for repos that don't want
+  #            daedalus:* labels or haven't bootstrapped them yet.
+  #   true  — projects canonical kanban pipeline state to namespaced VCS labels
+  #            on every tick: daedalus:stage/<role>, daedalus:state/{running,
+  #            blocked,done}, daedalus:gate/{needs-human,needs-info}.
+  #            Labels are write-through — pipeline advancement NEVER reads them;
+  #            they exist for human visibility only.  Run ensure_labels() once
+  #            (dispatched automatically on first tick) to pre-create the 13
+  #            projection labels in your repo.
+  # label_projection: false
+
+protocol:
+  # prefix_fallback: true
+
+  # ── Outcome metadata transport (#1288, Phase 1 of epic #1276) ──────────────
+  # metadata_transport (default: false — behaviour unchanged)
+  #   false — outcomes travel as free-text (legacy prefix + JSON block in the
+  #            handoff summary). Routing parses that text. This is the default.
+  #   true  — COMPLETION handoffs additionally emit the structured outcome as
+  #            NATIVE run metadata via `hermes kanban complete --metadata`
+  #            (stored on the closing run, read back with `hermes kanban runs
+  #            --json`). Routing (classify_blocked) then reads the native
+  #            closing-run outcome FIRST, falling through to the free-text JSON
+  #            block, then to the legacy prefix — so no behaviour is lost.
+  #            _guard_prefix_on_done also accepts a metadata-only completion.
+  #
+  #   BLOCKED handoffs (review-required, awaiting-pr, changes-requested,
+  #   needs_input) still carry their outcome as FREE-TEXT JSON in the block
+  #   reason, because `hermes kanban block` has NO `--metadata` option — a
+  #   blocked card has no closing run to attach metadata to. Full elimination
+  #   of free-text transport on the blocked/gate paths awaits the #1290 DAG
+  #   work (Phase 2). Keep prefix_fallback: true while soaking this flag.
+  # metadata_transport: false
+
+  # ── Crash retry (issue #1205) ──────────────────────────────────────────────
+  # A card whose worker CRASHED (agent process died, session/usage limit,
+  # provider connection error) is automatically unblocked and re-dispatched on
+  # the next dispatch trigger, with a stepped backoff, instead of stranding
+  # until a manual `hermes kanban unblock`. The episode counter resets after a
+  # quiet cooldown window; once the attempt cap OR the wall-clock window is
+  # exhausted the card hard-blocks (`crash-retries-exhausted:`) and a
+  # `crash-retries-exhausted` notification fires (falls back to
+  # `retry-cap-exhausted` targets). Defaults shown:
+  # crash_retry_enabled: true
+  # max_crash_retries: 5
+  # crash_retry_backoff_minutes: [0, 15, 30, 60, 120]
+  # crash_retry_cooldown_minutes: 120
+  # crash_retry_window_hours: 6
+  # NOTE (placement follow-up): the crash_retry_* keys above are actually read
+  # from the execution: section (crash_retry.resolve_config(execution)), not
+  # protocol:. They are documented here for historical reasons; relocating them
+  # under execution: (next to the native_bounds block, added for #1289) is a
+  # pre-existing-placement cleanup deferred to a separate PR.
 
   # Custom Hermes profile names and skills per pipeline role.
   # Override any role to route tasks to your own agent profiles instead of the
@@ -229,7 +547,23 @@ execution:
   # Shell command used by the developer agent to spawn the external coding agent
   # via terminal(background=True). Must be the full command (not a shell alias).
   # For Claude Code: use the absolute binary path + flags.
-  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions -p"
+  #
+  # Passed VERBATIM — add ANY CLI flags the agent accepts (claude --help), e.g.
+  # --model, --add-dir, --permission-mode, --allowedTools, --mcp-config,
+  # --append-system-prompt, and leading env vars. The dispatcher only appends
+  # --max-turns (and a compatible --model) IF you haven't already set them here.
+  # Example: "CLAUDE_CONFIG_DIR=$HOME/.claude /usr/local/bin/claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
+  #
+  # IMPORTANT — keep `--strict-mcp-config --setting-sources project`. Delegated
+  # workers run headless, once per role per issue. If CLAUDE_CONFIG_DIR has
+  # plugins/MCP servers enabled (Cortex, Context-Mode, Playwright, LSPs, …) the
+  # agent re-initializes ALL of them on every spawn — adding minutes of startup,
+  # or hanging indefinitely with zero output if any MCP server is slow/unreachable
+  # (that frozen `running` card holds the max_dispatch slot and stalls the whole
+  # pipeline). --strict-mcp-config loads NO MCP servers; --setting-sources project
+  # skips the user settings.json where plugins live. Auth still comes from
+  # CLAUDE_CONFIG_DIR (keychain). Measured: 5+ min hang → ~3s. See README
+  # "Delegating to Claude Code (or Codex)".
   #
   # coding_agent_cmd: ""
 
@@ -252,3 +586,88 @@ execution:
   # Defaults to 3600 (1 hour).
   #
   # coding_agent_max_wait: 3600
+
+  # ── Provider failover chain (issue #1207) ──────────────────────────────────
+  # Ordered coding-agent chain: the FIRST entry is the primary, the rest are
+  # fallbacks. When the active agent fails on a transient trigger (session /
+  # usage limit, quota, crash, timeout — see `failover.triggers` below), the
+  # crash-retry reconciler (#1205) automatically re-dispatches the SAME card on
+  # the next entry instead of retrying the limited provider forever. Names are
+  # the same set as `coding_agent` (hermes | claude-code | codex | opencode);
+  # `cmd` defaults per agent when omitted.
+  #
+  # Multiple ACCOUNTS of the SAME agent (#1227): you may list several entries
+  # with the same `name` as long as they are distinct accounts — e.g. two
+  # `claude-code` entries with different `CLAUDE_CONFIG_DIR` in their `cmd`.
+  # Give each an optional `account:` label (used in failover comments and for
+  # the per-account cooldown key); when omitted, the account is derived from
+  # the `cmd`. A session-limited account (`You've hit your session limit`) then
+  # auto-fails over to the next account with no manual swap. Entries are deduped
+  # by (name, account-or-cmd), so only exact duplicates are dropped.
+  #
+  # Back-compat: when `coding_agents` is absent, the single-value
+  # `coding_agent` / `coding_agent_cmd` keys above are treated as a
+  # one-element chain — failover is simply disabled, no config change needed.
+  #
+  # coding_agents:
+  #   # Two accounts of the same agent, tried in order on a session limit:
+  #   - name: claude-code
+  #     account: rizq
+  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude-rizq claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p'
+  #   - name: claude-code
+  #     account: personal
+  #     cmd: 'CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p'
+  #   # …then a different agent as the last resort:
+  #   - name: codex
+  #     cmd: 'codex exec --full-auto'
+
+  # Failover tuning (also accepted under `model.failover`; execution wins on
+  # conflict). A provider that spends `max_attempts_per_provider` dispatches
+  # on one episode enters a global cooldown and is skipped — by EVERY card —
+  # until the window expires; with `reset_to_primary` the primary is preferred
+  # again as soon as it recovers. Only the listed trigger classes rotate
+  # providers; deterministic task failures (agent ran but produced no PR)
+  # never do. When the whole chain is exhausted the card hard-blocks and the
+  # `crash-retries-exhausted` notification includes the per-provider history.
+  # Defaults shown:
+  #
+  # failover:
+  #   max_attempts_per_provider: 2
+  #   cooldown_minutes: 30
+  #   reset_to_primary: true
+  #   triggers: [session_limit, quota_exceeded, crash, timeout, api_connection_error]
+
+# ── Orchestration-brain model providers (issue #1207) ─────────────────────────
+# Ordered fallback chain for the Hermes model that DRIVES each pipeline role
+# (independent from the coding agent above). On a brain-side transient failure
+# (e.g. an ollama `APIConnectionError`), the *-daedalus profiles are resynced
+# to the next provider; with `failover.reset_to_primary` they are resynced
+# back once the primary's cooldown expires. Profiles with an explicit manual
+# model override are never touched (same rule as the normal model resync).
+#
+# Back-compat: when `providers` is absent, the global Hermes model config
+# (~/.hermes/config.yaml `model.default` / `model.provider`) is treated as a
+# one-element chain — no config change needed.
+#
+# Credentials come from `~/.hermes/.env`, never from this file. Each provider
+# needs its own key, e.g.: anthropic → ANTHROPIC_API_KEY, openrouter →
+# OPENROUTER_API_KEY, ollama-cloud → OLLAMA_API_KEY.
+#
+# model:
+#   providers:
+#     - {provider: ollama-cloud, default: glm-5.2}
+#     - {provider: anthropic,    default: claude-opus-4-8}
+#   # failover: {...}            # same knobs as execution.failover above
+
+# ── Dev mode ────────────────────────────────────────────────────────────────
+# Redirect the installed plugin's dispatcher to a local development checkout so
+# edits take effect immediately without `hermes plugins update daedalus`.
+# When enabled, the dispatcher re-execs itself from <path>/scripts/daedalus_dispatch.py
+# via os.execve (replaces the process — no double FileLock). The DAEDALUS_DEV
+# environment variable is set automatically to prevent infinite re-exec loops.
+# Set enabled: false (or remove this block) to restore normal installed-plugin
+# behaviour.
+#
+# dev_mode:
+#   enabled: true
+#   path: /path/to/local/daedalus/checkout

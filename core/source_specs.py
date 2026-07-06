@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import List, Optional
 
 from core import kanban
 
@@ -19,7 +18,7 @@ logger = logging.getLogger("daedalus.source_specs")
 _LIFECYCLE = "Triage → Spec → Plan → Build → Test → Review → Code-Simplify → Ship"
 
 
-def list_spec_files(repo_path: str, directory: str = ".hermes/pending/") -> List[Path]:
+def list_spec_files(repo_path: str, directory: str = ".hermes/pending/") -> list[Path]:
     """Return all ``*.md`` files in *directory* under *repo_path*, sorted by name.
 
     Returns an empty list if the directory does not exist (no error).
@@ -40,9 +39,9 @@ def spec_to_triage(
     slug: str,
     repo_path: str,
     spec_file: Path,
-    workspace: Optional[str] = None,
+    workspace: str | None = None,
     base_branch: str = "dev",
-) -> Optional[str]:
+) -> str | None:
     """Read a spec file and create a single triage kanban card for it.
 
     The card body is prefixed with a short lifecycle instruction (target branch)

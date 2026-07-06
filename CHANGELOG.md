@@ -1,3 +1,158 @@
+## [direct_delegate integration: daedalus must be the sole dispatcher for FRESH cards (daemon + iterate-gating + tick-cache)](https://github.com/benmarte/daedalus/issues/1339) — [PR #1340](https://github.com/benmarte/daedalus/pull/1340)
+
+## [provision_roster.sh: persist per-role platform_toolsets.cli so the toolset trim survives re-provisioning](https://github.com/benmarte/daedalus/issues/1319) — [PR #1322](https://github.com/benmarte/daedalus/pull/1322)
+
+## [docs: document that daedalus operators must set gateway kanban.dispatch_in_gateway=false](https://github.com/benmarte/daedalus/issues/1320) — [PR #1321](https://github.com/benmarte/daedalus/pull/1321)
+
+## fix: native QA swarm fan-out — remove ineffective external gating (planner.native_decompose), found by live dogfooding
+
+Live dogfooding of #1312 (deployed to the installed plugin) revealed the swarm QA-gating did not work: `hermes kanban swarm` cards **cannot be externally gated** — `hermes kanban block` is rejected on swarm-managed cards ("cannot block"), and workers promote off an auto-`done` swarm root immediately, so the `link QA→root` + `block root --kind dependency` approach was a no-op and reviews would have run without waiting for QA. Fix (B1): drop the (impossible) external QA pre-gate entirely and emit the swarm in its native shape — parallel `reviewer`/`security`/`accessibility` workers → `qa-daedalus` **verifier** → `documentation-daedalus` **synthesizer**, rooted at developer-card completion. In native mode QA therefore verifies **after** the parallel reviews rather than gating before them — a deliberate, default-off, flag-gated relaxation aligned with #1276's native-orchestration thesis; the legacy flag-off path keeps QA-gates-reviews-first, byte-identical. Idempotent via `swarm-{n}`; a swarm failure still falls back to the full legacy per-role fan-out. Net simplification (removes the QA-gate-card/`link`/`block` code from the native branch). Verified live: the swarm's internal `workers → verifier → synthesizer` promotion chain works, and `hermes kanban decompose` (Part A) fans an epic into role-routed child cards.
+
+## [feat: native planner epic decomposition via kanban decompose (planner.native_decompose Part A)](https://github.com/benmarte/daedalus/issues/1294) — [PR #1313](https://github.com/benmarte/daedalus/pull/1313)
+
+Completes Phase 5 of the structured-outcome epic (#1276). Part A of the `planner.native_decompose` flag (default `false`): when ON, planner epic decomposition routes through native `hermes kanban decompose` instead of the custom checklist-extraction → `provider.create_issue` sub-issue path. On `PLANNING COMPLETE`, the epic becomes ONE triage card (keyed `epic-{n}`, body = epic title+body) and `hermes kanban decompose` fans it out into role-routed kanban child cards (by profile description) — the same idempotency marker (`<!-- daedalus:decomposed:… -->`) + `epic` label + planner-card completion as the legacy path, so re-ticks short-circuit. A decompose failure leaves the epic un-marked and un-completed so a later tick retries rather than stranding it. Per D1 (owner-confirmed): flag-on epics produce **kanban child cards, not GitHub sub-issues** — consistent with #1276's "migrate to native primitives" thesis. The flag is threaded through both entry points (the `classify_blocked` executor path and the per-tick `check_planner_decompose_trigger`). With the flag off (the default) the legacy sub-issue path is byte-identical. Together with Part B (#1312, native QA swarm fan-out) this closes #1294.
+
+## [feat: native QA swarm fan-out behind planner.native_decompose](https://github.com/benmarte/daedalus/issues/1294) — [PR #1312](https://github.com/benmarte/daedalus/pull/1312)
+
+Phase 5 of the structured-outcome epic (#1276). A new opt-in `planner.native_decompose` flag (default `false`) replaces the custom post-developer reviewer/security/accessibility(+docs) fan-out with ONE native `hermes kanban swarm` (parallel reviewer/security/accessibility workers → `qa` verifier → `documentation` synthesizer). The QA gate is preserved: the `qa-{n}` card is still created parented to the developer card, then the swarm root is linked under it and dependency-blocked (`hermes kanban block --kind dependency`) so Hermes auto-promotes the whole swarm only once QA completes. Idempotent via `qa-{n}` and `swarm-{n}` keys; any swarm failure logs and falls back to the legacy per-role fan-out so a hiccup degrades to today's behaviour rather than stranding the issue. Adds never-raise `kanban.swarm()` and `kanban.link()` wrappers. Only consulted when `pipeline.upfront_dag` is OFF (upfront_dag no-ops the per-tick fan-out entirely). With the flag off (the default) the per-tick fan-out runs exactly as before — byte-identical. Native planner epic decomposition through `hermes kanban decompose` (D1: kanban child cards instead of GitHub sub-issues) is the remaining half of #1294, tracked as a follow-up. See `tasks/spec-issue-1294.md`.
+
+## [feat: native human gates via needs_input behind pipeline.native_gates](https://github.com/benmarte/daedalus/issues/1291) — [PR #1302](https://github.com/benmarte/daedalus/pull/1302)
+
+Phase 3 of the structured-outcome epic (#1276). A new opt-in `pipeline.native_gates` flag (default `false`) tags the in-pipeline human gate — the developer `review-required: PR #N` re-block emitted once the PR is open and awaiting human review/merge (QA/reviewer/security run in the meantime) — with the native Hermes block category `hermes kanban block --kind needs_input`, so an awaiting-human card is natively distinguishable on the board from a machine-wait. The `kind` is advisory metadata only: `classify_blocked()` still routes off the `review-required:` reason string (→ ADVANCE), so flag-on adds the tag without changing flow and flag-off omits `--kind` entirely (plain block, byte-identical). Machine-wait blocks (`awaiting-fix:`, `awaiting-pr`) are deliberately NOT tagged. The 3 GitHub-side gates (move-to-Ready, merge action, close-issue) stay human/assert-only — they are never card blocks. The native pending-merge (`auto_merge=false`) `needs_input` marker is a documented follow-up, since the docs card is terminal by merge-time and there is no non-fragile card to block. With the flag off (the default) behaviour is byte-identical to before.
+
+## [feat: upfront pipeline DAG at Ready-time behind pipeline.upfront_dag](https://github.com/benmarte/daedalus/issues/1290) — [PR #1300](https://github.com/benmarte/daedalus/pull/1300)
+
+Phase 2 (the KEYSTONE) of the structured-outcome epic (#1276). A new opt-in `pipeline.upfront_dag` flag (default `false`) builds the ENTIRE stage graph in one shot at Ready-time — validator → PM → developer → QA → [reviewer, security, accessibility] → docs — with every non-root stage created dependency-blocked (`hermes kanban block --kind dependency`) so Hermes auto-promotes it the moment ALL of its parents complete (docs is multi-parented to reviewer + security + accessibility). A 6-outcome arbiter then prunes the pre-built DAG by the validator's structured verdict, read from native run metadata first (#1288 transport) with free-text-JSON and legacy-prefix fallback: CONFIRMED keeps the DAG (Hermes promotes PM); ALREADY_FIXED / DUPLICATE cancel every downstream branch silently; NEEDS_MORE_INFO / BLOCK_FOR_REVIEW block for human input (`--kind needs_input`); SECURITY_THREAT escalates + cancels; anything unparseable safe-parks as NEEDS_MORE_INFO (never auto-proceeds on ambiguity). While the flag is on, the per-tick post-developer downstream creation no-ops so the upfront DAG owns those cards; re-ticks are idempotent via stable `<role>-{n}` keys. `kanban.block_task` gains an additive `kind=` parameter (dependency / needs_input / capability / transient). With the flag off (the default) the dispatcher creates only the validator card and fans out per-tick exactly as before — byte-identical. Highest-risk toggle: ships inert; downstream work (#1291 gates, #1292 labels, #1294 decompose) builds on this. Keep `protocol.metadata_transport: true` alongside so the arbiter can read the validator verdict natively.
+
+## [feat: native notification delivery behind notify.native_send](https://github.com/benmarte/daedalus/issues/1293) — [PR #1299](https://github.com/benmarte/daedalus/pull/1299)
+
+A new opt-in `notify.native_send` flag (default `false`) makes native `hermes send` the sole delivery transport for escalation notifications (`retry-cap-exhausted`, `crash-retries-exhausted`). With the flag off (the default), behaviour is byte-identical to before: those escalations fire on BOTH transports — the native `hermes send` path (`cron.notifications` targets, with threading) AND the legacy raw-webhook path (`core/notification_sender.py` → `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` env vars, Block Kit / Discord embeds). With the flag on, the redundant legacy raw-webhook calls are skipped since the native path already delivers the same notifications. Tradeoff: `hermes send` delivers plain markdown only (no Block Kit / embeds) and follows `cron.notifications` targets rather than the env webhooks, so configure native targets before flipping it. Delivery-only — inbound intake (the native webhook receiver) is tracked separately in #1298.
+
+## [feat: native retry/runtime bounds behind execution.native_bounds](https://github.com/benmarte/daedalus/issues/1289) — [PR #1297](https://github.com/benmarte/daedalus/pull/1297)
+
+An opt-in `execution.native_bounds` flag (default `false`) gives every dispatcher-created role card Hermes-native per-task circuit breakers: `--max-retries` (a consecutive-worker-failure breaker, default 2 = `kanban.failure_limit`, distinct from the CI/review fix-loop `MAX_FIX_ATTEMPTS = 3`) and `--max-runtime` (a wall-clock cap after which Hermes SIGTERM→SIGKILL→requeues the card). Per-role overrides come from `execution.native_max_retries`, `execution.native_max_runtime`, and `execution.native_bounds_by_role` (the developer role gets a generous default cap). With the flag on, native `--max-runtime` requeue is authoritative for wall-clock timeouts, so `crash_retry` skips `timeout`-class cards to avoid double-handling; all other crash classes flow through unchanged. Bounds-only — goal-mode (`--goal` judge adjudication) is a deliberate follow-up. With the flag off (the default) call sites emit byte-identical CLI args, so behaviour is unchanged.
+
+## [feat: outcome metadata transport via native complete --metadata](https://github.com/benmarte/daedalus/issues/1288) — [PR #1295](https://github.com/benmarte/daedalus/pull/1295)
+
+Phase 1 of the structured-outcome epic (#1276). A new opt-in `protocol.metadata_transport` flag (default `false`) lets **completion** handoffs additionally emit their structured outcome as native run metadata via `hermes kanban complete --metadata`, stored on the closing run and read back with `hermes kanban runs --json`. `classify_blocked()` reads the native closing-run outcome FIRST (telemetry source `metadata`), then falls through to the free-text JSON block and finally the legacy prefix, so no routing behaviour is lost; `_guard_prefix_on_done` also accepts a metadata-only completion. **Blocked** handoffs (review-required, awaiting-pr, changes-requested, needs_input) still carry their outcome as free-text JSON because `hermes kanban block` has no `--metadata` option — a blocked card has no closing run to attach metadata to (full elimination awaits the #1290 DAG work, Phase 2). With the flag off (the default) the caller passes `native_outcome=None`, making routing byte-identical to before. Keep `prefix_fallback: true` while soaking this flag.
+
+## [refactor: extract agent prompt bodies to templates/agent_bodies/](https://github.com/benmarte/daedalus/issues/1147) — [PR #1240](https://github.com/benmarte/daedalus/pull/1240)
+
+## [refactor: extract agent prompt bodies to templates/agent_bodies/](https://github.com/benmarte/daedalus/issues/1147) — [PR #1240](https://github.com/benmarte/daedalus/pull/1240)
+
+## [perf: cache kanban list_tasks per dispatch tick](https://github.com/benmarte/daedalus/issues/1142) — [PR #1238](https://github.com/benmarte/daedalus/pull/1238)
+
+## [perf: cache notification platform probes with a short TTL](https://github.com/benmarte/daedalus/issues/1144) — [PR #1232](https://github.com/benmarte/daedalus/pull/1232)
+
+## [perf: pass pre-fetched task list into QA/reviewer/security gate checks](https://github.com/benmarte/daedalus/issues/1135) — [PR #1234](https://github.com/benmarte/daedalus/pull/1234)
+
+## [feat: QA agent should skip local test suite when CI is already green on the PR](https://github.com/benmarte/daedalus/issues/1118) — [PR #1225](https://github.com/benmarte/daedalus/pull/1225)
+
+## [perf: batch PR CI status lookups in dashboard open-PRs list](https://github.com/benmarte/daedalus/issues/1143) — [PR #1219](https://github.com/benmarte/daedalus/pull/1219)
+
+## [docs: add CLAUDE.md — module map, invariants, and agent-maintainer guide](https://github.com/benmarte/daedalus/issues/1137) — [PR #1221](https://github.com/benmarte/daedalus/pull/1221)
+
+## [ci: align CI Python version with development (3.12 vs 3.14)](https://github.com/benmarte/daedalus/issues/1138) — [PR #1223](https://github.com/benmarte/daedalus/pull/1223)
+
+## [fix: follow-up issue dedup guard bypassed on API error — duplicate follow-up issues created silently](https://github.com/benmarte/daedalus/issues/1111) — [PR #1213](https://github.com/benmarte/daedalus/pull/1213)
+
+## [feat: QA agent runs full 'pytest -n auto' suite so QA-green matches CI-green](https://github.com/benmarte/daedalus/issues/1201) — [PR #1212](https://github.com/benmarte/daedalus/pull/1212)
+
+## [feat: auto-merge sweep re-runs failed CI (bounded) for pipeline-complete PRs, then escalates](https://github.com/benmarte/daedalus/issues/1199) — [PR #1208](https://github.com/benmarte/daedalus/pull/1208)
+
+## [fix: advance-hook resolver crashes (ModuleNotFoundError: core) — pipeline never advances autonomously](https://github.com/benmarte/daedalus/issues/1202) — [PR #1204](https://github.com/benmarte/daedalus/pull/1204)
+
+## [fix: CHANGELOG.md prepend causes merge conflicts between concurrent PRs](https://github.com/benmarte/daedalus/issues/1179) — [PR #1197](https://github.com/benmarte/daedalus/pull/1197)
+
+## [fix: paginate _board_item_for_issue projectItems + deduplicate board item fallback logic](https://github.com/benmarte/daedalus/issues/1171) — [PR #1196](https://github.com/benmarte/daedalus/pull/1196)
+
+## [fix: paginate _board_item_for_issue projectItems + deduplicate board item fallback logic](https://github.com/benmarte/daedalus/issues/1171) — [PR #1196](https://github.com/benmarte/daedalus/pull/1196)
+
+`_board_item_for_issue()` queried an issue's `projectItems` edge with `first:20` and no `hasNextPage` pagination, so an issue enrolled in more than 20 GitHub Projects would miss the configured board's item and trigger a spurious (idempotent) re-enroll — the same silent-truncation class that #1158 had already hardened `_items()` against. The fix paginates `projectItems(first:100, after:$cursor)` with a cursor loop and a 50-page (~5000-item) safety cap mirroring `_items()`, returns on the first matching board item, and logs a truncation warning if the cap is hit. A new `_resolve_board_item(issue_number)` helper consolidates the verbatim listing-then-direct-lookup fallback blocks that were duplicated in `board_ensure_backlog` and `board_set_status`; it tries the cached listing first (no extra round-trip) and falls back to the edge only on a miss. Status extraction is deduplicated via a single `_status_of()` static helper reused by both `_items()` and `_board_item_for_issue()`.
+
+## [fix: silent exception swallowing hides failures — add logging to bare except blocks](https://github.com/benmarte/daedalus/issues/1133) — [PR #1195](https://github.com/benmarte/daedalus/pull/1195)
+
+## [fix: enable SQLite WAL mode at all direct connection sites](https://github.com/benmarte/daedalus/issues/1134) — [PR #1193](https://github.com/benmarte/daedalus/pull/1193)
+
+## [fix(security): refuse verify_ssl:false outside dev mode](https://github.com/benmarte/daedalus/issues/1132) — [PR #1189](https://github.com/benmarte/daedalus/pull/1189)
+
+## [fix(security): webhook signature verification is never invoked — wire verify_signature into the ready-event path](https://github.com/benmarte/daedalus/issues/1141) — [PR #1188](https://github.com/benmarte/daedalus/pull/1188)
+
+## [fix(security): webhook signature verification is never invoked — wire verify_signature into the ready-event path](https://github.com/benmarte/daedalus/issues/1141)
+
+`verify_signature()` in `core/webhook_normalizer.py` was dead code — the ready-event hook (`scripts/daedalus-ready.sh`) read the payload from stdin via `payload=$(cat -)` and dispatched straight through `normalize()` with no signature check, so anyone who could reach the webhook endpoint could trigger a full pipeline dispatch of agents with repo write access. The `cat -` capture also stripped trailing newlines and re-`echo`ed the body per heredoc, so any HMAC computed over it would have mismatched even with the right secret. The inline python is now extracted into the importable, unit-tested `core/webhook_dispatch.py`, which reads the raw stdin bytes exactly ONCE and verifies the HMAC signature BEFORE `normalize()`. Decision rule is fail-safe: with a secret configured (`vcs.webhook_secret_env`, an env-var name — never a raw secret in YAML) an invalid or missing signature is logged and dropped with no dispatch (exit 0); a valid signature proceeds; with no secret configured a one-time warning is logged (marker file) and dispatch proceeds so existing deployments keep working. Signatures are reconstructed from forwarded CGI-style `HTTP_*` headers for reverse-proxied receivers (the native hermes gateway already HMAC-verifies fail-closed upstream and forwards no headers). `scripts/daedalus-ready.sh` is reduced to a thin `python3 -m core.webhook_dispatch` wrapper, `validate_vcs` accepts `vcs.webhook_secret_env` (non-empty string when present; absence valid), and `templates/daedalus.yaml` documents the key.
+
+## [fix: PM consultation trigger races APPROVE_ADVANCE — approved gate cards don't auto-advance](https://github.com/benmarte/daedalus/issues/1182) — [PR #1186](https://github.com/benmarte/daedalus/pull/1186)
+
+## [fix(security): Azure webhook verification fails open when token header is missing](https://github.com/benmarte/daedalus/issues/1140) — [PR #1181](https://github.com/benmarte/daedalus/pull/1181)
+
+## [fix: durable dedup + stage-recovery suppression for retry-cap notifications](https://github.com/benmarte/daedalus/issues/1167) — [PR #1172](https://github.com/benmarte/daedalus/pull/1172)
+
+Role-scoped markers (`<!-- daedalus:retry-cap-notified:<role> -->`) replace the bare marker so distinct stall episodes for developer/PM/validator on the same issue don't collide. `_mark_notified_block` returns bool, logs warnings on failure, and falls back to stamping the triggering card when no validator card is found. New `_retry_cap_stage_recovered()` helper checks whether the stage has recovered (running card, open PR, downstream role active) before sending a notification; provider errors fail open to "not recovered" (better one duplicate than a swallowed real alert). All five cap paths (developer, validator x2, PM x2) updated with guard order: dedup-check → recovery-check → send → mark.
+
+## [fix(security): dashboard API has no authentication — gate all daedalus plugin endpoints](https://github.com/benmarte/daedalus/issues/1130) — [PR #1173](https://github.com/benmarte/daedalus/pull/1173)
+
+The daedalus dashboard plugin API exposed all 21 backend routes with no authentication, allowing any local process to read project data and trigger install/uninstall/notification actions. The fix adds a fail-closed shared-secret gate (`require_dashboard_auth`) applied to every sub-router at include time. When no secret is configured and the explicit opt-in is unset, requests are rejected with HTTP 403. When a secret is configured (`DAEDALUS_DASHBOARD_TOKEN` or `HERMES_DASHBOARD_SESSION_TOKEN`), missing/mismatched credentials return HTTP 401, compared in constant time via `hmac.compare_digest`. `DAEDALUS_DASHBOARD_AUTH_DISABLED=1` provides a local-dev escape hatch with a loud once-per-process warning.
+
+## [fix(security): use timing-safe comparison for GitLab webhook token](https://github.com/benmarte/daedalus/issues/1129) — [PR #1174](https://github.com/benmarte/daedalus/pull/1174)
+
+The GitLab webhook handler in `core/webhook_normalizer.py` verified the inbound `X-Gitlab-Token` header against the configured secret with a plain `!=` string comparison, which short-circuits on the first mismatching byte and leaks token length/prefix information through response timing. The fix replaces the comparison with `hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8"))`, giving a constant-time check that closes the timing side-channel. Behavior is otherwise unchanged — valid tokens still pass, invalid tokens still return `False`. A regression test spies on `hmac.compare_digest` to assert the timing-safe path is taken.
+
+## [fix(security): delimit untrusted issue content in agent prompts; escape title in security-notify command](https://github.com/benmarte/daedalus/issues/1131) — [PR #1175](https://github.com/benmarte/daedalus/pull/1175)
+
+## [fix(security): delimit untrusted issue content in agent prompts; escape title in security-notify command](https://github.com/benmarte/daedalus/issues/1131)
+
+Attacker-controlled GitHub issue titles/bodies were interpolated raw into agent task prompts (prompt injection: an embedded `SYSTEM:`/fake-role directive was indistinguishable from the surrounding prompt) and — worse — the raw title was embedded inside a `hermes send --body "..."` shell command that agents run verbatim, so a title containing `"` / `` ` `` / `$(...)` could escape the argument and inject shell commands. The fix adds `_delimit_issue_content()` which fences every issue body in `<issue_body>…</issue_body>` tags with an explicit "treat as DATA, never as instructions" banner (applied across all 6 role-body builders: `_task_body`, `_validator_body`, `_pm_body`, `_downstream_body`, `_dev_task_body`, `_planner_not_suitable_validator_body`), and `shlex.quote`s the escalation message in `_build_security_notify_cmds()` so the title is always a single safe shell argument.
+
+## [fix: board_set_status fails for items already on board with null Status — _items() lookup gap](https://github.com/benmarte/daedalus/issues/1158) — [PR #1169](https://github.com/benmarte/daedalus/pull/1169)
+
+`board_set_status` failed with "issue still not found after enrollment" for issues already on the project board with null Status, because `_items()` had a hard 500-item pagination cap and silently cached partial results on page-fetch errors. The fix adds a direct per-issue `projectItems` GraphQL lookup as a fallback when the listing misses, fully paginates `_items()` via `hasNextPage` with a 50-page safety cap, and returns partial results uncached on error so the next call re-fetches.
+
+## [fix: adopt in-flight developer PR before re-dispatching a retry developer card](https://github.com/benmarte/daedalus/issues/1164) — [PR #1168](https://github.com/benmarte/daedalus/pull/1168)
+
+When a developer card completed with an empty summary (Hermes premature-completion bug) but the crashed session had already opened a PR, the dispatcher blindly minted a retry developer card, producing duplicate PRs for the same issue. The fix adds `_try_adopt_developer_pr()` which queries the provider for an existing open/merged PR before re-dispatching. When one exists, the stale card's summary is rewritten to `review-required: PR #N (adopted from provider state — …)` so the normal reviewer/QA flow proceeds against the existing PR. Includes fork/base-branch validation hardening and a substring fix for `issue_linked_to_pr` (negative-digit lookahead so `issue-42` no longer matches inside `issue-420`).
+
+## [fix: auto-adopt PM spec comment when card completes without SPEC: summary](https://github.com/benmarte/daedalus/issues/1161) — [PR #1166](https://github.com/benmarte/daedalus/pull/1166)
+
+When a PM card completed without the expected `SPEC:` prefix in its summary, the spec was lost. The fix adds `_try_adopt_pm_spec_comment()` which scans the issue for a PM spec comment and adopts it by rewriting the card's summary via `kanban.edit_summary`, enabling the normal downstream flow to proceed.
+
+## [fix: rerun dispatch dropped on FileLock contention instead of silently discarding it](https://github.com/benmarte/daedalus/issues/1160) — [PR #1162](https://github.com/benmarte/daedalus/pull/1162)
+
+When the dispatcher's FileLock was contended (another tick already running), the rerun marker was drained but the dispatch was silently discarded, causing the tick's work to be lost. The fix drains the rerun marker and logs the hook output so the next tick picks up the work.
+
+## [fix: rescue gate cards re-promoted by block-loop detection when their verdict already passed](https://github.com/benmarte/daedalus/issues/1119) — [PR #1159](https://github.com/benmarte/daedalus/pull/1159)
+
+Gate cards (qa-passed/review-approved/security-approved) re-promoted by block-loop detection were re-running the gate forever instead of being recognized as already passed. The fix adds a block-loop rescue scan that completes gate cards with passing verdicts instead of re-queuing them.
+
+## [chore: repo hygiene — .gitignore gaps, untrack kanban.db, remove stray artifacts, archive closed specs](https://github.com/benmarte/daedalus/issues/1128) — [PR #1157](https://github.com/benmarte/daedalus/pull/1157)
+
+## [fix: _resolve_repo_arg() swallows config-load failures with no diagnostic — wrong-project dispatch possible](https://github.com/benmarte/daedalus/issues/1110) — [PR #1122](https://github.com/benmarte/daedalus/pull/1122)
+
+## [fix: developer task body does too much — strip /review, /code-simplify; add clean fallback on inner-agent failure](https://github.com/benmarte/daedalus/issues/1123) — [PR #1127](https://github.com/benmarte/daedalus/pull/1127)
+
+## [fix: validator inner agent completes kanban card without summary → infinite retry loop](https://github.com/benmarte/daedalus/issues/1121) — [PR #1124](https://github.com/benmarte/daedalus/pull/1124)
+
+When `coding_agent` is set to `claude-code` (or any non-hermes value), `_validator_body()` now emits "Print to stdout: 'CONFIRMED: ...'" instructions instead of "Complete your card..." for every outcome block, and explicitly prohibits `hermes kanban complete` calls from the inner subprocess. The `_ROLE_AFTER_SPAWN["validator"]` delegation block received the same fix. The outer `validator-daedalus` agent (SOUL.md step 6) remains the sole caller of `kanban complete`. A fallback guard in `validator-daedalus.md` covers the edge case where the inner agent somehow still marks the card done with `summary: None`.
+
+## [fix: gate epic-level QA dispatch until at least one sub-issue PR is open](https://github.com/benmarte/daedalus/issues/1098) — [PR #1106](https://github.com/benmarte/daedalus/pull/1106)
+
+## [fix: validator agent must not create kanban tasks or write board state (read-only enforcement)](https://github.com/benmarte/daedalus/issues/1105) — [PR #1107](https://github.com/benmarte/daedalus/pull/1107)
+
+## [fix: epic-detection heuristic misclassifies large-body bug reports as epics — route to validator instead](https://github.com/benmarte/daedalus/issues/1100) — [PR #1103](https://github.com/benmarte/daedalus/pull/1103)
+
+## [feat: dispatch QA/reviewer/security immediately on PR open — move CI gate to merge only](https://github.com/benmarte/daedalus/issues/1074) — [PR #1095](https://github.com/benmarte/daedalus/pull/1095)
+
+## [fix: trigger ADVANCE immediately on review-required without waiting for CI](https://github.com/benmarte/daedalus/issues/1075) — [PR #1090](https://github.com/benmarte/daedalus/pull/1090)
+
+- Developer cards with `review-required: PR #N` now ADVANCE immediately regardless of CI state (per epic #1074). CI gating moved from ADVANCE-time to merge-time only. QA/reviewer/security dispatch happens as soon as the PR is opened.
+- Auto-merge gate enforces CI green before merging (issue #1085, PR #1092). If CI is not green when docs completes, the merge is deferred to the next cron tick.
+- Reviewer and security merge gates added (issue #1085, PR #1093): `_reviewer_passed_for_issue()` and `_security_passed_for_issue()` check that the reviewer and security-analyst have approved the PR before auto-merge. A `skip-qa` label bypasses both gates (issue #1074 non-regression, PR #1094).
+- Downstream review task body text updated to reflect that CI may still be running (issue #1082, PR #1091).
+
+## [feat: dev_mode YAML flag to redirect dispatcher to local dev checkout](https://github.com/benmarte/daedalus/issues/1071) — [PR #1089](https://github.com/benmarte/daedalus/pull/1089)
+
+## [fix: _check_completed_planner silently drops done planner tasks with non-PLANNING-COMPLETE summary](https://github.com/benmarte/daedalus/issues/1072) — [PR #1073](https://github.com/benmarte/daedalus/pull/1073)
+
 # Changelog
 
 All notable changes to Daedalus are documented here. The format loosely follows
@@ -27,7 +182,7 @@ All notable changes to Daedalus are documented here. The format loosely follows
 - `ensure_labels()` calls `list_labels()` exactly once — eliminated a redundant API round-trip on every label-ensure path
 - `_resolve_web_path()` lazy-fetch + log injection hardening — `path_with_namespace` only fetched when needed; raw API response sanitized via `unicode_escape` before logging
 - `VCSProvider.enrollment_failures` moved to instance `__init__` — eliminates shared mutable class-level default
-- Document `_execute_dev_fix_ci` `True`/`False` return semantics in docstring
+- Document `_execute_qa_fix` `True`/`False` return semantics in docstring
 
 ### New Features
 

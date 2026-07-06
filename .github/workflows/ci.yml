@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - name: Install deps
         run: pip install --quiet pyyaml fastapi pytest httpx pytest-xdist pytest-timeout filelock
       # Plain-script smoke test (uses custom check() runner).
@@ -22,8 +22,71 @@ jobs:
       - name: Pytest suites (parallel, with timeout)
         run: pytest tests/ -n auto --timeout=60
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install ruff
+        run: pip install --quiet ruff
+      - name: Ruff check (whole repo)
+        run: ruff check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install mypy + runtime stubs
+        run: pip install --quiet mypy pyyaml fastapi httpx
+      # Scope: new split packages + small clean modules. Legacy modules are
+      # baseline-ignored in pyproject.toml [tool.mypy.overrides] (see #1262).
+      - name: Mypy (scoped packages)
+        run: python3 -m mypy core/dispatch/ core/iterate/ core/util.py core/db.py config/
+
+  dist-drift:
+    # Guard against dashboard src/dist/manifest drift on pull requests.
+    # On push to main/dev the job skips cleanly — no base ref to diff against.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so git diff origin/<base>...HEAD resolves correctly.
+          fetch-depth: 0
+
+      - name: Fetch PR base branch
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin ${{ github.base_ref }}
+
+      - name: Check dashboard src/dist/manifest drift
+        if: github.event_name == 'pull_request'
+        # Fails if dashboard/src or build.js changes without matching dist+manifest,
+        # or if dist/manifest are edited without a src change (hand-edit guard).
+        # Metadata-only manifest edits (label/tab): run the build and commit the
+        # (unchanged-hash or rebuilt) dist alongside — CI requires the trio to
+        # move together; there is no bypass. See scripts/check_dist_drift.py.
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          if [ -z "$changed" ]; then
+            echo "dist-drift: skip — no changed files"
+            exit 0
+          fi
+          echo "Changed files:"
+          echo "$changed"
+          echo "---"
+          echo "$changed" | python3 scripts/check_dist_drift.py
+
+      - name: Skip (non-PR event)
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "dist-drift: skip — non-PR event, nothing to diff"
+
   ci-complete:
-    needs: [test]
+    needs: [test, lint, typecheck, dist-drift]
     runs-on: ubuntu-latest
     steps:
       - run: echo "all required checks passed"

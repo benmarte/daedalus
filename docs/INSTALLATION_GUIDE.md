@@ -40,6 +40,8 @@ This guide walks you through every step: installing the plugin, provisioning the
 
 > **No `gh`, `glab`, or `az` CLI needed.** Daedalus talks directly to your VCS platform's HTTPS API. No additional CLIs required.
 
+> **⚠️ Set `kanban.dispatch_in_gateway: false` on your Hermes gateway.** The gateway's built-in kanban dispatch daemon will otherwise double-dispatch cards alongside Daedalus. This is required for every Daedalus install and needs a `hermes gateway restart` to apply — see [SETUP.md → Prerequisites](../SETUP.md#prerequisites-each-colleague-once) for the full explanation.
+
 ---
 
 ## 2. Install the Plugin
@@ -50,6 +52,8 @@ hermes gateway restart
 ```
 
 The `gateway restart` is required so Hermes registers Daedalus's API routes and dashboard tab.
+
+> **Before restarting, confirm `kanban.dispatch_in_gateway: false`** in your Hermes gateway config (see the Prerequisites callout above). The gateway reads it once at startup, so this restart is also when that value takes effect.
 
 ![Hermes Plugins page showing Daedalus installed and enabled](screenshots/guide/00-plugins-page.png)
 
@@ -79,7 +83,7 @@ Verify the profiles by going to **Profiles** in Hermes:
 | **project-manager** | Coordinates work, routes issues to agents, unblocks stalled pipelines. Creates the conditional accessibility task when the issue references UI/frontend work. |
 | **planner** | **Handles epic-sized issues** (≥4 checklist items, an `epic` label, or body ≥2000 chars). Detects the issue type and orchestrates the full decomposition pipeline: creates sub-issues, injects source context from relevant files in the repository, computes tier levels based on dependencies, and applies the Ready label to tier-0 sub-issues. Also breaks normal issues into concrete plans with acceptance criteria. |
 | **developer** | Phase 2 only. Writes code, runs tests, auto-detects and runs the project's lint/format tools before opening a PR. Posts a summary comment to the GitHub issue on completion. |
-| **qa** | **Runs after developer, before reviewer and security-analyst.** Runs the full test suite, analyzes coverage gaps, reports a QA verdict (`qa-passed` or `qa-failed`). Posts a summary comment to the GitHub issue. |
+| **qa** | **Runs after developer, before reviewer and security-analyst.** Checks CI status first via a CI-gate (#1118): if all CI checks are green on the PR head commit, QA skips the local full-suite run (~10–20 min saved) and goes straight to acceptance-criteria verification and diff review. If CI is pending, failing, or has no checks, QA runs the full test suite locally exactly as CI does (`pytest tests/ -n auto --timeout=60` in the isolated PR worktree). If QA pushes new tests, the old CI-green is stale and those tests are run locally (targeted). Reports a QA verdict (`qa-passed` or `qa-failed`). `qa-passed` requires BOTH the ACs and the suite to pass — where "suite passes" means CI is green on the PR head OR the local full suite passed (#1201). Posts a summary comment to the GitHub issue. |
 | **reviewer** | Reviews the PR for correctness, style, and logic. Runs after QA passes. Posts a summary comment to the GitHub issue on completion. |
 | **security-analyst** | Audits for secrets, injection risks, and over-permissioned code. Runs after QA passes, in parallel with reviewer. Posts a summary comment to the GitHub issue on completion. |
 | **accessibility** | **Runs after QA passes, in parallel with reviewer/security-analyst. Conditional — only created when the issue references UI/frontend work.** Audits the PR against WCAG 2.1 AA and posts a findings table. Blocks with `approved` or `changes requested`. |
@@ -227,7 +231,13 @@ Every time the cron job fires, Daedalus runs its dispatch loop:
 
 **Stale blocked-card sweeper:** a blocked card that no agent can classify sits on the board forever, polluting the queue and confusing humans. The sweeper runs inside the tick (alongside `kanban.diagnostics`) and uses heartbeat timestamps, `started_at`, or `created_at` to detect cards stuck in `blocked` status for longer than a threshold (default: 48 hours). It logs a warning with the card ID and age, then — when enabled — archives the card off the active board via `hermes kanban archive`. It degrades gracefully: any failure logs and returns, never breaking the run.
 
-**Retry-cap exhaustion notifications:** validator and PM retry caps exist so a broken issue doesn't loop forever. But a cap with no notification means the operator only learns about it days later by scrolling the board. When a validator or PM agent exhausts its retry cap without reaching CONFIRMED status, the dispatcher posts a one-time `retry-cap-exhausted` notification (deduped per issue via a marker comment) and routes it to the same channels as `security-escalation`. This surfaces the wedge the moment it happens so a human can investigate. Configure the `retry-cap-exhausted` event in your notification targets to receive these alerts.
+**Retry-cap exhaustion notifications:** validator and PM retry caps exist so a broken issue doesn't loop forever. But a cap with no notification means the operator only learns about it days later by scrolling the board. When a validator or PM agent exhausts its retry cap without reaching CONFIRMED status, the dispatcher posts a one-time `retry-cap-exhausted` notification (deduped per issue per role via a role-scoped marker comment `<!-- daedalus:retry-cap-notified:<role> -->`) and routes it to the same channels as `security-escalation`. A stage-recovery check suppresses the notification if the stalled stage has already recovered (running card, open PR, or downstream role active). This surfaces the wedge the moment it happens so a human can investigate. Configure the `retry-cap-exhausted` event in your notification targets to receive these alerts.
+
+**Orphaned worktree cleanup:** agents are told to `git worktree remove --force` on cleanup, but a crashed or reclaimed agent leaves its worktree behind and they accumulate unboundedly under `.worktrees/`. The dispatcher now runs `_sweep_orphan_worktrees()` once per tick (right after `kanban.ensure_board`): it enumerates registered worktrees, attributes each to an issue number (branch `fix/issue-<N>` or directory name `dev-<N>`), and removes any whose issue has no active kanban task. The main worktree and unattributable entries are always skipped; a failed removal is logged and skipped without aborting the tick. Stale worktrees are cleaned within one tick of their pipeline finishing.
+
+**Crash-retry reconciler** (#1205): cards whose worker agent crashed (exit without a valid completion signal) were silently stuck in `running` until the 24h stale-card sweeper noticed. The crash-retry reconciler scans for crashed cards on every dispatch tick and re-queues them with a time-bounded retry policy: stepped backoff between attempts, a per-card attempt cap, and a wall-clock cap. When retries are exhausted, the card is escalated (marked as blocked with a `coding-agent-failed` reason) instead of looping silently. Configurable via `execution.crash_retry` knobs in `templates/daedalus.yaml`.
+
+**Provider failover chain** (#1207): when a coding agent (Claude Code, Codex, etc.) hits a transient failure (session limit, quota, crash, timeout), the crash-retry reconciler automatically re-dispatches the same card on the next provider in an ordered fallback chain (`execution.coding_agents` in `daedalus.yaml`) instead of retrying the limited provider forever. A provider that spends `max_attempts_per_provider` dispatches on one episode enters a global cooldown and is skipped by every card until the window expires; with `reset_to_primary: true` the primary is preferred again once its cooldown clears. The same pattern applies to the orchestration-brain model (`model.providers` chain). Configurable via `execution.failover` and `model.failover` knobs in `templates/daedalus.yaml`.
 
 View the cron job for your project in the Hermes **Cron** page:
 
@@ -501,6 +511,8 @@ hermes gateway restart
 
 > **Why `~/.hermes/.env`?** Hermes loads this file at startup and injects its variables into the gateway process. Both the dashboard and the dispatcher cron job can see your tokens without you re-exporting them each session.
 
+> **Dashboard API authentication:** The daedalus dashboard plugin API relies on the Hermes host's global `/api/` auth middleware — no daedalus-specific token configuration is needed. See [README → Dashboard REST API → Authentication](../README.md#authentication) for details.
+
 ### Token Permissions Required
 
 **GitHub — Fine-grained PAT** (Settings → Developer settings → Fine-grained tokens):
@@ -605,7 +617,7 @@ You don't need to do anything here. Each agent fires the dispatcher the moment i
 
 Once the developer's PR is open and CI turns green, the dispatcher releases the next phase:
 
-1. **QA** runs the full test suite and reports `qa-passed` or `qa-failed`.
+1. **QA** checks CI status first via a CI-gate (#1118): if all CI checks are green on the PR head commit, it skips the local full-suite run (~10–20 min saved) and goes straight to AC verification and diff review. If CI is pending, failing, or has no checks, it runs the full test suite locally (`pytest tests/ -n auto --timeout=60`). Reports `qa-passed` (only if both ACs and suite pass) or `qa-failed`.
 2. On `qa-passed`, **reviewer** and **security-analyst** start in parallel (plus **accessibility** for UI/frontend issues).
 3. When those clear, **documentation** writes the completion report and posts it to the PR and your notification channels.
 
@@ -770,7 +782,12 @@ The label picker calls your VCS provider's API. If it shows empty:
 
 ### Pipeline stalled — validator task completed with `summary: None`
 
-When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery, all downstream agents hit a HARD STOP and ghost-complete instantly with no code written.
+A validator kanban summary of `None` can occur for two reasons:
+
+1. **Context window overflow** — the validator's context fills before `kanban_complete(summary=...)` runs.
+2. **Inner-agent kanban write (delegated mode, fixed in #1121)** — when `coding_agent` is set to `claude-code` or similar, the inner subprocess used to call `hermes kanban complete <id>` without a summary argument. The `_validator_body()` task now instructs the inner agent to print its verdict to stdout only; the outer `validator-daedalus` agent is the sole caller of `kanban complete`.
+
+Without recovery, all downstream agents hit a HARD STOP and ghost-complete instantly with no code written.
 
 The dispatcher handles this automatically in two stages:
 

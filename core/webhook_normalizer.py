@@ -15,7 +15,7 @@ import hashlib
 import hmac
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger("daedalus.webhook_normalizer")
 
@@ -40,8 +40,8 @@ class ReadyEvent:
 def normalize(
     provider: str,
     payload: Any,
-    status_map: Optional[Dict[str, str]] = None,
-) -> Optional[ReadyEvent]:
+    status_map: dict[str, str] | None = None,
+) -> ReadyEvent | None:
     """Normalize a webhook payload into a ReadyEvent if the item moved to Ready.
 
     Args:
@@ -77,8 +77,8 @@ def normalize(
 
 
 def _normalize_github(
-    payload: Dict[str, Any], ready_status: str
-) -> Optional[ReadyEvent]:
+    payload: dict[str, Any], ready_status: str
+) -> ReadyEvent | None:
     """Parse GitHub Projects v2 webhook payload.
 
     Expected structure:
@@ -127,7 +127,7 @@ def _normalize_github(
     # GitHub's projects_v2_item webhook exposes it via:
     #   - `projects_v2_item.field_value.name`          (single edited field object)
     #   - `projects_v2_item.field_values[i].name`      (array snapshot, field_name=="Status")
-    new_status_value: Optional[str] = None
+    new_status_value: str | None = None
     fv = pvi.get("field_value")
     if isinstance(fv, dict):
         new_status_value = fv.get("name") or fv.get("value")
@@ -181,8 +181,8 @@ def _normalize_github(
 
 
 def _normalize_gitlab(
-    payload: Dict[str, Any], ready_status: str
-) -> Optional[ReadyEvent]:
+    payload: dict[str, Any], ready_status: str
+) -> ReadyEvent | None:
     """Parse GitLab issue webhook payload.
 
     GitLab doesn't have native 'Ready' columns — it uses labels.
@@ -253,8 +253,8 @@ def _normalize_gitlab(
 
 
 def _normalize_azure(
-    payload: Dict[str, Any], ready_status: str
-) -> Optional[ReadyEvent]:
+    payload: dict[str, Any], ready_status: str
+) -> ReadyEvent | None:
     """Parse Azure DevOps work item webhook payload.
 
     Expected structure:
@@ -314,8 +314,8 @@ def _normalize_azure(
 
 
 def _normalize_hermes(
-    payload: Dict[str, Any], ready_status: str
-) -> Optional[ReadyEvent]:
+    payload: dict[str, Any], ready_status: str
+) -> ReadyEvent | None:
     """Parse Hermes Kanban webhook payload (forward-looking stub).
 
     Expected structure:
@@ -361,7 +361,7 @@ def _normalize_hermes(
 def verify_signature(
     provider: str,
     payload_bytes: bytes,
-    headers: Optional[Dict[str, str]],
+    headers: dict[str, str] | None,
     secret: str,
 ) -> bool:
     """Verify HMAC signature on an incoming webhook payload.
@@ -400,7 +400,7 @@ def verify_signature(
 
 
 def _verify_github_signature(
-    payload_bytes: bytes, headers: Dict[str, str], secret: str
+    payload_bytes: bytes, headers: dict[str, str], secret: str
 ) -> bool:
     """Verify GitHub's X-Hub-Signature-256 HMAC-SHA256 signature.
 
@@ -427,34 +427,34 @@ def _verify_github_signature(
     return True
 
 
-def _verify_gitlab_token(headers: Dict[str, str], secret: str) -> bool:
+def _verify_gitlab_token(headers: dict[str, str], secret: str) -> bool:
     """Verify GitLab's X-Gitlab-Token header (shared secret direct comparison)."""
     token = headers.get("X-Gitlab-Token") or headers.get("X-Gitlab-Token".lower())
     if not token:
         logger.warning("webhook: gitlab missing X-Gitlab-Token header")
         return False
 
-    if token != secret:
+    if not hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8")):
         logger.warning("webhook: gitlab X-Gitlab-Token mismatch")
         return False
 
     return True
 
 
-def _verify_azure_secret(headers: Dict[str, str], secret: str) -> bool:
-    """Verify Azure DevOps shared secret.
+def _verify_azure_secret(headers: dict[str, str], secret: str) -> bool:
+    """Verify Azure DevOps shared secret sent in the X-Azure-Webhook-Token header.
 
-    Azure DevOps doesn't use HMAC — it sends a shared secret in the request body
-    for service hooks. We check the header path if present; body-level verification
-    is deferred to the caller (the normalizer parses the body).
+    A secret is always configured by the time we reach here (the caller rejects
+    empty secrets), so a missing header means the request is unauthenticated and
+    must be rejected — failing open would let any Azure-shaped payload bypass
+    authentication entirely. The present-header path uses a timing-safe compare.
     """
     token = headers.get("X-Azure-Webhook-Token") or headers.get("x-azure-webhook-token")
     if not token:
-        # Azure doesn't always send a header; body verification is the caller's job
-        logger.info("webhook: azure no token header, deferring to body-level verification")
-        return True  # Permissive — Azure webhook body carries the secret
+        logger.warning("webhook: azure missing X-Azure-Webhook-Token header")
+        return False
 
-    if token != secret:
+    if not hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8")):
         logger.warning("webhook: azure token mismatch")
         return False
 

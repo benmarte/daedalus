@@ -12,7 +12,7 @@ sent as the PRIVATE-TOKEN header.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 from urllib.parse import quote
 
 from .base import (CIStatus, Comment, IssueSummary, LabelDef, PRSummary,
@@ -36,7 +36,7 @@ class GitLabProvider(VCSProvider):
     supports_labels = True
     supports_branches = True
 
-    def __init__(self, resolved: Dict[str, Any]):
+    def __init__(self, resolved: dict[str, Any]):
         super().__init__(resolved)
         vcs = self._cfg.get("vcs") or {}
         project_id = vcs.get("project_id")
@@ -60,7 +60,7 @@ class GitLabProvider(VCSProvider):
         self._web_base = base_url
         # None = "not yet fetched"; "" = "fetched but unavailable". Distinguishing
         # the two prevents repeated API retries after a permanent failure.
-        self._project_web_path: Optional[str] = (
+        self._project_web_path: str | None = (
             project_path if "/" in project_path else None
         )
 
@@ -69,14 +69,14 @@ class GitLabProvider(VCSProvider):
         return f"/projects/{self._project}"
 
     # ── issues ───────────────────────────────────────────────────────────────
-    def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
-                    limit: int = 50) -> List[IssueSummary]:
+    def list_issues(self, state: str = "open", labels: list[str] | None = None,
+                    limit: int = 50) -> list[IssueSummary]:
         """ANY-label semantics: one call per label, deduped (GitHub parity)."""
         gl_state = {"open": "opened", "closed": "closed"}.get(state)
-        label_sets = [[l] for l in (labels or []) if l] or [[]]
-        seen: Dict[int, IssueSummary] = {}
+        label_sets = [[lbl] for lbl in (labels or []) if lbl] or [[]]
+        seen: dict[int, IssueSummary] = {}
         for ls in label_sets:
-            params: Dict[str, Any] = {"per_page": min(limit, 100)}
+            params: dict[str, Any] = {"per_page": min(limit, 100)}
             if gl_state:
                 params["state"] = gl_state
             if ls:
@@ -108,8 +108,8 @@ class GitLabProvider(VCSProvider):
         return True
 
     def create_issue(self, title: str, body: str,
-                     labels: Optional[List[str]] = None) -> Optional[int]:
-        payload: Dict[str, Any] = {"title": title, "description": body}
+                     labels: list[str] | None = None) -> int | None:
+        payload: dict[str, Any] = {"title": title, "description": body}
         if labels:
             payload["labels"] = ",".join(labels)
         try:
@@ -122,7 +122,7 @@ class GitLabProvider(VCSProvider):
             self._log.warning("create_issue failed: %s", e)
         return None
 
-    def get_issue_state(self, issue_number: int) -> Optional[str]:
+    def get_issue_state(self, issue_number: int) -> str | None:
         try:
             data = self._http.get_json(f"{self._proj}/issues/{issue_number}")
             state = (data.get("state") or "opened").lower()
@@ -132,7 +132,7 @@ class GitLabProvider(VCSProvider):
                 return "closed"
             return None
 
-    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+    def get_issue(self, issue_number: int) -> IssueSummary | None:
         try:
             it = self._http.get_json(f"{self._proj}/issues/{issue_number}")
         except ProviderError as e:
@@ -147,14 +147,14 @@ class GitLabProvider(VCSProvider):
             state="open" if (it.get("state") == "opened") else (it.get("state") or ""),
             url=it.get("web_url") or "")
 
-    def blockers(self, issue_number: int) -> List[int]:
+    def blockers(self, issue_number: int) -> list[int]:
         """Open blockers via native issue links (``link_type: is_blocked_by``)
         merged with the portable ``Depends on:`` body fallback.
 
         The links endpoint returns each linked issue with its ``state`` inline,
         so open-filtering needs no extra request.
         """
-        out: List[int] = []
+        out: list[int] = []
         try:
             links = self._http.get_json(f"{self._proj}/issues/{issue_number}/links")
         except ProviderError as e:
@@ -172,9 +172,9 @@ class GitLabProvider(VCSProvider):
         return out
 
     # ── merge requests ───────────────────────────────────────────────────────
-    def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
+    def list_prs(self, state: str = "all", limit: int = 50) -> list[PRSummary]:
         gl_state = {"open": "opened", "merged": "merged", "closed": "closed"}.get(state)
-        params: Dict[str, Any] = {"per_page": min(limit, 100)}
+        params: dict[str, Any] = {"per_page": min(limit, 100)}
         if gl_state:
             params["state"] = gl_state
         try:
@@ -182,7 +182,7 @@ class GitLabProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("list_prs failed: %s", e)
             return []
-        out: List[PRSummary] = []
+        out: list[PRSummary] = []
         for mr in data or []:
             out.append(PRSummary(
                 number=mr.get("iid"),
@@ -194,7 +194,7 @@ class GitLabProvider(VCSProvider):
                 head_sha=mr.get("sha") or ""))
         return out[:limit]
 
-    def find_pr_for_branch(self, branch: str) -> Optional[int]:
+    def find_pr_for_branch(self, branch: str) -> int | None:
         if not branch:
             return None
         try:
@@ -217,7 +217,7 @@ class GitLabProvider(VCSProvider):
             self._log.warning("get_pr_ci_status MR !%s failed: %s", pr_number, e)
             return CIStatus.UNKNOWN
         if not data:
-            return CIStatus.UNKNOWN
+            return CIStatus.NONE  # no pipelines → repo has no CI (F8): pass, don't gate
         status = (data[0].get("status") or "").lower()
         if status == "success":
             return CIStatus.GREEN
@@ -229,7 +229,7 @@ class GitLabProvider(VCSProvider):
         return CIStatus.UNKNOWN
 
     # ── MR notes (comments) ──────────────────────────────────────────────────
-    def list_pr_comments(self, pr_number: int) -> List[Comment]:
+    def list_pr_comments(self, pr_number: int) -> list[Comment]:
         try:
             data = self._http.get_paginated(
                 f"{self._proj}/merge_requests/{pr_number}/notes",
@@ -255,7 +255,7 @@ class GitLabProvider(VCSProvider):
     def board_configured(self) -> bool:
         return self.supports_boards
 
-    def board_numbers_with_statuses(self, status_names: List[str]) -> set:
+    def board_numbers_with_statuses(self, status_names: list[str]) -> set:
         if not self.board_configured():
             return set()
         out: set = set()
@@ -263,6 +263,18 @@ class GitLabProvider(VCSProvider):
             for issue in self.list_issues(state="open", labels=[name], limit=100):
                 out.add(issue.number)
         return out
+
+    def remove_label(self, issue_number: int, label_name: str) -> bool:
+        """PUT /projects/{id}/issues/{iid} with remove_labels."""
+        try:
+            self._http.put_json(
+                f"{self._proj}/issues/{issue_number}",
+                {"remove_labels": label_name},
+            )
+            return True
+        except ProviderError as e:
+            self._log.warning("remove_label #%s %r failed: %s", issue_number, label_name, e)
+            return False
 
     def board_set_status(self, issue_number: int, status_name: str) -> bool:
         """Add the target status label; remove the other status_map labels.
@@ -283,10 +295,10 @@ class GitLabProvider(VCSProvider):
         self._log.info("board: #%s -> %s", issue_number, status_name)
         return True
 
-    def ensure_labels(self) -> List[str]:
+    def ensure_labels(self) -> list[str]:
         """Create required Daedalus labels (epic, subtask) plus all board lane labels."""
         from .base import REQUIRED_LABELS
-        created: List[str] = []
+        created: list[str] = []
         existing = {lbl.name for lbl in self.list_labels()}
         for ldef in REQUIRED_LABELS:
             if ldef["name"] in existing:
@@ -309,8 +321,8 @@ class GitLabProvider(VCSProvider):
         return created
 
     def ensure_status_labels(
-        self, status_names: List[str], *, _existing: Optional[Set[str]] = None
-    ) -> List[str]:
+        self, status_names: list[str], *, _existing: set[str] | None = None
+    ) -> list[str]:
         """Create any missing board status labels in the project (idempotent).
 
         Guarantees the Issue Board lists keyed to ``status_map`` exist so
@@ -318,7 +330,7 @@ class GitLabProvider(VCSProvider):
         a concurrent tick or a case-insensitive collision) is treated as
         success. Returns the names that were newly created.
         """
-        created: List[str] = []
+        created: list[str] = []
         existing = _existing if _existing is not None else {label.name for label in self.list_labels()}
         for name in status_names:
             if not name or name in existing:
@@ -380,7 +392,7 @@ class GitLabProvider(VCSProvider):
         return self._project_web_path or self._cfg.get("repo") or ""
 
     # ── meta ─────────────────────────────────────────────────────────────────
-    def get_default_branch(self) -> Optional[str]:
+    def get_default_branch(self) -> str | None:
         """The project's default branch (GET /projects/:id), or None on error."""
         try:
             data = self._http.get_json(self._proj)
@@ -389,7 +401,7 @@ class GitLabProvider(VCSProvider):
             return None
         return (data or {}).get("default_branch") or None
 
-    def list_branches(self) -> List[str]:
+    def list_branches(self) -> list[str]:
         try:
             data = self._http.get_paginated(f"{self._proj}/repository/branches",
                                             style="x_next_page", max_pages=2)
@@ -398,7 +410,7 @@ class GitLabProvider(VCSProvider):
             return []
         return [b.get("name") or "" for b in data or [] if b.get("name")]
 
-    def list_labels(self) -> List[LabelDef]:
+    def list_labels(self) -> list[LabelDef]:
         try:
             # include_ancestor_groups returns group-level labels too, not just project-level.
             data = self._http.get_paginated(f"{self._proj}/labels",
@@ -407,5 +419,5 @@ class GitLabProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("list_labels failed: %s", e)
             return []
-        return [LabelDef(name=l.get("name") or "", color=(l.get("color") or "").lstrip("#"))
-                for l in data or [] if l.get("name")]
+        return [LabelDef(name=lbl.get("name") or "", color=(lbl.get("color") or "").lstrip("#"))
+                for lbl in data or [] if lbl.get("name")]

@@ -23,6 +23,8 @@ from core.iterate import (  # noqa: E402
     _execute_planner_decompose,
     has_decomposed_marker,
 )
+from core import kanban as _core_kanban
+from tests.conftest import kanban_as
 
 
 # ── has_decomposed_marker: unit tests ────────────────────────────────────────
@@ -135,8 +137,9 @@ def test_integ_body_marker_skips_all_sub_issue_creation():
     issue = _make_issue_obj(number=5, body=body)
     prov = _make_provider(issue_obj=issue)
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban = mock.MagicMock()
+    mk_kanban.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(issue_n=5), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -149,11 +152,6 @@ def test_integ_body_marker_skips_all_sub_issue_creation():
     mk_kanban.complete.assert_called_once()
 
 
-def iterate_module():
-    from core import iterate as _it
-    return _it
-
-
 def test_integ_comment_marker_skips_sub_issue_creation():
     """When the marker appears as a posted comment (legacy or new), no
     sub-issues are created on a re-run of the dispatcher."""
@@ -161,8 +159,9 @@ def test_integ_comment_marker_skips_sub_issue_creation():
     comments = [{"body": "<!-- daedalus:decomposed:1720000000 -->\nDone"}]
     prov = _make_provider(issue_obj=issue, comments=comments)
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban = mock.MagicMock()
+    mk_kanban.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(issue_n=7), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -181,8 +180,9 @@ def test_integ_legacy_sub_issues_marker_still_skips():
     comments = [{"body": "<!-- daedalus:sub-issues:[20,21,22] -->\n3 issues"}]
     prov = _make_provider(issue_obj=issue, comments=comments)
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban = mock.MagicMock()
+    mk_kanban.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(issue_n=9), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -204,7 +204,8 @@ def test_integ_no_marker_triggers_full_decompose():
     prov.post_issue_comment.return_value = True
     prov.add_label.return_value = True
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
+    mk_kanban = mock.MagicMock()
+    with kanban_as(_core_kanban, mk_kanban):
         ok = _execute_planner_decompose(
             "slug", _make_card(issue_n=11), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -228,7 +229,8 @@ def test_integ_rerun_after_marker_posted_creates_zero_sub_issues():
     prov.add_label.return_value = True
 
     # ── Pass 1: fresh epic, marker not yet posted ──
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
+    mk_kanban1 = mock.MagicMock()
+    with kanban_as(_core_kanban, mk_kanban1):
         ok1 = _execute_planner_decompose(
             "slug", _make_card(issue_n=13), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -247,8 +249,9 @@ def test_integ_rerun_after_marker_posted_creates_zero_sub_issues():
     prov.create_issue.reset_mock()
     prov.post_issue_comment.reset_mock()
 
-    with mock.patch.object(iterate_module(), "kanban") as mk_kanban:
-        mk_kanban.complete.return_value = True
+    mk_kanban2 = mock.MagicMock()
+    mk_kanban2.complete.return_value = True
+    with kanban_as(_core_kanban, mk_kanban2):
         ok2 = _execute_planner_decompose(
             "slug", _make_card(issue_n=13), "o/r", "PLANNING COMPLETE",
             provider=prov,
@@ -257,4 +260,4 @@ def test_integ_rerun_after_marker_posted_creates_zero_sub_issues():
     assert ok2 is True
     prov.create_issue.assert_not_called()     # zero sub-issues created
     prov.post_issue_comment.assert_not_called()  # no duplicate marker
-    mk_kanban.complete.assert_called_once()
+    mk_kanban2.complete.assert_called_once()

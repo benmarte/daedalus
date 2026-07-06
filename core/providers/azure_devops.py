@@ -12,7 +12,7 @@ Code (Read), Pull Requests (Read & Write), Build (Read).
 from __future__ import annotations
 
 import base64
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import quote
 
 from .base import (CIStatus, Comment, IssueSummary, LabelDef, PRSummary,
@@ -31,7 +31,7 @@ class AzureDevOpsProvider(VCSProvider):
     supports_labels = True
     supports_branches = True
 
-    def __init__(self, resolved: Dict[str, Any]):
+    def __init__(self, resolved: dict[str, Any]):
         super().__init__(resolved)
         vcs = self._cfg.get("vcs") or {}
         org = (vcs.get("org") or "").strip()
@@ -56,7 +56,7 @@ class AzureDevOpsProvider(VCSProvider):
         self._prepo = f"{self._pproj}/_apis/git/repositories/{quote(repo)}"
 
     # ── work items (issues) ──────────────────────────────────────────────────
-    def _wiql(self, query: str) -> List[int]:
+    def _wiql(self, query: str) -> list[int]:
         try:
             data = self._http.post_json(f"{self._pproj}/_apis/wit/wiql?api-version=7.1",
                                         {"query": query})
@@ -66,8 +66,8 @@ class AzureDevOpsProvider(VCSProvider):
         return [wi.get("id") for wi in (data or {}).get("workItems") or []
                 if isinstance(wi.get("id"), int)]
 
-    def _work_items(self, ids: List[int]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
+    def _work_items(self, ids: list[int]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
         for i in range(0, len(ids), 200):
             batch = ",".join(str(x) for x in ids[i:i + 200])
             try:
@@ -80,11 +80,11 @@ class AzureDevOpsProvider(VCSProvider):
         return out
 
     @staticmethod
-    def _tags(fields: Dict[str, Any]) -> List[str]:
+    def _tags(fields: dict[str, Any]) -> list[str]:
         return [t.strip() for t in (fields.get("System.Tags") or "").split(";") if t.strip()]
 
-    def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
-                    limit: int = 50) -> List[IssueSummary]:
+    def list_issues(self, state: str = "open", labels: list[str] | None = None,
+                    limit: int = 50) -> list[IssueSummary]:
         cond = [f"[System.TeamProject] = '{self.project}'",
                 f"[System.WorkItemType] = '{self.work_item_type}'"]
         if state == "open":
@@ -97,7 +97,7 @@ class AzureDevOpsProvider(VCSProvider):
                 cond.append("(" + " OR ".join(tag_conds) + ")")
         ids = self._wiql("SELECT [System.Id] FROM WorkItems WHERE " + " AND ".join(cond)
                          + " ORDER BY [System.ChangedDate] DESC")[:limit]
-        out: List[IssueSummary] = []
+        out: list[IssueSummary] = []
         for wi in self._work_items(ids):
             fields = wi.get("fields") or {}
             out.append(IssueSummary(
@@ -126,7 +126,7 @@ class AzureDevOpsProvider(VCSProvider):
         return ok
 
     def create_issue(self, title: str, body: str,
-                     labels: Optional[List[str]] = None) -> Optional[int]:
+                     labels: list[str] | None = None) -> int | None:
         patch = [
             {"op": "add", "path": "/fields/System.Title", "value": title},
             {"op": "add", "path": "/fields/System.Description", "value": body},
@@ -148,7 +148,7 @@ class AzureDevOpsProvider(VCSProvider):
             self._log.warning("create_issue failed: %s", e)
         return None
 
-    def get_issue_state(self, issue_number: int) -> Optional[str]:
+    def get_issue_state(self, issue_number: int) -> str | None:
         try:
             data = self._http.get_json(
                 f"{self._pproj}/_apis/wit/workitems/{issue_number}",
@@ -161,7 +161,7 @@ class AzureDevOpsProvider(VCSProvider):
         except ProviderError:
             return None
 
-    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+    def get_issue(self, issue_number: int) -> IssueSummary | None:
         items = self._work_items([issue_number])
         if not items:
             return None
@@ -175,12 +175,12 @@ class AzureDevOpsProvider(VCSProvider):
             url=(wi.get("_links") or {}).get("html", {}).get("href") or "")
 
     @staticmethod
-    def _id_from_url(url: str) -> Optional[int]:
+    def _id_from_url(url: str) -> int | None:
         """Trailing work-item id from a relation URL (…/workItems/123)."""
         tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
         return int(tail) if tail.isdigit() else None
 
-    def blockers(self, issue_number: int) -> List[int]:
+    def blockers(self, issue_number: int) -> list[int]:
         """Open blockers via work-item Predecessor links
         (``System.LinkTypes.Dependency-Reverse``) merged with the portable
         ``Depends on:`` body fallback.
@@ -189,7 +189,7 @@ class AzureDevOpsProvider(VCSProvider):
         blocker. Expanding relations also returns the description, so the body
         fallback reuses it without a second fetch.
         """
-        out: List[int] = []
+        out: list[int] = []
         try:
             data = self._http.get_json(
                 f"{self._pproj}/_apis/wit/workitems/{issue_number}",
@@ -210,7 +210,7 @@ class AzureDevOpsProvider(VCSProvider):
         return out
 
     # ── pull requests ────────────────────────────────────────────────────────
-    def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]:
+    def list_prs(self, state: str = "all", limit: int = 50) -> list[PRSummary]:
         status = {"open": "active", "merged": "completed", "closed": "abandoned"}.get(state, "all")
         try:
             data = self._http.get_json(f"{self._prepo}/pullrequests",
@@ -219,7 +219,7 @@ class AzureDevOpsProvider(VCSProvider):
         except ProviderError as e:
             self._log.warning("list_prs failed: %s", e)
             return []
-        out: List[PRSummary] = []
+        out: list[PRSummary] = []
         for pr in (data or {}).get("value") or []:
             out.append(PRSummary(
                 number=pr.get("pullRequestId"),
@@ -241,8 +241,8 @@ class AzureDevOpsProvider(VCSProvider):
             return CIStatus.UNKNOWN
         statuses = (data or {}).get("value") or []
         if not statuses:
-            return CIStatus.UNKNOWN
-        latest: Dict[str, str] = {}
+            return CIStatus.NONE  # no statuses → repo has no CI (F8): pass, don't gate
+        latest: dict[str, str] = {}
         for s in statuses:  # API returns oldest→newest; keep the latest per context
             ctx = s.get("context") or {}
             key = f"{ctx.get('genre') or ''}/{ctx.get('name') or ''}"
@@ -251,7 +251,7 @@ class AzureDevOpsProvider(VCSProvider):
         # Filter them out so they don't prevent a GREEN result or inflate PENDING.
         effective = {s for s in latest.values() if s not in ("notapplicable", "notset", "")}
         if not effective:
-            return CIStatus.UNKNOWN
+            return CIStatus.NONE  # only neutral statuses → nothing to gate on (F8)
         if effective & {"failed", "error"}:
             return CIStatus.RED
         if effective & {"pending"}:
@@ -261,14 +261,14 @@ class AzureDevOpsProvider(VCSProvider):
         return CIStatus.UNKNOWN
 
     # ── PR threads (comments) ────────────────────────────────────────────────
-    def list_pr_comments(self, pr_number: int) -> List[Comment]:
+    def list_pr_comments(self, pr_number: int) -> list[Comment]:
         try:
             data = self._http.get_json(f"{self._prepo}/pullRequests/{pr_number}/threads",
                                        params=_API)
         except ProviderError as e:
             self._log.warning("list_pr_comments PR #%s failed: %s", pr_number, e)
             return []
-        out: List[Comment] = []
+        out: list[Comment] = []
         for thread in (data or {}).get("value") or []:
             for c in thread.get("comments") or []:
                 out.append(Comment(
@@ -291,7 +291,7 @@ class AzureDevOpsProvider(VCSProvider):
     def board_configured(self) -> bool:
         return True  # states always exist on work items
 
-    def board_numbers_with_statuses(self, status_names: List[str]) -> set:
+    def board_numbers_with_statuses(self, status_names: list[str]) -> set:
         if not status_names:
             return set()
         quoted = ", ".join(f"'{s}'" for s in status_names)
@@ -308,7 +308,7 @@ class AzureDevOpsProvider(VCSProvider):
         return ok
 
     # ── meta ─────────────────────────────────────────────────────────────────
-    def list_branches(self) -> List[str]:
+    def list_branches(self) -> list[str]:
         try:
             data = self._http.get_json(f"{self._prepo}/refs",
                                        params={"filter": "heads/", **_API})
@@ -331,7 +331,21 @@ class AzureDevOpsProvider(VCSProvider):
     def display_repo(self) -> str:
         return f"{self.org}/{self.project}/{self.repo}"
 
-    def list_labels(self) -> List[LabelDef]:
+    def remove_label(self, issue_number: int, label_name: str) -> bool:
+        """Azure DevOps tag removal is not yet implemented for label projection.
+
+        Tags on work items don't have a per-tag DELETE endpoint; removal requires
+        a PATCH with the full updated tag list.  This is a known gap — label_projection
+        on Azure DevOps currently supports add-only.  Falls back to the base no-op.
+        """
+        self._log.debug(
+            "remove_label: Azure DevOps per-tag removal not implemented "
+            "(issue #%s, label %r) — label_projection writes are add-only on ADO",
+            issue_number, label_name,
+        )
+        return False
+
+    def list_labels(self) -> list[LabelDef]:
         """Work-item tags (closest Azure analogue to labels)."""
         try:
             data = self._http.get_json(f"{self._pproj}/_apis/wit/tags",

@@ -52,9 +52,10 @@
    - 6.6 [Dispatcher Concurrency (FileLock Mutex)](#66-dispatcher-concurrency-filelock-mutex)
    - 6.7 [Status-Blind Re-Triage](#67-status-blind-re-triage)
    - 6.8 [Dispatcher CLI Flags (--dry-run, --self-test, --history)](#68-dispatcher-cli-flags---dry-run---self-test---history)
+   - 6.9 [Dev Mode Redirect (Local Dev Checkout)](#69-dev-mode-redirect-local-dev-checkout)
 
-**Last updated:** 2026-06-29  
-**Coverage:** 38 behaviors across 6 feature areas
+**Last updated:** 2026-06-30  
+**Coverage:** 39 behaviors across 6 feature areas
 
 ---
 
@@ -87,7 +88,7 @@ No user-facing configuration. Detection thresholds are hardcoded in the source.
 ### 1.2 Epic Sub-issue Creation (Phase 3)
 
 **What it does:**  
-When the planner agent completes its kanban card with `PLANNING COMPLETE:`, the dispatcher automatically decomposes the parent epic into sub-issues using one of two strategies:
+When the planner agent completes its kanban card with `PLANNING COMPLETE:` (or the synonym `PLAN:`), the dispatcher automatically decomposes the parent epic into sub-issues using one of two strategies:
 
 - **Case A:** One sub-issue per checklist item in the epic body (capped at 10 sub-issues)
 - **Case B:** Three default sub-issues:
@@ -101,7 +102,7 @@ Sub-issues inherit parent labels (minus `epic`) and add the `subtask` label. An 
 Epics are automatically broken into actionable sub-issues that enter the pipeline without manual intervention. You don't need to manually create sub-issues or track which checklist items map to which sub-tasks — the system handles decomposition after the planner finishes.
 
 **Prerequisites:**  
-- The epic must pass through Phase 2 (planner agent) and complete with `PLANNING COMPLETE:` in the card result.
+- The epic must pass through Phase 2 (planner agent) and complete with `PLANNING COMPLETE:` or `PLAN:` in the card result.
 
 **Configuration:**  
 No user-facing configuration. Strategy selection (Case A vs Case B) is automatic based on checklist presence.
@@ -201,12 +202,12 @@ No user-facing configuration. Idempotency is enforced automatically.
 ### 1.7 Planner Not-Suitable Fallback
 
 **What it does:**  
-When the planner agent completes its kanban card but concludes the parent issue is not suitable for decomposition (e.g., the issue is already small, blocked on a dependency, or already simple enough for direct implementation), it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The dispatcher detects this via a case-insensitive regex match, skips the planner's normal decomposition path, looks up the parent issue, and creates a validator task for it — routing the issue through the standard validator → PM → developer flow rather than leaving it stuck in In Progress with no active child task.
+When the planner agent completes its kanban card but concludes the parent issue is not suitable for decomposition (e.g., the issue is already small, blocked on a dependency, or already simple enough for direct implementation), it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The dispatcher detects this via a case-insensitive regex match, skips the planner's normal decomposition path, looks up the parent issue, and creates a validator task for it — routing the issue through the standard validator → PM → developer flow rather than leaving it stuck In Progress with no active child task. If the planner summary contains neither `PLANNING COMPLETE:`, `PLAN:`, nor `NOT SUITABLE FOR DECOMPOSITION`, the dispatcher emits a `WARNING`-level log instead of silently dropping the task (fix for #1072).
 
 **Defense-in-depth extension (fix for issue #969).** The previous implementation (`_check_planner_not_suitable()`) only scanned cards with `status="done"`. If the planner blocked its card — emitting the signal as a block reason instead of a completion summary — the handler was blind to it, and the issue stayed stuck In Progress forever. The handler now iterates **both `done` and `blocked` planner cards**, matching the signal on either status. Duplicate routing is prevented by the `planner-fallback-validator-{n}` idempotency key (only one validator per issue across both scans). The handler also emits diagnostic `info`/`debug` logs at every skip point (empty summary, non-matching pattern, missing issue, out-of-scope issue number) so silent failure modes from issue #969 no longer recur.
 
 **How you interact with it:**  
-No manual intervention required. If the planner determines an issue doesn't need decomposition, the system automatically reassigns it to the validator for normal pipeline processing. The parent issue will not get stuck — it will continue through the standard flow, even if the planner incorrectly blocks its card instead of completing it.
+No manual intervention required. If the planner determines an issue doesn't need decomposition, the system automatically reassigns it to the validator for normal pipeline processing. The parent issue will not get stuck — it will continue through the standard flow, even if the planner incorrectly blocks its card instead of completing it. The handler also skips issues that have been closed since they were routed (three-state closed-issue guard from issue #1120), so it never creates validator tasks for issues already resolved.
 
 **Prerequisites:**  
 - The parent issue must have been routed to the planner (via epic detection or manual assignment).
@@ -335,9 +336,9 @@ No user-facing configuration. Idempotency is enforced automatically.
 
 **What it does:**  
 For every blocked card, `classify_blocked()` categorizes its state into one of:
-- `advance`: Green CI → complete the card and advance the dependency chain
-- `dev_fix_ci`: Red CI → create a fix card for the developer
-- `pending_ci`: CI still running → wait and re-check next tick
+- `advance`: Developer card with open PR + `review-required` → complete the card and advance the dependency chain (CI no longer gates this — enforced at merge-time per epic #1074)
+- `qa_fix`: QA card with failing tests → create a fix card for the developer
+- `pending_signal`: QA/accessibility card with unrecognized QA/a11y signal → wait and re-check next tick
 - `pending_pr`: Awaiting PR → search VCS and auto-link the PR to the card
 - `pm_route`: Reviewer requested changes → create a PM routing card to address feedback
 - `approve_advance`: PR approved → complete the card and advance
@@ -346,13 +347,13 @@ For every blocked card, `classify_blocked()` categorizes its state into one of:
 
 Each action has a dedicated executor function that performs the appropriate VCS operations (label changes, comments, card completions, etc.).
 
-**A note on approval signals:** `approve_advance` fires when a card's handoff text contains an explicit approval signal — `approved`, `lgtm`, `qa-passed`, `a11y-passed`, `security-approved`, and similar role-prefixed tokens. The bare word `pass` is **not** a signal: it used to be, but it false-triggered on ordinary QA notes like "all tests pass" (and even "password"), advancing cards that were never approved. If you author agent souls or write QA pass notes, you can describe a passing run freely — only the explicit signals above are read as approval.
+**A note on approval signals:** `approve_advance` fires when a card's handoff text contains an explicit approval signal — `approved`, `lgtm`, `qa-passed`, `security-approved`, and similar role-prefixed tokens. The bare word `pass` is **not** a signal: it used to be, but it false-triggered on ordinary QA notes like "all tests pass" (and even "password"), advancing cards that were never approved. If you author agent souls or write QA pass notes, you can describe a passing run freely — only the explicit signals above are read as approval.
 
 **How you interact with it:**  
 Blocked cards are automatically diagnosed and routed — most resolve without human intervention. You don't need to manually unblock cards or figure out why a card is stuck — the self-healing loop identifies the blocker and takes corrective action.
 
 For example:
-- If CI fails, a `dev_fix_ci` card is created and assigned to a developer
+- If QA reports failing tests, a `qa_fix` card is created and assigned to a developer
 - If a PR is approved, the card auto-completes and the next tier promotes
 - If an agent exhausts retries, the team is notified (see 4.2)
 
@@ -363,7 +364,7 @@ None. The self-healing loop runs automatically on every dispatcher tick.
 No user-facing configuration. Classification logic is automatic.
 
 **Source implementation:**  
-`core/iterate.py:classify_blocked()` (line ~100), `core/iterate.py:_execute_advance()` (line ~380), `core/iterate.py:_execute_dev_fix_ci()` (line ~531), `core/iterate.py:_execute_pending_pr()` (line ~587), `core/iterate.py:_execute_pm_route()` (line ~645), `core/iterate.py:_execute_escalate()` (line ~829), `core/iterate.py:_execute_planner_decompose()` (line ~1503)
+`core/iterate.py:classify_blocked()` (line ~100), `core/iterate.py:_execute_advance()` (line ~380), `core/iterate.py:_execute_qa_fix()` (line ~531), `core/iterate.py:_execute_pending_pr()` (line ~587), `core/iterate.py:_execute_pm_route()` (line ~645), `core/iterate.py:_execute_escalate()` (line ~829), `core/iterate.py:_execute_planner_decompose()` (line ~1503)
 
 ---
 
@@ -595,10 +596,10 @@ No user-facing configuration. Intermediate retry notifications are automatic.
 ### 4.4 Dedup Guard on PM Retry-Cap Notifications
 
 **What it does:**  
-Prevents duplicate PM (project manager) retry-cap notifications. If a PM agent exhausts retries and the dispatcher sends a notification, subsequent retry-cap notifications for the same issue are suppressed until the PM agent is re-dispatched. This prevents notification spam when the PM agent repeatedly fails.
+Prevents duplicate PM (project manager) retry-cap notifications. If a PM agent exhausts retries and the dispatcher sends a notification, subsequent retry-cap notifications for the same issue are suppressed until the PM agent is re-dispatched. This prevents notification spam when the PM agent repeatedly fails. As of PR #1172, dedup markers are role-scoped (`<!-- daedalus:retry-cap-notified:<role> -->`) so distinct stall episodes for developer/PM/validator on the same issue don't collide, and a stage-recovery check (`_retry_cap_stage_recovered()`) suppresses the notification if the stalled stage has already recovered (running card, open PR, or downstream role active).
 
 **How you interact with it:**  
-You'll see one PM retry-cap notification per issue per dispatch cycle. If the PM agent is re-dispatched and exhausts retries again, you'll see another notification. No configuration needed — dedup is automatic.
+You'll see one retry-cap notification per issue per role per dispatch cycle. If the agent is re-dispatched and exhausts retries again, you'll see another notification. If the stage recovers before the notification fires (e.g., a new card was created or a PR was opened), the notification is suppressed. No configuration needed — dedup and recovery checks are automatic.
 
 **Prerequisites:**  
 - The PM agent must be configured to retry.
@@ -608,7 +609,7 @@ You'll see one PM retry-cap notification per issue per dispatch cycle. If the PM
 No user-facing configuration. Dedup is automatic.
 
 **Source implementation:**  
-`core/iterate.py` (PM retry-cap dedup logic)
+`scripts/daedalus_dispatch.py` (role-scoped dedup markers, `_retry_cap_stage_recovered()`, `_mark_notified_block()`)
 
 ---
 
@@ -958,10 +959,13 @@ hermes kanban show <task-id> | grep latest_summary
 - The QA agent must complete its work and signal `qa-passed` in the card summary.
 
 **Configuration:**  
-- `skip-qa` label: Add this label to any PR to bypass the QA gate. No other configuration needed.
+- `skip-qa` label: Add this label to any PR to bypass the QA gate (and the reviewer/security merge gates). No other configuration needed.
+
+**Reviewer and security merge gates (issue #1085):**  
+In addition to the QA gate, the auto-merge path now checks that the reviewer and security-analyst have approved the PR. `_reviewer_passed_for_issue()` and `_security_passed_for_issue()` inspect the respective cards' `latest_summary` for approval signals (`approved`, `review-approved`, `lgtm`, `sign-off` for reviewers; `security-approved`, `security-passed`, `no findings` for security). If either gate has not passed, the merge is skipped with a warning log. A `skip-qa` label bypasses both gates to preserve the pre-existing skip-qa behaviour (issue #1074 non-regression).
 
 **Source implementation:**  
-`core/iterate.py:_qa_passed_for_issue()` (line ~490), `core/iterate.py:run_iterate()` (line ~2260, auto-merge gate), `core/iterate.py:classify_blocked()` (skip_qa bypass in QA card classification)
+`core/iterate.py:_qa_passed_for_issue()` (line ~490), `core/iterate.py:_reviewer_passed_for_issue()`, `core/iterate.py:_security_passed_for_issue()`, `core/iterate.py:run_iterate()` (line ~2260, auto-merge gate), `core/iterate.py:classify_blocked()` (skip_qa bypass in QA card classification)
 
 ---
 
@@ -1041,6 +1045,8 @@ python scripts/daedalus_dispatch.py --history 25
 
 `--dry-run` is most useful when diagnosing unexpected dispatch behavior or previewing changes before a real run. `--self-test` is intended for CI pipelines — it runs fast, needs no credentials, and exits non-zero on any failed assertion. `--history` lets you audit recent dispatches without starting a full tick.
 
+**Exit code behavior (issue #1112):** A normal dispatch tick returns exit code **0** on success (including partial failure — at least one project ran cleanly — and zero-project ticks where nothing ran). It returns exit code **1** when at least one project ran and **every** project errored, so cron mail-on-error, CI status gates, and wrapper scripts can detect a total dispatch failure (e.g. misconfigured provider, broken auth). `--self-test` and `--history` keep their own exit codes.
+
 **Prerequisites:**  
 - `--dry-run` and `--history` require valid cron/environment setup (they use the same code path as a real tick, just with mutations gated out).  
 - `--self-test` requires no external credentials or GitHub access.
@@ -1053,15 +1059,57 @@ No configuration keys — these are pure CLI flags, passed on the command line.
 
 ---
 
+### 6.9 Dev Mode Redirect (Local Dev Checkout)
+
+**What it does:**  
+The dispatcher can redirect itself from the installed plugin to a local development checkout, so edits to `scripts/daedalus_dispatch.py` take effect immediately without running `hermes plugins update daedalus`. When `dev_mode.enabled: true` and `dev_mode.path` points at a valid checkout containing `scripts/daedalus_dispatch.py`, the dispatcher re-execs itself via `os.execve` — replacing the current process image so the FileLock is not double-held. The `DAEDALUS_DEV` environment variable is set to `"1"` automatically to prevent infinite re-exec loops.
+
+**Guard chain (all must pass before re-exec):**
+1. Skip if `DAEDALUS_DEV` env var is already set (infinite-loop guard)
+2. Skip if `dev_mode` config is not a dict (bad config / missing key)
+3. Skip if `dev_mode.enabled` is falsy
+4. Skip if `dev_mode.path` is absent or empty
+5. Warn + skip if `<path>/scripts/daedalus_dispatch.py` does not exist
+6. Skip if `abspath(dev_script) == abspath(__file__)` (already running from dev)
+7. Set `DAEDALUS_DEV=1`, prepend `path` to `PYTHONPATH`, call `os.execve`
+
+On any skip condition or unexpected error, the function returns `None` and the caller continues with the installed-plugin code path (fail safe — never crashes the dispatcher).
+
+**How you interact with it:**  
+Add a `dev_mode` block to your project's `.hermes/daedalus.yaml`:
+```yaml
+dev_mode:
+  enabled: true
+  path: /path/to/local/daedalus/checkout
+```
+
+Set `enabled: false` (or remove the block) to restore normal installed-plugin behaviour.
+
+**Prerequisites:**  
+- The path must point to a valid Daedalus checkout containing `scripts/daedalus_dispatch.py`.
+- `dev_mode.path` supports `~` expansion via `os.path.expanduser`.
+
+**Configuration:**  
+- `dev_mode.enabled` (bool): Toggle the redirect. Default: `false` (block is commented out in template).
+- `dev_mode.path` (string): Absolute or `~`-relative path to the local checkout.
+
+**Source implementation:**  
+`scripts/daedalus_dispatch.py` — `_DEV_MODE_ENV` constant (line ~79), `_maybe_redirect_dev_mode()` function (line ~6520), called at 2 sites in `_main_inner()` after `resolve_repo_config()`.
+
+**Tests:**  
+`tests/test_dev_mode_redirect.py` — 11 tests covering the full guard chain, edge cases (non-dict config, permission errors, execve failure), and an integration test verifying the end-to-end redirect chain.
+
+---
+
 ## Summary
 
-This guide documents **38 new user-facing behaviors** across **6 feature areas**:
+This guide documents **39 new user-facing behaviors** across **6 feature areas**:
 - **Epic & Sub-issue Management (7 behaviors):** Automatic epic detection, decomposition, and context injection
 - **Dependency-Aware Dispatch (5 behaviors):** Ready-gating, tier promotion, and idempotency
 - **Self-Healing & Auto-Advance (7 behaviors):** Automatic diagnosis and routing of blocked cards
 - **Notification & Alerting (8 behaviors):** Threading, retry-cap alerts, and webhook integration
 - **Reliability & Infrastructure (5 behaviors):** Auto-pagination, retry logic, and rate-limit handling
-- **Dispatch & Pipeline (8 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, status-blind re-triage, and dispatcher CLI flags
+- **Dispatch & Pipeline (9 behaviors):** History persistence, performance optimizations, comment enforcement, QA gate, FileLock mutex, status-blind re-triage, dispatcher CLI flags, and dev-mode redirect
 
 All behaviors are verified against the source code implementation and are active in the current release (v1.0.0-beta.30).
 

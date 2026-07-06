@@ -7,8 +7,13 @@ and logs a warning for each:
   (default 48h) — optionally archived off the active board via the native
   ``hermes kanban archive`` command (issue #186).
 * **running** cards whose summary hasn't advanced for longer than a threshold
-  (default 24h) — a worker that has died or wedged, otherwise invisible since
-  the board still shows it as in-progress (issue #232).
+  (default 30 min) — a worker that has died, wedged, or suspended on a headless
+  permission prompt, otherwise invisible since the board still shows it as
+  in-progress (issue #232). When ``reset`` is enabled (issue #1323) the sweep
+  also self-heals: it re-blocks each stale running card with a crash-class
+  reason so the crash-retry reconciler re-dispatches it on the SAME tick,
+  freeing the ``execution.max_dispatch`` slot in minutes instead of stranding
+  the whole pipeline until a 24h warn or a human unblock.
 
 It runs each dispatch tick alongside ``kanban.diagnostics`` and degrades
 gracefully: any failure logs and returns, never breaking a run.
@@ -25,22 +30,33 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
+import re
 import time
-from typing import Dict, List, Optional, Tuple
 
 from core import kanban
+from core.db import connect_wal
 
 logger = logging.getLogger("daedalus.sweeper")
 
 DEFAULT_STALE_HOURS = 48
-DEFAULT_RUNNING_STALE_HOURS = 24
+# Shortened from 24h → 30 min (issue #1323): a suspended/dead worker holds the
+# ``execution.max_dispatch`` slot the whole time it sits ``running``, so a fast
+# threshold is the minimum needed for the pipeline to self-recover. The delegate
+# wrapper heartbeats every 300s, so 30 min without any heartbeat (6 missed) is a
+# confident dead-worker signal — a live worker never ages out.
+DEFAULT_RUNNING_STALE_HOURS = 0.5
+
+# Crash-class block reason stamped on a reclaimed stale-running card. Must begin
+# with a marker that ``core.crash_retry.classify`` maps to the ``crash`` class
+# (``coding-agent-failed:``) — and NOT a non-crash prefix — so the crash-retry
+# reconciler owns the card and re-dispatches it (issue #1323).
+STALE_RUNNING_RESET_REASON = "coding-agent-failed: STALE_RUNNING"
 
 # Timestamp columns to consult, in order of preference, for "last progress".
 _SINCE_KEYS = ("last_heartbeat_at", "started_at", "created_at")
 
 
-def blocked_since(card: Dict) -> Optional[int]:
+def blocked_since(card: dict) -> int | None:
     """Best epoch-seconds estimate of when ``card`` last made progress.
 
     Returns the first present, truthy value among ``last_heartbeat_at``,
@@ -60,19 +76,19 @@ def blocked_since(card: Dict) -> Optional[int]:
 
 
 def _find_stale(
-    cards: List[Dict],
+    cards: list[dict],
     *,
     status: str,
     now: int,
     threshold_hours: float,
-) -> List[Tuple[Dict, float]]:
+) -> list[tuple[dict, float]]:
     """Pure detection: cards in ``status`` with no progress for > ``threshold_hours``.
 
     Returns ``[(card, age_hours)]`` sorted oldest-first. Cards not in ``status``,
     or whose age can't be determined, are skipped.
     """
     cutoff = now - threshold_hours * 3600
-    stale: List[Tuple[Dict, float]] = []
+    stale: list[tuple[dict, float]] = []
     for card in cards:
         if (card.get("status") or "").lower() != status:
             continue
@@ -90,11 +106,11 @@ def _find_stale(
 
 
 def find_stale_blocked(
-    cards: List[Dict],
+    cards: list[dict],
     *,
     now: int,
     threshold_hours: float = DEFAULT_STALE_HOURS,
-) -> List[Tuple[Dict, float]]:
+) -> list[tuple[dict, float]]:
     """Pure detection: blocked cards with no activity for > ``threshold_hours``.
 
     Returns ``[(card, age_hours)]`` sorted oldest-first. Cards that are not
@@ -104,11 +120,11 @@ def find_stale_blocked(
 
 
 def find_stale_running(
-    cards: List[Dict],
+    cards: list[dict],
     *,
     now: int,
     threshold_hours: float = DEFAULT_RUNNING_STALE_HOURS,
-) -> List[Tuple[Dict, float]]:
+) -> list[tuple[dict, float]]:
     """Pure detection: running cards with no progress for > ``threshold_hours``.
 
     A running card whose ``last_heartbeat_at`` (the freshest summary-update
@@ -120,10 +136,15 @@ def find_stale_running(
 
 
 def _db_path(slug: str) -> str:
-    return os.path.expanduser(f"~/.hermes/kanban/boards/{slug}/kanban.db")
+    # Honor HERMES_HOME so tests (and non-default installs) never touch the real
+    # ~/.hermes board. A hardcoded ~/.hermes here let test runs write cards onto
+    # the live board, which the running gateway then executed — a runaway loop
+    # (2026-07-02 incident).
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return os.path.join(home, "kanban", "boards", slug, "kanban.db")
 
 
-def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
+def _heartbeats(slug: str, task_ids: list[str]) -> dict[str, int]:
     """``{task_id: last_heartbeat_at}`` from the board DB. Degrades to ``{}``.
 
     Only ids found in the DB with a non-null heartbeat are returned, so callers
@@ -135,7 +156,7 @@ def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
     if not os.path.exists(path):
         return {}
     try:
-        conn = sqlite3.connect(path)
+        conn = connect_wal(path)
         placeholders = ",".join("?" for _ in task_ids)
         rows = conn.execute(
             f"SELECT id, last_heartbeat_at FROM tasks WHERE id IN ({placeholders})",
@@ -146,6 +167,65 @@ def _heartbeats(slug: str, task_ids: List[str]) -> Dict[str, int]:
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("sweeper: heartbeat lookup failed for %s: %s", slug, exc)
         return {}
+
+
+def _worker_pids(slug: str, task_ids: list[str]) -> dict[str, int]:
+    """``{task_id: worker_pid}`` from the board DB for a fast dead-worker signal.
+
+    The board records the OS pid of the worker it spawned. When that process is
+    gone the card is a crash zombie *right now* — no need to wait out the
+    heartbeat threshold. Degrades to ``{}`` (callers fall back to heartbeat aging).
+    """
+    if not task_ids:
+        return {}
+    path = _db_path(slug)
+    if not os.path.exists(path):
+        return {}
+    try:
+        conn = connect_wal(path)
+        placeholders = ",".join("?" for _ in task_ids)
+        rows = conn.execute(
+            f"SELECT id, worker_pid FROM tasks WHERE id IN ({placeholders})",
+            task_ids,
+        ).fetchall()
+        conn.close()
+        return {r[0]: int(r[1]) for r in rows if r[1]}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("sweeper: worker_pid lookup failed for %s: %s", slug, exc)
+        return {}
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a local process with ``pid`` exists. ``os.kill(pid, 0)`` sends no
+    signal — it only probes existence/permission. Assumes the worker ran on THIS
+    host (true for local coding-agent / local-LLM workers); a cross-host pid can
+    only yield a false *alive* (→ safe heartbeat fallback), never a false reclaim."""
+    if pid <= 0:
+        return True  # unknown → don't treat as dead
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False  # no such process → worker is gone
+    except PermissionError:
+        return True  # exists but not ours → alive
+    except OSError:
+        return True  # inconclusive → don't reclaim on this signal
+
+
+def find_dead_worker_running(
+    cards: list[dict], pid_by_id: dict[str, int], *, alive_fn=_pid_alive,
+) -> list[dict]:
+    """Running cards whose recorded worker pid is DEAD — reclaim immediately,
+    independent of heartbeat age. Pure/testable: liveness is injected."""
+    dead: list[dict] = []
+    for card in cards:
+        if (card.get("status") or "").lower() != "running":
+            continue
+        pid = pid_by_id.get(str(card.get("id")))
+        if pid and not alive_fn(pid):
+            dead.append(card)
+    return dead
 
 
 def _archive_with_retry(
@@ -192,9 +272,9 @@ def sweep_stale_blocked(
     *,
     threshold_hours: float = DEFAULT_STALE_HOURS,
     archive: bool = False,
-    now: Optional[int] = None,
+    now: int | None = None,
     dry_run: bool = False,
-) -> List[str]:
+) -> list[str]:
     """Detect, warn, and optionally archive stale blocked cards.
 
     Returns the list of stale card ids found. ``archive`` (off by default) moves
@@ -219,7 +299,7 @@ def sweep_stale_blocked(
                 c["last_heartbeat_at"] = beat
 
     stale = find_stale_blocked(cards, now=now, threshold_hours=threshold_hours)
-    stale_ids: List[str] = []
+    stale_ids: list[str] = []
     for card, age in stale:
         tid = str(card.get("id") or "")
         label = card.get("title") or card.get("assignee") or "?"
@@ -242,14 +322,23 @@ def sweep_stale_running(
     slug: str,
     *,
     threshold_hours: float = DEFAULT_RUNNING_STALE_HOURS,
-    now: Optional[int] = None,
-) -> List[str]:
-    """Detect and warn about running cards stuck with no update for > N hours.
+    reset: bool = False,
+    now: int | None = None,
+) -> list[str]:
+    """Detect stale running cards; warn, and optionally self-heal via reset.
 
-    A card whose worker has died or wedged stays in ``running`` indefinitely and
-    is otherwise invisible. This warns (card id, assignee, hours elapsed) so a
-    human can intervene; unlike blocked cards, running cards are never archived
-    automatically. Returns the list of stale running card ids found.
+    A card whose worker has died, wedged, or suspended (e.g. on a headless
+    permission prompt, issue #1323) stays in ``running`` indefinitely and is
+    otherwise invisible — worse, it holds the ``execution.max_dispatch`` slot so
+    the whole pipeline stalls. This always warns (card id, assignee, hours
+    elapsed).
+
+    When ``reset`` is True (issue #1323) it also re-blocks each stale card with
+    a crash-class reason (``STALE_RUNNING_RESET_REASON``). Because the crash-retry
+    reconciler runs immediately after the sweep on the same dispatch tick, the
+    card is re-dispatched with a fresh worker and the ``max_dispatch`` slot is
+    freed in minutes — no human unblock needed. Unlike blocked cards, running
+    cards are never archived. Returns the list of stale running card ids found.
     """
     now = int(time.time()) if now is None else int(now)
     cards = kanban.list_tasks(slug, status="running") or []
@@ -267,15 +356,139 @@ def sweep_stale_running(
             if beat is not None:
                 c["last_heartbeat_at"] = beat
 
+    # Fast dead-worker path: a running card whose recorded worker pid is gone is a
+    # crash zombie NOW — reclaim without waiting out the heartbeat threshold. This is
+    # what makes local-model self-heal fast instead of ~30 min (the qwen developer
+    # crashes mid-run; heartbeat aging alone is slow). Heartbeat aging below still
+    # catches wedged-but-alive workers and cross-host cases (dead-pid → safe fallback).
+    all_ids = [str(c.get("id")) for c in cards if c.get("id")]
+    dead_cards = find_dead_worker_running(cards, _worker_pids(slug, all_ids))
+    dead_ids = {str(c.get("id")) for c in dead_cards}
+
     stale = find_stale_running(cards, now=now, threshold_hours=threshold_hours)
-    stale_ids: List[str] = []
-    for card, age in stale:
+    # Reclaim the union: dead-pid cards (immediate) + heartbeat-stale cards. Dedup so a
+    # card that is both isn't reblocked twice.
+    seen: set = set()
+    stale_ids: list[str] = []
+    work: list[tuple[dict, float | None]] = (
+        [(c, None) for c in dead_cards] + [(c, age) for c, age in stale]
+    )
+    for card, age in work:
         tid = str(card.get("id") or "")
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
         assignee = card.get("assignee") or card.get("title") or "?"
-        logger.warning(
-            "sweeper: card %s (%s) stuck in running for %.0fh (>%gh) with no "
-            "summary update — worker may have died; manual intervention may be required",
-            tid, assignee, age, threshold_hours,
+        is_dead = tid in dead_ids
+        action = (
+            "re-blocking crash-class so it re-dispatches and frees the slot"
+            if reset else "manual intervention may be required"
         )
+        if is_dead:
+            logger.warning(
+                "sweeper: card %s (%s) worker process is gone — crash zombie; %s",
+                tid, assignee, action,
+            )
+        else:
+            logger.warning(
+                "sweeper: card %s (%s) stuck in running for %.0fh (>%gh) with no "
+                "summary update — worker may have died; %s",
+                tid, assignee, age, threshold_hours, action,
+            )
         stale_ids.append(tid)
+        if reset and tid:
+            detail = (
+                "worker process gone (fast dead-worker reclaim)"
+                if is_dead
+                else f"no summary update for {age:.0f}h (issue #1323 auto-reclaim)"
+            )
+            reason = f"{STALE_RUNNING_RESET_REASON} — {detail}"
+            if kanban.block_task(slug, tid, reason):
+                logger.info("sweeper: reset stale-running card %s → %s", tid, reason)
+            else:
+                logger.warning("sweeper: failed to reset stale-running card %s", tid)
     return stale_ids
+
+
+# Bounded re-creation of role cards stuck in the terminal `triage` state. A flaky local
+# model can crash-loop a role until the block-recurrence breaker escalates it to `triage`
+# (terminal — complete/unblock/promote all reject it), which strands the whole pipeline
+# and needs a human. This gives each such card a bounded number of fresh attempts.
+DEFAULT_MAX_TRIAGE_RECOVERIES = 3
+# The developer is recovered by the PR-aware F10/F12 path (adopt an open PR / open one
+# from a pushed branch), so it is skipped here to avoid double-handling.
+_TRIAGE_SKIP_ROLES = ("developer",)
+_TRIAGE_RECOVER_RE = re.compile(r"\s*\[recover (\d+)\]\s*$")
+
+
+def recover_triaged_cards(
+    slug: str,
+    *,
+    skip_roles: tuple[str, ...] = _TRIAGE_SKIP_ROLES,
+    max_recoveries: int = DEFAULT_MAX_TRIAGE_RECOVERIES,
+    reset: bool = False,
+) -> list[str]:
+    """Re-create role cards stuck in terminal ``triage`` (bounded) so a flaky local model
+    gets fresh attempts instead of being permanently stuck.
+
+    Triage is terminal and immovable, so recovery = archive the stuck card (which, being
+    terminal, keeps any gated child unblocked) and create a fresh card of the same role
+    (same assignee/body/parents) with a ``[recover N]`` marker in the title. The marker is
+    the attempt counter — once it reaches ``max_recoveries`` the card is left in triage for
+    a human. Role is derived from the ``<role>-daedalus`` assignee convention; ``skip_roles``
+    (developer) are left to the PR-aware path. Returns the ids of triaged cards acted on.
+    When ``reset`` is False this only *reports* (warns) — nothing is mutated (dry-run).
+    """
+    recovered: list[str] = []
+    for card in kanban.list_tasks(slug, status="triage") or []:
+        if (card.get("status") or "").lower() != "triage":
+            continue
+        assignee = (card.get("assignee") or "").strip()
+        role = assignee.split("-daedalus")[0] if assignee else ""
+        if not role or role in skip_roles:
+            continue
+        tid = str(card.get("id") or "")
+        if not tid:
+            continue
+        title = card.get("title") or ""
+        m = _TRIAGE_RECOVER_RE.search(title)
+        count = int(m.group(1)) if m else 0
+        if count >= max_recoveries:
+            logger.warning(
+                "sweeper: triage card %s (%s) exhausted %d/%d recoveries — leaving for a human",
+                tid, role, count, max_recoveries,
+            )
+            continue
+        if not reset:
+            logger.warning(
+                "sweeper: triage card %s (%s) is recoverable (attempt %d/%d)",
+                tid, role, count + 1, max_recoveries,
+            )
+            recovered.append(tid)
+            continue
+        base_title = _TRIAGE_RECOVER_RE.sub("", title).rstrip()
+        detail = kanban.show_card(slug, tid) or {}
+        dt = detail.get("task") or {}
+        body = dt.get("body") or card.get("body") or ""
+        parents = [
+            p if isinstance(p, str) else (p.get("id") if isinstance(p, dict) else None)
+            for p in (detail.get("parents") or [])
+        ]
+        parents = [p for p in parents if p]
+        new_tid = kanban.create_task(
+            slug,
+            f"{base_title} [recover {count + 1}]",
+            assignee=assignee,
+            body=body,
+            parents=parents or None,
+        )
+        if not new_tid:
+            logger.warning("sweeper: triage-recovery could not re-create %s (%s)", tid, role)
+            continue
+        kanban.archive_task(slug, tid)
+        logger.info(
+            "sweeper: triage-recovery re-created %s (%s) as %s (attempt %d/%d)",
+            tid, role, new_tid, count + 1, max_recoveries,
+        )
+        recovered.append(tid)
+    return recovered

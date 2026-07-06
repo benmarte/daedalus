@@ -12,6 +12,7 @@ References:
 """
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -23,13 +24,6 @@ import pytest
 from core.iterate import _execute_planner_decompose
 from core.providers.base import VCSProvider, parse_depends_on
 from core import iterate
-
-
-@pytest.fixture(autouse=True)
-def _restore_kanban():
-    original = iterate.kanban
-    yield
-    iterate.kanban = original
 
 
 def _make_provider(
@@ -82,13 +76,18 @@ def _make_card(issue_number: int = 100) -> dict:
     }
 
 
+@contextlib.contextmanager
 def _mock_kanban():
-    """Mock kanban operations to avoid side effects."""
-    iterate.kanban = MagicMock()
-    iterate.kanban.complete.return_value = True
-    iterate.kanban.create_triage.return_value = "t_triage"
-    iterate.kanban.decompose.return_value = True
-    iterate.kanban.list_tasks.return_value = []
+    """Patch kanban operations at method level to avoid side effects."""
+    import unittest.mock as mock
+    from core import kanban as _core_kanban
+    with (
+        mock.patch.object(_core_kanban, "complete", return_value=True),
+        mock.patch.object(_core_kanban, "create_triage", return_value="t_triage"),
+        mock.patch.object(_core_kanban, "decompose", return_value=True),
+        mock.patch.object(_core_kanban, "list_tasks", return_value=[]),
+    ):
+        yield
 
 
 class TestIssue920ReadyLabelAutoAdvance:
@@ -101,26 +100,25 @@ class TestIssue920ReadyLabelAutoAdvance:
             sub_issue_numbers=[101, 102],
             epic_body=epic_body,
         )
-        _mock_kanban()
-        
-        result = _execute_planner_decompose(
-            slug="test",
-            card=_make_card(100),
-            repo="test/repo",
-            handoff_text="PLANNING COMPLETE",
-            workdir=str(tmp_path),
-            provider=provider,
-            dry_run=False,
-        )
-        
+        with _mock_kanban():
+            result = _execute_planner_decompose(
+                slug="test",
+                card=_make_card(100),
+                repo="test/repo",
+                handoff_text="PLANNING COMPLETE",
+                workdir=str(tmp_path),
+                provider=provider,
+                dry_run=False,
+            )
+
         assert result is True, "Decomposition should succeed"
-        
+
         # Find all Ready label calls
         ready_calls = [
             call for call in provider.add_label.call_args_list
             if call[0][1] == "Ready"
         ]
-        
+
         # First sub-issue (tier-0, no dependencies) should get Ready label
         assert len(ready_calls) >= 1, "At least one sub-issue should receive Ready label"
         assert ready_calls[0][0][0] == 101, "First sub-issue (#101) should get Ready label"
@@ -134,20 +132,19 @@ class TestIssue920ReadyLabelAutoAdvance:
             sub_issue_numbers=[201, 202, 203],
             epic_body=epic_body,
         )
-        _mock_kanban()
-        
-        result = _execute_planner_decompose(
-            slug="test",
-            card=_make_card(100),
-            repo="test/repo",
-            handoff_text="PLANNING COMPLETE",
-            workdir=str(tmp_path),
-            provider=provider,
-            dry_run=False,
-        )
-        
+        with _mock_kanban():
+            result = _execute_planner_decompose(
+                slug="test",
+                card=_make_card(100),
+                repo="test/repo",
+                handoff_text="PLANNING COMPLETE",
+                workdir=str(tmp_path),
+                provider=provider,
+                dry_run=False,
+            )
+
         assert result is True, "Decomposition should succeed"
-        
+
         # Verify that sub-issues with dependencies do NOT get Ready label
         # Only tier-0 (first) sub-issue should get it
         ready_calls = [
@@ -186,20 +183,19 @@ class TestIssue920ReadyLabelAutoAdvance:
             sub_issue_numbers=[301],
             epic_body=epic_body,
         )
-        _mock_kanban()
-        
-        result = _execute_planner_decompose(
-            slug="test",
-            card=_make_card(100),
-            repo="test/repo",
-            handoff_text="PLANNING COMPLETE",
-            workdir=str(tmp_path),
-            provider=provider,
-            dry_run=False,
-        )
-        
+        with _mock_kanban():
+            result = _execute_planner_decompose(
+                slug="test",
+                card=_make_card(100),
+                repo="test/repo",
+                handoff_text="PLANNING COMPLETE",
+                workdir=str(tmp_path),
+                provider=provider,
+                dry_run=False,
+            )
+
         assert result is True
-        
+
         # Single sub-issue should get Ready label
         ready_calls = [
             call for call in provider.add_label.call_args_list
@@ -216,20 +212,19 @@ class TestIssue920ReadyLabelAutoAdvance:
             epic_body=epic_body,
             board_configured=True,
         )
-        _mock_kanban()
-        
-        result = _execute_planner_decompose(
-            slug="test",
-            card=_make_card(100),
-            repo="test/repo",
-            handoff_text="PLANNING COMPLETE",
-            workdir=str(tmp_path),
-            provider=provider,
-            dry_run=False,
-        )
-        
+        with _mock_kanban():
+            result = _execute_planner_decompose(
+                slug="test",
+                card=_make_card(100),
+                repo="test/repo",
+                handoff_text="PLANNING COMPLETE",
+                workdir=str(tmp_path),
+                provider=provider,
+                dry_run=False,
+            )
+
         assert result is True
-        
+
         # Verify Ready label and board status are aligned
         ready_label_calls = {
             call[0][0] for call in provider.add_label.call_args_list
@@ -256,20 +251,19 @@ class TestIssue920ReadyLabelAutoAdvance:
             epic_body=epic_body,
             board_configured=False,
         )
-        _mock_kanban()
-        
-        result = _execute_planner_decompose(
-            slug="test",
-            card=_make_card(100),
-            repo="test/repo",
-            handoff_text="PLANNING COMPLETE",
-            workdir=str(tmp_path),
-            provider=provider,
-            dry_run=False,
-        )
-        
+        with _mock_kanban():
+            result = _execute_planner_decompose(
+                slug="test",
+                card=_make_card(100),
+                repo="test/repo",
+                handoff_text="PLANNING COMPLETE",
+                workdir=str(tmp_path),
+                provider=provider,
+                dry_run=False,
+            )
+
         assert result is True
-        
+
         # Ready label should still be applied
         ready_calls = [
             call for call in provider.add_label.call_args_list

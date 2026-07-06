@@ -98,6 +98,8 @@ def test_scenario_1_full_pipeline_happy_path():
         mock.patch("core.iterate.kanban.show_card", return_value=docs_card),
         mock.patch("core.iterate.kanban.complete", return_value=True),
         mock.patch("core.iterate._qa_passed_for_issue", return_value=True),
+        mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True),
+        mock.patch("core.iterate._security_passed_for_issue", return_value=True),
     ):
         counts_docs, *_ = iterate.run_iterate(
             SLUG, REPO, provider=provider, resolved=resolved
@@ -195,6 +197,8 @@ def test_scenario_4_auto_merge_fires_on_qa_passed():
         mock.patch("core.iterate.kanban.show_card", return_value=docs_card),
         mock.patch("core.iterate.kanban.complete", return_value=True),
         mock.patch("core.iterate._qa_passed_for_issue", return_value=True),
+        mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True),
+        mock.patch("core.iterate._security_passed_for_issue", return_value=True),
     ):
         iterate.run_iterate(SLUG, REPO, provider=provider, resolved=resolved)
 
@@ -216,6 +220,8 @@ def test_scenario_5_skip_qa_bypass_merges_without_qa_signal():
         mock.patch("core.iterate.kanban.show_card", return_value=docs_card),
         mock.patch("core.iterate.kanban.complete", return_value=True),
         mock.patch("core.iterate._qa_passed_for_issue", return_value=False),
+        mock.patch("core.iterate._reviewer_passed_for_issue", return_value=True),
+        mock.patch("core.iterate._security_passed_for_issue", return_value=True),
     ):
         iterate.run_iterate(SLUG, REPO, provider=provider, resolved=resolved)
 

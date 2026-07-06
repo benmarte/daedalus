@@ -96,7 +96,7 @@ def test_default_titles_returns_three():
 
 # ── _execute_planner_decompose: checklist path ───────────────────────────────
 
-def test_checklist_case_creates_sub_issues():
+def test_checklist_case_creates_sub_issues(tmp_path):
     body = "\n".join(f"- [ ] task {i}" for i in range(5))
     issue = _make_issue_obj(1, "Epic", body)
     prov = _make_provider(issue_obj=issue, created_numbers=[10, 11, 12, 13, 14])
@@ -106,7 +106,7 @@ def test_checklist_case_creates_sub_issues():
          mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
         ok = _execute_planner_decompose(
             "slug", _make_card(body=body), "o/r", "PLANNING COMPLETE: ready",
-            provider=prov, workdir="/tmp"
+            provider=prov, workdir=str(tmp_path)
         )
 
     assert ok is True
@@ -179,7 +179,7 @@ def test_sub_issue_body_includes_scope_from_checklist():
     assert any("Add password validation" in b for b in bodies)
 
 
-def test_checklist_capped_at_10():
+def test_checklist_capped_at_10(tmp_path):
     body = "\n".join(f"- [ ] task {i}" for i in range(15))
     issue = _make_issue_obj(1, "Epic", body)
     prov = _make_provider(issue_obj=issue, created_numbers=list(range(200, 215)))
@@ -189,7 +189,7 @@ def test_checklist_capped_at_10():
          mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
         _execute_planner_decompose(
             "slug", _make_card(body=body), "o/r", "PLANNING COMPLETE",
-            provider=prov, workdir="/tmp"
+            provider=prov, workdir=str(tmp_path)
         )
 
     assert prov.create_issue.call_count == 10
@@ -538,9 +538,10 @@ def test_other_planner_handoff_routes_to_pm():
 
 
 def test_non_epic_path_unchanged():
+    # Canonical reviewer approval prefix per #1125 F1: must start with "review-approved:".
     action = classify_blocked(
         "reviewer-daedalus",
-        "reviewed:approved",
+        "review-approved: PR #42",
         ci_green=True,
     )
     assert action == APPROVE_ADVANCE

@@ -3,7 +3,7 @@
 Verifies that when a qa-daedalus card reports 'qa-failed', the dispatcher:
   1. Returns the card info in qa_failed_cards (4th return from run_iterate)
   2. Fires a notification to configured 'qa-failed' targets via _notify_qa_failed
-  3. Does NOT fire notifications for developer DEV_FIX_CI (CI-red) cards
+  3. Does NOT fire notifications for developer QA_FIX (QA-reported test failures) cards
   4. Works correctly under dry_run (logs intent, no actual send)
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import core.iterate as iterate
-from conftest import FakeKanban, FakeProvider
+from conftest import FakeKanban, FakeProvider  # noqa: F401 (FakeKanban kept for compat)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -56,9 +56,7 @@ class TestRunIterateQaFailedCards:
     def test_qa_failed_summary_returned_in_fourth_slot(self):
         """qa-daedalus card with 'qa-failed' → qa_failed_cards contains it."""
         card = _qa_card()
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.create_task", return_value="t_fix"),
@@ -70,30 +68,32 @@ class TestRunIterateQaFailedCards:
         assert qa_failed[0]["pr"] == 99
         assert qa_failed[0]["issue_n"] == 42
 
-    def test_developer_dev_fix_ci_not_in_qa_failed(self):
-        """Developer CI-red card triggers DEV_FIX_CI but is NOT in qa_failed_cards."""
+    def test_developer_red_ci_advances_not_in_qa_failed(self):
+        """Developer QA-reported test failures card triggers ADVANCE (not QA_FIX) and is NOT in qa_failed_cards.
+
+        Per epic #1074, CI no longer gates ADVANCE for developer cards — CI is
+        enforced at merge-time only. So a developer card with QA-reported failures advances
+        immediately. qa_failed_cards is only for QA-daedalus QA_FIX, not
+        developer ADVANCE.
+        """
         provider = FakeProvider()
         provider._ci = "red"
         provider._open_prs = {77}
         card = _dev_card(pr=77)
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
-            mock.patch("core.iterate.kanban.create_task", return_value="t_fix"),
-            mock.patch("core.iterate.kanban.comment", return_value=True),
+            mock.patch("core.iterate.kanban.complete", return_value=True),
         ):
             counts, _, _, qa_failed, *_ = iterate.run_iterate("slug", "O/R", provider=provider)
 
         assert qa_failed == []
+        assert counts[iterate.ADVANCE] == 1
 
     def test_qa_failed_not_appended_when_create_task_fails(self):
         """When create_task returns None (kanban down), qa_failed_cards stays empty."""
         card = _qa_card()
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.create_task", return_value=None),
@@ -118,9 +118,7 @@ class TestRunIterateQaFailedCards:
             "latest_summary": "qa-passed: PR #50 all green",
             "body": "Issue #30",
         }
-        fk = FakeKanban()
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.complete", return_value=True),
@@ -350,11 +348,9 @@ class TestNotifyQaFailed:
     def test_escalated_cards_populated_in_fifth_slot(self):
         """run_iterate 5th slot: escalated card when fix_attempts file counter is at MAX."""
         card = _qa_card()
-        fk = FakeKanban()
         # Pass a workdir so the file-counter check runs; mock it to return MAX_FIX_ATTEMPTS.
         resolved = {"workdir": "/tmp/fake-workdir"}
         with (
-            mock.patch("core.iterate.kanban", fk),
             mock.patch("core.iterate.kanban.list_blocked", return_value=[card]),
             mock.patch("core.iterate.kanban.show_card", return_value=card),
             mock.patch("core.iterate.kanban.create_task", return_value="t_esc"),

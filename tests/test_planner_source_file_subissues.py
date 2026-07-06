@@ -235,7 +235,7 @@ def test_subissue_acceptance_criteria_reference_file_paths(tmp_path):
 
 # ── Test 3: No sub-issues for irrelevant/empty files ─────────────────────────
 
-def test_no_subissues_for_irrelevant_empty_files():
+def test_no_subissues_for_irrelevant_empty_files(tmp_path):
     """Empty or irrelevant file paths should not cause sub-issue creation failure."""
     parent_body = "- [ ] Generic task\n"
     parent_issue = _make_issue_obj(99, "Generic Epic", parent_body)
@@ -266,7 +266,7 @@ def test_no_subissues_for_irrelevant_empty_files():
     ):
         ok = _execute_planner_decompose(
             "slug", _make_card(body=parent_body, issue_n=99), "o/r", "PLANNING COMPLETE",
-            provider=prov, workdir="/tmp/workdir",
+            provider=prov, workdir=_ensure_workdir_exists(tmp_path),
         )
 
     assert ok is True
@@ -358,7 +358,7 @@ def test_output_structure_matches_schema(tmp_path):
 
 # ── Test 5: Source reading failure graceful degradation ──────────────────────
 
-def test_source_reading_failure_graceful_degradation():
+def test_source_reading_failure_graceful_degradation(tmp_path):
     """When source reading fails, sub-issues are still created with template-only body."""
     parent_body = "- [ ] Task A\n- [ ] Task B\n"
     parent_issue = _make_issue_obj(55, "Recovery Epic", parent_body)
@@ -377,7 +377,7 @@ def test_source_reading_failure_graceful_degradation():
     ):
         ok = _execute_planner_decompose(
             "slug", _make_card(body=parent_body, issue_n=55), "o/r", "PLANNING COMPLETE",
-            provider=prov, workdir="/tmp/workdir",
+            provider=prov, workdir=_ensure_workdir_exists(tmp_path),
         )
 
     assert ok is True
@@ -514,7 +514,7 @@ def test_multiple_files_per_subissue(tmp_path):
 
 # ── Test 9: Fallback count incremented on source reading failure ─────────────
 
-def test_fallback_count_incremented_on_failure():
+def test_fallback_count_incremented_on_failure(tmp_path):
     """_source_reading_fallback_count should increment when source reading fails."""
     initial_count = getattr(iterate, "_source_reading_fallback_count", 0)
 
@@ -534,7 +534,7 @@ def test_fallback_count_incremented_on_failure():
     ):
         _execute_planner_decompose(
             "slug", _make_card(body=parent_body, issue_n=90), "o/r", "PLANNING COMPLETE",
-            provider=prov, workdir="/tmp/workdir",
+            provider=prov, workdir=_ensure_workdir_exists(tmp_path),
         )
 
     final_count = getattr(iterate, "_source_reading_fallback_count", 0)

@@ -17,9 +17,64 @@ filterwarnings = [
     "ignore::DeprecationWarning",
 ]
 xfail_strict = true
+markers = [
+    "uses_real_hk: opt out of the autouse core.kanban._hk stub to exercise the real _hk (still guarded against writing the live board; issue #1209)",
+]
+
+[tool.ruff.lint]
+# Per-file overrides: test files and the legacy dashboard keep their existing
+# style; production core/ and scripts/ are held to the full rule set.
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["F401", "F811", "F821", "F841", "F541", "E402", "E741", "E702"]
+"dashboard/plugin_api.py" = ["F401"]
+
+[tool.mypy]
+# Run with --explicit-package-bases so worktree / checkout dirs with hyphens
+# in their names don't confuse mypy's package resolver.
+explicit_package_bases = true
+ignore_missing_imports = true
+# Minimum strictness for the scoped packages.
+warn_unused_ignores = false
+
+# ── Out-of-scope legacy modules — will expand as files shrink (see #1262) ──
+[[tool.mypy.overrides]]
+module = [
+    "core.dispatch_state",
+    "core.crash_retry",
+    "core.crash_retry.*",
+    "core.provider_failover",
+    "core.kanban",
+    "core.sweeper",
+    "core.sweeper_cli",
+    "core.tier_promotion",
+    "core.notification_sender",
+    "core.notify_templates",
+    "core.thread_delivery",
+    "core.webhook_dispatch",
+    "core.webhook_normalizer",
+    "core.workspace",
+    "core.registry",
+    "core.source_specs",
+    "core.file_overlap",
+    "core.db",
+    "core.cli",
+    "core.dispatch_selftest",
+    "core.iterate",
+    "core.providers.base",
+    "core.providers.github",
+    "core.providers.gitlab",
+    "core.providers.azure_devops",
+    "core.providers.detect",
+    "core.providers.http",
+    "dashboard.*",
+    "scripts.*",
+    "tests.*",
+]
+ignore_errors = true
 
 [dependency-groups]
 dev = [
+    "mypy>=1.0",
     "pytest>=9.1.1",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",

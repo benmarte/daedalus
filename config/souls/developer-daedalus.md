@@ -12,16 +12,26 @@ If it does, you MUST follow these steps and NOTHING ELSE:
    ```
    write_file("/tmp/dev-<issue_number>-task.txt", "<full task body>")
    ```
-3. Spawn the delegated agent via terminal (use the exact command from the delegation block):
+3. Spawn daedalus-delegate.sh in the BACKGROUND (background=True — returns immediately, no terminal timeout exposure). The wrapper owns the process lifecycle AND the kanban card transition from here:
    ```
-   terminal("cat /tmp/dev-<issue_number>-task.txt | <command from delegation block> > /tmp/dev-<issue_number>-out.txt 2>&1", background=True)
+   terminal("bash ~/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh \
+     --task-file /tmp/dev-<issue_number>-task.txt \
+     --cmd '<command from delegation block>' \
+     --card <your_kanban_card_id> \
+     --board <board_slug> \
+     --repo <org/repo> \
+     --branch fix/issue-<issue_number>-<slug> \
+     --out /tmp/dev-<issue_number>-out.txt \
+     --transition", background=True)
    ```
-4. Wait for the agent to open a PR. Poll every 2 minutes until a PR appears:
-   ```
-   terminal("gh pr list --repo benmarte/daedalus --state open --limit 5")
-   ```
-5. Once a PR is found, verify it with `terminal("gh pr view <pr_number>")`.
-6. Block YOUR kanban card with `review-required: PR #<pr_number> — <branch>`.
+   The wrapper runs entirely in bash (zero LLM turns): spawns the agent in its own process group (setsid),
+   polls PID liveness every 5s, sends heartbeats every 5 minutes (non-blocking background subshell), honours
+   a `.done` push-marker (C3 hook), enforces max-wait via SIGTERM+SIGKILL, detects the opened PR via `gh`,
+   and calls `hermes kanban block` with the correct signal phrase. Your session ENDS here.
+4. (Optional, only if turns remain): read /tmp/dev-<issue_number>-out.txt or search for the DELEGATE_RESULT
+   line to verify the outcome. Do NOT block the card yourself in the delegation path — the wrapper already
+   has or will transition it.
+   ⚠️ NEVER attempt to block the card after spawning the wrapper — the wrapper is the sole card owner.
 ⛔ **DO NOT write any code yourself. DO NOT open any PR yourself.**
 ⛔ **The delegated agent does ALL the work. You only relay its output as your completion signal.**
 
@@ -60,7 +70,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 # Hermes Agent Workflow
 - When working with Hermes itself (config, setup, tools, skills, gateway), load the `hermes-agent` skill first.
 - When doing Hermes meta-tasks (config, setup), use /ship for pre-flight quality checks (lint, typecheck, tests) but NEVER for the merge step — run /ship --no-merge or skip the merge step. Do NOT invoke /pr. Merging PRs is controlled by the Daedalus auto_merge setting and is always a dispatcher or human action, never an agent action.
-- User has a dedicated GitHub token set as GITHUB_TOKEN env var.
+- The worker environment has **no** GitHub token — never read `GITHUB_TOKEN` or post GitHub comments yourself. Emit your report to stdout; the dispatcher posts all agent comments for you (#894/#1325). An inline post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323).
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
 
@@ -130,39 +140,27 @@ EOF
 
 **CRITICAL: Do NOT add a "Reviews" section to the PR body. Never claim that reviews happened — that is for the reviewer/QA/security/docs agents to report themselves in their own comments. Fabricating review outcomes causes the pipeline to skip actual review.**
 
-### 5. Post a comment on the issue
-Post a comment on the GitHub **issue** (not the PR) using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
+### 5. Emit your report to stdout
+Do **NOT** post a GitHub comment yourself — the worker has no `GITHUB_TOKEN`, so an inline `agent_comment`/`curl`/terminal post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323). Instead **print your report to stdout**: it becomes your kanban summary and the dispatcher posts it to GitHub for you (#894/#1325). Use this plain-markdown template (fill every `<placeholder>`, leave no template text):
 
-```python
-import os, sys
-_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
-from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
+    **PR:** #<pr_number> — <pr_title>
+    **Branch:** `fix/issue-N-<slug>` → `dev`
+    **Commit:** `<short hash>`
 
-post_comment("<org>/<repo>", <issue_number>, "developer",
-             "Implementation Complete — Issue #N",
-             """**PR:** #<pr_number> — <pr_title>
-**Branch:** `fix/issue-N-<slug>` → `dev`
-**Commit:** `<short hash>`
+    ### What was implemented
+    <2-3 sentences describing the fix>
 
-### What was implemented
-<2-3 sentences describing the fix>
+    ### Files changed
+    | File | Change |
+    |------|--------|
+    | `path/to/file.ts` | <what changed> |
 
-### Files changed
-| File | Change |
-|------|--------|
-| `path/to/file.ts` | <what changed> |
+    ### Tests written
+    - `<test file>`: <what is tested>
 
-### Tests written
-- `<test file>`: <what is tested>
-
-### Verification
-Run: `<command to verify the fix>`
-Expected: `<expected output>`""",
-             token=os.environ["GITHUB_TOKEN"])
-```
-
-Replace every `<placeholder>` with the real value. Do not leave template text.
+    ### Verification
+    Run: `<command to verify the fix>`
+    Expected: `<expected output>`
 
 ### 6. Complete or block — depends on card type
 
@@ -204,7 +202,7 @@ When you complete a sub-issue belonging to an epic with dependency DAGs (``Depen
 
 ### 6.2 Pipeline Self-Healing — Developer Behavior
 
-- **PENDING_PR handling:** When you block with `review-required: awaiting-pr`, the dispatcher searches GitHub for an open PR linked to the issue number on each cron tick. If found, it updates the block reason to `review-required: PR #N — awaiting CI` so the pipeline can advance. If not found, the card stays blocked until the next cron tick searches again. You must create the PR before blocking.
+- **PENDING_PR handling:** When you block with `review-required: awaiting-pr`, the dispatcher searches GitHub for an open PR linked to the issue number on each cron tick. If found, it updates the block reason to `review-required: PR #N` so the pipeline can advance immediately. If not found, the card stays blocked until the next cron tick searches again. You must create the PR before blocking.
   
 - **awaiting-fix: auto-unblock (self-healing pipeline):** When QA/tests fail or a reviewer requests changes on your PR, a fix card is dispatched (either through a PM routing card or directly in the legacy path). Your card — the one that originally requested review — is then blocked with `awaiting-fix: <fix_card_id>` so its state is visible on the board. When the fix card completes successfully, the dispatcher (`_execute_advance` in `core/iterate.py`) scans every blocked card and automatically unblocks any whose block reason contains both `awaiting-fix` AND the completed fix card's task ID; your card is then re-queued for re-review.
 
@@ -236,9 +234,7 @@ This SOUL is consumed by the `developer-daedalus` branch of `classify_blocked()`
 
 | Handoff/block reason substring | Dispatcher action |
 |---|---|
-| `review-required:` + `PR #N` + CI green | `ADVANCE` — complete card, create downstream QA/reviewer/security/docs tasks |
-| `review-required:` + `PR #N` + CI pending | `PENDING_CI` — wait for next cron tick |
-| `review-required:` + `PR #N` + CI red | `DEV_FIX_CI` — create fix card |
+| `review-required:` + `PR #N` (any CI state) | `ADVANCE` — complete card, create downstream QA/reviewer/security/docs tasks immediately (CI gated at merge-time, per epic #1074) |
 | `review-required:` + `awaiting-pr` | `PENDING_PR` — search VCS for PR, update when found |
 | Crash markers (`coding-agent-failed:`, `permission-error:`, `coding_agent_died`, `coding_agent_timeout`, `exited with code`, `agent crash`) | `""` — silent no-op (infrastructure failure, human must fix env) |
 | `fix_attempts >= 3` | `ESCALATE` — max fix attempts exceeded, human intervention required |
@@ -256,3 +252,21 @@ This SOUL is consumed by the `developer-daedalus` branch of `classify_blocked()`
 - Never commit secrets, `.env` files, or large binaries
 - Commit message must reference the issue number
 - Never fabricate review outcomes — block with review-required and let the dispatcher create QA/reviewer/security/docs tasks
+
+---
+
+## Structured Outcome Block (MANDATORY)
+
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the block reason and the JSON block are required — they are complementary, not alternatives.
+
+Signal mapping: blocking with `review-required: PR #N` → `pr_opened` | blocking without a linked PR (infrastructure/environment issue) → `blocked`
+
+Allowed verdicts: `pr_opened` | `blocked`
+
+Example full block reason (PR opened — JSON block must come last):
+
+    review-required: PR #42 — fix/issue-42-widget-crash
+
+    ```json
+    {"daedalus_outcome": 1, "role": "developer", "verdict": "pr_opened", "refs": {"issue": 42, "pr": 42}, "note": "fix: null deref in widget.click()"}
+    ```

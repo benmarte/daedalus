@@ -37,7 +37,7 @@ flowchart TD
     Reco --> V
 
     E --> Dev["👨‍💻 Developer\nImplement · test\nShip-gate · open PR"]
-    Dev --> QA["🧪 QA\nTest suite · coverage\nqa-passed / qa-failed"]
+    Dev --> QA["🧪 QA\nCI-gate → skip local suite if green\nAC check · diff review\nqa-passed / qa-failed"]
     Dev --> CI["⚙️ CI Pipeline\nGitHub Actions · lint · typecheck"]
     
     QA --> QAGate{{"🚦 QA Gate\nqa-passed?"}}
@@ -48,7 +48,7 @@ flowchart TD
     
     CI -->|red| Fix
     Fix --> Dev
-    Rev -->|approved| Doc["📝 Documentation\nADRs · changelog\nReport → PR + chat channels"]
+    Rev -->|approved| Doc["📝 Documentation\nADRs · README\nReport → PR + chat channels"]
     Sec -->|cleared| Doc
     A11y -->|cleared| Doc
     Doc --> AutoMerge{{"🚦 QA auto-merge gate\nqa-passed signal present\nOR skip-qa label?\nAND CI green?"}}
@@ -179,8 +179,18 @@ closed off in code. The reasoning behind each is in [Design decisions](#design-d
      these atomically on the next tick: a triage card is decomposed across all roles with QA gating
      the reviewer/security/accessibility stages.
    - **developer** implements + tests, then must pass the **ship-gate** to open a PR.
-   - **qa** runs the test suite, analyzes coverage, and reports a verdict (`qa-passed` or
-     `qa-failed`). The pipeline advances to reviewer/security/accessibility only after QA passes.
+   - **qa** checks CI status first via a **CI-gate** (#1118): if all checks are
+     green on the PR head commit, QA skips the local full-suite run entirely
+     (saving ~10–20 min) and goes straight to acceptance-criteria verification
+     and diff review. If CI is pending, failing, or has no checks, QA falls back
+     to running the full suite locally exactly as CI does (`pytest tests/ -n auto
+     --timeout=60` in the isolated PR worktree). If QA pushes new tests, the old
+     CI-green is stale and those tests are run locally (targeted). The verdict is
+     `qa-passed` only if BOTH the acceptance criteria AND the suite pass — where
+     "suite passes" means CI is green on the PR head OR the local full suite
+     passed; any full-suite failure (even unrelated to the PR) yields
+     `qa-failed`. This ensures QA-green matches CI-green (#1201). The pipeline
+     advances to reviewer/security/accessibility only after QA passes.
    - **reviewer** reviews, **security-analyst** audits, **accessibility** audits the PR for
      WCAG 2.1 AA compliance (only when the issue references UI/frontend work), and
      **documentation** writes a completion report and posts it to the **PR and your chat
@@ -214,7 +224,7 @@ deterministic — never dependent on an agent remembering to update anything.
 When an issue is flagged as epic-sized (≥4 checklist items, an `epic` label, or body ≥2000
 chars), the dispatcher routes it to the planner agent for scoping instead of splitting it
 across the team directly. The planner confirms readiness by completing its kanban card with
-`PLANNING COMPLETE:` — the dispatcher records a decomposed-mark
+`PLANNING COMPLETE:` (or the synonym `PLAN:`) — the dispatcher records a decomposed-mark
 (`<!-- daedalus:decomposed -->`, tolerant of an optional suffix like
 `<!-- daedalus:decomposed:1719630000 -->`) on the parent so subsequent ticks never
 re-trigger decomposition even if the planner's summary is replayed. The dispatcher then decomposes the
@@ -232,7 +242,7 @@ re-creation on subsequent dispatcher ticks. The `epic` label is applied to the p
 issue (GitHub only in Phase 3; no-op on GitLab/Azure DevOps).
 
 **Source file context injection.** When the dispatcher detects a planner task completion
-with the `PLANNING COMPLETE:` prefix (which triggers the decompose), the dispatcher reads
+with the `PLANNING COMPLETE:` (or `PLAN:`) prefix (which triggers the decompose), the dispatcher reads
 up to 10 source files from the codebase (hardcoded limits: max 10 files, max 50KB per file)
 and analyzes their contents to derive per-sub-issue context (file paths and symbols). This
 gives the planner concrete context about existing implementations when scoping sub-issues.
@@ -253,7 +263,14 @@ enrolls it on the configured project board (when present) with dependency-aware 
 tier-0 sub-issues (no dependencies) land in **Ready**; dependent sub-issues land in **Todo**.
 Enrollment failures are logged and non-fatal so sibling sub-issues still get processed.
 This ensures sub-issues are visible on the board immediately after decomposition, not just
-after they pick up the `Ready` label via tier promotion.
+after they pick up the `Ready` label via tier promotion. Board item lookup is resilient to
+pagination truncation and partial page failures: if the cached board listing misses an
+enrolled item (e.g., null Status or beyond the old 500-item cap), a direct per-issue
+`projectItems` GraphQL lookup resolves it as a fallback (#1158). The direct lookup itself
+now paginates `projectItems(first:100, after:$cursor)` with a `hasNextPage` loop and a
+50-page safety cap, so issues enrolled in many GitHub Projects are still found, and a
+shared `_resolve_board_item()` helper consolidates the listing→fallback path used by both
+`board_ensure_backlog` and `board_set_status` (#1171).
 
 **Not-suitable fallback.** When the planner completes its card but concludes the parent
 issue is not suitable for decomposition (e.g., already small, blocked on a dependency),
@@ -261,7 +278,10 @@ it signals `NOT SUITABLE FOR DECOMPOSITION` instead of `PLANNING COMPLETE:`. The
 dispatcher detects this via a case-insensitive regex, skips the planner's normal
 `PLANNING COMPLETE:` handler, looks up the parent issue, and creates a validator task
 for it — routing the issue through the standard validator → PM → developer flow rather
-than leaving it stuck In Progress with no active child task. Idempotency is enforced
+than leaving it stuck In Progress with no active child task. If the planner summary
+contains neither `PLANNING COMPLETE:`, `PLAN:`, nor `NOT SUITABLE FOR DECOMPOSITION`,
+the dispatcher now emits a `WARNING`-level log instead of silently dropping the task
+(fix for #1072). Idempotency is enforced
 via a `planner-fallback-validator-{n}` idempotency key so re-runs on subsequent ticks
 return the existing task instead of creating duplicates. The handler scans **both
 `done` and `blocked` planner cards** for the signal (defense in depth — the planner
@@ -288,6 +308,19 @@ Sub-issues are linked to their parent epic via a body-reference convention. The 
 A single issue reference matches regardless of which format the author chose. Providers with native sub-issue links (GitHub's dependency API) override `sub_issues_of` to prefer the API, then fall back to the regex scan for portability.
 
 Promotion is **idempotent**: `promote_waiting_tiers` queries `provider.has_label(n, "Ready")` before adding the label, so each promotable issue is labeled and commented exactly once. `VCSProvider.has_label()` defaults to returning `False`; the GitHub provider implements it via the issue's `labels` field (never raises).
+
+**Overlap-based blocking chains.** When the planner decomposes an epic, sub-issues that
+reference overlapping source files are linked with `depends_on` edges so they execute
+serially rather than in parallel — preventing merge conflicts and inconsistent file
+states. The dispatcher extracts file references from each sub-issue's body and uses
+`core/file_overlap.py` to detect overlaps; overlapping sub-issues are chained so that
+one must close before the next is promoted to Ready (PR #1067).
+
+**Profile resync.** The dispatcher computes a config fingerprint on each tick. When the
+fingerprint changes (e.g., `coding_agent` or the global Hermes model is updated), all
+`*-daedalus` profiles are automatically resynced to match the new configuration — no
+manual restart required. The first tick seeds the baseline; subsequent ticks with a
+changed fingerprint trigger the resync (PR #1066, #1063).
 
 **Three tiers of gating** combine to scope what dispatches when:
 
@@ -374,13 +407,13 @@ a different perspective.
 |---|---|---|
 | `validator-daedalus` | **Phase 1 — runs alone before any other agent.** Validates the issue: reproduces the bug, checks git history, detects duplicates. Scans for security threats (prompt injection, social engineering, credential exfiltration, auth-bypass, backdoor patterns, supply-chain attacks). Six possible outcomes: **CONFIRMED** (proceeds; summary prefix `CONFIRMED:` triggers Phase 2), **ALREADY_FIXED** (closes issue, pipeline ends), **DUPLICATE** (closes issue), **NEEDS_MORE_INFO** (blocks, comments asking reporter), **SECURITY_THREAT** (blocks, posts issue comment, sends `security-escalation` notification), **BLOCK_FOR_REVIEW** (high-privilege request lacks verifiable context — blocks, posts comment listing missing details, sends `security-escalation` notification). Posts a summary comment to the GitHub issue regardless of outcome. | No |
 | `project-manager-daedalus` | Scope, acceptance criteria, decomposition, pre-ship checklist. Coordinates the team. Creates the conditional accessibility task when the issue references UI/frontend work. | No |
-| `planner-daedalus` | Task graph, interface contracts, architecture decisions. **Phase 3:** reviews epic-sized issues and signals readiness with `PLANNING COMPLETE:`, triggering automated sub-issue decomposition. | No |
+| `planner-daedalus` | Task graph, interface contracts, architecture decisions. **Phase 3:** reviews epic-sized issues and signals readiness with `PLANNING COMPLETE:` or `PLAN:`, triggering automated sub-issue decomposition. | No |
 | `developer-daedalus` | Implementation, tests, ship-gate, PR open. | Yes |
-| `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Runs the test suite, analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). | No |
+| `qa-daedalus` | **Runs after Developer, before Reviewer and Security-Analyst.** Verifies acceptance criteria, then runs the full test suite exactly as CI does (`pytest tests/ -n auto --timeout=60` in the isolated PR worktree), analyzes coverage gaps, and reports a QA verdict (`qa-passed` or `qa-failed`). `qa-passed` requires BOTH the ACs and the full suite to pass (#1201). | No |
 | `reviewer-daedalus` | Code review — correctness, quality, performance. Approves or blocks with actionable findings. Runs after QA passes. | No |
 | `security-analyst-daedalus` | Security audit — OWASP, injection, secrets, authn/z. Blocks on risk with severity-rated findings. Runs after QA passes, parallel to reviewer. | No |
 | `accessibility-daedalus` | **Runs after QA passes, parallel to reviewer/security. Conditional — only created for UI/frontend issues.** Audits the PR against WCAG 2.1 AA and posts a findings table. Blocks with `approved` or `changes requested`. | No |
-| `documentation-daedalus` | READMEs, ADRs, changelogs, completion report posted to the PR and chat channels. Waits for reviewer, security-analyst, and accessibility (when assigned) to clear. | No |
+| `documentation-daedalus` | READMEs, ADRs, completion report posted to the PR and chat channels. `CHANGELOG.md` is **not** edited by the docs agent — the dispatcher writes it post-merge via `append_changelog` (#1179). Waits for reviewer, security-analyst, and accessibility (when assigned) to clear. | No |
 
 ### Skills per profile
 
@@ -478,7 +511,7 @@ makes the pipeline repeatable rather than demo-quality.
 
 | Skill | What it governs |
 |---|---|
-| `documentation-and-adrs` | READMEs, Architecture Decision Records, changelogs |
+| `documentation-and-adrs` | READMEs, Architecture Decision Records |
 | `source-driven-development` | Verifies documentation accuracy against the actual code |
 | `context-engineering` | Loads only the relevant merged changes into context |
 | `using-agent-skills` | Meta-skill |
@@ -596,17 +629,56 @@ process.
 ```yaml
 execution:
   coding_agent: claude-code
-  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p"
+  # --strict-mcp-config --setting-sources project are STRONGLY RECOMMENDED — see the warning below.
+  coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
 ```
 
 ![.hermes/daedalus.yaml showing the execution block with coding_agent: claude-code and a per-role override (developer delegates to Claude Code, validator stays on the local Hermes LLM)](docs/screenshots/guide/14-coding-agent-config.png)
 
 - `coding_agent_cmd` is the **full shell command** the agent pipes the task body into (not a
   shell alias). Use the absolute binary path + flags. When omitted, sensible per-agent
-  defaults are used (`claude --dangerously-skip-permissions -p`, `codex exec --full-auto`,
-  `opencode run`).
-- Optional: `coding_agent_model` passes through to the agent's `--model` flag, and
-  `coding_agent_max_turns` (default `10`) caps runaway loops.
+  defaults are used (`claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p`,
+  `codex exec --full-auto`, `opencode run`).
+- **Pass any CLI flags you want** — `coding_agent_cmd` is run **verbatim**, so anything the
+  agent's CLI accepts works here. For Claude Code that includes e.g. `--model`, `--add-dir`,
+  `--permission-mode`, `--allowedTools` / `--disallowedTools`, `--mcp-config`,
+  `--append-system-prompt`, `--fallback-model`, and the plugin/MCP-bypass flags above. Prepend
+  env vars too (e.g. `CLAUDE_CONFIG_DIR=…`). The same applies to Codex/OpenCode — put their
+  native flags in the command string. (Run `claude --help` for the full list.)
+- The dispatcher only **appends two things**, and each is skipped if you already set it: it adds
+  `--max-turns <coding_agent_max_turns>` (default `10`) unless your command already has
+  `--max-turns`, and — when `coding_agent_model` is set and Anthropic-compatible — `--model`
+  unless your command already has `--model`. So you keep full control: specify `--model` /
+  `--max-turns` yourself in `coding_agent_cmd` to override the injected values.
+- Optional convenience keys: `coding_agent_model` (→ appended as `--model`) and
+  `coding_agent_max_turns` (→ appended as `--max-turns`, caps runaway loops) — shorthands for
+  the two flags above if you'd rather not put them in the command string.
+
+> [!WARNING]
+> **Disable plugins and MCP servers in the delegated command.** Daedalus spawns the coding
+> agent **headless** (`-p`), fresh, once per role, per issue. If the config dir you point
+> `CLAUDE_CONFIG_DIR` at has **plugins or MCP servers enabled** (e.g. Cortex, Context-Mode,
+> Playwright, Sentry, an LSP), the agent must initialize **all of them on every spawn**
+> before it does any work. In headless mode this routinely adds minutes of startup — and if
+> any MCP server is slow, unreachable, or disconnected, the worker can **hang indefinitely
+> producing zero output**, freezing the pipeline (the `running` card holds the
+> `max_dispatch` slot). This is a real failure we hit in production.
+>
+> **The fix — add two flags to `coding_agent_cmd`:**
+>
+> ```yaml
+> coding_agent_cmd: "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p"
+> ```
+>
+> | Flag | Effect |
+> |---|---|
+> | `--strict-mcp-config` | Ignores every MCP server except those passed via `--mcp-config`. With none passed, **no MCP servers load** — no init hang. |
+> | `--setting-sources project` | Loads **only** project-scoped settings, skipping the user `settings.json` where plugins are enabled. **No plugins/hooks load.** Auth still comes from `CLAUDE_CONFIG_DIR` (keychain), so the worker stays logged in. |
+>
+> Measured impact: with a plugin-heavy config, headless startup went from a **5+ minute hang
+> (0 bytes of output)** to **~3 seconds**, fully authenticated. These flags are the default
+> in the config template for exactly this reason. The same principle applies to Codex/OpenCode
+> — point delegated workers at a **minimal** agent config with no background integrations.
 
 **How it works:**
 
@@ -621,6 +693,11 @@ execution:
    the spawned agent survives the Hermes session exit).
 4. The coding agent does the work (writes code, opens the PR), and its output is **relayed
    back as the role's completion signal** so the pipeline advances to the next phase.
+5. Review, QA, security, and documentation agents work **inline** — their inner coding-agent
+   sessions do NOT invoke slash-command skills (`/review`, `/code-simplify`, `/test`) or
+   spawn nested subagents. The triple-nesting (outer profile → inner agent → skill subagent)
+   broke completion detection and caused polling churn; the inner agent now reads the diff
+   and writes its verdict directly (#1192).
 
 **Per-role override.** Each role can choose its own agent via
 `execution.profiles.<role>.agent`, which takes precedence over the global
@@ -712,7 +789,9 @@ end of the session, triggering the next phase within seconds rather than waiting
 the next cron tick.
 
 For example, as soon as the developer blocks with `review-required`, the session ends,
-the dispatcher fires, detects CI green, and promotes the reviewer task.
+the dispatcher fires, detects `review-required: PR #N`, and immediately
+promotes the reviewer and QA tasks (CI is no longer a gate for ADVANCE —
+it is enforced at merge-time per epic #1074).
 
 This end-of-session trigger is the `daedalus-advance.sh` hook, wired into each profile's
 `hooks.on_session_end` in its `config.yaml`. Registration is **per profile** — a profile
@@ -741,7 +820,7 @@ PM / project-manager runs → SPEC: <note>
       │   └─ session ends → dispatcher triggers next phase
       ▼
 developer → review-required
-      │   └─ session ends → dispatcher detects CI green → QA starts
+      │   └─ session ends → dispatcher triggers ADVANCE (no CI wait) → QA starts
       ▼
 QA → qa-passed (or qa-failed → dev fix card)
       │   └─ session ends → dispatcher creates reviewer + security-analyst
@@ -845,7 +924,7 @@ dispatcher is already running, the new tick exits immediately (no-op) rather tha
 The lock auto-releases after 300 seconds (5 minutes) even on crash, preventing stale locks
 from wedging future ticks.
 
-**Validator None-summary recovery.** When a validator agent's context window fills before `kanban_complete(summary=...)` runs, its kanban summary is `None`. Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
+**Validator None-summary recovery.** A validator kanban summary of `None` can result from two causes: (1) context window overflow before `kanban_complete(summary=...)` runs, or (2) the inner subprocess calling `hermes kanban complete <id>` with no summary in delegated mode (fixed in [#1121](https://github.com/benmarte/daedalus/issues/1121) — `_validator_body()` now emits print-to-stdout instructions instead). Without recovery this causes the entire downstream pipeline to ghost-complete with no code written (all downstream agents hit a HARD STOP checking for `CONFIRMED:`). The dispatcher handles this in two stages:
 
 1. **GitHub-comment fallback** — scans the issue for a comment with the mandatory `**Agent: validator**` attribution header and looks for `CONFIRMED` in the body. If found, advances directly to PM without re-running the validator.
 2. **Validator retry** — if no confirming comment exists, re-queues the validator with a per-run idempotency key (`validator-retry-N-r1`, `validator-retry-N-r2`), capped at 2 retries before human escalation.
@@ -858,24 +937,39 @@ before the agent finishes (a known platform-level bug), the task is left with no
 re-creates the PM task with a new idempotency key (`pm-{n}-r1`, `pm-{n}-r2`),
 capped at 3 retries. Previously this stalled the pipeline indefinitely.
 
+**Developer stale-task recovery & PR adoption.** The same premature-completion
+bug can strike a developer card: the Hermes platform marks it done with an empty
+summary, but the agent's session had already opened a PR. Without a guard, the
+dispatcher classified the card as `stale` and blindly minted a retry developer
+card — producing **duplicate PRs** for the same issue (observed live: #1160 →
+duplicate PR #1163; #1161 → three developer cards and duplicate PR #1165). The
+fix ([#1164](https://github.com/benmarte/daedalus/issues/1164),
+PR [#1168](https://github.com/benmarte/daedalus/pull/1168)) adds
+`_try_adopt_developer_pr()` in `daedalus_dispatch.py`. Before re-dispatching, it
+queries the provider for an existing open or merged PR (`pr_number_for_issue`).
+When one exists, the stale card's summary is rewritten to the canonical
+`review-required: PR #N (adopted from provider state — …)` format so
+`_developer_task_state` reports `complete` on the next tick and the normal
+reviewer/QA flow proceeds against the existing PR — no retry card is created.
+This mirrors the PM spec-comment adoption pattern from #1161. Provider errors
+fail open to the existing retry path. Fork-headed or wrong-base-branch PRs are
+rejected by review hardening so they are never adopted. A pushed branch without
+a PR is deliberately NOT adopted — it isn't a completion, and the retry
+developer can reuse the branch.
+
 ```
 blocked card detected
         │
-        ├─ developer card + CI green + review-required?
+        ├─ developer card + review-required + PR #N (any CI state)?
         │       └──► advance
-        │             complete the developer card
+        │             complete the developer card (CI no longer gates ADVANCE —
+        │             enforced at merge-time per epic #1074)
         │             _create_downstream_review_tasks() fires:
         │               creates a qa-{n} task and parents reviewer,
         │                 security-analyst, docs to it — QA gate enforced
         │                 (downstream roles run only after qa-passed)
         │               idempotency keys: qa-{n}, reviewer-{n}, security-{n}, docs-{n}
         │               skips any whose key already exists on the board
-        │
-        ├─ developer card + CI red?
-        │       └──► dev_fix_ci
-        │             create an idempotent fix card assigned to developer-daedalus
-        │             key: fix-ci-{card_id}-attempt-{N}
-        │             only fires when CI is definitively RED (not UNKNOWN/PENDING)
         │
         ├─ reviewer or security-analyst card + changes requested?
         │       └──► pm_route
@@ -901,14 +995,12 @@ blocked card detected
 flowchart TD
     Scan["🔍 Scan blocked cards"] --> Classify{"classify_blocked()<br>core/iterate.py"}
 
-    Classify -->|"dev card<br>+ CI green<br>+ review-required"| AdvanceDev["advance()<br>_create_downstream_review_tasks()<br>creates qa-{n} parented by reviewer,<br>security-analyst, docs"]
-    Classify -->|"dev card<br>+ CI red"| DevFixCI["dev_fix_ci()<br>idempotent fix card<br>key: fix-ci-{id}-attempt-{N}"]
+    Classify -->|"dev card<br>+ review-required<br>+ PR #N (any CI)"| AdvanceDev["advance()<br>_create_downstream_review_tasks()<br>creates qa-{n} parented by reviewer,<br>security-analyst, docs<br>(CI gated at merge-time)"]
     Classify -->|"reviewer/sec<br>+ changes requested"| PMRoute["pm_route()<br>PM reads findings<br>assigns fix owner"]
     Classify -->|"reviewer/sec<br>+ approved"| ApproveAdv["approve_advance()<br>complete card<br>next stage starts"]
     Classify -->|"attempt > 3"| Escalate["escalate()<br>post comment<br>leave blocked for human"]
 
     AdvanceDev --> Done1["✅ Card unblocked"]
-    DevFixCI --> Done2["✅ Card unblocked"]
     PMRoute --> Done3["✅ Card unblocked"]
     ApproveAdv --> Done4["✅ Card unblocked"]
     Escalate --> Done5["🛑 Card blocked<br>(human required)"]
@@ -932,7 +1024,7 @@ handoff text against to detect `approve_advance`) deliberately omits the bare to
 `pass` — it false-triggered on phrases like "all tests pass" and "password", silently
 advancing a reviewer/security card that hadn't actually been approved. The set now
 carries only explicit, role-prefixed signals (`approved`, `lgtm`, `qa-passed`,
-`a11y-passed`, `security-approved`, …), so a QA pass note can describe its run without
+`security-approved`, …), so a QA pass note can describe its run without
 being misread as an approval (fixed in #956).
 
 **Merged-PR guard on Done sync.** When an issue reaches **Done** on the VCS board, the
@@ -984,14 +1076,17 @@ python -m core.sweeper_cli <board_slug> [--threshold-hours 48] [--archive] [--dr
 (`validator-retry-N-r*`) and PM stale-task recovery (`pm-{n}-r*`) each cap at a
 maximum (2 for validator, 3 for PM). When an attempt counter exhausts the cap,
 the dispatcher fires a one-time `retry-cap-exhausted` notification — idempotently
-deduped on the issue via an `<!-- daedalus:retry-cap-notified -->` marker comment
-so the same cap-exhaustion is never messaged twice per issue — and posts a
-comment on the card instructing a human to investigate. Route this event to a
+deduped on the issue via a role-scoped `<!-- daedalus:retry-cap-notified:<role> -->`
+marker comment so the same cap-exhaustion is never messaged twice per issue per
+role — and posts a comment on the card instructing a human to investigate. A
+stage-recovery check (`_retry_cap_stage_recovered()`) suppresses the notification
+if the stalled stage has already recovered (running card, open PR, or downstream
+role active), avoiding stale alerts. Route this event to a
 high-visibility channel in the Notifications editor alongside
 `security-escalation`. The `MAX_FIX_ATTEMPTS = 3` cap for CI/routing fix cards
 is unchanged: it posts a per-card comment and stops escalating, but does not
 fire a chat notification. See
-[`design-retry-cap-notification.md`](design-retry-cap-notification.md) for the
+[`design-retry-cap-notification.md`](docs/design-retry-cap-notification.md) for the
 design rationale.
 
 **Validator-blocked notifications.** When a validator blocks with `BLOCKED:`,
@@ -1098,8 +1193,7 @@ on `origin/dev` at commit `70c1340`.
    PR. Every cron tick calls `_execute_pending_pr()` (lines 601–657), which
    searches open PRs via `provider.list_prs()` and matches them against the
    issue number in the PR title/body/branch. Once a PR appears, the block
-   reason is updated to `review-required: PR #N — awaiting CI` so CI checks
-   can drive the next stage. This eliminates the race where the agent opens a
+   reason is updated to `review-required: PR #N` so the pipeline can advance. This eliminates the race where the agent opens a
    PR but the dispatcher keeps classifying the card as "no PR found."
 
 5. **PM `awaiting-fix:` silent no-op.** The project-manager profile's
@@ -1118,12 +1212,12 @@ on `origin/dev` at commit `70c1340`.
 >   warning comment.** `PENDING_PR` currently keeps searching silently until
 >   a PR appears; there is no timeout constant or escalation path yet.
 >   Tracked in epic #180.
-> - **QA/accessibility `PENDING_CI` escalation after `MAX_FIX_ATTEMPTS` (3)
->   silent ticks.** `classify_blocked()` returns `PENDING_CI` for
+> - **QA/accessibility `PENDING_SIGNAL` escalation after `MAX_FIX_ATTEMPTS` (3)
+>   silent ticks.** `classify_blocked()` returns `PENDING_SIGNAL` for
 >   non-canonical QA/a11y signals (anything that isn't `qa-passed:` /
 >   `qa-failed:` / `approved:` / `a11y-na:` / `a11y-skipped:` /
 >   `changes requested`), but there is no fix-attempt counter or escalation
->   path for the `PENDING_CI` case itself.
+>   path for the `PENDING_SIGNAL` case itself.
 > - **Empty-summary developer skip.** Developers that block with no
 >   recognizable signal still route to `PM_ROUTE` for downstream review —
 >   the "skip PM consult when the developer has no signal" branch was not
@@ -1147,10 +1241,10 @@ resolve them:
   `qa-failed:` (lowercase, with the colon). Accessibility must use
   `approved:`, `a11y-approved:`, `a11y-na:`, `a11y-skipped:`, or
   `a11y-changes-requested:`. Any other phrasing (e.g., `qa-blocked:`,
-  `a11y-failed:`) returns `PENDING_CI` from `classify_blocked()`, which stays
-  in the pending queue indefinitely. The `PENDING_CI` retry cron eventually
+  `a11y-failed:`) returns `PENDING_SIGNAL` from `classify_blocked()`, which stays
+  in the pending queue indefinitely. The `PENDING_SIGNAL` retry cron eventually
   resolves when a proper signal arrives, but the `MAX_FIX_ATTEMPTS` escalation
-  does not apply to `PENDING_CI` cards — so a QA/a11y agent that keeps posting
+  does not apply to `PENDING_SIGNAL` cards — so a QA/a11y agent that keeps posting
   ambiguous signals will sit in the queue with no automatic human alert.
   Operators should watch the board and re-queue or cancel cards that never
   reach a canonical signal.
@@ -1192,8 +1286,9 @@ Each piece exists because the obvious approach failed:
   (developer / reviewer / security-analyst / documentation), not one agent grading its
   own homework.
 - **Auto-advance** — workers *block for review* instead of completing, which stalls the
-  chain. The dispatcher completes a review-required handoff once its PR's CI is green,
-  so the pipeline is genuinely hands-off (the PR still waits for a human merge).
+  chain. The dispatcher completes a review-required handoff as soon as the PR is opened
+  (CI no longer gates ADVANCE — it is enforced at merge-time per epic #1074),
+  so the pipeline is genuinely hands-off (QA/reviewer/security dispatch immediately).
 - **Post-developer handoff safety net** — when `_execute_advance()` completes a developer
   card, it calls `_create_downstream_review_tasks()` as a guard. If the initial Phase 2
   decompose (triage → developer + reviewer + security + docs) failed to create any of the
@@ -1203,8 +1298,8 @@ Each piece exists because the obvious approach failed:
   and docs tasks had to be manually created by the human operator (issue #21).
 - **Self-healing loop** (`core/iterate.py`) — every blocked card is classified into one
   of 5 actions and routed to the agent that can clear it:
-    - `advance` — dev PR green + review-required → complete dev card, then `_create_downstream_review_tasks()` creates a `qa-{n}` task and parents reviewer/security/docs to it so they run only after QA passes (idempotent keys `qa-{n}`, `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
-    - `dev_fix_ci` — CI red → creates idempotent developer fix card
+    - `advance` — dev PR opened + review-required → complete dev card immediately (CI no longer gates this; enforced at merge-time per epic #1074), then `_create_downstream_review_tasks()` creates a `qa-{n}` task and parents reviewer/security/docs to it so they run only after QA passes (idempotent keys `qa-{n}`, `reviewer-{n}`, `security-{n}`, `docs-{n}`; skips any that already exist)
+    - `qa_fix` — QA reports failing tests → creates idempotent developer fix card
     - `pm_route` — reviewer/security requests changes → creates PM routing card with findings; PM decides owner (developer, security-analyst, re-spec), then fix lands. Reviewer cards are marked "awaiting-fix" and auto-unblocked when the fix completes.
     - `approve_advance` — reviewer/security approved → complete the card
     - `escalate` — cap at 3 fix attempts per PR → log + notify, set card aside (no infinite loop)
@@ -1226,6 +1321,85 @@ Each piece exists because the obvious approach failed:
   bypasses the gate entirely for low-risk changes (docs-only, config, dependency bumps). See
   [`qa-gate-design.md`](qa-gate-design.md) for the full design spec, edge cases, and signal
   format reference.
+- **Reviewer and security merge gates** (`core/iterate.py`, issue #1085) — in addition to the
+  QA gate, the auto-merge path now checks that the reviewer and security-analyst have approved
+  the PR before merging. `_reviewer_passed_for_issue()` and `_security_passed_for_issue()`
+  examine the respective cards' `latest_summary` fields for approval signals (`approved`,
+  `review-approved`, `lgtm`, `sign-off` for reviewers; `security-approved`, `security-passed`,
+  `no findings` for security). If either gate has not passed, the merge is skipped with a
+  warning log. A `skip-qa` label bypasses both gates (preserving the pre-existing skip-qa
+  behaviour per issue #1074 non-regression).
+- **Bounded CI re-run for deferred-merge PRs** (`core/iterate.py`, issue #1199) —
+  the deferred-merge sweep (`sweep_deferred_merges`) re-checks all gates every tick
+  and merges once they pass, but a transiently-red CI check (e.g. a flaky test under
+  `pytest -n auto`) permanently stranded otherwise-mergeable PRs — nothing triggered
+  a re-run. For a pipeline-complete PR whose required CI is genuinely **RED** (not
+  PENDING/UNKNOWN), the sweep now bounded-retries the failed CI run via a new
+  `rerun_failed_ci()` provider capability, capped at **N=2 re-runs per PR head SHA**.
+  Attempts are tracked idempotently by per-SHA marker comments on the PR
+  (`<!-- daedalus:ci-rerun:<sha>:<n> -->`), so same-tick re-invocation never exceeds
+  the budget; a new head SHA (branch pushed) grants a fresh budget. After the budget
+  is spent and CI is still red, the sweep **escalates** — posts a PR comment with the
+  failing-run URL (`<!-- daedalus:ci-escalated:<sha> -->`) and logs a warning instead
+  of looping. Natural inter-tick backoff: issuing a re-run flips CI to PENDING, so
+  the sweep won't act again until it settles back to RED — no timer needed.
+- **Crash-retry reconciler** (`core/crash_retry.py`, issue #1205) — cards whose
+  worker agent crashed (exit without a valid completion signal) were silently
+  stuck in `running` until the 24h stale-card sweeper noticed. The crash-retry
+  reconciler scans for crashed cards on every dispatch tick and re-queues them
+  with a time-bounded retry policy: stepped backoff between attempts, a per-card
+  attempt cap, and a wall-clock cap. When retries are exhausted, the card is
+  escalated (marked as blocked with a `coding-agent-failed` reason) instead of
+  looping silently. Configurable via `execution.crash_retry` knobs in
+  `templates/daedalus.yaml`. This replaces the old silent-stuck behaviour where
+  a crashed agent card sat indefinitely in `running`.
+- **Native per-task bounds** (`core/native_bounds.py`, issue #1289) — an
+  opt-in `execution.native_bounds` flag (default `false`) tags every
+  dispatcher-created role card with Hermes-native circuit breakers so a
+  crashed or runaway worker self-bounds without waiting on the crash-retry
+  reconciler: `--max-retries N` (a per-task *consecutive-worker-failure*
+  breaker — Hermes parks the card after `N` straight worker deaths; default
+  `2`, matching `kanban.failure_limit`) and `--max-runtime <dur>` (a
+  wall-clock cap after which Hermes SIGTERM→SIGKILL→requeues the card).
+  Note the `--max-retries` breaker is a DIFFERENT mechanism from the
+  CI/review fix-loop `MAX_FIX_ATTEMPTS = 3`: the breaker retries a card whose
+  *worker process died*; the fix-loop retries a *completed* card whose
+  artifact failed CI or review. Global defaults and per-role overrides come
+  from `execution.native_max_retries`, `execution.native_max_runtime`, and
+  `execution.native_bounds_by_role`. With the flag on, native `--max-runtime`
+  requeue is authoritative for wall-clock timeouts, so the crash-retry
+  reconciler skips `timeout`-class cards to avoid double-handling; all other
+  crash classes are unaffected. Bounds-only for now — goal-mode (`--goal`
+  judge adjudication) is a deliberate follow-up. With the flag off (default)
+  the emitted CLI args are byte-identical to before.
+- **Provider failover chain** (`core/provider_failover.py`, issue #1207) —
+  when a coding agent (Claude Code, Codex, etc.) hits a transient failure
+  (session limit, quota, crash, timeout), the crash-retry reconciler
+  automatically re-dispatches the same card on the next provider in an
+  ordered fallback chain (`execution.coding_agents` in `daedalus.yaml`)
+  instead of retrying the limited provider forever. A provider that spends
+  `max_attempts_per_provider` dispatches on one episode enters a global
+  cooldown and is skipped by every card until the window expires; with
+  `reset_to_primary: true` the primary is preferred again once its cooldown
+  clears. The same pattern applies to the orchestration-brain model
+  (`model.providers` chain) — profiles are resynced to the next provider on
+  a brain-side transient failure and back to the primary when it recovers.
+  Configurable via `execution.failover` and `model.failover` knobs in
+  `templates/daedalus.yaml`.
+- **Orphaned worktree sweep** (`scripts/daedalus_dispatch.py`, issue #1114) —
+  agents are instructed to `git worktree remove --force` on cleanup, but a crashed
+  or reclaimed agent leaves its worktree behind and they accumulate unboundedly
+  (25+ orphans had accumulated under `.worktrees/`). `_sweep_orphan_worktrees()`
+  runs once per dispatch tick (right after `kanban.ensure_board`): it enumerates
+  registered worktrees via `git worktree list --porcelain`, attributes each to an
+  issue number (branch `fix/issue-<N>`, falling back to a `dev-<N>`/`issue-<N>`
+  directory name), and removes any whose issue has no active (non-terminal) kanban
+  task via `git worktree remove --force`, then prunes stale metadata. The main
+  worktree and unattributable entries (detached QA trees, scratch branches) are
+  always skipped. Every removal is individually wrapped — a failed remove (locked
+  worktree, permission error) is logged at WARNING and skipped; the tick never
+  aborts. If the kanban board cannot be read, the sweep aborts without removing
+  anything (never sweeps blind). The function never raises.
 - **Tier promotion** — epic decomposition produces multiple sub-issues, but marking
   all of them `Ready` at once overwhelms the validator pipeline and bypasses dependency
   semantics. Instead, sub-issues with no declared blockers get the `Ready` label on
@@ -1253,6 +1427,22 @@ Each piece exists because the obvious approach failed:
   learns about it days later by scrolling the board. A one-time `retry-cap-exhausted`
   notification (deduped per issue via a marker comment) surfaces the wedge the
   moment it happens, routed to the same channels as `security-escalation`.
+- **Provider-instantiation warning in tick-summary notify** (`scripts/daedalus_dispatch.py`, issue #1113) —
+  when `providers.get_provider()` raised inside `_notify_project_summary()`, the code fell back to
+  `provider = None` with no log, silently degrading the dispatch summary for the entire tick. The
+  `except` branch now emits a `logger.warning()` with the exception detail and project identity
+  (name + workdir), so operators can see *why* the summary was degraded instead of guessing.
+  Behaviour is otherwise unchanged: the summary still renders (degraded) and the rest of dispatch
+  continues normally.
+- **Non-zero exit code on total dispatch failure** (`scripts/daedalus_dispatch.py`, issue #1112) —
+  `_main_inner()` previously returned exit code 0 on every path (its own docstring said "Always
+  returns 0 — errors are logged + summarized, never via exit code"), so cron mail-on-error, CI
+  status gates, and wrapper scripts always saw success even when every project run in a tick
+  errored (misconfigured provider, broken auth, total kanban failure). The dispatcher now tracks
+  a per-project run tally (`n_ok` / `n_err`) across both the single-repo path and the registry
+  sweep, and returns exit code **1** when at least one project ran and **every** one errored.
+  Partial success (>=1 project ran cleanly) and zero-project ticks (empty registry / unresolved
+  repo) still return 0. `--self-test` and `--history` keep their own exit codes.
 - **Fetch limit raised to 100** — the original page limit of 20 silently truncated
   boards with more than 20 open issues: validator sweep missed work, merged-PR
   archival missed completions, and the board looked healthy while issues rotted in
@@ -1261,10 +1451,30 @@ Each piece exists because the obvious approach failed:
   and an agent stuck `blocked` (waiting for input) used to share a code path; a
   dead-code branch let `stop:` fall through and leave the card blocked. Separate
   paths — `stop:` auto-closes, `blocked` PM-consults — prevent the regression.
+- **Closed-issue guard gaps** (`scripts/daedalus_dispatch.py`, issue #1120) — the
+  closed-issue skip guard added in #1117 had two gaps: `_check_planner_not_suitable()`
+  was missing the guard entirely (kept creating validator tasks for closed issues), and
+  `_is_issue_closed_cached()` returned `False` ("open") on a 403 rate-limit error, causing
+  a self-reinforcing rate-limit loop. The guard is now three-state: `True` (closed),
+  `False` (confirmed open, or no provider → fail-open for provider-less tests), `None`
+  (unknown — `get_issue_state` raised). All 6 call sites gate on `is not False`, so closed
+  **and** unknown/rate-limited issues are skipped rather than processed. The `None` result
+  is cached so a rate-limited tick makes at most one API call per issue.
 - **`issues_map` miss fallback** — a freshly-created issue can race with the
   dispatcher's sweep such that the sweep has the issue's number but not its body.
   A one-shot `get_issue()` retry on transient failure prevents a single API flake
   from stalling the entire tick.
+- **Dev mode redirect** — testing dispatcher changes normally requires
+  `hermes plugins update daedalus` after every push. A `dev_mode` block in
+  `daedalus.yaml` lets operators point the installed plugin at a local checkout
+  so edits take effect immediately. When `dev_mode.enabled: true` and
+  `dev_mode.path` points at a valid checkout containing
+  `scripts/daedalus_dispatch.py`, the dispatcher re-execs itself from that path
+  via `os.execve` (replaces the process — no double FileLock). The
+  `DAEDALUS_DEV` environment variable is set automatically to prevent infinite
+  re-exec loops. Set `enabled: false` (or remove the block) to restore normal
+  installed-plugin behaviour. See `templates/daedalus.yaml` for the commented-out
+  config block.
 
 ---
 
@@ -1307,9 +1517,11 @@ on its board.
 
 | Path | What it is |
 |------|------------|
-| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close. Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
+| `scripts/daedalus_dispatch.py` | The deterministic dispatch tick (cron entrypoint, `--no-agent`). Ready-gating, reconcile, decompose, auto-advance, merged→close, dev-mode redirect, orphaned-worktree sweep (issue #1114). Exits non-zero (1) when at least one project ran and every project errored, so cron mail-on-error and CI gates can detect total dispatch failure (issue #1112). Flags: `--history [N]`, `--repo <path>`, `--plugin-dir <path>`, `--dry-run`, `--self-test` (offline hermetic smoke test — seeds in-memory doubles, drives the real handoff functions, asserts state transitions with zero network/GitHub access). |
 | `core/iterate.py` | Self-healing loop: classify blocked cards into 5 actions, idempotent fix-card creation, iteration cap + escalation, reviewer re-engage after fix. |
-| `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys. |
+| `core/dispatch_state.py` | Dispatch state persistence (`daedalus_dispatch_state.json`) — threads, retry counters, idempotency keys, config fingerprints. |
+| `core/crash_retry.py` | Time-bounded crash retry with stepped backoff, per-card attempt cap, wall-clock cap. Re-queues crashed cards on next dispatch tick (#1205). |
+| `core/provider_failover.py` | Cross-provider coding-agent failover chain resolution. Selects next provider on transient failure, per-provider cooldown, reset-to-primary (#1207). |
 | `core/notification_sender.py` | Structured webhook payloads + Slack/Discord/Telegram/Signal/WhatsApp `send()` with per-platform formatting. |
 | `core/notify_templates.py` | Rich markdown notification templates (dispatch summary, doc report envelope, PR-ready, pipeline-failure) with clickable issue/PR links for every Hermes messaging platform. |
 | `core/registry.py` | Project registry read/write — `projects.yaml` CRUD for multi-repo onboarding. |
@@ -1326,6 +1538,7 @@ on its board.
 | `core/kanban.py` | Thin, idempotent wrapper over `hermes kanban` (triage, decompose, complete). |
 | `config/` | `ConfigLoader` (defaults + per-repo merge), `validate_vcs`, and the config template. |
 | `dashboard/` | Dashboard tab: project grid, add/edit project modals, notifications editor (`plugin_api.py` + React `src/App.jsx`). |
+| `templates/agent_bodies/` | Agent prompt-body templates — one `.md` per role (planner, validator, pm, downstream, dev, qa, reviewer, security, docs, task_body). Rendered via `string.Template` (`$placeholder`) by `_render_agent_body()` in the dispatcher. Prompt-only changes now diff as markdown, not Python (#1147). |
 | `tests/` | Unit tests — config, providers (mocked HTTP), dispatcher, dashboard API, installers. |
 
 The **ship-gate hook**, **cron wrapper**, and **roster profiles** live in the Hermes
@@ -1357,6 +1570,19 @@ The `/meta/*` endpoints power the dashboard's dropdown selectors when editing
 project config. All config reads pass through `_strip_secrets()` to ensure
 tokens are never echoed back to the UI.
 
+### Authentication
+
+The daedalus dashboard plugin API is mounted under `/api/plugins/daedalus/*`
+in the Hermes dashboard host. Authentication is handled entirely by the
+**Hermes host's global `/api/` auth middleware**, which gates every plugin
+route with the session token — the plugin does not implement its own auth layer
+(see issue #1233 for the rationale behind removing the former plugin-level
+`require_dashboard_auth` gate).
+
+For deployments where the Hermes host runs in loopback/tunnel mode or is
+gated by OAuth/password, all plugin routes are already covered. No
+daedalus-specific token configuration is needed.
+
 ---
 
 ## Development references
@@ -1366,8 +1592,7 @@ conventions:
 
 | Document | Purpose |
 |----------|---------|
-| [`SPEC.md`](SPEC.md) | Detailed specification of the pipeline's behavior — what each phase does, how agents interact, what the quality gates are. The README is an overview; SPEC.md is the reference. |
-| [`design-retry-cap-notification.md`](design-retry-cap-notification.md) | Design rationale for retry-cap exhaustion and intermediate retry-attempt notifications. |
+| [`design-retry-cap-notification.md`](docs/design-retry-cap-notification.md) | Design rationale for retry-cap exhaustion and intermediate retry-attempt notifications. |
 | [`qa-gate-design.md`](docs/qa-gate-design.md) | Full QA gate design specification — how the auto-merge gate validates the QA signal, edge cases, and the `skip-qa` label bypass. |
 | [`ci-plugin-lifecycle.md`](docs/ci-plugin-lifecycle.md) | CI integration patterns and plugin lifecycle hooks for pipeline automation. |
 | [`e2e-smoke-test.md`](docs/e2e-smoke-test.md) | End-to-end smoke testing procedures and regression test suites. |
@@ -1484,6 +1709,33 @@ includes per-project sections for dispatched issues, completions, advanced PRs,
 auto-remediation actions, and delivered doc reports. Documentation reports are
 wrapped in a structured envelope with a header, navigation links, and issue
 cross-reference before delivery.
+
+#### Delivery transport — `notify.native_send` (#1293)
+
+Escalation notifications (`retry-cap-exhausted`, `crash-retries-exhausted`) can be
+delivered over two transports. The `notify.native_send` flag (default `false`)
+selects which:
+
+- **`false` (default)** — behaviour is byte-identical to before. These escalations
+  fire on **both** transports: the native `hermes send` path (`cron.notifications`
+  targets, with threading) **and** the legacy raw-webhook path
+  (`core/notification_sender.py` → the `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`
+  env vars, with Slack Block Kit / Discord embeds).
+- **`true`** — routes delivery through native `hermes send` only; the redundant
+  legacy raw-webhook calls are skipped because the native path already delivers the
+  same notifications. **Tradeoff:** `hermes send` delivers **plain markdown only**
+  (no Block Kit, no Discord embeds) and follows your `cron.notifications` targets
+  rather than the `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` env webhooks. If you
+  rely only on those env webhooks, add native `cron.notifications` targets before
+  flipping it on, or these escalations will not be delivered.
+
+```yaml
+notify:
+  native_send: false   # true = native hermes send only; false = both transports
+```
+
+This flag is **delivery-only**. Inbound intake — the native webhook receiver — is
+tracked separately in [#1298](https://github.com/benmarte/daedalus/issues/1298).
 
 ### Comment threading
 

@@ -12,7 +12,6 @@ Entrypoints (scripts/, dashboard/plugin_api.py) set up their own path locally.
 
 import logging
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -139,6 +138,18 @@ def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
                     profile_cfg.pop(key, None)
                 else:
                     profile_cfg[key] = global_val
+                changed = True
+
+        # Strip "messaging" from toolsets arrays — Hermes emits "Unknown toolsets: messaging"
+        # at startup because this toolset is not registered. Daedalus agents don't need it.
+        toolset_candidates = [
+            profile_cfg.get("toolsets"),
+            profile_cfg.get("disabled_toolsets"),
+            *(profile_cfg.get("platform_toolsets") or {}).values(),
+        ]
+        for ts_list in toolset_candidates:
+            if isinstance(ts_list, list) and "messaging" in ts_list:
+                ts_list.remove("messaging")
                 changed = True
 
         if changed:
@@ -304,6 +315,10 @@ def _ensure_dispatch_crons() -> None:
         import yaml
         from pathlib import Path
 
+        # Lazy for the same reason as _schedule_to_crontab: keep the plugin
+        # entry point import-safe when ``core`` is not yet on sys.path.
+        from core.cron_parser import parse_cron_jobs
+
         hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
         registry_file = Path(
             os.environ.get("HERMES_ORCH_REGISTRY")
@@ -332,8 +347,9 @@ def _ensure_dispatch_crons() -> None:
                 tpl = yaml.safe_load(template_path.read_text()) or {}
                 tpl = tpl.get("defaults", tpl)
                 default_schedule = ((tpl.get("cron") or {}).get("schedule") or "").strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("daedalus: failed to read default cron schedule from template %s: %s",
+                               template_path, exc)
 
             # List existing cron job NAMES once (a single subprocess for all projects).
             # Without the list we can't tell what's missing, so bail rather than risk
@@ -352,32 +368,10 @@ def _ensure_dispatch_crons() -> None:
             # Parse name, status, AND schedule so we can detect dead or
             # interval-format crons.  Only active crons with crontab-syntax
             # schedules block recreation.
-            # NOTE: cron list output has Name: before Schedule:, so we must
-            # accumulate all fields and flush when the next entry starts.
-            cron_info: dict[str, tuple[str, str, str]] = {}  # name -> (cron_id, status, schedule)
-            _cur_id: str | None = None
-            _cur_status: str | None = None
-            _cur_schedule: str | None = None
-            _cur_name: str | None = None
-
-            def _flush_cron_entry() -> None:
-                if _cur_id and _cur_name:
-                    cron_info[_cur_name] = (_cur_id, _cur_status or "", _cur_schedule or "")
-
-            for line in res.stdout.splitlines():
-                id_m = re.match(r"^\s+([0-9a-f]{8,})\s+\[(\w+)\]", line)
-                if id_m:
-                    _flush_cron_entry()
-                    _cur_id, _cur_status, _cur_schedule, _cur_name = id_m.group(1), id_m.group(2), None, None
-                    continue
-                name_m = re.match(r"^\s*Name:\s+(.+)$", line)
-                if name_m and _cur_id:
-                    _cur_name = name_m.group(1).strip()
-                    continue
-                sched_m = re.match(r"^\s*Schedule:\s+(.+)$", line)
-                if sched_m and _cur_id:
-                    _cur_schedule = sched_m.group(1).strip()
-            _flush_cron_entry()  # flush the last entry
+            cron_info: dict[str, tuple[str, str, str]] = {
+                j["name"]: (j["job_id"], j["state"], j.get("schedule") or "")
+                for j in parse_cron_jobs(res.stdout)
+            }  # name -> (cron_id, status, schedule)
             # Active crons: present and not completed AND already using crontab syntax.
             # Interval-format crons (e.g. "every 60m") are treated as stale and recreated.
             existing_names = {
@@ -401,7 +395,9 @@ def _ensure_dispatch_crons() -> None:
                     continue
                 try:
                     cfg = yaml.safe_load(cfg_file.read_text()) or {}
-                except Exception:
+                except Exception as exc:
+                    logger.warning("daedalus: failed to parse config %s during cron self-heal: %s",
+                                   cfg_file, exc)
                     continue
 
                 name = (cfg.get("name") or "").strip()
@@ -500,8 +496,8 @@ def _ensure_dispatch_crons() -> None:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 lock_fd.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("daedalus: failed to release cron-heal lock: %s", exc)
     except Exception:
         logger.debug("daedalus: _ensure_dispatch_crons failed", exc_info=True)
 

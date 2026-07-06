@@ -2277,6 +2277,10 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
     var restarting = rg[0], setRestarting = rg[1];
     var rgr = useState(null);
     var restartResult = rgr[0], setRestartResult = rgr[1];
+    var sp = useState(false);
+    var syncProfiles = sp[0], setSyncProfiles = sp[1];
+    var sr = useState(null);
+    var syncResult = sr[0], setSyncResult = sr[1];
     var load = useCallback(function() {
       setLoading(true);
       setLoadErr(null);
@@ -2357,6 +2361,26 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
         setRosterResult({ ok: false, error: String(err && err.message || err) });
       });
     }
+    function syncProfilesModel() {
+      setSyncProfiles(true);
+      setSyncResult(null);
+      fetchJSON("/api/plugins/daedalus/profiles/model/sync", { method: "POST" }).then(function(r) {
+        setSyncProfiles(false);
+        setSyncResult(r || { ok: false, error: "no response" });
+        if (r && r.ok) {
+          fetchJSON("/api/plugins/daedalus/meta/roster-status").then(function(d) {
+            setRosterStatus(d || null);
+          }).catch(function() {
+          });
+          setTimeout(function() {
+            setSyncResult(null);
+          }, 8e3);
+        }
+      }).catch(function(err) {
+        setSyncProfiles(false);
+        setSyncResult({ ok: false, error: String(err && err.message || err) });
+      });
+    }
     if (loading) return React.createElement(
       "div",
       { style: S.wrap },
@@ -2402,14 +2426,37 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
           React.createElement("h1", { style: S.h1 }, "Daedalus"),
           React.createElement("p", { style: S.subtitle }, projects.length, " project", projects.length !== 1 ? "s" : "")
         ),
-        React.createElement(Button, {
-          label: "+ Add Project",
-          variant: "primary",
-          onClick: function() {
-            setShowAddProject(true);
-          }
-        })
+        React.createElement(
+          "div",
+          { style: { display: "flex", gap: "8px", alignItems: "center" } },
+          React.createElement(Button, {
+            label: syncProfiles ? "Syncing\u2026" : "Sync Profiles",
+            variant: "small",
+            disabled: syncProfiles,
+            onClick: syncProfilesModel
+          }),
+          React.createElement(Button, {
+            label: "+ Add Project",
+            variant: "primary",
+            onClick: function() {
+              setShowAddProject(true);
+            }
+          })
+        )
       ),
+      // Sync-profiles result line — right-aligned, fades after 8s on success
+      syncResult ? React.createElement(
+        "div",
+        {
+          style: {
+            textAlign: "right",
+            fontSize: "12px",
+            marginBottom: "8px",
+            color: syncResult.ok ? "#4ade80" : "#f87171"
+          }
+        },
+        syncResult.ok ? "Synced " + syncResult.updated + " profile(s) to " + (syncResult.model || "global model") : "Sync error: " + (syncResult.error || "failed")
+      ) : null,
       // Roster provisioning banner — shown when any of the 9 profiles are missing
       rosterStatus && !rosterStatus.all_provisioned ? React.createElement(
         "div",

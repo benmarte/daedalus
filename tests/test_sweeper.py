@@ -106,6 +106,39 @@ def test_find_stale_respects_custom_threshold():
           len(sweeper.find_stale_blocked(cards, now=NOW, threshold_hours=6)) == 1)
 
 
+# ── fast dead-worker reclaim (worker_pid liveness) ──────────────────────────
+def test_find_dead_worker_detects_gone_pid():
+    cards = [_card("t1", status="running")]
+    dead = sweeper.find_dead_worker_running(cards, {"t1": 12345}, alive_fn=lambda p: False)
+    check("running card with dead worker pid is reclaimed immediately",
+          len(dead) == 1 and dead[0]["id"] == "t1")
+
+
+def test_find_dead_worker_ignores_live_pid():
+    cards = [_card("t1", status="running")]
+    check("live worker pid is not reclaimed",
+          sweeper.find_dead_worker_running(cards, {"t1": 999}, alive_fn=lambda p: True) == [])
+
+
+def test_find_dead_worker_ignores_missing_pid():
+    cards = [_card("t1", status="running")]
+    check("no recorded pid → skip (heartbeat fallback owns it)",
+          sweeper.find_dead_worker_running(cards, {}, alive_fn=lambda p: False) == [])
+
+
+def test_find_dead_worker_ignores_non_running():
+    cards = [_card("t1", status="blocked")]
+    check("non-running card is never dead-worker reclaimed",
+          sweeper.find_dead_worker_running(cards, {"t1": 12345}, alive_fn=lambda p: False) == [])
+
+
+def test_pid_alive_semantics():
+    import os as _os
+    check("own pid is alive", sweeper._pid_alive(_os.getpid()) is True)
+    check("pid<=0 treated as unknown/alive", sweeper._pid_alive(0) is True)
+    check("very high pid is dead", sweeper._pid_alive(2_000_000_000) is False)
+
+
 # ── find_stale_blocked: edge cases at the exact 48h boundary ─────────────────
 
 
@@ -259,11 +292,21 @@ def test_find_stale_running_ignores_blocked():
           sweeper.find_stale_running(cards, now=NOW, threshold_hours=24) == [])
 
 
-def test_find_stale_running_default_threshold_is_24h():
-    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 25 * HOUR)]
-    check("25h running card stale at default threshold",
+def test_find_stale_running_default_threshold_is_30min():
+    # #1323: default cut from 24h → 0.5h (30 min) so a stuck card frees the
+    # max_dispatch slot in minutes. A card idle 1h is stale at the default.
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 1 * HOUR)]
+    check("1h running card stale at default threshold",
           len(sweeper.find_stale_running(cards, now=NOW)) == 1)
-    check("DEFAULT_RUNNING_STALE_HOURS is 24", sweeper.DEFAULT_RUNNING_STALE_HOURS == 24)
+    check("DEFAULT_RUNNING_STALE_HOURS is 0.5", sweeper.DEFAULT_RUNNING_STALE_HOURS == 0.5)
+
+
+def test_find_stale_running_fresh_under_30min_default():
+    # A card idle only 10 min (< 30 min default) is NOT stale — a live worker
+    # heartbeats every 5 min, so it never ages out.
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 600)]
+    check("10min running card not stale at default threshold",
+          sweeper.find_stale_running(cards, now=NOW) == [])
 
 
 def test_find_stale_running_skips_unaged_card():
@@ -296,8 +339,46 @@ def test_sweep_running_returns_stale_ids():
     cards = [_card("t1", status="running", last_heartbeat_at=NOW - 30 * HOUR),
              _card("t2", status="running", last_heartbeat_at=NOW - 1 * HOUR)]
     with mock.patch.object(kanban, "list_tasks", return_value=cards):
-        ids = sweeper.sweep_stale_running("daedalus", now=NOW)
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW, threshold_hours=24)
     check("only the 30h running card is returned", ids == ["t1"])
+
+
+# ── sweep_stale_running: self-heal via reset (issue #1323) ─────────────────────
+
+
+def test_sweep_running_reset_false_does_not_block():
+    """Default (reset=False) is warn-only — byte-identical to pre-#1323 behavior."""
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 2 * HOUR)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(kanban, "block_task") as bt:
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW)
+    check("stale card still returned", ids == ["t1"])
+    check("reset=False never blocks", bt.call_count == 0)
+
+
+def test_sweep_running_reset_blocks_stale_card():
+    """reset=True re-blocks each stale running card so it can be re-dispatched."""
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 2 * HOUR),
+             _card("fresh", status="running", last_heartbeat_at=NOW - 60)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(kanban, "block_task", return_value=True) as bt:
+        ids = sweeper.sweep_stale_running("daedalus", now=NOW, reset=True)
+    check("only the stale card is returned", ids == ["t1"])
+    check("only the stale card is blocked", bt.call_count == 1)
+    check("block targets the stale card", bt.call_args[0][:2] == ("daedalus", "t1"))
+
+
+def test_sweep_running_reset_reason_is_crash_class():
+    """The reset reason must classify as crash-class so crash-retry re-dispatches it."""
+    from core import crash_retry
+    cards = [_card("t1", status="running", last_heartbeat_at=NOW - 2 * HOUR)]
+    with mock.patch.object(kanban, "list_tasks", return_value=cards), \
+         mock.patch.object(kanban, "block_task", return_value=True) as bt:
+        sweeper.sweep_stale_running("daedalus", now=NOW, reset=True)
+    reason = bt.call_args[0][2]
+    check("reason starts with the crash-class marker",
+          reason.startswith(sweeper.STALE_RUNNING_RESET_REASON))
+    check("crash_retry.classify → crash", crash_retry.classify(reason) == "crash")
 
 
 def test_sweep_running_queries_running_status():
@@ -435,7 +516,79 @@ def test_archive_with_retry_idempotent_success():
             sweeper._archive_with_retry("daedalus", "t1", max_attempts=3) is True
         )
 
+# ── generalized triage-recovery ─────────────────────────────────────────────
+def _triage_card(tid, assignee, title):
+    return {"id": tid, "status": "triage", "assignee": assignee, "title": title}
+
+
+def test_recover_triaged_recreates_nondeveloper_role():
+    card = _triage_card("t_v", "validator-daedalus", "#7 Validator: feat")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "show_card",
+                          return_value={"task": {"body": "B"}, "parents": []}),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="t_new") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as archive,
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=True)
+    check("recovered the validator", out == ["t_v"])
+    check("replacement titled [recover 1]", create.call_args[0][1] == "#7 Validator: feat [recover 1]")
+    check("archived the triaged card", archive.call_args[0] == ("b", "t_v"))
+
+
+def test_recover_triaged_skips_developer():
+    card = _triage_card("t_d", "developer-daedalus", "#7 Developer: feat")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="x") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=True)
+    check("developer skipped (F10/F12 owns it)", out == [] and not create.called)
+
+
+def test_recover_triaged_bounded_at_max():
+    card = _triage_card("t_q", "qa-daedalus", "#7 QA: feat [recover 3]")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="x") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=True, max_recoveries=3)
+    check("exhausted recoveries → left for human", out == [] and not create.called)
+
+
+def test_recover_triaged_increments_marker_and_keeps_parents():
+    card = _triage_card("t_q", "qa-daedalus", "#7 QA: feat [recover 1]")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "show_card",
+                          return_value={"task": {"body": ""}, "parents": ["t_dev"]}),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="t_new") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        sweeper.recover_triaged_cards("b", reset=True)
+    check("increments [recover 1] -> [recover 2]", create.call_args[0][1] == "#7 QA: feat [recover 2]")
+    check("preserves parents", create.call_args.kwargs.get("parents") == ["t_dev"])
+
+
+def test_recover_triaged_reset_false_reports_only():
+    card = _triage_card("t_v", "validator-daedalus", "#7 Validator")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="x") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as archive,
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=False)
+    check("reports recoverable, no mutation", out == ["t_v"] and not create.called and not archive.called)
+
+
 ALL_TESTS = [
+    test_recover_triaged_recreates_nondeveloper_role,
+    test_recover_triaged_skips_developer,
+    test_recover_triaged_bounded_at_max,
+    test_recover_triaged_increments_marker_and_keeps_parents,
+    test_recover_triaged_reset_false_reports_only,
     test_blocked_since_prefers_heartbeat,
     test_blocked_since_falls_back_to_started,
     test_blocked_since_falls_back_to_created,
@@ -463,11 +616,15 @@ ALL_TESTS = [
     test_find_stale_running_detects_old_running,
     test_find_stale_running_ignores_fresh_running,
     test_find_stale_running_ignores_blocked,
-    test_find_stale_running_default_threshold_is_24h,
+    test_find_stale_running_default_threshold_is_30min,
+    test_find_stale_running_fresh_under_30min_default,
     test_find_stale_running_skips_unaged_card,
     test_find_stale_running_sorts_oldest_first,
     test_find_stale_running_exactly_at_24h_is_not_stale,
     test_sweep_running_returns_stale_ids,
+    test_sweep_running_reset_false_does_not_block,
+    test_sweep_running_reset_blocks_stale_card,
+    test_sweep_running_reset_reason_is_crash_class,
     test_sweep_running_queries_running_status,
     test_sweep_running_empty_board,
     test_sweep_running_enriches_heartbeat_from_db,

@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.providers.base import ProviderConfigError  # noqa: E402
 from core.providers.http import (HTTPClient, ProviderError, _parse_link_next)  # noqa: E402
 
 
@@ -44,7 +45,8 @@ def test_verify_ssl_default_true():
     assert c._verify_ssl is True
 
 
-def test_verify_ssl_false_sets_verify_false(no_sleep):
+def test_verify_ssl_false_sets_verify_false(no_sleep, monkeypatch):
+    monkeypatch.setenv("DAEDALUS_DEV_MODE", "1")
     resp = FakeResponse(200, json_data={"ok": True})
     with mock.patch("core.providers.http.httpx.request", return_value=resp) as req:
         c = HTTPClient("https://api.example.com", {}, verify_ssl=False)
@@ -53,6 +55,23 @@ def test_verify_ssl_false_sets_verify_false(no_sleep):
     # Verify was passed as False to httpx
     _, kwargs = req.call_args
     assert kwargs["verify"] is False
+
+
+def test_verify_ssl_false_rejected_in_prod(monkeypatch):
+    monkeypatch.delenv("DAEDALUS_DEV_MODE", raising=False)
+    with pytest.raises(ProviderConfigError):
+        HTTPClient("https://api.example.com", {}, verify_ssl=False)
+
+
+def test_verify_ssl_false_permitted_in_dev_mode(monkeypatch, caplog):
+    monkeypatch.setenv("DAEDALUS_DEV_MODE", "1")
+    with caplog.at_level("ERROR", logger="daedalus.providers.http"):
+        c = HTTPClient("https://api.example.com", {}, verify_ssl=False)
+    assert c._verify_ssl is False
+    assert any(
+        r.levelname == "ERROR" and "SSL certificate verification disabled" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_verify_ssl_true_passes_verify_true(no_sleep):

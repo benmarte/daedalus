@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import re
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
-def _split_remote_url(url: str) -> Optional[Tuple[str, List[str]]]:
+def _split_remote_url(url: str) -> tuple[str, list[str]] | None:
     """Normalize an https/ssh/scp-style git URL into (host, path_parts)."""
     url = (url or "").strip()
     if not url:
@@ -46,7 +46,7 @@ def _split_remote_url(url: str) -> Optional[Tuple[str, List[str]]]:
     return host.lower(), parts
 
 
-def detect_from_url(url: str) -> Optional[Dict[str, Any]]:
+def detect_from_url(url: str) -> dict[str, Any] | None:
     """Detect provider + identity from a git remote URL, or None if unknown."""
     split = _split_remote_url(url)
     if not split:
@@ -86,7 +86,7 @@ def detect_from_url(url: str) -> Optional[Dict[str, Any]]:
     if host == "gitlab.com" or "gitlab" in host:
         if len(parts) >= 2:
             project_path = "/".join(parts)
-            result: Dict[str, Any] = {"provider": "gitlab",
+            result: dict[str, Any] = {"provider": "gitlab",
                                       "repo": project_path,  # nested groups OK
                                       "vcs_extra": {"project_path": project_path}}
             if host != "gitlab.com":
@@ -97,7 +97,7 @@ def detect_from_url(url: str) -> Optional[Dict[str, Any]]:
     return None  # unknown host — caller keeps defaults / asks the user
 
 
-def detect_repo_vcs(workdir: str) -> Optional[Dict[str, Any]]:
+def detect_repo_vcs(workdir: str) -> dict[str, Any] | None:
     """Detect provider + identity from ``workdir``'s origin remote, or None."""
     try:
         proc = subprocess.run(

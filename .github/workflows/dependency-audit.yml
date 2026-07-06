@@ -1,0 +1,42 @@
+name: Dependency Audit
+
+# Scheduled pip-audit of project dependencies (issue #1139).
+# Runs nightly at 00:00 UTC and on PRs that touch dependency manifests.
+# Fails the workflow on any known CVE findings so vulnerabilities are
+# caught before merge and surfaced within a day of disclosure.
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # daily at 00:00 UTC
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'requirements.txt'
+      - '.github/workflows/dependency-audit.yml'
+  workflow_dispatch:  # allow manual triggering
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: pip install --quiet pip-audit
+
+      - name: Audit project dependencies
+        run: |
+          # Audit against requirements.txt (the canonical pinned manifest
+          # for isolated/CI environments). pip-audit resolves each package
+          # against the PyPI advisory database and exits non-zero on any
+          # known CVE.
+          pip-audit -r requirements.txt --strict

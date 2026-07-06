@@ -14,7 +14,7 @@ Separately, the existing `qa-failed` notification fires when a fix card is *crea
 
 ## Decision
 
-1. Extend `run_iterate()` to return a 5-tuple: `(counts, advance_prs, pending_ci_cards, qa_failed_cards, escalated_cards)`.
+1. Extend `run_iterate()` to return a 5-tuple: `(counts, advance_prs, pending_signal_cards, qa_failed_cards, escalated_cards)`.
 
 2. Classify a QA fix card as *escalated* (vs. just *failed*) by checking the file counter after the executor returns `ok=True`:
 

@@ -12,11 +12,14 @@ nothing in this module ever logs or embeds a credential.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
+
+from .base import ProviderConfigError
 
 logger = logging.getLogger("daedalus.providers.http")
 
@@ -29,7 +32,7 @@ RETRY_BACKOFF = [1.0, 2.0, 4.0]  # seconds; Retry-After header wins when present
 class ProviderError(Exception):
     """Any provider HTTP failure. ``status_code`` is None for transport errors."""
 
-    def __init__(self, message: str, status_code: Optional[int] = None):
+    def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
 
@@ -38,7 +41,7 @@ class HTTPClient:
     """HTTPS-only JSON client. All errors are raised as ProviderError with the
     token redacted; callers (provider methods) catch and return safe defaults."""
 
-    def __init__(self, base_url: str, headers: Dict[str, str],
+    def __init__(self, base_url: str, headers: dict[str, str],
                  token: str = "", timeout: float = DEFAULT_TIMEOUT,
                  verify_ssl: bool = True):
         if not base_url.startswith("https://"):
@@ -49,8 +52,16 @@ class HTTPClient:
         self._timeout = timeout
         self._verify_ssl = verify_ssl
         if not verify_ssl:
+            if not os.environ.get("DAEDALUS_DEV_MODE"):
+                raise ProviderConfigError(
+                    "verify_ssl=false is not permitted outside dev mode "
+                    "(set DAEDALUS_DEV_MODE env var to override)"
+                )
             warnings.filterwarnings("ignore", message="Unverified HTTPS request")
-            logger.warning("SSL certificate verification disabled (base_url=%s)", base_url)
+            logger.error(
+                "SSL certificate verification disabled (base_url=%s) — DAEDALUS_DEV_MODE active",
+                base_url,
+            )
 
     # ── core ─────────────────────────────────────────────────────────────────
     def _redact(self, text: str) -> str:
@@ -62,17 +73,17 @@ class HTTPClient:
         return text
 
     def request(self, method: str, path: str, *,
-                params: Optional[Dict[str, Any]] = None,
+                params: dict[str, Any] | None = None,
                 json_body: Any = None,
-                content_type: Optional[str] = None,
-                headers: Optional[Dict[str, str]] = None) -> httpx.Response:
+                content_type: str | None = None,
+                headers: dict[str, str] | None = None) -> httpx.Response:
         url = path if path.startswith("https://") else f"{self._base}{path}"
         hdrs = dict(self._headers)
         if headers:
             hdrs.update(headers)
         if content_type:
             hdrs["Content-Type"] = content_type
-        last_exc: Optional[ProviderError] = None
+        last_exc: ProviderError | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
                 resp = httpx.request(method, url, params=params, json=json_body,
@@ -111,8 +122,8 @@ class HTTPClient:
             return RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
 
     # ── JSON helpers ─────────────────────────────────────────────────────────
-    def get_json(self, path: str, *, params: Optional[Dict[str, Any]] = None,
-                 headers: Optional[Dict[str, str]] = None) -> Any:
+    def get_json(self, path: str, *, params: dict[str, Any] | None = None,
+                 headers: dict[str, str] | None = None) -> Any:
         resp = self.request("GET", path, params=params, headers=headers)
         try:
             return resp.json()
@@ -120,7 +131,7 @@ class HTTPClient:
             return None
 
     def post_json(self, path: str, json_body: Any, *,
-                  content_type: Optional[str] = None) -> Any:
+                  content_type: str | None = None) -> Any:
         resp = self.request("POST", path, json_body=json_body, content_type=content_type)
         try:
             return resp.json()
@@ -128,7 +139,7 @@ class HTTPClient:
             return None
 
     def patch_json(self, path: str, json_body: Any, *,
-                   content_type: Optional[str] = None) -> Any:
+                   content_type: str | None = None) -> Any:
         resp = self.request("PATCH", path, json_body=json_body, content_type=content_type)
         try:
             return resp.json()
@@ -143,15 +154,15 @@ class HTTPClient:
             return None
 
     # ── pagination ───────────────────────────────────────────────────────────
-    def get_paginated(self, path: str, *, params: Optional[Dict[str, Any]] = None,
+    def get_paginated(self, path: str, *, params: dict[str, Any] | None = None,
                       style: str = "link_header", per_page: int = 100,
-                      max_pages: int = 10) -> List[Any]:
+                      max_pages: int = 10) -> list[Any]:
         """Collect list results across pages.
 
         style: ``link_header`` (GitHub), ``x_next_page`` (GitLab),
         ``continuation`` (Azure DevOps — items under ``value``).
         """
-        out: List[Any] = []
+        out: list[Any] = []
         params = dict(params or {})
         if style in ("link_header", "x_next_page"):
             params.setdefault("per_page", per_page)
@@ -187,7 +198,7 @@ class HTTPClient:
         return out
 
 
-def _parse_link_next(link_header: str) -> Optional[str]:
+def _parse_link_next(link_header: str) -> str | None:
     """Extract the rel="next" URL from an RFC 5988 Link header, or None."""
     for part in (link_header or "").split(","):
         section = part.split(";")

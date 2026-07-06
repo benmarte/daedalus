@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from core.providers.base import VCSProvider, parse_depends_on
 
@@ -44,10 +44,10 @@ EPIC_REF_RE = re.compile(
 class PromotionResult:
     """Outcome of a single tier-promotion pass."""
 
-    promoted: List[int] = field(default_factory=list)
-    errors: List[Dict[str, Any]] = field(default_factory=list)
-    cycles: List[List[int]] = field(default_factory=list)
-    epics_checked: Set[int] = field(default_factory=set)
+    promoted: list[int] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    cycles: list[list[int]] = field(default_factory=list)
+    epics_checked: set[int] = field(default_factory=set)
 
 
 class DependencySnapshot:
@@ -71,11 +71,11 @@ class DependencySnapshot:
         self.provider = provider
         self.just_closed = frozenset(just_closed)
         # Lazily derived.
-        self._sub_issues: Optional[List[int]] = None
-        self._computed_dep_map: Optional[Dict[int, List[int]]] = None
+        self._sub_issues: list[int] | None = None
+        self._computed_dep_map: dict[int, list[int]] | None = None
 
     # ── lazy providers ───────────────────────────────────────────────────────
-    def _ensure_sub_issues(self) -> List[int]:
+    def _ensure_sub_issues(self) -> list[int]:
         if self._sub_issues is None:
             try:
                 self._sub_issues = list(self.provider.sub_issues_of(self.epic_number) or [])
@@ -85,11 +85,11 @@ class DependencySnapshot:
         return self._sub_issues
 
     @property
-    def sub_issues(self) -> List[int]:
+    def sub_issues(self) -> list[int]:
         """Public access to the list of sub-issues discovered for this epic."""
         return self._ensure_sub_issues()
 
-    def _dep_map(self) -> Dict[int, List[int]]:
+    def _dep_map(self) -> dict[int, list[int]]:
         """Build the *structural* dependency graph for the epic's sub-issues.
 
         Uses ``parse_depends_on(body)`` (not ``provider.blockers``) so the
@@ -102,7 +102,7 @@ class DependencySnapshot:
             return self._computed_dep_map
         sub_issues = self._ensure_sub_issues()
         siblings = set(sub_issues)
-        out: Dict[int, List[int]] = {}
+        out: dict[int, list[int]] = {}
         for n in sub_issues:
             try:
                 issue = self.provider.get_issue(n)
@@ -120,11 +120,11 @@ class DependencySnapshot:
         return self._computed_dep_map
 
     # ── public surface used by tests & promote_waiting_tiers ─────────────────
-    def compute_tiers(self) -> Dict[int, int]:
+    def compute_tiers(self) -> dict[int, int]:
         """Tier for every node in the DAG (cycle nodes excluded)."""
         return compute_tiers(self._dep_map())
 
-    def promotable(self, *, already_ready: Optional[Set[int]] = None) -> List[int]:
+    def promotable(self, *, already_ready: set[int] | None = None) -> list[int]:
         """Open sub-issues whose providers.blockers() is now empty.
 
         Excludes:
@@ -136,7 +136,7 @@ class DependencySnapshot:
         """
         already = set(already_ready or ())
         tiers = self.compute_tiers()
-        out: List[int] = []
+        out: list[int] = []
         for n in self._ensure_sub_issues():
             if n in self.just_closed or n in already:
                 continue
@@ -159,7 +159,7 @@ class DependencySnapshot:
 # ---------------------------------------------------------------------------
 # Pure-graph helpers
 # ---------------------------------------------------------------------------
-def detect_cycles(dep_map: Dict[int, List[int]]) -> List[List[int]]:
+def detect_cycles(dep_map: dict[int, list[int]]) -> list[list[int]]:
     """Return cycles (each a list of nodes forming the loop) via DFS back-edges.
 
     Returns the empty list when the graph is acyclic. Cycles are *not*
@@ -167,10 +167,10 @@ def detect_cycles(dep_map: Dict[int, List[int]]) -> List[List[int]]:
     different entry points. Tests only check non-emptiness, so that's fine.
     """
     WHITE, GRAY, BLACK = 0, 1, 2
-    color: Dict[int, int] = {n: WHITE for n in dep_map}
-    cycles: List[List[int]] = []
+    color: dict[int, int] = {n: WHITE for n in dep_map}
+    cycles: list[list[int]] = []
 
-    def dfs(node: int, stack: List[int]) -> None:
+    def dfs(node: int, stack: list[int]) -> None:
         color[node] = GRAY
         stack.append(node)
         for dep in dep_map.get(node, []) or []:
@@ -190,7 +190,7 @@ def detect_cycles(dep_map: Dict[int, List[int]]) -> List[List[int]]:
     return cycles
 
 
-def compute_tiers(dep_map: Dict[int, List[int]]) -> Dict[int, int]:
+def compute_tiers(dep_map: dict[int, list[int]]) -> dict[int, int]:
     """Longest-path tier with cycle detection.
 
     Cycle participants are omitted from the result. External deps (numbers
@@ -202,14 +202,14 @@ def compute_tiers(dep_map: Dict[int, List[int]]) -> Dict[int, int]:
         return {}
 
     cycles = detect_cycles(dep_map)
-    cyclic_nodes: Set[int] = set()
+    cyclic_nodes: set[int] = set()
     for cycle in cycles:
         cyclic_nodes.update(cycle)
 
-    tiers: Dict[int, int] = {}
-    computing: Set[int] = set()
+    tiers: dict[int, int] = {}
+    computing: set[int] = set()
 
-    def tier_of(node: int) -> Optional[int]:
+    def tier_of(node: int) -> int | None:
         if node in tiers:
             return tiers[node]
         if node in cyclic_nodes:
@@ -244,7 +244,7 @@ def compute_tiers(dep_map: Dict[int, List[int]]) -> Dict[int, int]:
 # ---------------------------------------------------------------------------
 def promote_waiting_tiers(
     provider: VCSProvider,
-    just_closed: List[int],
+    just_closed: list[int],
 ) -> PromotionResult:
     """Run one tier-promotion pass over the epics owning the closed issues.
 
@@ -258,7 +258,7 @@ def promote_waiting_tiers(
     if not just_closed:
         return result
 
-    processed_epics: Set[int] = set()
+    processed_epics: set[int] = set()
 
     for closed_issue in just_closed:
         try:
@@ -295,7 +295,7 @@ def promote_waiting_tiers(
             )
 
         # Gather promotable issues, excluding already-Ready ones.
-        already_ready: Set[int] = set()
+        already_ready: set[int] = set()
         for n in snapshot._ensure_sub_issues():
             try:
                 if provider.has_label(n, "Ready"):
@@ -371,9 +371,9 @@ def promote_waiting_tiers(
 # ---------------------------------------------------------------------------
 def promote_next_tier(
     provider: VCSProvider,
-    just_closed: List[int],
-    epic_number: Optional[int] = None,
-) -> List[int]:
+    just_closed: list[int],
+    epic_number: int | None = None,
+) -> list[int]:
     """Legacy wrapper returning the promoted issue numbers only."""
     result = promote_waiting_tiers(provider, just_closed)
     return result.promoted

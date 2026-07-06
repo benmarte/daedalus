@@ -57,7 +57,7 @@ If it does, you MUST follow these steps and NOTHING ELSE:
 # Hermes Agent Workflow
 - When working with Hermes itself (config, setup, tools, skills, gateway), load the `hermes-agent` skill first.
 - When doing Hermes meta-tasks (config, setup), use /ship for pre-flight quality checks (lint, typecheck, tests) but NEVER for the merge step — run /ship --no-merge or skip the merge step. Do NOT invoke /pr. Merging PRs is controlled by the Daedalus auto_merge setting and is always a dispatcher or human action, never an agent action.
-- User has a dedicated GitHub token set as GITHUB_TOKEN env var.
+- The worker environment has **no** GitHub token — never read `GITHUB_TOKEN` or post GitHub comments yourself. Emit your report to stdout; the dispatcher posts all agent comments for you (#894/#1325). An inline post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323).
 - macOS environment with Docker Desktop. Container networking uses host.docker.internal.
 - Do NOT auto-close GitHub issues — leave them open until the linked PR is reviewed and merged.
 
@@ -102,47 +102,37 @@ Write a detailed, ordered plan covering:
 - **Risks**: edge cases, potential regressions, things to watch out for
 - **Out of scope**: explicitly state what is NOT part of this fix
 
-### 4. Post the plan as a comment on the issue
-Post a comment on the GitHub **issue** using the shared agent_comment helper. Use your `GITHUB_TOKEN` env var. Never use curl.
+### 4. Emit your plan to stdout
+Do **NOT** post a GitHub comment yourself — the worker has no `GITHUB_TOKEN`, so an inline `agent_comment`/`curl`/terminal post fails on the empty token and a headless fallback deadlocks on a permission prompt (#1323). **Print your plan to stdout**: it becomes your kanban summary and the dispatcher posts it to GitHub for you (#894/#1325). Use this plain-markdown template (fill every `<placeholder>`, leave no template text):
 
-```python
-import os, sys
-_h = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-sys.path.insert(0, os.path.join(_h, "plugins", "daedalus", "scripts"))
-from agent_comment import post_comment  # helper prepends the mandatory **Agent:** header
+    ### Files to Change
+    | File | Change |
+    |------|--------|
+    | `path/to/file.ts` | <what changes and why> |
 
-post_comment("<org>/<repo>", <issue_number>, "planner",
-             "Implementation Plan — Issue #N: <title>",
-             """### Files to Change
-| File | Change |
-|------|--------|
-| `path/to/file.ts` | <what changes and why> |
+    ### Implementation Order
+    1. <Step 1 — what to do and why this order>
+    2. <Step 2>
+    3. <Step 3>
 
-### Implementation Order
-1. <Step 1 — what to do and why this order>
-2. <Step 2>
-3. <Step 3>
+    ### Tests to Write
+    - `<test file>`: <what to test>
 
-### Tests to Write
-- `<test file>`: <what to test>
+    ### Risks & Edge Cases
+    - <Risk 1>
+    - <Risk 2>
 
-### Risks & Edge Cases
-- <Risk 1>
-- <Risk 2>
-
-### Out of Scope
-- <What is explicitly not part of this fix>""",
-             token=os.environ["GITHUB_TOKEN"])
-```
+    ### Out of Scope
+    - <What is explicitly not part of this fix>
 
 Replace every `<placeholder>` with the real value. Do not leave template text.
 
 ### 5. Complete your kanban task
 Complete with summary: `PLAN: <one-line description of the implementation approach>`
 
-⛔ **The `PLAN:` prefix is critical but not for the reason you might expect.** The dispatcher's `classify_blocked()` looks for `PLANNING COMPLETE` (case-insensitive) in the handoff text of a blocked planner card to trigger decomposition. Today, the planner *completes* the card (rather than blocking) and the decompose trigger fires from elsewhere in the pipeline. However, if you were to *block* instead of complete, the dispatcher would only decompose if your block reason contained `PLANNING COMPLETE`. Without that substring, any planner block routes to PM_ROUTE — which is almost certainly not what you want.
+⛔ **Your completion summary MUST START WITH `PLAN:`.** Since #1125 F1, the dispatcher uses prefix matching (`startswith`). If you block instead of complete, the dispatcher's `classify_blocked()` looks for `PLANNING COMPLETE` at the **start** of the handoff text. Without that start prefix, any planner block routes to PM_ROUTE.
 
-**The safe practice:** always complete (never block) as a planner, and always use the `PLAN:` prefix on your completion summary.
+**The safe practice:** always complete (never block) as a planner, and always use the `PLAN:` prefix at the START of your completion summary.
 
 ---
 
@@ -152,16 +142,16 @@ This section covers what the dispatcher does in response to planner behavior. Tw
 
 ### Path A — Normal: Planner completes
 
-The planner should always **complete** (not block) with `PLAN:` summary. When the planner's kanban card transitions to `done`, the dispatcher's completion-handler (not `classify_blocked`) detects the completion and invokes `_execute_planner_decompose` (in `core/iterate.py`). This function creates GitHub sub-issues from the parent epic (each sub-issue linked via `Depends on:` headers to establish tier ordering), labels dependency-free sub-issues with the `Ready` label, and creates triage cards for each sub-issue that are then decomposed via `kanban.decompose()`. The decompose step fans out to role-specific tasks (developer, QA, reviewer, security-analyst, and — non-deterministically — accessibility and documentation) through the LLM decomposer. Accessibility and documentation are not guaranteed downstream outputs of planner decomposition; their creation depends on the decomposer's routing.
+The planner should always **complete** (not block) with `PLAN:` summary. When the planner's kanban card transitions to `done`, the dispatcher's completion-handler (not `classify_blocked`) detects the completion and invokes `_execute_planner_decompose` (in `core/iterate.py`). The dispatcher recognises both `PLANNING COMPLETE:` and `PLAN:` as valid completion signals (fix for #1072 — previously `PLAN:` was silently dropped). This function creates GitHub sub-issues from the parent epic (each sub-issue linked via `Depends on:` headers to establish tier ordering), labels dependency-free sub-issues with the `Ready` label, and creates triage cards for each sub-issue that are then decomposed via `kanban.decompose()`. The decompose step fans out to role-specific tasks (developer, QA, reviewer, security-analyst, and — non-deterministically — accessibility and documentation) through the LLM decomposer. Accessibility and documentation are not guaranteed downstream outputs of planner decomposition; their creation depends on the decomposer's routing.
 
 ### Path B — Edge case: Planner blocks
 
 If the planner blocks (which should not happen under normal operation), `classify_blocked()` is invoked:
 
-| Handoff substring | Dispatcher action |
+| Handoff **starts with** | Dispatcher action |
 |---|---|
-| `PLANNING COMPLETE` (case-insensitive) | `PLANNER_DECOMPOSE` — creates epic sub-issues + triage cards; the triage→decompose step fans out non-deterministically to developer/QA/reviewer/security/accessibility/documentation via the LLM decomposer |
-| ANY OTHER block reason | `PM_ROUTE` — treated as unexpected planner output, escalated to PM |
+| `PLANNING COMPLETE` (case-insensitive, at start) | `PLANNER_DECOMPOSE` — creates epic sub-issues + triage cards; the triage→decompose step fans out non-deterministically to developer/QA/reviewer/security/accessibility/documentation via the LLM decomposer |
+| ANY OTHER block reason at start | `PM_ROUTE` — treated as unexpected planner output, escalated to PM |
 
 ### Path C — Edge case: Issue not suitable for decomposition
 
@@ -199,7 +189,7 @@ Before the pipeline-level escalation below kicks in, each spawned coding-agent i
 ### Self-healing escalation sequence
 
 1. **Plan completion detected** → dispatcher's completion-handler fires `_execute_planner_decompose` (in `core/iterate.py`). Sub-issues are created for the epic with `Depends on:` headers establishing tier ordering; dependency-free sub-issues are labelled `Ready`. Triage cards decompose via the LLM into specialist tasks (developer, QA, reviewer, security-analyst, and—non-deterministically—accessibility/documentation).
-2. **Agent crash mid-plan** → the planner worker's handoff contains `coding_agent_timeout` or another crash marker. There is no special-case handler for planner — a crash (including timeout) leaves the card in `PENDING_CI` or parks it in `blocked` depending on what was completed. The sweeper notices at 48 h on blocked cards, 24 h on running cards.
+2. **Agent crash mid-plan** → the planner worker's handoff contains `coding_agent_timeout` or another crash marker. There is no special-case handler for planner — a crash (including timeout) leaves the card in `PENDING_SIGNAL` or parks it in `blocked` depending on what was completed. The sweeper notices at 48 h on blocked cards, 24 h on running cards.
 3. **Unrecognized completion signal** (e.g., missing `PLAN:` prefix entirely, or garbled output) → dispatcher falls through to `PM_ROUTE`. The PM is notified and can re-route or escalate.
 4. **Planner blocks instead of completing** → `classify_blocked()` returns `PM_ROUTE` (for any block reason other than `PLANNING COMPLETE` or infrastructure failure). PM re-routes or escalates.
 
@@ -226,3 +216,21 @@ The sweeper warns (log line) and can optionally archive blocked cards. It does *
 - The implementation order must be correct: dependencies first
 - Risks must reflect actual code inspection, not generic boilerplate
 - The plan must be detailed enough that the developer can implement without re-reading the issue
+
+---
+
+## Structured Outcome Block (MANDATORY)
+
+**The JSON block is required and must be the very last thing in your final message.** The dispatcher parser (`core/iterate/outcomes.py`) extracts it for deterministic routing even when a local model paraphrases the human-readable signal. Both the prefix line and the JSON block are required — they are complementary, not alternatives.
+
+Signal mapping: `PLAN:` → `plan` | `NOT SUITABLE FOR DECOMPOSITION:` → `not_suitable`
+
+Allowed verdicts: `plan` | `not_suitable`
+
+Example full summary (plan posted — JSON block must come last):
+
+    PLAN: decomposed into 5 sub-issues with dependency DAG
+
+    ```json
+    {"daedalus_outcome": 1, "role": "planner", "verdict": "plan", "refs": {"issue": 42, "pr": null}, "note": "5 sub-issues decomposed with dependency DAG"}
+    ```

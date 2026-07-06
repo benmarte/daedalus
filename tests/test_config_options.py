@@ -499,6 +499,32 @@ class TestResolveMaxPmRetries:
         assert sd._resolve_max_pm_retries({}, default=6) == 6
 
 
+class TestResolveMaxFixAttempts:
+    def test_default_is_3(self):
+        assert sd._resolve_max_fix_attempts({}) == 3
+
+    def test_custom_value(self):
+        assert sd._resolve_max_fix_attempts({"max_fix_attempts": 5}) == 5
+
+    def test_zero_falls_back(self):
+        assert sd._resolve_max_fix_attempts({"max_fix_attempts": 0}) == 3
+
+    def test_negative_falls_back(self):
+        assert sd._resolve_max_fix_attempts({"max_fix_attempts": -1}) == 3
+
+    def test_non_numeric_falls_back(self):
+        assert sd._resolve_max_fix_attempts({"max_fix_attempts": "lots"}) == 3
+
+    def test_none_falls_back(self):
+        assert sd._resolve_max_fix_attempts({"max_fix_attempts": None}) == 3
+
+    def test_none_execution_falls_back(self):
+        assert sd._resolve_max_fix_attempts(None) == 3
+
+    def test_custom_default(self):
+        assert sd._resolve_max_fix_attempts({}, default=4) == 4
+
+
 class TestResolveHistoryMaxLines:
     def test_default_is_1000(self):
         assert sd._resolve_history_max_lines({}) == 1000

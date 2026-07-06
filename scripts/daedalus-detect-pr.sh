@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# daedalus-detect-pr.sh OUT_FILE [PID_FILE]
+# daedalus-detect-pr.sh OUT_FILE [PID_FILE] [BRANCH]
 #
 # Provider-side completion handshake for the developer role (issue #146).
 #
@@ -28,17 +28,28 @@ set -uo pipefail
 
 out="${1:-}"
 pidfile="${2:-}"
+branch="${3:-}"
+repo="${4:-}"
 [ -n "$out" ] || exit 0
 
 command -v gh >/dev/null 2>&1 || exit 0
 # gh reads GH_TOKEN then GITHUB_TOKEN; make sure one is exported for headless runs.
 export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 
-br="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+# Prefer an explicitly-passed branch (the caller knows the deterministic
+# fix/issue-<N> branch). This is race-free: reading `git HEAD` from the shared
+# workdir would report whatever branch another concurrent agent left checked
+# out, so a developer could be handed a DIFFERENT issue's PR (the #1131 loop).
+br="$branch"
+[ -n "$br" ] || br="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 [ -n "$br" ] || exit 0
 case "$br" in
   HEAD|main|master|dev|develop|trunk) exit 0 ;;  # never fire on a base branch
 esac
+
+# When an explicit repo is passed (e.g. from daedalus-delegate.sh running in a
+# non-git directory), export GH_REPO so gh can resolve the remote without git.
+[ -n "$repo" ] && export GH_REPO="$repo"
 
 # .[0] guards against multiple matches; select(.number) drops the null case so a
 # branch with no open PR yields empty output (and we exit without touching OUT).

@@ -23,20 +23,21 @@ PIP    ?= $(PYTHON) -m pip
 E2E_TESTS := tests/test_e2e_full_pipeline.py \
              tests/test_e2e_multi_tick.py \
              tests/test_e2e_regressions.py \
+             tests/test_e2e_regression_comprehensive.py \
              tests/test_e2e_smoke.py \
              tests/test_dispatch_selftest.py \
              tests/test_pipeline_scenarios.py
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install test lint e2e e2e-live
+.PHONY: help install test lint typecheck e2e e2e-live
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install runtime + test dependencies
-	$(PIP) install --quiet pyyaml fastapi pytest httpx ruff
+	$(PIP) install --quiet pyyaml fastapi pytest httpx ruff mypy filelock
 
 test: ## Run the full unit/integration suite
 	$(PYTHON) tests/test_daedalus.py
@@ -50,6 +51,9 @@ lint: ## Lint changed Python files (falls back to the whole repo)
 		echo "ruff: no changed Python files"; \
 	fi
 
+typecheck: ## Type-check scoped packages (core/dispatch, core/iterate, core/util, core/db, config)
+	$(PYTHON) -m mypy core/dispatch/ core/iterate/ core/util.py core/db.py config/
+
 e2e: ## Run the offline E2E regression suite (seed issue -> full pipeline -> pass/fail)
 	@echo "=== Daedalus E2E regression suite ==="
 	@echo "--- Seeding a controlled issue and driving the full pipeline ---"
@@ -59,6 +63,13 @@ e2e: ## Run the offline E2E regression suite (seed issue -> full pipeline -> pas
 	@echo "--- Dispatcher --self-test (offline, no real GitHub) ---"
 	$(PYTHON) scripts/daedalus_dispatch.py --self-test
 	@echo "=== E2E suite PASSED ==="
+
+regression: ## Full "nothing breaks" gate — standalone + full pytest + self-test (run before shipping any change)
+	@echo "=== Daedalus regression gate ==="
+	$(PYTHON) tests/test_daedalus.py
+	$(PYTHON) -m pytest tests/ -q
+	$(PYTHON) scripts/daedalus_dispatch.py --self-test
+	@echo "=== Regression gate PASSED ==="
 
 e2e-live: ## Run the live smoke test against the REAL dispatcher (requires GITHUB_TOKEN)
 	@if [ -z "$$GITHUB_TOKEN" ]; then \

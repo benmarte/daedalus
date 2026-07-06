@@ -9,6 +9,7 @@ Capability flags let the dispatcher and dashboard degrade gracefully when a
 provider can't do something (e.g. GitLab issue boards are label-driven, so
 ``supports_boards`` is False and board calls are no-ops).
 """
+
 from __future__ import annotations
 
 import abc
@@ -16,7 +17,8 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 logger = logging.getLogger("daedalus.providers")
 
@@ -25,7 +27,7 @@ class ProviderConfigError(Exception):
     """Required provider config (repo identifiers, …) is missing or invalid."""
 
 
-def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
+def resolve_token(resolved: dict[str, Any], default_envs: Sequence[str]) -> str:
     """Resolve an API token at runtime — never from config file values.
 
     Order: env var named by ``vcs.token_env`` → provider default env vars.
@@ -33,7 +35,7 @@ def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
     a missing token must never disable the whole plugin.
     """
     vcs = (resolved or {}).get("vcs") or {}
-    names: List[str] = []
+    names: list[str] = []
     custom = (vcs.get("token_env") or "").strip()
     if custom:
         names.append(custom)
@@ -44,20 +46,52 @@ def resolve_token(resolved: Dict[str, Any], default_envs: Sequence[str]) -> str:
             return val
     return ""
 
+
 # Sentinel for "report already delivered" PR comments. The literal string is
 # kept from the Slack-only era so previously-marked PRs are not re-delivered.
 DELIVERY_MARKER = "<!-- daedalus:slack-delivered -->"
 
 # Labels that Daedalus requires in every VCS repo it manages.
 # Providers create these on first dispatch via ensure_labels().
-REQUIRED_LABELS: List[Dict[str, str]] = [
-    {"name": "epic",    "color": "7057ff",
-     "description": "Large issue requiring decomposition into sub-issues"},
-    {"name": "subtask", "color": "0075ca",
-     "description": "Child issue created from an epic decomposition"},
-    {"name": "Ready",   "color": "a2eeef",
-     "description": "Issue ready for developer work — no outstanding dependencies blockers"},
+REQUIRED_LABELS: list[dict[str, str]] = [
+    {
+        "name": "epic",
+        "color": "7057ff",
+        "description": "Large issue requiring decomposition into sub-issues",
+    },
+    {
+        "name": "subtask",
+        "color": "0075ca",
+        "description": "Child issue created from an epic decomposition",
+    },
+    {
+        "name": "Ready",
+        "color": "a2eeef",
+        "description": "Issue ready for developer work — no outstanding dependencies blockers",
+    },
 ]
+
+# Labels created by ensure_labels() when label_projection is bootstrapped.
+# Colors: yellow=stage (active work), blue=state-running, red=state-blocked,
+# green=state-done, orange=gate.  All use hex WITHOUT the leading '#' (GitHub format).
+DAEDALUS_PROJECTION_LABELS: list[dict[str, str]] = [
+    {"name": "daedalus:stage/validator",     "color": "e4e669", "description": "Pipeline stage: validator"},
+    {"name": "daedalus:stage/pm",            "color": "e4e669", "description": "Pipeline stage: project-manager"},
+    {"name": "daedalus:stage/developer",     "color": "e4e669", "description": "Pipeline stage: developer"},
+    {"name": "daedalus:stage/qa",            "color": "e4e669", "description": "Pipeline stage: qa"},
+    {"name": "daedalus:stage/reviewer",      "color": "e4e669", "description": "Pipeline stage: reviewer"},
+    {"name": "daedalus:stage/security",      "color": "e4e669", "description": "Pipeline stage: security-analyst"},
+    {"name": "daedalus:stage/accessibility", "color": "e4e669", "description": "Pipeline stage: accessibility"},
+    {"name": "daedalus:stage/docs",          "color": "e4e669", "description": "Pipeline stage: documentation"},
+    {"name": "daedalus:state/running",       "color": "0052cc", "description": "Pipeline: stage actively running"},
+    {"name": "daedalus:state/blocked",       "color": "b60205", "description": "Pipeline: blocked, waiting for action"},
+    {"name": "daedalus:state/done",          "color": "0e8a16", "description": "Pipeline: all stages complete"},
+    {"name": "daedalus:gate/needs-human",    "color": "ff6b35", "description": "Gate: human review required (block_for_review)"},
+    {"name": "daedalus:gate/needs-info",     "color": "ff6b35", "description": "Gate: reporter info needed (needs_more_info)"},
+]
+# Extend the core REQUIRED_LABELS with projection labels so ensure_labels()
+# bootstraps them.  Providers filter their own REQUIRED_LABELS by name.
+REQUIRED_LABELS.extend(DAEDALUS_PROJECTION_LABELS)
 
 # Canonical pipeline statuses → default provider-facing names. Overridable per
 # project via vcs.status_map (values are board columns / labels / WI states).
@@ -74,6 +108,10 @@ class CIStatus:
     RED = "red"
     PENDING = "pending"
     UNKNOWN = "unknown"
+    # NONE = the PR was inspected successfully and has ZERO checks configured (the repo
+    # has no CI). Distinct from UNKNOWN (couldn't determine — error/unsupported). Callers
+    # treat NONE as "nothing to gate on" → passing, so Daedalus works with OR without CI.
+    NONE = "none"
 
 
 @dataclass
@@ -81,23 +119,33 @@ class IssueSummary:
     number: int
     title: str = ""
     body: str = ""
-    labels: List[str] = field(default_factory=list)
+    labels: list[str] = field(default_factory=list)
     state: str = "open"
     url: str = ""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """Dict shape the dispatcher's triage path consumes."""
-        return {"number": self.number, "title": self.title, "body": self.body,
-                "labels": [{"name": n} for n in self.labels], "url": self.url}
+        return {
+            "number": self.number,
+            "title": self.title,
+            "body": self.body,
+            "labels": [{"name": n} for n in self.labels],
+            "url": self.url,
+        }
 
 
-# ── Epic detection (Phase 1, issue #138) ────────────────────────────────────
+# ── Epic detection (Phase 1, issue #138; semantic signals added issue #1100) ──
 #
 # Heuristic: an issue is "epic-sized" if ANY of these hold:
+#   • labels include an exact match for "epic" (case-insensitive)
 #   • body contains >= _EPIC_CHECKLIST_MIN markdown checklist items
 #     (``- [ ]`` / ``* [x]`` / ``+ [X]``, indented or not)
-#   • labels include an exact match for "epic" (case-insensitive)
-#   • body length >= _EPIC_BODY_SIZE_MIN chars
+#     AND the body is NOT a well-scoped bug report (see _is_single_ac_bug)
+#   • body length >= _EPIC_BODY_SIZE_MIN chars AND body contains semantic
+#     decomposition signals (sub-issue checklist refs or decomp language)
+#
+# NOT an epic if the body has a single ## Acceptance Criteria block with no
+# sub-issue checklist — that pattern indicates a well-scoped bug report (#1100).
 #
 # Accepts a raw provider dict (``{"body": ..., "labels": [...]}``), an
 # :class:`IssueSummary`, or any object exposing ``.body`` / ``.labels``.
@@ -106,13 +154,26 @@ class IssueSummary:
 _EPIC_CHECKLIST_MIN = 4
 _EPIC_BODY_SIZE_MIN = 2000
 _CHECKLIST_LINE_RE = re.compile(r"^\s*[-*+]\s+\[[\sxX]\]", re.MULTILINE)
+# Checklist items that reference a GitHub issue number — indicates sub-task decomposition.
+_SUB_ISSUE_CHECKLIST_RE = re.compile(
+    r"^\s*[-*+]\s+\[[\sxX]\]\s+(?:#\d+|\[.+?\]\(#\d+\))",
+    re.MULTILINE,
+)
+# Explicit multi-phase / decomposition language found in true epics.
+_DECOMP_LANGUAGE_RE = re.compile(
+    r"\b(?:phase\s+[1-9]|decompose\s+into|split\s+into|break\s+(?:this\s+)?(?:up\s+)?into)\b",
+    re.IGNORECASE,
+)
+_AC_SECTION_RE = re.compile(
+    r"^##\s+acceptance\s+criteria\b", re.MULTILINE | re.IGNORECASE
+)
 
 
-def _label_names(labels: Any) -> List[str]:
+def _label_names(labels: Any) -> list[str]:
     """Extract label names from either list-of-dicts or list-of-strings shape."""
     if not labels:
         return []
-    out: List[str] = []
+    out: list[str] = []
     for item in labels:
         if isinstance(item, dict):
             name = item.get("name")
@@ -123,17 +184,32 @@ def _label_names(labels: Any) -> List[str]:
     return out
 
 
-def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
+def _has_sub_issue_checklist(body: str) -> bool:
+    """Return True if body has checklist items referencing GitHub issue numbers."""
+    return bool(_SUB_ISSUE_CHECKLIST_RE.search(body))
+
+
+def _is_single_ac_bug(body: str) -> bool:
+    """Return True if body looks like a well-scoped bug/feature report.
+
+    A body with a '## Acceptance Criteria' section and no sub-issue checklist
+    (items of the form ``- [ ] #NNN``) is a single well-scoped issue, not an
+    epic decomposition — regardless of how long the body is (#1100).
+    """
+    return bool(_AC_SECTION_RE.search(body)) and not _has_sub_issue_checklist(body)
+
+
+def is_epic(issue: Any, epic_config: dict[str, Any] | None = None) -> bool:
     """Return True if ``issue`` looks epic-sized per the heuristics above.
-    
+
     When ``epic_config`` is provided (from execution.epic_detection), its values
     override the defaults. Otherwise uses _EPIC_CHECKLIST_MIN and _EPIC_BODY_SIZE_MIN.
-    
+
     The config can disable epic detection entirely by setting ``enabled=False``.
     """
     if issue is None:
         return False
-    
+
     # Resolve thresholds from config or use constants
     if epic_config:
         # Check if epic detection is enabled (defaults to True)
@@ -142,7 +218,7 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
             enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
         if not enabled:
             return False
-        
+
         min_checklist = int(epic_config.get("min_deliverables", 4))
         min_body_size = int(epic_config.get("size_threshold", 2000))
         epic_label = str(epic_config.get("epic_label", "epic"))
@@ -152,7 +228,7 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
         min_body_size = _EPIC_BODY_SIZE_MIN
         epic_label = "epic"
         child_label = "subtask"
-    
+
     # Accept both IssueSummary / dataclass and raw provider dict.
     if isinstance(issue, dict):
         body = issue.get("body") or ""
@@ -165,16 +241,29 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
     if child_label in {n.lower() for n in _label_names(labels)}:
         return False
 
-    # Heuristic 1: checklist density
-    if len(_CHECKLIST_LINE_RE.findall(body)) >= min_checklist:
-        return True
-
-    # Heuristic 2: epic label (exact, case-insensitive)
+    # Heuristic 2: epic label (explicit signal, overrides AC-exclusion below).
     if any(name.lower() == epic_label for name in _label_names(labels)):
         return True
 
-    # Heuristic 3: body size
-    if len(body) >= min_body_size:
+    # Sub-issue checklist: >= 2 checklist items referencing GitHub issue numbers
+    # are an unambiguous decomposition signal, regardless of body size.
+    if len(_SUB_ISSUE_CHECKLIST_RE.findall(body)) >= 2:
+        return True
+
+    # Bug-report exclusion: a body with a single ## Acceptance Criteria block
+    # and no sub-issue checklist is a well-scoped single issue, not an epic.
+    # Checked after the epic-label and sub-issue guards so explicit signals win.
+    if _is_single_ac_bug(body):
+        return False
+
+    # Checklist density: >= min_checklist plain checkboxes indicate an epic
+    # (only reached when the AC-exclusion above did not fire).
+    if len(_CHECKLIST_LINE_RE.findall(body)) >= min_checklist:
+        return True
+
+    # Body size + decomposition language: large body alone is insufficient —
+    # detailed bug reports can exceed the threshold (#1100).
+    if len(body) >= min_body_size and bool(_DECOMP_LANGUAGE_RE.search(body)):
         return True
 
     return False
@@ -183,13 +272,15 @@ def is_epic(issue: Any, epic_config: Optional[Dict[str, Any]] = None) -> bool:
 @dataclass
 class PRSummary:
     number: int
-    state: str = "open"          # open | merged | closed
+    state: str = "open"  # open | merged | closed
     head_branch: str = ""
-    base_branch: str = ""        # target branch the PR merges INTO
+    base_branch: str = ""  # target branch the PR merges INTO
     title: str = ""
     body: str = ""
     url: str = ""
     head_sha: str = ""
+    author: str = ""  # login of the PR author (issue #1168)
+    is_fork: bool = False  # True when the head is from a fork (issue #1168)
 
 
 @dataclass
@@ -219,7 +310,7 @@ class FieldOption:
 class FieldDef:
     id: str
     name: str
-    options: List[FieldOption] = field(default_factory=list)
+    options: list[FieldOption] = field(default_factory=list)
 
 
 @dataclass
@@ -235,18 +326,20 @@ _CLOSING_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\
 # provider-agnostic fallback for dependency-aware ready-gating (issue #139) when
 # native issue links aren't present. Leading list/quote markers are tolerated so
 # it works inside markdown bullets.
-_DEPENDS_RE = re.compile(r"(?im)^[ \t>*\-]*(?:depends[ _-]on|blocked[ _-]by)\s*:?[ \t]*(.+)$")
+_DEPENDS_RE = re.compile(
+    r"(?im)^[ \t>*\-]*(?:depends[ _-]on|blocked[ _-]by)\s*:?[ \t]*(.+)$"
+)
 _ISSUE_REF_RE = re.compile(r"#(\d+)")
 
 
-def parse_depends_on(body: str) -> List[int]:
+def parse_depends_on(body: str) -> list[int]:
     """Issue numbers referenced by a ``Depends on:``/``Blocked by:`` line.
 
     Order-preserving and de-duplicated; returns ``[]`` when the convention is
     absent. Numbers are returned as declared — the caller is responsible for
     filtering to those that are still open.
     """
-    out: List[int] = []
+    out: list[int] = []
     seen = set()
     for line in _DEPENDS_RE.finditer(body or ""):
         for ref in _ISSUE_REF_RE.findall(line.group(1)):
@@ -262,12 +355,20 @@ def issue_linked_to_pr(pr: PRSummary, issue_number: int) -> bool:
 
     Matches ``…issue-<n>…`` / ``…/<n>-…`` / ``…-<n>`` head branches or a
     ``Closes/Fixes/Resolves #<n>`` body reference.
+
+    The ``issue-<n>`` check uses a negative-digit-lookahead regex so
+    ``issue-42`` does NOT match inside ``issue-420`` (substring bug, #1168).
+    The ``/<n>-`` and ``-<n>`` suffix checks are already delimiter-bounded.
     """
     n = str(issue_number)
     head = pr.head_branch or ""
     body = pr.body or ""
-    return (f"issue-{n}" in head or f"/{n}-" in head or head.endswith(f"-{n}")
-            or any(m.group(1) == n for m in _CLOSING_RE.finditer(body)))
+    return (
+        bool(re.search(rf"issue-{n}(?!\d)", head))
+        or f"/{n}-" in head
+        or head.endswith(f"-{n}")
+        or any(m.group(1) == n for m in _CLOSING_RE.finditer(body))
+    )
 
 
 def ensure_closing_keyword(body: str, issue_number: int) -> str:
@@ -289,18 +390,32 @@ class VCSProvider(abc.ABC):
     name: str = "base"
     supports_boards: bool = False
     supports_ci_status: bool = False
+    supports_ci_rerun: bool = False
     supports_pr_comments: bool = False
     supports_labels: bool = False
     supports_branches: bool = False
 
-    def __init__(self, resolved: Dict[str, Any]):
+    def __init__(self, resolved: dict[str, Any]):
         self._cfg = resolved or {}
         vcs = self._cfg.get("vcs") or {}
-        self._status_map: Dict[str, str] = {**DEFAULT_STATUS_MAP, **(vcs.get("status_map") or {})}
+        self._status_map: dict[str, str] = {
+            **DEFAULT_STATUS_MAP,
+            **(vcs.get("status_map") or {}),
+        }
         self._log = logging.getLogger(f"daedalus.providers.{self.name}")
         # Populated by enroll_repo(); surfaced in dispatch summary under enrollment_failures.
         # Defined here so getattr(provider, "enrollment_failures", []) is never needed.
-        self.enrollment_failures: List[int] = []
+        self.enrollment_failures: list[int] = []
+        # Namespace collision guard: daedalus:* label prefix must not collide
+        # with status_map values (on GitLab, labels are board columns).
+        for _k, _v in self._status_map.items():
+            if (_v or "").startswith("daedalus:"):
+                self._log.warning(
+                    "status_map key %r has value %r which starts with 'daedalus:' "
+                    "— this will collide with the label-projection namespace; "
+                    "rename the status_map value to avoid conflicts",
+                    _k, _v,
+                )
 
     # ── status mapping ───────────────────────────────────────────────────────
     def status_name(self, canonical: str) -> str:
@@ -309,17 +424,18 @@ class VCSProvider(abc.ABC):
 
     # ── issues ───────────────────────────────────────────────────────────────
     @abc.abstractmethod
-    def list_issues(self, state: str = "open", labels: Optional[List[str]] = None,
-                    limit: int = 50) -> List[IssueSummary]: ...
+    def list_issues(
+        self, state: str = "open", labels: list[str] | None = None, limit: int = 50
+    ) -> list[IssueSummary]: ...
 
     @abc.abstractmethod
     def close_issue(self, issue_number: int) -> bool: ...
 
-    def get_issue_state(self, issue_number: int) -> Optional[str]:
+    def get_issue_state(self, issue_number: int) -> str | None:
         """Return 'open', 'closed', or None if unknown/error. Providers override for efficiency."""
         return None
 
-    def get_issue(self, issue_number: int) -> Optional[IssueSummary]:
+    def get_issue(self, issue_number: int) -> IssueSummary | None:
         """Fetch a single issue by number. Returns None if not found or on error.
 
         Providers override for direct single-issue fetch; default scans list_issues
@@ -327,8 +443,9 @@ class VCSProvider(abc.ABC):
         """
         return None
 
-    def create_issue(self, title: str, body: str,
-                     labels: Optional[List[str]] = None) -> Optional[int]:
+    def create_issue(
+        self, title: str, body: str, labels: list[str] | None = None
+    ) -> int | None:
         """Create a new issue. Returns the issue number on success, None on failure.
 
         Providers that support issue creation override this; default is a no-op.
@@ -339,6 +456,10 @@ class VCSProvider(abc.ABC):
         """Apply a label to an issue. Returns True on success. Default no-op."""
         return False
 
+    def remove_label(self, issue_number: int, label_name: str) -> bool:
+        """Remove a label from an issue. Returns True on success. Default no-op."""
+        return False
+
     def has_label(self, issue_number: int, label_name: str) -> bool:
         """Return True if ``issue_number`` has ``label_name`` applied.
 
@@ -347,7 +468,7 @@ class VCSProvider(abc.ABC):
         """
         return False
 
-    def sub_issues_of(self, epic_number: int) -> List[int]:
+    def sub_issues_of(self, epic_number: int) -> list[int]:
         """Return issue numbers that are sub-issues of the given epic.
 
         Base implementation scans all open issues for epic-reference conventions
@@ -359,12 +480,13 @@ class VCSProvider(abc.ABC):
         Never raises — returns ``[]`` on any provider error.
         """
         import re as _re
+
         # Aligned with EPIC_REF_RE in core/tier_promotion.py so both code paths
         # agree on what counts as a parent-epic reference.
         pattern = _re.compile(
             rf"(?im)^(?:part[\s-]+of(?:[\s-]+epic)?|epic)\s*:?\s*#{epic_number}\b"
         )
-        results: List[int] = []
+        results: list[int] = []
         try:
             all_issues = self.list_issues(state="open")
         except Exception:
@@ -376,12 +498,16 @@ class VCSProvider(abc.ABC):
             else:
                 body = getattr(issue, "body", "") or ""
             if pattern.search(body):
-                n = issue.get("number") if isinstance(issue, dict) else getattr(issue, "number", None)
+                n = (
+                    issue.get("number")
+                    if isinstance(issue, dict)
+                    else getattr(issue, "number", None)
+                )
                 if n is not None:
                     results.append(int(n))
         return results
 
-    def ensure_labels(self) -> List[str]:
+    def ensure_labels(self) -> list[str]:
         """Create required Daedalus labels if missing. Returns newly created names.
 
         Called once per dispatch run so every managed repo always has the labels
@@ -393,8 +519,9 @@ class VCSProvider(abc.ABC):
         return []
 
     # ── cross-issue dependencies (ready-gating, issue #139) ──────────────────
-    def _depends_on_blockers(self, issue_number: int,
-                             *, body: Optional[str] = None) -> List[int]:
+    def _depends_on_blockers(
+        self, issue_number: int, *, body: str | None = None
+    ) -> list[int]:
         """Open blockers from the portable ``Depends on:`` body convention.
 
         Fetches the issue body when not supplied, parses the convention, and
@@ -407,10 +534,9 @@ class VCSProvider(abc.ABC):
         if body is None:
             issue = self.get_issue(issue_number)
             body = issue.body if issue else ""
-        return [n for n in parse_depends_on(body)
-                if self.get_issue_state(n) == "open"]
+        return [n for n in parse_depends_on(body) if self.get_issue_state(n) == "open"]
 
-    def blockers(self, issue_number: int) -> List[int]:
+    def blockers(self, issue_number: int) -> list[int]:
         """Open issue numbers that block ``issue_number`` (``[]`` when unblocked).
 
         The dispatcher refuses to start new work on an issue while this is
@@ -424,14 +550,35 @@ class VCSProvider(abc.ABC):
 
     # ── pull/merge requests ──────────────────────────────────────────────────
     @abc.abstractmethod
-    def list_prs(self, state: str = "all", limit: int = 50) -> List[PRSummary]: ...
+    def list_prs(self, state: str = "all", limit: int = 50) -> list[PRSummary]: ...
 
-    def find_pr_for_branch(self, branch: str) -> Optional[int]:
+    def find_pr_for_branch(self, branch: str) -> int | None:
         """Open PR number whose head is ``branch``, or None."""
         if not branch:
             return None
         for pr in self.list_prs(state="open"):
             if pr.head_branch == branch:
+                return pr.number
+        return None
+
+    def find_pr_for_issue(self, issue_number: int) -> int | None:
+        """Open PR for ``issue_number`` via its worktree branch, or None.
+
+        The canonical worktree/delegate path forks a deterministic branch
+        ``fix/issue-<n>`` (see daedalus-worktree-spawn.sh), but an agent may
+        push a descriptive suffix instead (``fix/issue-<n>-<slug>``). Match
+        either the exact branch or the ``fix/issue-<n>-`` prefix so a suffixed
+        branch does not strand the deferred-merge sweep (#1176 exact-match gap).
+        Guards against ``fix/issue-2`` matching ``fix/issue-22`` by requiring the
+        prefix boundary to be a literal ``-``.
+        """
+        if not issue_number:
+            return None
+        exact = f"fix/issue-{issue_number}"
+        prefix = f"{exact}-"
+        for pr in self.list_prs(state="open"):
+            head = pr.head_branch or ""
+            if head == exact or head.startswith(prefix):
                 return pr.number
         return None
 
@@ -465,9 +612,9 @@ class VCSProvider(abc.ABC):
             for pr in self.list_prs(state="all")
         )
 
-    def _pr_for_issue(self, issue_number: int) -> Optional[PRSummary]:
+    def _pr_for_issue(self, issue_number: int) -> PRSummary | None:
         """Best PR referencing an issue — prefers merged over open."""
-        open_pr: Optional[PRSummary] = None
+        open_pr: PRSummary | None = None
         for pr in self.list_prs(state="all"):
             if not issue_linked_to_pr(pr, issue_number):
                 continue
@@ -477,11 +624,11 @@ class VCSProvider(abc.ABC):
                 open_pr = pr
         return open_pr
 
-    def pr_state_for_issue(self, issue_number: int) -> Optional[str]:
+    def pr_state_for_issue(self, issue_number: int) -> str | None:
         pr = self._pr_for_issue(issue_number)
         return pr.state if pr else None
 
-    def pr_number_for_issue(self, issue_number: int) -> Optional[int]:
+    def pr_number_for_issue(self, issue_number: int) -> int | None:
         pr = self._pr_for_issue(issue_number)
         return pr.number if pr else None
 
@@ -492,8 +639,51 @@ class VCSProvider(abc.ABC):
     def pr_ci_green(self, pr_number: int) -> bool:
         return self.get_pr_ci_status(pr_number) == CIStatus.GREEN
 
+    def get_prs_ci_status(self, pr_numbers: list[int]) -> dict[int, str]:
+        """Batch CI-status lookup for multiple PRs.
+
+        Default implementation iterates sequentially over
+        :meth:`get_pr_ci_status` — providers that support a true batch query
+        (e.g. GitHub GraphQL) override this for a single round-trip.
+
+        Returns a dict keyed by PR number with the same status string
+        (``CIStatus.GREEN`` / ``RED`` / ``PENDING`` / ``UNKNOWN``) as the
+        single-PR method. PRs whose lookup raises are mapped to
+        ``CIStatus.UNKNOWN`` so callers always get an entry for every
+        requested PR number.
+        """
+        result: dict[int, str] = {}
+        for pr in pr_numbers:
+            try:
+                result[pr] = self.get_pr_ci_status(pr)
+            except Exception as exc:
+                logger.warning("get_prs_ci_status PR #%s failed: %s", pr, exc)
+                result[pr] = CIStatus.UNKNOWN
+        return result
+
+    def get_pr_head_sha(self, pr_number: int) -> str | None:
+        """Head commit SHA of a PR — keys the bounded CI-rerun budget (#1199).
+        Returns None when unknown; providers that support it override."""
+        return None
+
+    def rerun_failed_ci(self, pr_number: int) -> bool:
+        """Re-run only the failed CI jobs for a PR's head commit (#1199).
+
+        Used by the deferred-merge sweep to clear a *transiently* red CI on an
+        otherwise pipeline-complete PR. Returns True if a re-run was issued,
+        False if there was nothing to re-run or the request failed. Default is a
+        no-op so callers can invoke it without checking provider type; providers
+        that support it override and set ``supports_ci_rerun = True``."""
+        return False
+
+    def failed_ci_run_url(self, pr_number: int) -> str | None:
+        """Web URL of the most recent failed CI run for a PR — surfaced in the
+        escalation message when CI stays red after the re-run budget is spent
+        (#1199). Returns None when unknown; providers override."""
+        return None
+
     # ── PR comments / delivery markers ───────────────────────────────────────
-    def list_pr_comments(self, pr_number: int) -> List[Comment]:
+    def list_pr_comments(self, pr_number: int) -> list[Comment]:
         return []
 
     def post_pr_comment(self, pr_number: int, body: str) -> bool:
@@ -503,7 +693,7 @@ class VCSProvider(abc.ABC):
         """Overwrite the PR body. Returns True on success, False if unsupported/failed."""
         return False
 
-    def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
+    def get_pr_files(self, pr_number: int) -> list[dict[str, Any]]:
         """Changed files in a PR. Returns [{filename, additions, deletions, changes, status}].
         Providers that support it override; defaults to [] (safe no-op)."""
         return []
@@ -512,7 +702,7 @@ class VCSProvider(abc.ABC):
         """Post a comment on an issue (distinct from PR comments). Returns True on success."""
         return False
 
-    def get_issue_comments(self, issue_number: int) -> List[Dict[str, Any]]:
+    def get_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
         """Return issue comments as dicts with at least 'body' and 'user' keys.
         Defaults to [] — providers that support it override."""
         return []
@@ -526,6 +716,14 @@ class VCSProvider(abc.ABC):
         safely call this without checking provider type.
         """
         return False
+
+    def open_pr(
+        self, head_branch: str, base_branch: str, title: str, body: str = "",
+    ) -> int | None:
+        """Open a PR from ``head_branch`` into ``base_branch`` (F12). Returns the new PR
+        number, or None if unsupported / the branch has no diff / a PR already exists /
+        on error. Default: unsupported (None) so callers need not check provider type."""
+        return None
 
     def append_changelog(self, base_branch: str, entry: str) -> bool:
         """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the VCS API.
@@ -547,18 +745,21 @@ class VCSProvider(abc.ABC):
         return self._cfg.get("repo") or ""
 
     def pr_has_delivery_marker(self, pr_number: int) -> bool:
-        return any(DELIVERY_MARKER in (c.body or "") for c in self.list_pr_comments(pr_number))
+        return any(
+            DELIVERY_MARKER in (c.body or "") for c in self.list_pr_comments(pr_number)
+        )
 
     def post_delivery_marker(self, pr_number: int, report_body: str = "") -> bool:
         return self.post_pr_comment(
-            pr_number, f"{DELIVERY_MARKER}\n\nDelivered:\n\n{report_body}")
+            pr_number, f"{DELIVERY_MARKER}\n\nDelivered:\n\n{report_body}"
+        )
 
     # ── board / project tracking (high-level; provider caches its own meta) ──
     def board_configured(self) -> bool:
         """True when this project has a usable board configured."""
         return False
 
-    def board_numbers_with_statuses(self, status_names: List[str]) -> set:
+    def board_numbers_with_statuses(self, status_names: list[str]) -> set:
         """Issue numbers whose board status is in ``status_names`` (one call)."""
         return set()
 
@@ -570,7 +771,7 @@ class VCSProvider(abc.ABC):
         """Create ``status_name`` as a board status option if it doesn't exist yet."""
         return False
 
-    def reconcile_board_status(self, issue_number: int) -> Optional[str]:
+    def reconcile_board_status(self, issue_number: int) -> str | None:
         """Set card status from PR state: open → in_review, merged → done.
 
         Returns the canonical status applied, or None.
@@ -585,14 +786,14 @@ class VCSProvider(abc.ABC):
         return None
 
     # ── meta (dashboard pickers) ─────────────────────────────────────────────
-    def list_branches(self) -> List[str]:
+    def list_branches(self) -> list[str]:
         return []
 
-    def list_labels(self) -> List[LabelDef]:
+    def list_labels(self) -> list[LabelDef]:
         return []
 
-    def list_boards(self) -> List[BoardSummary]:
+    def list_boards(self) -> list[BoardSummary]:
         return []
 
-    def get_board_fields(self, board_id: str) -> List[FieldDef]:
+    def get_board_fields(self, board_id: str) -> list[FieldDef]:
         return []

@@ -1,0 +1,31 @@
+You are the REVIEWER for issue acme/widgets#1234: Fix the widget crash
+Work in the existing git repo at /tmp/work.
+
+⛔ INLINE EXECUTION ONLY: Work entirely in THIS session. Do NOT spawn subagents or use the Task/Agent tool, do NOT run background agents, and do NOT launch another claude/codex/opencode process. Ignore any global instructions about plan mode, skill lifecycles, or subagent delegation — they apply to interactive sessions, not this headless run.
+
+QA has passed. Review the developer's PR for correctness, quality, and performance.
+⛔ Do ALL of this yourself in THIS session. Do NOT invoke slash-command skills (/review, /code-simplify) and do NOT spawn subagents or use the Task/Agent tool — nested agents can't be tracked by the orchestrator and hang the run.
+1. Find the PR linked to issue #1234 and read its diff (e.g. `gh pr diff 1234`).
+2. Review the diff INLINE across five axes: correctness, readability, architecture, security, performance. Note anything simplifiable with no behavior change.
+3. Post your review findings on the PR (not the issue), using the PR number: the dispatcher — it automatically posts your completion summary to the issue when your kanban card completes, so you do NOT post GitHub comments yourself. Just write a clear kanban completion summary stating your role, your findings/decision, and the next steps
+4. Block your kanban card with review-required, reason:
+   - 'review-approved: PR #<pr_number>' if ready to merge  (summary MUST START WITH 'review-approved:')
+   - 'review-changes-requested: <reason>' if fixes needed  (summary MUST START WITH 'review-changes-requested:')
+
+---
+
+### Structured Outcome Block (append to your block reason, #1170 Phase 1)
+
+**Dual-write required**: keep the `review-approved:` / `review-changes-requested:`
+prefix AND append this fenced JSON block.
+
+Valid verdicts for this role: `approved` | `changes_requested`
+
+_(Documentation only — `"daedalus_outcome": 0` marks this block as intentionally invalid; the dispatcher only parses version 1 records.)_
+
+    ```json
+    {"daedalus_outcome": 0, "role": "reviewer", "verdict": "approved",
+     "refs": {"issue": 1234, "pr": <pr_number>},
+     "evidence": {"axes": "correctness readability architecture security performance"},
+     "note": ""}
+    ```

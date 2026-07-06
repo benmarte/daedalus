@@ -15,8 +15,12 @@ fixture wires a single shared ``FakeKanban`` into both the dispatcher and the
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import os
+import re
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -25,6 +29,131 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# Capture pristine references to the ``core.kanban`` functions that scenario
+# tests frequently replace via *raw attribute assignment* (e.g.
+# ``disp.kanban.list_tasks = lambda *a, **k: []``). ``disp.kanban`` IS the
+# ``core.kanban`` module, and raw assignment bypasses monkeypatch's automatic
+# teardown — so a test that does not restore leaks its stub into unrelated
+# tests sharing the same xdist worker. Concretely, test_daedalus.py sets
+# ``list_tasks -> []`` without restoring, which zeroes out ``close_issue_tasks``
+# in a later test_kanban.py test (``expected 9 show_card calls, got 0``). The
+# leak only surfaces under a worker split that co-locates the two (CI's 2-core
+# ``-n auto``). Snapshotting here — once, at import, before any test mutates the
+# module — lets the autouse fixture restore them after every test.
+import core.kanban as _kanban_module  # noqa: E402
+
+_KANBAN_PRISTINE = {
+    _name: getattr(_kanban_module, _name)
+    for _name in (
+        "list_tasks",
+        "show_card",
+        "create_task",
+        "complete",
+        "block",
+        "unblock",
+        "edit",
+        "dispatch",
+    )
+    if hasattr(_kanban_module, _name)
+}
+
+# ── isolate the dispatcher process-mutex FileLock per xdist worker (issue #1198)
+# daedalus_dispatch.main() acquires a host-global FileLock at _MUTEX_LOCK_PATH.
+# Under ``pytest -n auto`` every xdist worker is a separate process on the same
+# host, so two workers that each call main() collide on that one lock: the loser
+# gets Timeout and returns early WITHOUT running _main_inner(), which flakes any
+# test asserting on dispatch side effects (e.g. test_main_scopes_to_cwd_project).
+# Point the lock at a unique per-worker file so workers never contend. This must
+# run in pytest_configure, NOT at conftest import: xdist exports
+# PYTEST_XDIST_WORKER only after conftest is imported, so an import-time
+# fallback gave every worker the same "master" lock and workers contended again
+# (issue #1201). ``config.workerinput`` is xdist's documented per-worker handle
+# and is always populated by configure time. pytest_configure runs before test
+# modules import ``disp``, and _load_dispatch re-reads the env on every re-exec,
+# so all loads pick the override up. Dedicated lock-contention suites still
+# override _MUTEX_LOCK_PATH directly, so they are unaffected.
+# The xdist controller also runs pytest_configure and its workers INHERIT its
+# environment, so a plain "if not set" guard would freeze the controller's
+# "master" value into every worker. The _AUTOSET sentinel distinguishes our own
+# auto-set value (workers re-derive it with their real workerid) from a path a
+# user exported deliberately (respected as-is everywhere).
+_LOCK_AUTOSET_FLAG = "_DAEDALUS_DISPATCH_LOCK_AUTOSET"
+
+
+def pytest_configure(config):
+    autoset = os.environ.get(_LOCK_AUTOSET_FLAG) == "1"
+    if "DAEDALUS_DISPATCH_LOCK" not in os.environ or autoset:
+        worker = getattr(config, "workerinput", {}).get("workerid", "master")
+        os.environ["DAEDALUS_DISPATCH_LOCK"] = str(
+            Path(tempfile.gettempdir()) / f".daedalus_dispatch_test_{worker}.lock"
+        )
+        os.environ[_LOCK_AUTOSET_FLAG] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hermes_home(tmp_path, monkeypatch, request):
+    """Guarantee NO test ever writes to the real ~/.hermes kanban board.
+
+    A test that exercises the real dispatcher or the ``hermes kanban`` CLI
+    without an isolated HERMES_HOME creates cards on the LIVE board; the running
+    gateway then executes them, spawning real agents that create more cards — a
+    runaway loop (2026-07-02 incident, e.g. ``disp.run(dry_run=False)`` in
+    test_profile_resync_integration.py). Forcing HERMES_HOME to a throwaway dir
+    for every test makes that impossible. Tests that set their own (tmp)
+    HERMES_HOME inside ``with`` blocks still override this — also isolated.
+
+    Defense in depth (issue #1209): HERMES_HOME alone proved insufficient under
+    the pipeline QA/PM worker environment, where the env override failed to
+    propagate to some subprocess/re-exec'd path and real cards still leaked. So
+    we ALSO stub the single chokepoint — ``core.kanban._hk``, which shells out
+    to the real ``hermes kanban`` CLI — with an in-memory no-op that mimics
+    ``_hk``'s graceful-degradation contract (rc!=0 → callers log-and-return
+    falsy). No test spawns the real CLI by default. A test that legitimately
+    exercises real ``_hk`` parsing either patches ``_hk`` itself (its explicit
+    ``mock.patch`` wins over this stub) or opts out with
+    ``@pytest.mark.uses_real_hk`` (still guarded by ``_guard_test_isolation``).
+    """
+    home = tmp_path / "hermes-home"
+    (home / "kanban").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "test-isolated")
+
+    # Clean up any dispatch state that prior tests may have written to shared
+    # paths (e.g. "/tmp", "/tmp/wt") via hardcoded workdir arguments.
+    # The state persists across test runs (#1275) which causes tests that check
+    # notification call counts to fail on the second run if state says "already sent".
+    # We delete the entire state file — tests that use "/tmp" as workdir do not
+    # pre-seed any state and recreate what they need each time.
+    for _shared_wd in ("/tmp", "/tmp/wt"):
+        _p = Path(_shared_wd) / ".hermes" / "daedalus_dispatch_state.json"
+        if _p.exists():
+            try:
+                _p.unlink()
+            except Exception:
+                pass
+
+    # Reset the per-tick list_tasks cache (issue #1142) around every test. It is a
+    # module-level global enabled by the dispatcher's run() for the duration of a
+    # tick; without this a test that enables it (or a real disp.run()) could leak
+    # an enabled/stale cache into an unrelated test, making list_tasks return
+    # cached data instead of hitting the (mocked) subprocess.
+    import core.kanban as _kanban
+
+    _kanban.disable_tick_cache()
+
+    if request.node.get_closest_marker("uses_real_hk") is None:
+        def _stub_hk(args, timeout=60):
+            return (1, "", "core.kanban._hk stubbed in tests (issue #1209)")
+
+        monkeypatch.setattr(_kanban, "_hk", _stub_hk)
+    yield
+    # Restore any core.kanban function a test replaced via raw attribute
+    # assignment (see _KANBAN_PRISTINE) so a leaked stub — e.g.
+    # ``list_tasks -> []`` — cannot poison the next test in this xdist worker.
+    for _name, _fn in _KANBAN_PRISTINE.items():
+        setattr(_kanban_module, _name, _fn)
+    _kanban.disable_tick_cache()
 
 
 def _load_dispatch():
@@ -83,11 +212,14 @@ class FakeKanban:
         self._counter = 0
         self.completed: List[tuple] = []
         self.blocked_calls: List[tuple] = []
+        self.block_kind_calls: List[tuple] = []  # (task_id, reason, kind) — #1290
         self.unblocked_calls: List[tuple] = []
         self.created: List[Dict[str, Any]] = []
         self.comments: List[tuple] = []
         self.archived: List[str] = []
         self.decomposed: List[str] = []
+        self.swarmed: List[Dict[str, Any]] = []  # #1294 swarm() calls
+        self.linked: List[tuple] = []  # #1294 (parent_id, child_id) link() calls
 
     # ---- seeding (not counted as pipeline mutations) ----
 
@@ -195,18 +327,29 @@ class FakeKanban:
             return False
         t["status"] = "done"
         t["summary"] = summary
-        t["latest_summary"] = summary
+        # Preserve latest_summary when no new summary is provided — mirrors
+        # the real kanban CLI which doesn't overwrite on empty summary.
+        if summary:
+            t["latest_summary"] = summary
         self.completed.append((task_id, summary))
         return True
 
-    def block_task(self, slug: str, task_id: str, reason: str = "") -> bool:
+    def block_task(
+        self, slug: str, task_id: str, reason: str = "", *, kind: Optional[str] = None
+    ) -> bool:
         t = self.tasks.get(task_id)
         if not t:
+            return False
+        if t.get("status") in ("done", "complete", "completed", "cancelled"):
             return False
         t["status"] = "blocked"
         t["reason"] = reason
         t["latest_summary"] = reason
+        # #1290: record the native block kind (dependency/needs_input/…) so tests
+        # can assert the DAG's dependency blocks and the arbiter's human gate.
+        t["block_kind"] = kind
         self.blocked_calls.append((task_id, reason))
+        self.block_kind_calls.append((task_id, reason, kind))
         return True
 
     def unblock_task(self, slug: str, task_id: str, reason: str = "") -> bool:
@@ -280,6 +423,96 @@ class FakeKanban:
         self.decomposed.append(task_id)
         return True
 
+    def swarm(
+        self,
+        slug: str,
+        goal: str,
+        workers: List[str],
+        verifier: str,
+        synthesizer: str,
+        idempotency_key: str = "",
+        priority: Optional[int] = None,
+        created_by: str = "",
+    ) -> Optional[str]:
+        """Create a swarm graph root card and record the call (#1294).
+
+        Honours ``idempotency_key`` like the real CLI so a re-tick returns the
+        existing root rather than a duplicate.
+        """
+        if idempotency_key:
+            for t in self.tasks.values():
+                if t.get("idempotency_key") == idempotency_key:
+                    return t["id"]
+        self._counter += 1
+        tid = f"t{self._counter}"
+        self.tasks[tid] = {
+            "id": tid,
+            "title": goal,
+            "assignee": created_by,
+            "status": "running",
+            "idempotency_key": idempotency_key,
+            "parents": [],
+            "reason": "",
+            "comments": [],
+        }
+        self.swarmed.append({
+            "root": tid,
+            "goal": goal,
+            "workers": list(workers),
+            "verifier": verifier,
+            "synthesizer": synthesizer,
+            "idempotency_key": idempotency_key,
+        })
+        return tid
+
+    def link(self, slug: str, parent_id: str, child_id: str) -> bool:
+        """Attach child as a dependency child of parent post-hoc (#1294)."""
+        c = self.tasks.get(child_id)
+        if c is not None:
+            c.setdefault("parents", []).append(parent_id)
+        self.linked.append((parent_id, child_id))
+        return True
+
+    def run_outcome(self, slug: str, task_id: str) -> Optional[Dict[str, Any]]:
+        """Return the structured outcome metadata on a card's closing run (#1288).
+
+        Seed via ``fk.tasks[tid]["run_metadata"] = {...}`` to exercise the
+        native-metadata read path of the arbiter / classify_blocked.
+        """
+        t = self.tasks.get(task_id) or {}
+        meta = t.get("run_metadata")
+        return dict(meta) if isinstance(meta, dict) else None
+
+    def close_issue_tasks(
+        self, slug: str, issue_number: int, *, summary: str = "", dry_run: bool = False
+    ) -> List[str]:
+        """Complete all non-terminal cards referencing #issue_number (word-boundary).
+
+        Mirrors the real helper closely enough for arbiter tests: completes both
+        active and blocked cards (so pruned DAG branches don't strand) and returns
+        the completed ids.
+        """
+        pattern = re.compile(rf"(?<!\d)#{issue_number}(?!\d)")
+        closed: List[str] = []
+        for t in list(self.tasks.values()):
+            title = t.get("title") or ""
+            body = t.get("body") or ""
+            if not (pattern.search(title) or pattern.search(body)):
+                continue
+            status = (t.get("status") or "").lower()
+            if status in ("done", "complete", "completed", "cancelled"):
+                continue
+            tid = t.get("id")
+            if not tid:
+                continue
+            if not dry_run:
+                t["status"] = "done"
+                if summary:
+                    t["summary"] = summary
+                    t["latest_summary"] = summary
+            closed.append(str(tid))
+        return closed
+
     # ---- assertion helpers ----
 
     def created_with_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
@@ -289,8 +522,72 @@ class FakeKanban:
                 return t
         return None
 
+    def edit_body(self, slug: str, task_id: str, body: str) -> bool:
+        """Rewrite a task's body field in-memory (mirrors core.kanban.edit_body)."""
+        t = self.tasks.get(task_id)
+        if t is None:
+            return False
+        t["body"] = body
+        return True
+
     def comments_on(self, task_id: str) -> List[str]:
         return [body for (tid, body) in self.comments if tid == task_id]
+
+
+# ── method-level kanban patch helper ──────────────────────────────────────────
+
+
+@contextlib.contextmanager
+def kanban_as(kanban_mod: Any, fk: "FakeKanban"):
+    """Patch all FakeKanban API methods onto *kanban_mod* at method level.
+
+    Use instead of whole-module rebinding (``disp.kanban = fk`` or
+    ``iterate.kanban = fk``). The module's ``kanban`` name binding stays in
+    place; only the individual methods are swapped for the duration of the
+    ``with`` block.  ``mock.patch.object`` auto-restores originals on exit so
+    patches never leak across tests.
+
+    Usage::
+
+        fk = FakeKanban()
+        fk.seed(assignee=..., title=..., status=...)
+        with kanban_as(disp.kanban, fk):
+            result = disp._has_downstream_tasks(slug, n, ...)
+        assert result is False
+    """
+    import unittest.mock as mock
+
+    _METHODS = [
+        "list_tasks",
+        "list_blocked",
+        "get_latest_summary",
+        "show_card",
+        "create_task",
+        "complete",
+        "block_task",
+        "unblock_task",
+        "comment",
+        "archive_task",
+        "create_triage",
+        "decompose",
+        "swarm",
+        "link",
+        "run_outcome",
+        "close_issue_tasks",
+        "edit_body",
+    ]
+    patches = [
+        mock.patch.object(kanban_mod, m, side_effect=getattr(fk, m))
+        for m in _METHODS
+        if hasattr(kanban_mod, m)
+    ]
+    for p in patches:
+        p.start()
+    try:
+        yield fk
+    finally:
+        for p in patches:
+            p.stop()
 
 
 # ── in-memory VCS provider double ─────────────────────────────────────────────
@@ -319,8 +616,13 @@ class FakeProvider:
         closed_issues: Optional[set[int]] = None,
         close_issue_fail_for: Optional[set[int]] = None,
         post_issue_comment_fail_for: Optional[set[int]] = None,
+        board_configured: bool = False,
     ) -> None:
         self.name = name
+        # #1290: arbiter/enforcement tests need a "configured" board. Default
+        # False preserves every existing test that assumes no VCS board.
+        self._board_configured = board_configured
+        self.board_status_calls: List[tuple] = []
         self._ci = ci_status
         self._issues = issues or {}
         self._branch_prs = branch_prs or {}
@@ -452,7 +754,12 @@ class FakeProvider:
         return True
 
     def board_configured(self) -> bool:
-        return False
+        return self._board_configured
+
+    def board_set_status(self, issue_number: int, status: str) -> bool:
+        """Record a board status change (#1290 arbiter tests)."""
+        self.board_status_calls.append((issue_number, status))
+        return True
 
 
 # ── multi-tick pipeline harness (issue #901) ──────────────────────────────────
@@ -492,19 +799,22 @@ def _role_handoff(role: str, *, issue: int, repo: str, pr: int) -> tuple:
     """Return ``(action, signal)`` for a role's simulated agent.
 
     ``action`` is ``"complete"`` (validator/PM emit a done-card summary the
-    dispatcher reads) or ``"block"`` (team roles emit a ``review-required:``
-    handoff the dispatcher auto-advances). The signal strings mirror the live
-    handoffs exercised by ``test_e2e_full_pipeline``.
+    dispatcher reads) or ``"block"`` (team roles block with the canonical
+    role-prefix signal that iterate.classify_blocked uses startswith matching
+    on since #1125 F1). The signal strings mirror the live handoffs.
     """
     signals = {
         "validator": ("complete", "CONFIRMED: reproduced on main; scope is clear"),
         "pm": ("complete", "SPEC: acceptance criteria defined"),
+        # developer: "review-required: PR #N ..." is the canonical developer handoff.
+        # classify_blocked("developer-daedalus", ...) checks is_review_required + pr_number.
         "developer": ("block", f"review-required: PR #{pr} opened for {repo}#{issue}"),
-        "qa": ("block", f"review-required: qa-passed: PR #{pr} — suite green"),
-        "reviewer": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
-        "security": ("block", f"review-required: No findings. Approved for merge. PR #{pr}"),
-        "accessibility": ("block", f"review-required: a11y-skipped: no UI changes. PR #{pr}"),
-        "docs": ("block", f"review-required: docs posted: issue #{issue} PR #{pr} — README updated"),
+        # All signals below MUST START WITH their canonical prefix (#1125 F1 — startswith).
+        "qa": ("block", f"qa-passed: PR #{pr} — suite green"),
+        "reviewer": ("block", f"review-approved: PR #{pr}"),
+        "security": ("block", f"security-approved: PR #{pr}"),
+        "accessibility": ("block", f"a11y-skipped: no UI changes. PR #{pr}"),
+        "docs": ("block", f"docs posted: PR #{pr} — README updated"),
     }
     return signals[role]
 

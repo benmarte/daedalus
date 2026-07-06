@@ -46,3 +46,13 @@ dashboard/dist/*.map
 
 # ── Local runtime state ──────────────────────────────────────────────────────
 kanban.db
+
+# ── Runtime artifacts (dispatcher/QA pipeline byproducts — issue #1128) ──────
+qa-*.log
+worktree-*/
+.worktrees/
+*.db
+*.sqlite
+# Dispatcher process mutex + rerun-on-contention marker (issue #1160).
+scripts/.daedalus_dispatch.lock
+scripts/.daedalus_dispatch.rerun

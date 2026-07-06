@@ -1,80 +1,29 @@
-# Session — Beta.32 Audit + Feature Additions (PR #225)
+# Todo — Issue #1241 (fix/issue-1241)
 
-## Bug Fixes
-- [x] AC1 — Gate `qa_failed_cards` on executor `ok=True`
-- [x] AC2 — Add `enrollment_failures` to kanban-only dispatch summary
-- [x] AC3 — Combine PUT+GET failure into single warning in `merge_pr()`
-- [x] AC4 — Extend `_redact()` to cover URL-percent-encoded token variants
-- [x] AC5 — `ensure_labels()` calls `list_labels()` exactly once
-- [x] AC6 — `_resolve_web_path()`: lazy-fetch + sanitize raw API output
-- [x] AC7 — `VCSProvider.enrollment_failures` as instance attr in `__init__`
-- [x] AC8 — Document `_execute_dev_fix_ci` return semantics
+Ordered, verifiable slices. Verify each before the next.
 
-## New Features
-- [x] AC9 — `max-fix-attempts` NOTIFY_EVENT + `_notify_max_fix_attempts()`
-- [x] AC10 — `run_iterate()` returns 5-tuple; 5th slot = `escalated_cards`
-- [x] AC11 — `_notify_qa_failed()` deduped per `(issue_n, pr)` via `_QA_FAILED_NOTIFIED`
-- [x] AC12 — `_notify_max_fix_attempts()` deduped per `(issue_n, pr)` via `_MAX_FIX_NOTIFIED`
-
-## E2E Tests
-- [x] AC13 — 5-scenario QA gate smoke suite (`test_e2e_qa_gate_filelock_smoke.py`)
-- [x] AC14 — Scenario 2 deterministic with `threading.Event` barriers
-
-## Test Coverage
-- [x] AC15–AC19 — ok=False path, ensure_labels dedup, enrollment_failures, combined warning, notification dedup
-
-## Lifecycle
-- [x] Spec: `tasks/spec-session-beta32-audit.md`
-- [x] Build: all ACs above
-- [x] Test: 2551 passed, 0 failures
-- [x] Review: GO — all findings applied
-- [x] Ship: GO — PR #225 open; human gate: user merges dev → main
-- [ ] PR merge: **HUMAN GATE** — user merges PR #225
-
----
-
-# Phase 3 (#151) — Epic Sub-Issue Creation
-
-## Tasks
-- [ ] T1: `core/providers/base.py` — add `add_label()` stub
-- [ ] T2: `core/providers/github.py` — implement `add_label()` via Labels API
-- [ ] T3: `core/iterate.py` — PLANNER_DECOMPOSE constant + `_execute_planner_decompose()` (pass provider to executors)
-- [ ] T4: `scripts/daedalus_dispatch.py` — update `_planner_body()` to instruct agent to output `PLANNING COMPLETE:`
-- [ ] T5: `tests/test_subissue_creation.py` — 13-test suite covering both template paths, idempotency, dry-run, regressions
-
-## Checkpoints
-- [ ] After T1+T2: existing tests still pass
-- [ ] After T3+T5: all 13 new tests pass
-- [ ] Final: full `pytest tests/ -v` — no regressions
-
----
-
-# Issue #137 — thread/dedupe dispatch summaries + scope crons to --repo
-
-## Spec / Acceptance
-- AC1: in-progress issue, no state change → no new Slack messages on later ticks.
-- AC2: identical consecutive summaries are threaded/deduped, not top-level.
-- AC3: a cron/hook/webhook tick processes only the relevant project.
-
-## Plan (DONE — 823 tests pass, 8 new)
-### Problem 1 — thread + dedupe + suppress project dispatch summaries
-- [x] `scripts/daedalus_dispatch.py`: route `_notify_project_summary` through
-      `thread_delivery.deliver_event` with a per-project anchor
-      (`_PROJECT_SUMMARY_ANCHOR = 0`) + content-hash `event_key`.
-      Silent ticks already return "" (suppression). Falls back to plain send when
-      no workdir. `import hashlib`.
-
-### Problem 2 — scope crons/hooks/webhook to one project
-- [x] `scripts/daedalus_dispatch.py`: `_resolve_repo_arg` (path or owner/repo
-      slug → repo path) + `_resolve_repo_from_cwd`; `main()` scopes to --repo,
-      else cwd-matched project, else legacy registry sweep.
-- [x] `__init__.py`: `_on_session_end` passes `--repo` (cwd→registry match via
-      `_resolve_project_for_task`). `_ensure_dispatch_crons` adds `--workdir`.
-- [x] `dashboard/plugin_api.py`: `_reconcile_cron` adds `--workdir` (create+edit).
-- [x] `scripts/daedalus-ready.sh`: resolve project from payload repo, pass `--repo`.
-
-### Tests
-- [x] threaded/deduped summary (sent once, reply on change, skip on repeat) + silent tick.
-- [x] `_resolve_repo_arg` / `_resolve_repo_from_cwd`.
-- [x] main() cwd-scoping.
-- [x] `_on_session_end` passes --repo; cron create/edit carry --workdir.
+1. [x] **T1 — Verify `--setting-sources` against the installed CLI.**
+       `claude --help | grep setting-sources`; if present, run a headless probe
+       with and without `--setting-sources project` asking whether user-global
+       CLAUDE.md content ("Plan Mode Default") is in context. Adopt in
+       `_CODING_AGENT_DEFAULTS["claude-code"]` + `templates/daedalus.yaml` only
+       if the probe shows user scope skipped. Record the result either way.
+2. [x] **T2 — Golden test first (red).**
+       New tests/test_issue_1241_inner_body.py: every delegated role-body
+       builder × {claude-code, codex, opencode} → extracted inner body excludes
+       `AGENT DELEGATION`, `Spawn`, `write_file(`, `kanban complete`; prepend
+       bodies contain exactly one separator line; guard test iterating
+       templates/agent_bodies/ asserts the inline-execution guard phrases.
+3. [x] **T3 — Separator + composition-aware wrapper steps (green).**
+       `_INNER_BODY_SEPARATOR`; `_build_delegation_instructions(...,
+       body_position)`; steps 1–2 per composition; block ends with separator in
+       "below" mode only. `_prepend_delegation` derives body_position from
+       `append`. `_apply_coding_agent_failover` detects composition from the
+       card body. `_inner_task_body(body)` helper encodes the copy contract.
+4. [x] **T4 — Inline-execution guard in all 10 templates.**
+       Standardized guard paragraph near the top of each
+       templates/agent_bodies/*.md; keep existing role-specific guards. Update
+       byte-for-byte fixtures for tests/test_agent_bodies.py.
+5. [x] **T5 — Full suite + lint.** `python3.14 -m pytest tests/ -x`, `make lint`
+       (after commit — lint diffs vs origin/dev).
+6. [x] **T6 — Push, PR into dev (Closes #1241), block kanban card.**
