@@ -96,7 +96,7 @@ def test_ci_status_aggregation(provider):
     assert provider.get_pr_ci_status(1) == CIStatus.PENDING
 
     provider._http.get_json.return_value = {"value": []}
-    assert provider.get_pr_ci_status(1) == CIStatus.UNKNOWN
+    assert provider.get_pr_ci_status(1) == CIStatus.NONE  # no statuses → no CI (F8)
 
 
 def test_threads_comments_flatten_and_post(provider):

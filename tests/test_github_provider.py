@@ -138,7 +138,7 @@ def test_ci_pending_and_unknown(provider):
     _ci_mock(provider, [{"name": "a", "status": "in_progress", "conclusion": None}])
     assert provider.get_pr_ci_status(5) == CIStatus.PENDING
     _ci_mock(provider, [])
-    assert provider.get_pr_ci_status(5) == CIStatus.UNKNOWN
+    assert provider.get_pr_ci_status(5) == CIStatus.NONE  # zero checks → no CI (F8)
 
 
 def test_ci_includes_legacy_commit_statuses(provider):
