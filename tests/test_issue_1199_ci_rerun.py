@@ -147,6 +147,7 @@ def _sweep_provider(*, ci, sha=SHA, comments=None, merged=False):
     p = mock.MagicMock()
     p.supports_ci_status = True
     p.supports_ci_rerun = True
+    p.find_pr_for_issue.return_value = 99
     p.find_pr_for_branch.return_value = 99
     p.get_pr_ci_status.return_value = ci
     p.is_pr_merged.return_value = merged

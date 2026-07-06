@@ -37,6 +37,7 @@ def _provider():
     p = mock.MagicMock()
     p.supports_ci_status = True
     # Deterministic branch fix/issue-<n> → PR number == issue number.
+    p.find_pr_for_issue.side_effect = lambda n: n
     p.find_pr_for_branch.side_effect = lambda branch: int(branch.rsplit("-", 1)[-1])
     p.get_pr_ci_status.return_value = GREEN
     p.is_pr_merged.return_value = False

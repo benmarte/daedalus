@@ -451,9 +451,16 @@ def sweep_deferred_merges(
                     continue
             except Exception:
                 pass
-        # Deterministic branch from worktree isolation (#1176): fix/issue-<n>.
+        # Worktree isolation (#1176) forks fix/issue-<n>, but an agent may push a
+        # descriptive suffix (fix/issue-<n>-<slug>). find_pr_for_issue tolerates
+        # both so a suffixed branch does not strand the merge sweep. Fall back to
+        # the exact-branch lookup for providers/doubles without the newer helper.
         try:
-            pr = provider.find_pr_for_branch(f"fix/issue-{issue_n}")
+            finder = getattr(provider, "find_pr_for_issue", None)
+            if callable(finder):
+                pr = finder(issue_n)
+            else:
+                pr = provider.find_pr_for_branch(f"fix/issue-{issue_n}")
         except Exception:
             pr = None
         if pr is None:
