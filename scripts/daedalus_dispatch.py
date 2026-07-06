@@ -4105,6 +4105,18 @@ def _run_tick(
         except Exception as exc:  # never let it break a tick
             logger.warning("dispatch: end-of-tick direct-dispatch failed: %s", exc)
 
+    # F11: unconditional end-of-tick dispatch of any `ready` card. The per-branch nudges
+    # above only fire when this tick *created* cards, so a card promoted to `ready` by a
+    # self-heal (crash-retry unblock, triage-recovery re-create) or by a gate opening would
+    # otherwise sit until the next created-card tick. `hermes kanban dispatch` is idempotent
+    # (only spawns for ready cards, capped at max_dispatch) and is what makes local-model
+    # self-heal fully hands-off. Skipped in dry-run; never breaks a tick.
+    if not dry_run:
+        try:
+            kanban.dispatch(slug, max_spawns=max_dispatch)
+        except Exception as exc:  # never let it break a tick
+            logger.warning("dispatch: end-of-tick ready-card dispatch failed: %s", exc)
+
     summary = {
         "board": slug,
         "mode": provider.name,
