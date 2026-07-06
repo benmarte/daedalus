@@ -561,6 +561,27 @@ class VCSProvider(abc.ABC):
                 return pr.number
         return None
 
+    def find_pr_for_issue(self, issue_number: int) -> int | None:
+        """Open PR for ``issue_number`` via its worktree branch, or None.
+
+        The canonical worktree/delegate path forks a deterministic branch
+        ``fix/issue-<n>`` (see daedalus-worktree-spawn.sh), but an agent may
+        push a descriptive suffix instead (``fix/issue-<n>-<slug>``). Match
+        either the exact branch or the ``fix/issue-<n>-`` prefix so a suffixed
+        branch does not strand the deferred-merge sweep (#1176 exact-match gap).
+        Guards against ``fix/issue-2`` matching ``fix/issue-22`` by requiring the
+        prefix boundary to be a literal ``-``.
+        """
+        if not issue_number:
+            return None
+        exact = f"fix/issue-{issue_number}"
+        prefix = f"{exact}-"
+        for pr in self.list_prs(state="open"):
+            head = pr.head_branch or ""
+            if head == exact or head.startswith(prefix):
+                return pr.number
+        return None
+
     def is_pr_open(self, pr_number: int) -> bool:
         """True iff ``pr_number`` is a currently-open PR (#953).
 

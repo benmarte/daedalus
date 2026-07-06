@@ -24,6 +24,9 @@ PENDING = getattr(iterate.CIStatus, "PENDING", "pending")
 def _provider(*, merged=False, ci=GREEN, merge_ok=True, pr=99):
     p = mock.MagicMock()
     p.supports_ci_status = True
+    # sweep_deferred_merges prefers find_pr_for_issue (suffix-tolerant); keep
+    # find_pr_for_branch aligned for the exact-match fallback path.
+    p.find_pr_for_issue.return_value = pr
     p.find_pr_for_branch.return_value = pr
     p.get_pr_ci_status.return_value = ci
     p.is_pr_merged.return_value = merged
@@ -149,9 +152,9 @@ def test_sweep_ignores_non_done_docs_cards():
     p.merge_pr.assert_not_called()
 
 
-def test_sweep_skips_when_no_pr_for_branch():
+def test_sweep_skips_when_no_pr_for_issue():
     p = _provider()
-    p.find_pr_for_branch.return_value = None
+    p.find_pr_for_issue.return_value = None
     tasks = [{"assignee": "documentation-daedalus", "title": "#42 Docs: fix the thing", "status": "done"}]
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks):
         merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
@@ -159,14 +162,29 @@ def test_sweep_skips_when_no_pr_for_branch():
     p.merge_pr.assert_not_called()
 
 
-def test_sweep_uses_deterministic_branch_name():
+def test_sweep_resolves_pr_by_issue_number():
     p = _provider(pr=99)
     tasks = [{"assignee": "documentation-daedalus", "title": "#1234 Docs: fix the thing", "status": "done"}]
     with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks), _all_gates_pass() as m:
         for k in m:
             m[k].return_value = True
         iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
-    p.find_pr_for_branch.assert_called_with("fix/issue-1234")
+    # Suffix-tolerant lookup is keyed on the issue number, not a synthesized branch.
+    p.find_pr_for_issue.assert_called_with(1234)
+
+
+def test_sweep_falls_back_to_branch_lookup_without_helper():
+    # A provider double lacking find_pr_for_issue (older doubles) still merges via
+    # the exact-branch fallback so the sweep degrades gracefully.
+    p = _provider(pr=99)
+    del p.find_pr_for_issue
+    tasks = [{"assignee": "documentation-daedalus", "title": "#42 Docs: fix the thing", "status": "done"}]
+    with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks), _all_gates_pass() as m:
+        for k in m:
+            m[k].return_value = True
+        merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
+    assert merged == [99]
+    p.find_pr_for_branch.assert_called_with("fix/issue-42")
 
 
 # ── issue #1226: docs card already archived must still merge ───────────────────
@@ -214,6 +232,75 @@ def test_sweep_does_not_double_consider_docs_card_in_both_lists():
         merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
     assert merged == [99]
     p.merge_pr.assert_called_once_with(99, merge_method="squash")
+
+
+# ── find_pr_for_issue: suffix-tolerant branch matching ────────────────────────
+
+from core.providers.base import PRSummary, VCSProvider  # noqa: E402
+
+
+class _PRList:
+    """Duck-typed self exposing only list_prs, so the real base-class
+    find_pr_for_issue runs without implementing every abstract method."""
+
+    def __init__(self, *branches):
+        self._branches = branches
+
+    def list_prs(self, state="all", limit=50):
+        return [PRSummary(number=100 + i, head_branch=b) for i, b in enumerate(self._branches)]
+
+    def find_pr_for_issue(self, issue_number):
+        return VCSProvider.find_pr_for_issue(self, issue_number)
+
+
+def _find(issue_n, *branches):
+    return _PRList(*branches).find_pr_for_issue(issue_n)
+
+
+def test_find_pr_for_issue_matches_exact_branch():
+    assert _find(42, "main", "fix/issue-42") == 101
+
+
+def test_find_pr_for_issue_matches_suffixed_branch():
+    # The local-agent path pushes fix/issue-<n>-<slug>; it must still resolve.
+    assert _find(42, "main", "fix/issue-42-negate-function") == 101
+
+
+def test_find_pr_for_issue_rejects_adjacent_issue_numbers():
+    # fix/issue-42 must NOT match issue 4 or issue 421 (prefix boundary is '-').
+    assert _find(4, "fix/issue-42", "fix/issue-421") is None
+    assert _find(42, "fix/issue-421") is None
+
+
+def test_find_pr_for_issue_none_when_no_open_pr():
+    assert _find(42, "main", "feature/other") is None
+
+
+def test_sweep_merges_pr_with_suffixed_branch():
+    # End-to-end through the real base method: a done docs card whose PR lives on
+    # a suffixed branch still auto-merges (the F13 regression this fixes).
+    class _P(_PRList):
+        supports_ci_status = True
+        def get_pr_ci_status(self, pr):  # noqa: ANN001
+            return GREEN
+        def is_pr_merged(self, pr):  # noqa: ANN001
+            return False
+        def has_label(self, pr, label):  # noqa: ANN001
+            return False
+        def is_issue_open(self, n):  # noqa: ANN001
+            return True
+        def merge_pr(self, pr, merge_method="squash"):  # noqa: ANN001
+            self.merged = pr
+            return True
+
+    p = _P("fix/issue-42-negate-function")
+    tasks = [{"assignee": "documentation-daedalus", "title": "#42 Docs: fix", "status": "done"}]
+    with mock.patch.object(iterate.kanban, "list_tasks", return_value=tasks), _all_gates_pass() as m:
+        for k in m:
+            m[k].return_value = True
+        merged = iterate.sweep_deferred_merges("slug", "owner/repo", p, _RESOLVED)
+    assert merged == [100]
+    assert getattr(p, "merged", None) == 100
 
 
 if __name__ == "__main__":
