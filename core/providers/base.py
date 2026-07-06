@@ -696,6 +696,14 @@ class VCSProvider(abc.ABC):
         """
         return False
 
+    def open_pr(
+        self, head_branch: str, base_branch: str, title: str, body: str = "",
+    ) -> int | None:
+        """Open a PR from ``head_branch`` into ``base_branch`` (F12). Returns the new PR
+        number, or None if unsupported / the branch has no diff / a PR already exists /
+        on error. Default: unsupported (None) so callers need not check provider type."""
+        return None
+
     def append_changelog(self, base_branch: str, entry: str) -> bool:
         """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the VCS API.
         Returns True on success; defaults to False (providers that support it override)."""

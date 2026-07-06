@@ -584,6 +584,67 @@ def _try_adopt_developer_pr(
     return True
 
 
+def _try_open_missing_developer_pr(
+    slug: str,
+    issue_number: int,
+    developer_profile: str,
+    provider,
+    *,
+    base_branch: str = "",
+    dry_run: bool = False,
+) -> bool:
+    """F12: open a PR for a developer that finished without one.
+
+    A local model can push its ``fix/issue-<N>`` branch but omit or hallucinate the PR.
+    When no REAL open PR exists for the issue, open one from the branch so review can
+    proceed. ``provider.open_pr`` no-ops (returns None) if the branch has no diff, doesn't
+    exist, or a PR already exists — so this is safe and idempotent. Returns True iff a PR
+    was opened. Provider errors fail closed (return False); never raises.
+    """
+    if provider is None:
+        return False
+    branch = f"fix/issue-{issue_number}"
+    # A real PR already exists (by branch, or linked to the issue) → nothing to do.
+    try:
+        if provider.find_pr_for_branch(branch):
+            return False
+    except Exception:  # pragma: no cover - defensive
+        pass
+    try:
+        existing = provider._pr_for_issue(issue_number)
+        if existing and getattr(existing, "number", None) and getattr(existing, "state", "open") != "closed":
+            return False
+    except Exception:  # pragma: no cover - defensive
+        pass
+    if dry_run:
+        logger.info(
+            "[dry-run] F12: would open a PR for #%s from %s if the branch has work",
+            issue_number, branch,
+        )
+        return False
+    _open = getattr(provider, "open_pr", None)
+    if not callable(_open):
+        return False
+    try:
+        num = _open(
+            branch,
+            base_branch or "dev",
+            f"feat: resolve #{issue_number}",
+            f"Closes #{issue_number}\n\n(opened by daedalus — developer completed without a PR, F12)",
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("dispatch: F12 open_pr for #%s raised %s", issue_number, exc)
+        return False
+    if num:
+        logger.warning(
+            "dispatch: F12 opened PR #%s for #%s from pushed branch %s "
+            "(developer completed without opening a PR)",
+            num, issue_number, branch,
+        )
+        return True
+    return False
+
+
 # ── stage-recovery helper ─────────────────────────────────────────────────────
 
 
@@ -2507,6 +2568,39 @@ def _check_completed_developer(
                 slug, _sn, _dev_profile, provider,
                 base_branch=base_branch, dry_run=dry_run,
             )
+
+    # F12: a developer that completed but never opened a REAL PR (e.g. a local model that
+    # pushed the branch but omitted or *hallucinated* the PR — the fake PR# in the summary
+    # makes _developer_task_state read 'complete', so nothing else opens the real PR and
+    # review has nothing to act on). For each done developer card whose branch has work but
+    # no open PR, open one and point the card at it. `open_pr` no-ops if there's nothing to
+    # open or a PR already exists, so this is safe/idempotent.
+    for _t in _kanban().list_tasks(slug, status="done"):
+        if (_t.get("status") or "").lower() != "done":
+            continue
+        if (_t.get("assignee") or "").strip() != _dev_profile:
+            continue
+        # Only the CLAIMED-a-PR case: the summary references a PR number but it isn't real
+        # (a hallucinated PR). An empty-summary done card is a genuine stale/failed
+        # developer — leave that to the retry path (which re-dispatches to reuse the branch).
+        if extract_pr_number_from_summary(_get_task_summary(_t, slug)) is None:
+            continue
+        _fn = extract_issue_number(_t.get("title") or "")
+        if _fn is None:
+            continue
+        if _is_issue_closed_cached(provider, _fn, _closed_issue_cache) is not False:
+            continue
+        if _try_open_missing_developer_pr(
+            slug, _fn, _dev_profile, provider, base_branch=base_branch, dry_run=dry_run,
+        ):
+            _pr = provider._pr_for_issue(_fn) if provider else None
+            _tid = str(_t.get("id") or "")
+            if _pr and getattr(_pr, "number", None) and _tid and not dry_run:
+                _kanban().edit_summary(
+                    slug, _tid,
+                    f"review-required: PR #{_pr.number} — fix/issue-{_fn} "
+                    f"(opened by daedalus — developer completed without a PR, F12)",
+                )
 
     for task in _kanban().list_tasks(slug, status="done"):
         if (task.get("assignee") or "").strip() != p.get(

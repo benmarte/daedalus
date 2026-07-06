@@ -523,5 +523,61 @@ class TestIssueLinkedToPrSubstring(unittest.TestCase):
         self.assertFalse(issue_linked_to_pr(pr, 42))
 
 
+class TestOpenMissingDeveloperPr(unittest.TestCase):
+    """F12: open a PR for a developer that pushed its branch but never opened one."""
+
+    def setUp(self):
+        self.disp = _load_dispatch()
+
+    def _run(self, *, dry_run=False, branch_pr=None, issue_pr=None, open_returns=None):
+        opened = []
+
+        class _P:
+            def find_pr_for_branch(self, b):
+                return branch_pr
+
+            def _pr_for_issue(self, n):
+                return issue_pr
+
+            def open_pr(self, head, base, title, body=""):
+                opened.append((head, base))
+                return open_returns
+
+        res = self.disp._try_open_missing_developer_pr(
+            "slug", 42, "developer-daedalus", _P(), base_branch="dev", dry_run=dry_run,
+        )
+        return res, opened
+
+    def test_opens_pr_from_branch_when_none_exists(self):
+        res, opened = self._run(open_returns=99)
+        self.assertTrue(res)
+        self.assertEqual(opened, [("fix/issue-42", "dev")])
+
+    def test_skips_when_a_branch_pr_already_exists(self):
+        res, opened = self._run(branch_pr=99)
+        self.assertFalse(res)
+        self.assertEqual(opened, [])  # never attempted
+
+    def test_skips_when_an_issue_pr_already_exists(self):
+        res, opened = self._run(issue_pr=_pr(99))
+        self.assertFalse(res)
+        self.assertEqual(opened, [])
+
+    def test_returns_false_when_branch_has_nothing_to_open(self):
+        res, opened = self._run(open_returns=None)  # open_pr no-ops
+        self.assertFalse(res)
+        self.assertEqual(opened, [("fix/issue-42", "dev")])
+
+    def test_dry_run_never_opens(self):
+        res, opened = self._run(dry_run=True, open_returns=99)
+        self.assertFalse(res)
+        self.assertEqual(opened, [])
+
+    def test_no_provider_is_safe(self):
+        self.assertFalse(
+            self.disp._try_open_missing_developer_pr("slug", 42, "developer-daedalus", None)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

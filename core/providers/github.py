@@ -488,6 +488,37 @@ class GitHubProvider(VCSProvider):
             self._log.warning("merge_pr PR #%s failed: %s", pr_number, e)
             return False
 
+    def open_pr(
+        self, head_branch: str, base_branch: str, title: str, body: str = "",
+    ) -> int | None:
+        """Open a PR head->base via POST /repos/{repo}/pulls (F12). Returns the new PR
+        number, or None on any failure (branch missing, no diff, a PR already exists,
+        error) — never raises. Used to recover a developer that pushed its branch but
+        never opened the PR (common on local models)."""
+        if not head_branch or not base_branch:
+            return None
+        try:
+            resp = self._http.post_json(
+                f"/repos/{self.repo}/pulls",
+                {
+                    "title": title or head_branch,
+                    "head": head_branch,
+                    "base": base_branch,
+                    "body": body or "",
+                },
+            )
+        except ProviderError as e:
+            self._log.warning(
+                "open_pr: %s -> %s failed (branch missing / no diff / exists?): %s",
+                head_branch, base_branch, e,
+            )
+            return None
+        num = (resp or {}).get("number")
+        if isinstance(num, int):
+            self._log.info("open_pr: opened PR #%s (%s -> %s)", num, head_branch, base_branch)
+            return num
+        return None
+
     def get_pr_files(self, pr_number: int) -> list[dict[str, Any]]:
         """Changed files in a PR via GET /pulls/{n}/files (paginated)."""
         try:
