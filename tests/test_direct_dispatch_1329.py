@@ -90,6 +90,22 @@ def test_max_spawns_caps(monkeypatch):
     assert n == 2 and len(claimed) == 2  # capped
 
 
+def test_resets_tick_cache_before_reading(monkeypatch):
+    """direct_dispatch must reset the per-tick list_tasks cache before reading, so a
+    card created earlier in the same tick is visible (else the fresh-subprocess
+    `hermes kanban dispatch` grabs it first and spawns a qwen agent)."""
+    order = []
+    tasks = [{"id": "t1", "assignee": "validator-daedalus", "title": "#42 x"}]
+    cards = {"t1": {"task": {"id": "t1", "title": "#42 x", "body": _DELEG_BODY}}}
+    monkeypatch.setattr(dd.kanban, "reset_tick_cache", lambda: order.append("reset"))
+    monkeypatch.setattr(dd.kanban, "list_tasks",
+                        lambda slug, status="": (order.append("list"), tasks if status == "ready" else [])[1])
+    monkeypatch.setattr(dd.kanban, "show_card", lambda slug, cid: cards.get(cid))
+    monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: True)
+    dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=5, spawn=lambda **k: None)
+    assert order and order[0] == "reset", f"reset_tick_cache must precede list_tasks: {order}"
+
+
 def test_nested_show_card_body_is_read(monkeypatch):
     """Regression: kanban.show_card nests the card fields under a `task` key
     ({"task": {...body...}, "children":...}), NOT at the top level. direct_dispatch

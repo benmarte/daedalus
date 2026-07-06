@@ -112,6 +112,11 @@ def direct_dispatch(
     spawned = 0
     seen: set = set()
 
+    # Reset the per-tick list_tasks cache first (#1142): a card created earlier in
+    # THIS tick is invisible to a cached read, and ``hermes kanban dispatch`` (a fresh
+    # subprocess) would then grab it and spawn a qwen agent before we do. Reset forces
+    # direct_dispatch to see freshly-created cards, so it claims them first.
+    kanban.reset_tick_cache()
     cards = [c for st in _DISPATCHABLE_STATUSES for c in kanban.list_tasks(slug, status=st)]
     for card in cards:
         if spawned >= max_spawns:
