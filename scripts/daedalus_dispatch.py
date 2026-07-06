@@ -3185,6 +3185,18 @@ def _run_tick(
         if v > 0
         and k not in (iterate.ADVANCE, iterate.APPROVE_ADVANCE, iterate.PENDING_SIGNAL)
     }
+    # #1339: under direct_delegate, daedalus is the SOLE dispatcher for delegated
+    # (non-developer) cards — claim + spawn delegate.sh for any ready delegated card
+    # EVERY tick, not only on transition ticks. A FRESHLY-created validator card is not
+    # a transition, so the gated dispatch below would skip it and a standalone kanban
+    # daemon would grab it for the qwen hop. This unconditional pass claims it first.
+    # (Requires NO standalone `hermes kanban daemon` running — see daedalus.yaml note.)
+    if (resolved.get("execution") or {}).get("direct_delegate") and not dry_run:
+        try:
+            _direct_dispatch(slug, resolved, max_spawns=max_dispatch)
+        except Exception as exc:  # never let it break a tick
+            logger.warning("dispatch: unconditional direct-dispatch failed: %s", exc)
+
     # crash_retried > 0 forces a dispatch even when iterate saw nothing to do:
     # the crash-retry reconciler just returned card(s) to ready and they must
     # re-run within this same trigger (#1205).

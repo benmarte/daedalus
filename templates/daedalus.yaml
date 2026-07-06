@@ -163,6 +163,12 @@ execution:
   # worktree-spawn path.
   # REQUIRES kanban.dispatch_in_gateway=false (daedalus is the sole dispatcher),
   # else the gateway daemon also spawns a qwen agent for the same card.
+  #
+  # #1339: direct_delegate makes daedalus the SOLE dispatcher for delegated cards,
+  # so it runs an unconditional direct-dispatch pass each tick. Do NOT also run a
+  # standalone `hermes kanban daemon` while it is on — that daemon would dispatch a
+  # fresh card to a local-model (qwen) agent before direct-dispatch can, reintroducing
+  # the hop. Keep kanban.dispatch_in_gateway=false AND no standalone kanban daemon.
   # direct_delegate: false
 
   # How many developer/reviewer/security fix cycles run before a card escalates
