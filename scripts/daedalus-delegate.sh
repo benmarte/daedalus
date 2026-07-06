@@ -275,7 +275,7 @@ try:
 except Exception:
     sys.exit(0)
 # Prefer a fenced JSON outcome block (authoritative; parsed by outcomes.py).
-m = re.search(r"```(?:json)?\s*\{[^`]*daedalus_outcome[^`]*\}\s*```", t, re.S)
+m = re.search(r"```(?:json)?\s*\{[^`]*\"daedalus_outcome\"\s*:\s*1[^`]*\}\s*```", t, re.S)
 if m:
     print(m.group(0)); sys.exit(0)
 # Else the last line that starts with a canonical SOUL signal.
@@ -336,7 +336,14 @@ PYEOF
   local _ok=0 _verb="block"
   _kanban_transition() {
     if [ "$_do_complete" -eq 1 ]; then
-      hermes kanban --board "$_board" complete "$_card" --result "$_reason" 2>/dev/null
+      # #1329: if the inner agent self-completed the card (empty result) despite the
+      # relay-mode directive, `complete` no-ops on an already-done card and the verdict
+      # is lost — the dispatcher then reads an empty completion and re-creates the card.
+      # Backfill the verdict via `edit --result/--summary` so the completion is never
+      # empty and the dispatcher's _check_completed_* advance logic can read it.
+      hermes kanban --board "$_board" complete "$_card" --result "$_reason" 2>/dev/null \
+        || hermes kanban --board "$_board" edit "$_card" \
+             --result "$_reason" --summary "$_reason" 2>/dev/null
     else
       hermes kanban --board "$_board" block "$_card" "$_reason" 2>/dev/null
     fi

@@ -821,6 +821,27 @@ def _validator_agent(tmp_path: Path) -> str:
     return f"bash {script}"
 
 
+def test_relay_verdict_ignores_invalid_outcome_zero_uses_prose(tmp_path):
+    """A JSON block with daedalus_outcome:0 (the 'invalid/example' marker) must NOT be
+    used as the verdict — the relay falls through to the canonical prose signal line
+    (e.g. 'CONFIRMED:'), so a validator that echoes the template's 0 still completes."""
+    script = tmp_path / "fake_agent.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo '```json'\n"
+        "echo '{\"daedalus_outcome\": 0, \"role\": \"validator\", \"verdict\": \"confirmed\"}'\n"
+        "echo '```'\n"
+        "echo 'CONFIRMED: reproduced on main'\n"
+    )
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd=f"bash {script}", relay=True, role="validator"
+    )
+    assert result.returncode == 0, result.stderr
+    full = "\n".join(_log_lines(hermes_log))
+    assert "complete t_test123" in full, f"validator must complete on the prose verdict: {full}"
+    assert "CONFIRMED" in full and "daedalus_outcome" not in full, full
+
+
 def test_relay_verdict_validator_role_completes_card(tmp_path):
     """#1329 D2: a validator card must be COMPLETED (not blocked) on relay — the
     dispatcher advances validators via _check_confirmed_validators, which scans
