@@ -90,6 +90,23 @@ def test_max_spawns_caps(monkeypatch):
     assert n == 2 and len(claimed) == 2  # capped
 
 
+def test_ready_status_card_is_found(monkeypatch):
+    """#1333 regression: a freshly-created daedalus card sits in `ready` (not `todo`)
+    with dispatch_in_gateway=false. direct_dispatch must scan `ready` or it no-ops
+    and the qwen path wins."""
+    claimed, spawned = [], []
+    card = {"id": "t1", "assignee": "validator-daedalus", "title": "#42 x"}
+    cards = {"t1": {"id": "t1", "title": "#42 x", "body": _DELEG_BODY}}
+    # list_tasks returns the card ONLY for status='ready' (empty for 'todo')
+    monkeypatch.setattr(dd.kanban, "list_tasks",
+                        lambda slug, status="": [card] if status == "ready" else [])
+    monkeypatch.setattr(dd.kanban, "show_card", lambda slug, cid: cards.get(cid))
+    monkeypatch.setattr(dd.kanban, "claim", lambda slug, cid, **k: claimed.append(cid) or True)
+    n = dd.direct_dispatch("b", {"execution": _EXEC_ON}, max_spawns=5,
+                           spawn=lambda **k: spawned.append(k))
+    assert n == 1 and claimed == ["t1"] and spawned[0]["role"] == "validator"
+
+
 def test_claim_failure_skips_spawn(monkeypatch):
     spawned = []
     tasks = [{"id": "t1", "assignee": "qa-daedalus", "title": "#42 q"}]

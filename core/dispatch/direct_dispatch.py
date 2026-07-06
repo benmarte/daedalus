@@ -41,9 +41,12 @@ logger = logging.getLogger("daedalus.dispatch.direct")
 _PLUGIN_SCRIPTS = Path.home() / ".hermes" / "plugins" / "daedalus" / "scripts"
 _DELEGATE_SH = _PLUGIN_SCRIPTS / "daedalus-delegate.sh"
 
-# Statuses a fresh, not-yet-claimed card can have. A card this function claims
-# moves to ``running`` and is thereafter skipped (claim fails on a running card).
-_DISPATCHABLE_STATUS = "todo"
+# Statuses a fresh, not-yet-claimed card can have — the same buckets
+# ``hermes kanban dispatch`` consumes. With ``dispatch_in_gateway=false`` a newly
+# created daedalus card sits in ``ready`` (NOT ``todo``), so ``ready`` must be first;
+# ``todo`` is included for robustness. A card this function claims moves to
+# ``running`` and is thereafter skipped (claim fails on a running card). (#1333)
+_DISPATCHABLE_STATUSES = ("ready", "todo")
 
 # Developer keeps its own worktree-spawn path (it works, and its --cmd needs shell
 # env-var expansion that delegate.sh's single --cmd arg handles but a bare argv does
@@ -107,16 +110,19 @@ def direct_dispatch(
     }
     spawn = spawn or _default_spawn
     spawned = 0
+    seen: set = set()
 
-    for card in kanban.list_tasks(slug, status=_DISPATCHABLE_STATUS):
+    cards = [c for st in _DISPATCHABLE_STATUSES for c in kanban.list_tasks(slug, status=st)]
+    for card in cards:
         if spawned >= max_spawns:
             break
         role = role_by_assignee.get((card.get("assignee") or "").strip())
         if role not in _DIRECT_ROLES:
             continue  # developer / unknown → normal path
         cid = card.get("id")
-        if not cid:
-            continue
+        if not cid or cid in seen:
+            continue  # dedup across status buckets
+        seen.add(cid)
         detail = kanban.show_card(slug, cid) or card
         body = detail.get("body") or ""
         if _DELEGATION_MARKER not in body:
