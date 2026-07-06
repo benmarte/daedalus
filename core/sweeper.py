@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 
 from core import kanban
@@ -407,3 +408,87 @@ def sweep_stale_running(
             else:
                 logger.warning("sweeper: failed to reset stale-running card %s", tid)
     return stale_ids
+
+
+# Bounded re-creation of role cards stuck in the terminal `triage` state. A flaky local
+# model can crash-loop a role until the block-recurrence breaker escalates it to `triage`
+# (terminal — complete/unblock/promote all reject it), which strands the whole pipeline
+# and needs a human. This gives each such card a bounded number of fresh attempts.
+DEFAULT_MAX_TRIAGE_RECOVERIES = 3
+# The developer is recovered by the PR-aware F10/F12 path (adopt an open PR / open one
+# from a pushed branch), so it is skipped here to avoid double-handling.
+_TRIAGE_SKIP_ROLES = ("developer",)
+_TRIAGE_RECOVER_RE = re.compile(r"\s*\[recover (\d+)\]\s*$")
+
+
+def recover_triaged_cards(
+    slug: str,
+    *,
+    skip_roles: tuple[str, ...] = _TRIAGE_SKIP_ROLES,
+    max_recoveries: int = DEFAULT_MAX_TRIAGE_RECOVERIES,
+    reset: bool = False,
+) -> list[str]:
+    """Re-create role cards stuck in terminal ``triage`` (bounded) so a flaky local model
+    gets fresh attempts instead of being permanently stuck.
+
+    Triage is terminal and immovable, so recovery = archive the stuck card (which, being
+    terminal, keeps any gated child unblocked) and create a fresh card of the same role
+    (same assignee/body/parents) with a ``[recover N]`` marker in the title. The marker is
+    the attempt counter — once it reaches ``max_recoveries`` the card is left in triage for
+    a human. Role is derived from the ``<role>-daedalus`` assignee convention; ``skip_roles``
+    (developer) are left to the PR-aware path. Returns the ids of triaged cards acted on.
+    When ``reset`` is False this only *reports* (warns) — nothing is mutated (dry-run).
+    """
+    recovered: list[str] = []
+    for card in kanban.list_tasks(slug, status="triage") or []:
+        if (card.get("status") or "").lower() != "triage":
+            continue
+        assignee = (card.get("assignee") or "").strip()
+        role = assignee.split("-daedalus")[0] if assignee else ""
+        if not role or role in skip_roles:
+            continue
+        tid = str(card.get("id") or "")
+        if not tid:
+            continue
+        title = card.get("title") or ""
+        m = _TRIAGE_RECOVER_RE.search(title)
+        count = int(m.group(1)) if m else 0
+        if count >= max_recoveries:
+            logger.warning(
+                "sweeper: triage card %s (%s) exhausted %d/%d recoveries — leaving for a human",
+                tid, role, count, max_recoveries,
+            )
+            continue
+        if not reset:
+            logger.warning(
+                "sweeper: triage card %s (%s) is recoverable (attempt %d/%d)",
+                tid, role, count + 1, max_recoveries,
+            )
+            recovered.append(tid)
+            continue
+        base_title = _TRIAGE_RECOVER_RE.sub("", title).rstrip()
+        detail = kanban.show_card(slug, tid) or {}
+        dt = detail.get("task") or {}
+        body = dt.get("body") or card.get("body") or ""
+        parents = [
+            p if isinstance(p, str) else (p.get("id") if isinstance(p, dict) else None)
+            for p in (detail.get("parents") or [])
+        ]
+        parents = [p for p in parents if p]
+        new_tid = kanban.create_task(
+            slug,
+            f"{base_title} [recover {count + 1}]",
+            assignee=assignee,
+            body=body,
+            parents=parents or None,
+        )
+        if not new_tid:
+            logger.warning("sweeper: triage-recovery could not re-create %s (%s)", tid, role)
+            continue
+        kanban.archive_task(slug, tid)
+        logger.info(
+            "sweeper: triage-recovery re-created %s (%s) as %s (attempt %d/%d)",
+            tid, role, new_tid, count + 1, max_recoveries,
+        )
+        recovered.append(tid)
+    return recovered

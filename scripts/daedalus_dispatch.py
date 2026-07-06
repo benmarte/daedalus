@@ -3106,6 +3106,25 @@ def _run_tick(
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-running sweep failed: %s", exc)
 
+    # ── generalized triage-recovery ──────────────────────────────────────────
+    # Any role card that crash-loops to the terminal `triage` state (a flaky local model)
+    # is re-created a bounded number of times so the pipeline recovers hands-off instead of
+    # stranding until a human intervenes. The developer is skipped (its PR-aware F10/F12
+    # path owns it). Configurable via tracking.triage_recovery.{max,enabled}; skipped in
+    # dry-run. Never breaks a tick.
+    triage_cfg = (resolved.get("tracking") or {}).get("triage_recovery") or {}
+    if triage_cfg.get("enabled", True):
+        try:
+            sweeper.recover_triaged_cards(
+                slug,
+                max_recoveries=int(
+                    triage_cfg.get("max", sweeper.DEFAULT_MAX_TRIAGE_RECOVERIES)
+                ),
+                reset=not dry_run,
+            )
+        except Exception as exc:  # never let recovery break a dispatch tick
+            logger.warning("dispatch: triage-recovery failed: %s", exc)
+
     # ── crash-retry reconciler (issue #1205) ─────────────────────────────────
     # Crash-class blocked / gave-up cards (worker died, session limit, provider
     # connection error) are auto-unblocked with time-bounded, backed-off
@@ -4085,6 +4104,18 @@ def _run_tick(
             _direct_dispatch(slug, resolved, max_spawns=max_dispatch)
         except Exception as exc:  # never let it break a tick
             logger.warning("dispatch: end-of-tick direct-dispatch failed: %s", exc)
+
+    # F11: unconditional end-of-tick dispatch of any `ready` card. The per-branch nudges
+    # above only fire when this tick *created* cards, so a card promoted to `ready` by a
+    # self-heal (crash-retry unblock, triage-recovery re-create) or by a gate opening would
+    # otherwise sit until the next created-card tick. `hermes kanban dispatch` is idempotent
+    # (only spawns for ready cards, capped at max_dispatch) and is what makes local-model
+    # self-heal fully hands-off. Skipped in dry-run; never breaks a tick.
+    if not dry_run:
+        try:
+            kanban.dispatch(slug, max_spawns=max_dispatch)
+        except Exception as exc:  # never let it break a tick
+            logger.warning("dispatch: end-of-tick ready-card dispatch failed: %s", exc)
 
     summary = {
         "board": slug,

@@ -516,7 +516,79 @@ def test_archive_with_retry_idempotent_success():
             sweeper._archive_with_retry("daedalus", "t1", max_attempts=3) is True
         )
 
+# ── generalized triage-recovery ─────────────────────────────────────────────
+def _triage_card(tid, assignee, title):
+    return {"id": tid, "status": "triage", "assignee": assignee, "title": title}
+
+
+def test_recover_triaged_recreates_nondeveloper_role():
+    card = _triage_card("t_v", "validator-daedalus", "#7 Validator: feat")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "show_card",
+                          return_value={"task": {"body": "B"}, "parents": []}),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="t_new") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as archive,
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=True)
+    check("recovered the validator", out == ["t_v"])
+    check("replacement titled [recover 1]", create.call_args[0][1] == "#7 Validator: feat [recover 1]")
+    check("archived the triaged card", archive.call_args[0] == ("b", "t_v"))
+
+
+def test_recover_triaged_skips_developer():
+    card = _triage_card("t_d", "developer-daedalus", "#7 Developer: feat")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="x") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=True)
+    check("developer skipped (F10/F12 owns it)", out == [] and not create.called)
+
+
+def test_recover_triaged_bounded_at_max():
+    card = _triage_card("t_q", "qa-daedalus", "#7 QA: feat [recover 3]")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="x") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=True, max_recoveries=3)
+    check("exhausted recoveries → left for human", out == [] and not create.called)
+
+
+def test_recover_triaged_increments_marker_and_keeps_parents():
+    card = _triage_card("t_q", "qa-daedalus", "#7 QA: feat [recover 1]")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "show_card",
+                          return_value={"task": {"body": ""}, "parents": ["t_dev"]}),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="t_new") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        sweeper.recover_triaged_cards("b", reset=True)
+    check("increments [recover 1] -> [recover 2]", create.call_args[0][1] == "#7 QA: feat [recover 2]")
+    check("preserves parents", create.call_args.kwargs.get("parents") == ["t_dev"])
+
+
+def test_recover_triaged_reset_false_reports_only():
+    card = _triage_card("t_v", "validator-daedalus", "#7 Validator")
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "create_task", return_value="x") as create,
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as archive,
+    ):
+        out = sweeper.recover_triaged_cards("b", reset=False)
+    check("reports recoverable, no mutation", out == ["t_v"] and not create.called and not archive.called)
+
+
 ALL_TESTS = [
+    test_recover_triaged_recreates_nondeveloper_role,
+    test_recover_triaged_skips_developer,
+    test_recover_triaged_bounded_at_max,
+    test_recover_triaged_increments_marker_and_keeps_parents,
+    test_recover_triaged_reset_false_reports_only,
     test_blocked_since_prefers_heartbeat,
     test_blocked_since_falls_back_to_started,
     test_blocked_since_falls_back_to_created,
