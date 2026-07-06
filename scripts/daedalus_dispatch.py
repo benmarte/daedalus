@@ -3106,6 +3106,25 @@ def _run_tick(
     except Exception as exc:  # never let the sweeper break a dispatch tick
         logger.warning("dispatch: stale-running sweep failed: %s", exc)
 
+    # ── generalized triage-recovery ──────────────────────────────────────────
+    # Any role card that crash-loops to the terminal `triage` state (a flaky local model)
+    # is re-created a bounded number of times so the pipeline recovers hands-off instead of
+    # stranding until a human intervenes. The developer is skipped (its PR-aware F10/F12
+    # path owns it). Configurable via tracking.triage_recovery.{max,enabled}; skipped in
+    # dry-run. Never breaks a tick.
+    triage_cfg = (resolved.get("tracking") or {}).get("triage_recovery") or {}
+    if triage_cfg.get("enabled", True):
+        try:
+            sweeper.recover_triaged_cards(
+                slug,
+                max_recoveries=int(
+                    triage_cfg.get("max", sweeper.DEFAULT_MAX_TRIAGE_RECOVERIES)
+                ),
+                reset=not dry_run,
+            )
+        except Exception as exc:  # never let recovery break a dispatch tick
+            logger.warning("dispatch: triage-recovery failed: %s", exc)
+
     # ── crash-retry reconciler (issue #1205) ─────────────────────────────────
     # Crash-class blocked / gave-up cards (worker died, session limit, provider
     # connection error) are auto-unblocked with time-bounded, backed-off
