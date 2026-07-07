@@ -4822,6 +4822,27 @@ def _drain_rerun_requests() -> None:
         )
 
 
+def _resolve_plugin_version() -> str:
+    """Return the plugin version from ``plugin.yaml``, or ``"unknown"``.
+
+    Read-only and never raises (issue #1328): any failure — missing/unreadable
+    manifest, no ``version:`` field, malformed line — resolves to ``"unknown"``
+    so the ``--version`` path always exits 0. Parses the single ``version:`` line
+    directly (no YAML dependency) to keep this path dependency-free.
+    """
+    try:
+        for line in (
+            (_PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8").splitlines()
+        ):
+            stripped = line.strip()
+            if stripped.startswith("version:"):
+                value = stripped.split(":", 1)[1].strip().strip("\"'")
+                return value or "unknown"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def main() -> int:
     """Process-level mutex wrapper.
 
@@ -4835,6 +4856,12 @@ def main() -> int:
     A SIGALRM watchdog (Unix only) force-exits after _LOCK_WATCHDOG_SECS so a
     stuck tick cannot starve queued advance-hook invocations for hours (#1115).
     """
+    # --version is a read-only report (issue #1328): print the plugin version and
+    # exit WITHOUT acquiring the process mutex or running a dispatch tick. Handled
+    # in _main_inner so --help lists the flag alongside the argparse definition.
+    if "--version" in sys.argv[1:]:
+        return _main_inner()
+
     lock = FileLock(_MUTEX_LOCK_PATH)
     try:
         lock.acquire(timeout=0)
@@ -4954,6 +4981,12 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
         help="Print the last N dispatch-history entries (default 10) and exit.",
     )
     parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print the plugin version (from plugin.yaml) and exit 0, without "
+        "running a dispatch tick.",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Run an offline pipeline self-test (seeds fake "
@@ -4970,6 +5003,13 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
     # passes an explicit argv when rerunning a scope dropped on contention
     # (issue #1160).
     args = parser.parse_args(argv)
+
+    # --version is a read-only report (issue #1328): print the plugin version and
+    # exit 0 before any dispatch work. Never raises — _resolve_plugin_version()
+    # falls back to "unknown" if the manifest can't be read.
+    if args.version:
+        print(_resolve_plugin_version())
+        return 0
 
     # --self-test is a hermetic, GitHub-free smoke of the pipeline wiring: seed
     # fake data, drive a real tick, print PASS/FAIL, and exit non-zero on failure
