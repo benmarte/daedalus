@@ -104,6 +104,12 @@ from core.dispatch.verify import (  # noqa: E402
     verify_outcome as verify_outcome,
 )
 
+# Coding-agent resolution for delegation-wrapping downstream review bodies (#1344).
+from core.dispatch.resolvers import (  # noqa: E402
+    _resolve_coding_agent as _resolve_coding_agent,
+    _resolve_coding_agent_cmd as _resolve_coding_agent_cmd,
+)
+
 # Source-reading fallback counter for observability.
 # MUST live here (not in sources.py) because:
 #   1. Tests restore it via ``iterate_mod._source_reading_fallback_count = N``
@@ -150,6 +156,7 @@ from core.iterate.executors import (  # noqa: E402
     _create_downstream_review_tasks as _create_downstream_review_tasks,
     _default_sub_issue_titles as _default_sub_issue_titles,
     _downstream_parents as _downstream_parents,
+    _wrap_downstream_delegation as _wrap_downstream_delegation,
     _execute_advance as _execute_advance,
     _execute_approve_advance as _execute_approve_advance,
     _execute_escalate as _execute_escalate,
@@ -341,6 +348,13 @@ def run_iterate(
     # only — classify_blocked still routes off the block-reason string — so flag-on
     # adds the tag without changing flow and flag-off omits --kind (byte-identical).
     _native_gates = bool(_pipeline_cfg.get("native_gates", False))
+    # #1344: resolve the external coding agent + CLI command so downstream review
+    # tasks (created on developer-card advance) are delegation-wrapped and thus
+    # dispatchable by direct_dispatch. Resolves globally — matching direct_dispatch
+    # itself, which rebuilds the spawn command from the same global config — and
+    # no-ops to "none"/"" (byte-identical) when no external agent is configured.
+    _coding_agent = _resolve_coding_agent(execution)
+    _coding_agent_cmd = _resolve_coding_agent_cmd(execution)
 
     blocked_cards = kanban.list_blocked(slug)
 
@@ -352,7 +366,8 @@ def run_iterate(
     # only sign anything is wrong).
     blocked_ids = {str(c.get("id")) for c in blocked_cards if c.get("id")}
     for entry in _rescue_block_loop_gate_cards(
-            slug, repo, exclude_ids=blocked_ids, dry_run=dry_run):
+            slug, repo, exclude_ids=blocked_ids, dry_run=dry_run,
+            coding_agent=_coding_agent, coding_agent_cmd=_coding_agent_cmd):
         if not entry.get("ok"):
             continue
         counts[entry["action"]] = counts.get(entry["action"], 0) + 1
@@ -662,6 +677,8 @@ def run_iterate(
                 upfront_dag=_upfront_dag,
                 native_gates=_native_gates,
                 native_decompose=_native_decompose,
+                coding_agent=_coding_agent,
+                coding_agent_cmd=_coding_agent_cmd,
             )
 
             # Gate on ok=True: prevents notification when the executor fails
