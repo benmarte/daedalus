@@ -1,3 +1,5 @@
+## [Pipeline stalls: daedalus-delegate.sh killed by Hermes SIGTERM before kanban transition](https://github.com/benmarte/daedalus/issues/1356) — [PR #1357](https://github.com/benmarte/daedalus/pull/1357)
+
 ## [direct_delegate integration: daedalus must be the sole dispatcher for FRESH cards (daemon + iterate-gating + tick-cache)](https://github.com/benmarte/daedalus/issues/1339) — [PR #1340](https://github.com/benmarte/daedalus/pull/1340)
 
 ## [provision_roster.sh: persist per-role platform_toolsets.cli so the toolset trim survives re-provisioning](https://github.com/benmarte/daedalus/issues/1319) — [PR #1322](https://github.com/benmarte/daedalus/pull/1322)
