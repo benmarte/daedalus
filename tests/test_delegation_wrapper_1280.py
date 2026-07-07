@@ -858,6 +858,30 @@ def test_relay_verdict_validator_role_completes_card(tmp_path):
     assert "CONFIRMED" in full
 
 
+def test_relay_verdict_validator_backfills_summary_when_self_completed(tmp_path):
+    """#1361: a complete-role card must ALWAYS get its summary backfilled via
+    `kanban edit --summary`, even when `complete` returns 0 (a no-op when the inner
+    agent already self-completed the card). The old `complete --result || edit` skipped
+    the backfill whenever `complete` succeeded, leaving latest_summary empty — which
+    stalled _check_confirmed_validators into an empty-summary re-spawn loop (9 duplicate
+    validator cards observed live on #1360). The stub `hermes` always exits 0, mimicking
+    a successful/no-op complete, so this fails on the old short-circuit and passes now."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd=_validator_agent(tmp_path), relay=True, role="validator"
+    )
+    assert result.returncode == 0, result.stderr
+    calls = _log_lines(hermes_log)
+    full = "\n".join(calls)
+    edit_calls = [ln for ln in calls if "edit t_test123" in ln and "--summary" in ln]
+    assert edit_calls, (
+        "validator completion must ALWAYS backfill the summary via `kanban edit "
+        f"--summary` (even when `complete` exits 0); recorded hermes calls:\n{full}"
+    )
+    assert "CONFIRMED" in "\n".join(edit_calls), (
+        f"the backfilled summary must carry the relayed verdict:\n{full}"
+    )
+
+
 def test_relay_verdict_review_role_still_blocks_card(tmp_path):
     """Gate roles (qa/reviewer/security/…) must still BLOCK on relay so
     classify_blocked routes the emitted signal — the role-aware branch only
