@@ -2211,6 +2211,10 @@ def _check_completed_pm(
         getattr(d, "_has_downstream_tasks", _has_downstream_tasks)
         if d else _has_downstream_tasks
     )
+    _dev_state_fn = (
+        getattr(d, "_developer_task_state", _developer_task_state)
+        if d else _developer_task_state
+    )
     _fetch_issue = (
         getattr(d, "_fetch_issue_with_retry", _fetch_issue_with_retry_impl)
         if d else _fetch_issue_with_retry_impl
@@ -2266,7 +2270,22 @@ def _check_completed_pm(
         if _has_downstream(
             slug, n, validator_profile=p["validator"], pm_profile=p["pm"]
         ):
-            continue  # team triage already exists
+            continue  # team triage already exists (active card)
+        # #1349: distinguish a genuinely-completed pipeline (terminal cards from
+        # THIS cycle) from stale cards left by a crashed prior cycle. A done
+        # developer card carrying a PR number proves the team already ran to
+        # completion — do NOT re-enter team creation on every subsequent tick.
+        # Stale/empty done developer cards (no PR) still fall through so the epic
+        # #1008 re-triage path keeps working. _has_downstream_tasks stays
+        # status-blind (unchanged) for its other callers.
+        _dev_state, _ = _dev_state_fn(slug, n, developer_profile=p["developer"])
+        if _dev_state == "complete":
+            logger.debug(
+                "dispatch: PM #%s pipeline already completed (developer PR "
+                "present) — skipping team re-trigger",
+                n,
+            )
+            continue
         issue = issues_map.get(n)
         if not issue and provider is not None:
             fetched = _fetch_issue(provider, n)
