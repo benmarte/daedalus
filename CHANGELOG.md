@@ -1,3 +1,5 @@
+## [fix: PM re-triggers every tick after a pipeline fully completes (_has_downstream_tasks ignores terminal cards)](https://github.com/benmarte/daedalus/issues/1349) — [PR #1364](https://github.com/benmarte/daedalus/pull/1364)
+
 ## [fix: auto-merge gate blocks legit merges when gate-card summary is JSON-only (_role_gate_passed startswith misses structured verdict)](https://github.com/benmarte/daedalus/issues/1360) — [PR #1363](https://github.com/benmarte/daedalus/pull/1363)
 
 ## [postinstall never runs after 'hermes plugins update' — advance hook goes stale, pipeline stalls](https://github.com/benmarte/daedalus/issues/1354) — [PR #1355](https://github.com/benmarte/daedalus/pull/1355)
