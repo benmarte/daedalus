@@ -83,6 +83,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from core.iterate import outcomes
 from core.iterate.classify import MAX_FIX_ATTEMPTS
 from core.util import extract_issue_number, extract_pr_number_from_summary
 
@@ -380,6 +381,17 @@ def _role_cards_for_issue(
         return []
 
 
+# Per-role structured verdicts that clear the auto-merge gate (#1360).
+# Under the #1170 dual-write protocol an agent may write a JSON-only summary
+# with no leading free-text prefix; the structured ``verdict`` is authoritative
+# and must clear the gate even when the raw ``startswith`` scan cannot match.
+_GATE_PASS_VERDICTS: dict[str, frozenset[str]] = {
+    "qa":       frozenset({"passed"}),
+    "reviewer": frozenset({"approved"}),
+    "security": frozenset({"approved"}),
+}
+
+
 def _role_gate_passed(
     slug: str,
     issue_number: int | None,
@@ -392,7 +404,17 @@ def _role_gate_passed(
     """True if ANY card for (role, issue) has an approval signal in its summary.
 
     Scans all matching cards (there may be retries) and passes if any one's
-    latest_summary contains an approval signal.
+    latest_summary either
+
+      1. carries a structured ``daedalus_outcome`` record whose ``verdict`` is a
+         pass for this role (#1170 dual-write — a JSON-only summary has no
+         free-text prefix to ``startswith``-match, #1360), or
+      2. begins with a legacy free-text approval signal.
+
+    The structured verdict is authoritative: a card whose parsed record is a
+    definitive *non*-pass (e.g. ``changes_requested``) is skipped without the
+    ``startswith`` fallback, so a fail verdict never clears the gate even if the
+    summary happens to contain an approval token mid-string (preserves #1125 F1).
 
     ``active_tasks``/``archived_tasks`` are threaded to ``_role_cards_for_issue``
     so a per-issue gate check reuses a once-per-tick board snapshot (#1135).
@@ -407,13 +429,24 @@ def _role_gate_passed(
     if not cards:
         logger.debug("iterate: no %s card found for issue #%s", role, issue_number)
         return False
+    pass_verdicts = _GATE_PASS_VERDICTS.get(role)
     for card in cards:
         try:
             detail = kanban.show_card(slug, card["id"])
         except Exception as e:
             logger.error("iterate: failed to get %s card %s: %s", role, card.get("id"), e)
             continue
-        summary = ((detail or {}).get("latest_summary") or "").lower().lstrip()
+        raw_summary = (detail or {}).get("latest_summary") or ""
+        # Prefer the structured outcome record (#1170) — it is authoritative and
+        # survives JSON-only summaries that have no free-text prefix (#1360).
+        record = outcomes.parse(raw_summary)
+        if record is not None and pass_verdicts is not None and record.role == role:
+            if record.verdict in pass_verdicts:
+                return True
+            # Definitive non-pass verdict for this role — trust it and skip the
+            # brittle startswith fallback for this card.
+            continue
+        summary = raw_summary.lower().lstrip()
         # startswith prevents a mid-string signal match, e.g.
         # "changes-requested: approved workaround" no longer passes the gate (#1125 F1).
         if summary and any(summary.startswith(sig) for sig in approval_signals):
