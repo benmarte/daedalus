@@ -486,6 +486,8 @@ def _execute_advance(
     metadata_transport: bool = False,
     upfront_dag: bool = False,
     native_decompose: bool = False,
+    coding_agent: str = "none",
+    coding_agent_cmd: str = "",
     **_kwargs: Any,
 ) -> bool:
     """Complete a developer card to advance the chain (CI no longer gates this).
@@ -552,6 +554,7 @@ def _execute_advance(
             slug, issue_number, card,
             pr_number=pr, dry_run=dry_run, upfront_dag=upfront_dag,
             native_decompose=native_decompose,
+            coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd,
         )
     else:
         logger.warning(
@@ -618,6 +621,66 @@ _DOWNSTREAM_REVIEW_ROLES = [
     ("accessibility", "accessibility-daedalus"),
     ("docs", "documentation-daedalus"),
 ]
+
+# Idempotency-suffix → delegation role label (#1344). Fed to ``_prepend_delegation``
+# and ``_ROLE_TMP_PREFIX``; the ``docs`` suffix maps to the ``documentation`` role
+# (its profile + tmp-prefix key). Every other suffix is its own role label.
+_DOWNSTREAM_DELEGATION_ROLE = {
+    "qa": "qa",
+    "reviewer": "reviewer",
+    "security": "security",
+    "accessibility": "accessibility",
+    "docs": "documentation",
+}
+
+
+def _wrap_downstream_delegation(
+    body: str,
+    role_suffix: str,
+    issue_number: int,
+    coding_agent: str,
+    coding_agent_cmd: str,
+) -> str:
+    """Prepend the agent-delegation block to a downstream review-task body (#1344).
+
+    Mirrors the checks.py fan-out so every card created by this path carries the
+    ``_DELEGATION_MARKER`` when an external coding agent is configured — otherwise
+    ``core.dispatch.direct_dispatch`` skips the card (``_DELEGATION_MARKER not in
+    body``) and it sits ``ready`` forever (the accessibility stall in #1344).
+
+    Reaches the dispatcher's ``_prepend_delegation`` via ``_disp()`` — the same
+    call-time, patch-safe accessor ``core.dag_enrichment`` uses — because that
+    helper reads a mutable dispatcher global and deliberately stays in
+    ``scripts/daedalus_dispatch.py``. Returns the body unchanged when no external
+    agent is configured (``_prepend_delegation`` itself no-ops for ``none``/
+    ``hermes``) or the dispatcher is unreachable, so the non-delegate path is
+    byte-identical.
+    """
+    if coding_agent in ("", "none", "hermes"):
+        return body
+    role = _DOWNSTREAM_DELEGATION_ROLE.get(role_suffix, role_suffix)
+    try:
+        from core.dispatch.checks import _disp
+
+        d = _disp()
+        fn = getattr(d, "_prepend_delegation", None) if d is not None else None
+        if fn is None:
+            logger.warning(
+                "iterate: _prepend_delegation unreachable — downstream %s body for "
+                "issue #%s left unwrapped (may not direct-dispatch)",
+                role, issue_number,
+            )
+            return body
+        return fn(
+            body, coding_agent, coding_agent_cmd,
+            role=role, issue_number=issue_number,
+        )
+    except Exception as exc:  # never let body-wrapping break task creation
+        logger.warning(
+            "iterate: delegation-wrap failed for downstream %s issue #%s: %s — "
+            "using plain body", role, issue_number, exc,
+        )
+        return body
 
 
 def _downstream_parents(
@@ -730,6 +793,8 @@ def _create_downstream_review_tasks(
     dry_run: bool = False,
     upfront_dag: bool = False,
     native_decompose: bool = False,
+    coding_agent: str = "none",
+    coding_agent_cmd: str = "",
 ) -> list[str]:
     """Create qa/reviewer/security/accessibility/docs tasks after a developer card completes.
 
@@ -738,6 +803,17 @@ def _create_downstream_review_tasks(
     exists on the board (any status), creation is skipped for that role.
 
     Returns the list of newly-created task ids.
+
+    ``coding_agent`` / ``coding_agent_cmd`` (#1344): when an external CLI coding
+    agent is configured, each role body is wrapped with the agent-delegation
+    block (``_DELEGATION_MARKER``) exactly like the checks.py fan-out. Without
+    the marker ``core.dispatch.direct_dispatch`` skips the card (it dispatches
+    only delegation-wrapped bodies), so an unwrapped card sits ``ready`` forever.
+    The accessibility card is the ONLY review role created solely by this path
+    (checks.py creates qa/reviewer/security/docs first, which this then skips via
+    idempotency), so it was the only role that stalled under ``direct_delegate``.
+    Defaults keep the non-delegate path byte-identical: ``_prepend_delegation``
+    no-ops for ``none``/``hermes``.
 
     ``upfront_dag`` (#1290, default False): when the ``pipeline.upfront_dag`` flag
     is ON the full stage graph is built at Ready-time by :func:`build_pipeline_dag`
@@ -801,7 +877,10 @@ def _create_downstream_review_tasks(
             continue
 
         title = f"#{issue_number} {assignee.replace('-daedalus', '').title()} review"
-        body = base_body
+        body = _wrap_downstream_delegation(
+            base_body, role_suffix, issue_number,
+            coding_agent, coding_agent_cmd,
+        )
 
         if dry_run:
             logger.info(

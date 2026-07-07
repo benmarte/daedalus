@@ -112,6 +112,8 @@ def _rescue_block_loop_gate_cards(
     *,
     exclude_ids: set[str] | None = None,
     dry_run: bool = False,
+    coding_agent: str = "none",
+    coding_agent_cmd: str = "",
 ) -> list[dict[str, Any]]:
     """Complete gate cards the framework re-promoted despite a passing verdict.
 
@@ -167,7 +169,9 @@ def _rescue_block_loop_gate_cards(
             if assignee == "qa-daedalus":
                 action = ADVANCE
                 ok = _p._execute_advance(slug, card, repo, verdict,
-                                         dry_run=dry_run, pr_number=pr)
+                                         dry_run=dry_run, pr_number=pr,
+                                         coding_agent=coding_agent,
+                                         coding_agent_cmd=coding_agent_cmd)
             else:
                 action = APPROVE_ADVANCE
                 ok = _p._execute_approve_advance(slug, card, repo, verdict,
