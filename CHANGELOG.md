@@ -1,3 +1,5 @@
+## [direct_delegate: accessibility cards (iterate.py downstream) lack delegation marker → not dispatchable](https://github.com/benmarte/daedalus/issues/1344) — [PR #1359](https://github.com/benmarte/daedalus/pull/1359)
+
 ## [feat/docs: document supported local models + preflight developer-stage capability (qwen3.6 crash-loops)](https://github.com/benmarte/daedalus/issues/1351) — [PR #1358](https://github.com/benmarte/daedalus/pull/1358)
 
 ## [Pipeline stalls: daedalus-delegate.sh killed by Hermes SIGTERM before kanban transition](https://github.com/benmarte/daedalus/issues/1356) — [PR #1357](https://github.com/benmarte/daedalus/pull/1357)
