@@ -418,14 +418,17 @@ PYEOF
   local _ok=0 _verb="block"
   _kanban_transition() {
     if [ "$_do_complete" -eq 1 ]; then
-      # #1329: if the inner agent self-completed the card (empty result) despite the
-      # relay-mode directive, `complete` no-ops on an already-done card and the verdict
-      # is lost — the dispatcher then reads an empty completion and re-creates the card.
-      # Backfill the verdict via `edit --result/--summary` so the completion is never
-      # empty and the dispatcher's _check_completed_* advance logic can read it.
-      hermes kanban --board "$_board" complete "$_card" --result "$_reason" 2>/dev/null \
-        || hermes kanban --board "$_board" edit "$_card" \
-             --result "$_reason" --summary "$_reason" 2>/dev/null
+      # #1329/#1361: if the inner agent self-completed the card despite the relay-mode
+      # directive, `complete` no-ops on the already-done card AND returns exit 0, so a
+      # `complete || edit` fallback never backfills — latest_summary stays empty and the
+      # dispatcher's _check_confirmed_validators / _check_completed_* re-spawn the stage
+      # in an empty-summary loop (#1361). Run `complete` (best-effort) then ALWAYS `edit`
+      # the verdict onto result+summary (edit succeeds on an already-done card); the edit
+      # is the authoritative backfill and its exit status gates the retry below.
+      hermes kanban --board "$_board" complete "$_card" \
+        --result "$_reason" --summary "$_reason" 2>/dev/null || true
+      hermes kanban --board "$_board" edit "$_card" \
+        --result "$_reason" --summary "$_reason" 2>/dev/null
     else
       hermes kanban --board "$_board" block "$_card" "$_reason" 2>/dev/null
     fi
