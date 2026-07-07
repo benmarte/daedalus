@@ -1,3 +1,5 @@
+## [postinstall never runs after 'hermes plugins update' — advance hook goes stale, pipeline stalls](https://github.com/benmarte/daedalus/issues/1354) — [PR #1355](https://github.com/benmarte/daedalus/pull/1355)
+
 ## [direct_delegate: accessibility cards (iterate.py downstream) lack delegation marker → not dispatchable](https://github.com/benmarte/daedalus/issues/1344) — [PR #1359](https://github.com/benmarte/daedalus/pull/1359)
 
 ## [feat/docs: document supported local models + preflight developer-stage capability (qwen3.6 crash-loops)](https://github.com/benmarte/daedalus/issues/1351) — [PR #1358](https://github.com/benmarte/daedalus/pull/1358)
