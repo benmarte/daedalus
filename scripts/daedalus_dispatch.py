@@ -2791,6 +2791,76 @@ def _reconcile_vcs_board(resolved: Dict[str, Any], provider, *, dry_run: bool = 
     return provider, notes
 
 
+# Files that scripts/postinstall.py provisions into ~/.hermes/agent-hooks/.
+# `hermes plugins update daedalus` runs `git pull` + copies *.example files but
+# NEVER re-runs postinstall.py, so these go stale/missing after an update
+# (issue #1354); the self-heal below re-syncs them on drift. Keep in sync with
+# postinstall._install_advance_hook + _install_webhook_handler.
+_AGENT_HOOK_FILES = (
+    "daedalus-advance.sh",
+    "daedalus_resolve_project.py",
+    "daedalus-ready.sh",
+)
+
+
+def _self_heal_agent_hooks() -> bool:
+    """Re-sync postinstall-provisioned agent-hooks when they drift from source.
+
+    `hermes plugins update daedalus` git-pulls + copies *.example files but never
+    invokes scripts/postinstall.py, so new or changed hook scripts under
+    scripts/ are never re-copied to ~/.hermes/agent-hooks/ (issue #1354). A stale
+    or missing daedalus-advance.sh then makes agents' on_session_end advance hook
+    silently fail, stalling the pipeline up to ~60 min until the cron fallback.
+
+    Called once per dispatch tick. On the first tick after an update it detects
+    the drift and re-runs the idempotent installer helpers (which between them
+    cover every agent-hooks file); once current it is a cheap no-op (a few file
+    reads and compares).
+
+    Contract: never raises (log + return on any failure), no network, and skips
+    entirely under test isolation. The conftest points HERMES_HOME at a tmp dir
+    while the installers write to HOME/.hermes; a divergence between the two means
+    we are NOT in a live install, so touching the real home would be wrong.
+
+    Returns True when a re-sync was performed, else False (incl. on skip/failure).
+    """
+    try:
+        real_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+        hermes_home = os.environ.get("HERMES_HOME")
+        if hermes_home and Path(hermes_home).resolve() != (real_home / ".hermes").resolve():
+            # Isolated/test environment — the installers write to HOME/.hermes,
+            # not this HERMES_HOME. Do nothing so tests never touch the real home.
+            return False
+        source_dir = Path(__file__).resolve().parent
+        hooks_dir = real_home / ".hermes" / "agent-hooks"
+        drifted = False
+        for name in _AGENT_HOOK_FILES:
+            src = source_dir / name
+            if not src.is_file():
+                continue  # source not shipped in this build — nothing to sync
+            dst = hooks_dir / name
+            try:
+                if not dst.exists() or dst.read_text() != src.read_text():
+                    drifted = True
+                    break
+            except OSError:
+                drifted = True  # unreadable installed copy → treat as drift
+                break
+        if not drifted:
+            return False
+        from scripts.postinstall import _install_advance_hook, _install_webhook_handler
+
+        _install_advance_hook()
+        _install_webhook_handler()
+        logger.info(
+            "self-heal: re-synced agent-hooks from plugin source after update (#1354)"
+        )
+        return True
+    except Exception as exc:  # never let self-heal break a tick
+        logger.warning("self-heal: agent-hooks re-sync failed: %s", exc)
+        return False
+
+
 def run(
     resolved: Dict[str, Any],
     *,
@@ -2808,6 +2878,9 @@ def run(
     exception) collapses those repeated reads to one subprocess per distinct
     ``(slug, status)`` key, while mutations invalidate it so reads never go stale.
     """
+    # Self-heal agent-hooks that a `hermes plugins update` left stale (#1354).
+    # Drift-guarded + test-isolation-safe; never raises.
+    _self_heal_agent_hooks()
     kanban.enable_tick_cache()
     try:
         return _run_tick(
