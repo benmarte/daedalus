@@ -599,6 +599,31 @@ execution:
 The built-in profile skills installed by `postinstall.py` are always present.
 `skills:` in the config adds **on top of** those — it never removes the built-in set.
 
+### Supported local models
+
+When `execution.coding_agent` is left at its default (`hermes`), **every pipeline role runs
+directly on your local Hermes model** — no external coding agent is spawned. In this mode
+full hands-off autonomy is **model-dependent**: the model has to be strong enough to carry
+the *developer* stage, which is the make-or-break role (it must plan a change, edit files,
+write tests, and open a PR). A model that stalls or loops there strands the whole pipeline,
+even if it sails through validation and PM.
+
+| Local model | Full-autonomy verdict |
+|---|---|
+| **Ornith-1.0-35B** | ✅ **Known-good baseline.** Completes validator → … → docs → auto-merge hands-off with zero intervention (verified in the E2E hands-off matrix). |
+| **qwen3.6** | ❌ **Known-weak.** Crash-loops at the developer stage and cannot reliably produce a PR. |
+
+**Recommendation:** for hands-off local autonomy, run a model at least as capable as
+**Ornith-1.0-35B**. If your local model is weaker (or you're unsure), delegate the
+coding-heavy roles to an external CLI agent instead — see *Delegating to Claude Code (or
+Codex)* below.
+
+> [!NOTE]
+> The dispatcher runs a **warn-only capability preflight** each tick: when the `hermes`
+> coding-agent path is configured with a local model on the known-weak list (currently
+> `qwen3.6`), it logs a single warning naming the model and pointing at the Ornith-1.0-35B
+> baseline. It is advisory only — it **never blocks dispatch**.
+
 ### Delegating to Claude Code (or Codex)
 
 By default every pipeline role does its own work using the **local Hermes LLM** (whatever

@@ -155,8 +155,10 @@ from core.dispatch.resolvers import (  # noqa: F401, E402
     _is_epic,
     _is_model_compatible_with_coding_agent,
     _log_resync,
+    _normalize_model_name,
     _notify_targets,
     _parse_follow_ups,
+    _preflight_local_model_capability,
     _resolve_active_model_provider,
     _resolve_agent_for_role,
     _resolve_checklist_threshold,
@@ -2880,6 +2882,11 @@ def _run_tick(
     profiles = _resolve_profiles(execution)
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
     coding_agent = _resolve_coding_agent(execution)
+    # Warn-only capability preflight (#1351): when the hermes coding_agent path
+    # runs pipeline roles on a local model known to crash-loop at the developer
+    # stage (e.g. qwen3.6), log a single heads-up so operators aren't surprised
+    # by a silently-stalled pipeline. Never blocks dispatch.
+    _preflight_local_model_capability(execution, coding_agent)
     coding_agent_cmd = _resolve_coding_agent_cmd(execution)
     # Ensure a sane turn budget so substantial tasks don't silently hit claude's
     # 25-turn default; respects an explicit --max-turns and non-claude agents (#143).
