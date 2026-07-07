@@ -46,6 +46,43 @@
 # set -u: never unset variables. No set -e: must preserve child exit code and
 # distinguish timeout (124) from agent failure; -e traps would mask both.
 # CWE-377: ensure all sidecar files are private (mode 600/700).
+
+# ── self-detach into a new session (issue #1356) ─────────────────────────────
+# The outer Hermes worker spawns this wrapper as a child in Hermes' own process
+# group and then ends its session. On session end / max-runtime enforcement,
+# Hermes SIGTERMs that whole process group — killing the wrapper BEFORE it can
+# call `hermes kanban complete/block` to transition the card, so the pipeline
+# stalls between stages until the next (hourly) cron tick.
+#
+# Re-exec ourselves in a NEW session so the wrapper leaves Hermes' process group;
+# a group-targeted SIGTERM then no longer reaches it and the wrapper lives long
+# enough to relay the verdict and transition the card.
+#
+# Idempotent: only re-exec when we are NOT already a process-group leader
+# (pgid != pid). After setsid our pgid == pid, so the guard is false on the
+# re-exec'd invocation — no infinite loop. Because we re-exec ONLY when not a
+# group leader, setsid(2) succeeds via exec WITHOUT forking, so our PID is
+# preserved (the spawning parent keeps tracking the same process) — hence no
+# `-f`. Args are passed through verbatim ("$@").
+#
+# Composes with the inner-agent setsid (~L230): this detaches the wrapper from
+# Hermes; that later detaches the coding agent from the wrapper. They act on
+# different processes in sequence and never fight. A DIRECT-PID SIGTERM (Hermes
+# --max-runtime targets the wrapper pid, not its group) still reaches us and is
+# handled by _term_handler (exit 124, no transition) — unchanged.
+#
+# macOS has no setsid(1); fall back to perl POSIX::setsid(), mirroring the inner
+# spawn. If neither exists, continue undetached (best-effort) rather than loop.
+_self_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+if [ -n "$_self_pgid" ] && [ "$_self_pgid" != "$$" ]; then
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid bash "$0" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    exec perl -e 'use POSIX; POSIX::setsid(); exec @ARGV' -- bash "$0" "$@"
+  fi
+  # No setsid/perl: continue undetached (best-effort). No re-exec → no loop.
+fi
+
 umask 077
 set -uo pipefail
 

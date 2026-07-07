@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -881,3 +882,201 @@ def test_relay_verdict_validator_crash_still_blocks(tmp_path):
     assert "block t_test123" in full, f"crash must BLOCK: {full}"
     assert "coding-agent-failed" in full
     assert "complete t_test123" not in full
+
+
+# ── (n) self-detach into a new session — survive Hermes' group SIGTERM (#1356) ──
+# The wrapper re-execs itself in a new session at script top so a process-GROUP
+# SIGTERM (Hermes session-end / max-runtime on the worker group) no longer
+# reaches it. Without this the card never transitions and the pipeline stalls.
+
+
+def _detach_available() -> bool:
+    """The self-detach re-exec needs setsid(1) or perl (macOS fallback)."""
+    return shutil.which("setsid") is not None or shutil.which("perl") is not None
+
+
+def _pgid_of(pid: int) -> "int | None":
+    """Return the process-group ID of `pid`, or None if it can't be read."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pgid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    raw = out.stdout.strip()
+    return int(raw) if raw.isdigit() else None
+
+
+def _wait_for_pgid_eq_pid(pid: int, timeout: float) -> "int | None":
+    """Poll until the process's pgid == its pid (it became a session leader)."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = _pgid_of(pid)
+        if last == pid:
+            return last
+        time.sleep(0.2)
+    return last
+
+
+@pytest.mark.skipif(not _detach_available(), reason="no setsid/perl to self-detach")
+def test_self_detach_becomes_session_leader(tmp_path):
+    """The wrapper re-execs into its own session: pgid(wrapper) == pid(wrapper).
+
+    Popen (no start_new_session) spawns bash inside pytest's process group, so
+    the wrapper's initial pgid != pid → it must re-exec via setsid/perl and
+    become a session leader (pgid == pid). The PID is preserved across the exec
+    (we only re-exec when NOT a group leader, so setsid(2) succeeds without a
+    fork), so proc.pid stays valid.
+    """
+    stub_dir, _, _ = _stub_bin_dir(tmp_path)
+    task_file = tmp_path / "task.txt"
+    task_file.write_text("task\n")
+    out_file = tmp_path / "out.txt"
+
+    env = {
+        **os.environ,
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "HERMES_HOME": str(tmp_path / "hermes-home"),
+        "GH_TOKEN": "stub-token",
+        "GITHUB_TOKEN": "stub-token",
+    }
+    cmd = [
+        "bash", str(_DELEGATE_SH),
+        "--task-file", str(task_file),
+        "--cmd", "bash -c 'sleep 5'",
+        "--card", "t_detach", "--board", "test-board",
+        "--out", str(out_file),
+        "--max-wait", "20", "--poll-interval", "1",
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+    )
+    try:
+        pgid = _wait_for_pgid_eq_pid(proc.pid, timeout=10)
+        assert pgid == proc.pid, (
+            f"wrapper pgid {pgid} != pid {proc.pid} — did not become session leader"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=15)
+        except Exception:
+            proc.kill()
+
+
+@pytest.mark.skipif(not _detach_available(), reason="no setsid/perl to self-detach")
+def test_survives_parent_group_sigterm_and_transitions(tmp_path):
+    """Regression for #1356: when the spawning session ends (SIGTERM to the
+    parent's process GROUP), the detached wrapper survives and STILL calls
+    hermes kanban to transition the card — the card lands in the next stage
+    instead of stalling as 'protocol violation' / 'pid not alive'.
+
+    Without the self-detach the wrapper stays in the parent's group, the group
+    SIGTERM fires _term_handler (exit 124, status 'terminated', NO transition),
+    and no complete/block call is ever logged — this test would fail.
+    """
+    stub_dir, hermes_log, _ = _stub_bin_dir(tmp_path)
+    task_file = tmp_path / "task.txt"
+    task_file.write_text("task\n")
+    out_file = tmp_path / "out.txt"
+    wrapper_pid_file = tmp_path / "wrapper.pid"
+
+    # Inner agent emits its verdict AFTER a short delay, so the wrapper is still
+    # mid-run (not yet transitioned) when we kill the parent's group.
+    agent = tmp_path / "agent.sh"
+    agent.write_text(
+        "#!/usr/bin/env bash\n"
+        "sleep 3\n"
+        "echo 'CONFIRMED: reproduced on dev'\n"
+    )
+    agent.chmod(0o755)
+
+    # Parent is its own session leader (start_new_session=True). It spawns the
+    # wrapper as a child in its group, records the wrapper pid, then sleeps to
+    # hold the group open until we kill it.
+    parent = tmp_path / "parent.sh"
+    parent.write_text(
+        "#!/usr/bin/env bash\n"
+        f"bash {_DELEGATE_SH} "
+        f"--task-file {task_file} "
+        f"--cmd 'bash {agent}' "
+        "--card t_test123 --board test-board "
+        f"--out {out_file} "
+        "--max-wait 30 --poll-interval 1 "
+        "--relay-verdict --role validator &\n"
+        f"echo $! > {wrapper_pid_file}\n"
+        "sleep 999\n"
+    )
+    parent.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "HERMES_HOME": str(tmp_path / "hermes-home"),
+        "GH_TOKEN": "stub-token",
+        "GITHUB_TOKEN": "stub-token",
+    }
+    proc = subprocess.Popen(
+        ["bash", str(parent)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        start_new_session=True,
+    )
+    try:
+        # Wait for the wrapper pid to be recorded.
+        deadline = time.monotonic() + 10
+        wrapper_pid = None
+        while time.monotonic() < deadline:
+            if wrapper_pid_file.exists():
+                raw = wrapper_pid_file.read_text().strip()
+                if raw.isdigit():
+                    wrapper_pid = int(raw)
+                    break
+            time.sleep(0.2)
+        assert wrapper_pid, "wrapper pid never recorded"
+
+        # Wait for the wrapper to detach into its own session (pgid == pid).
+        pgid = _wait_for_pgid_eq_pid(wrapper_pid, timeout=8)
+        assert pgid == wrapper_pid, (
+            f"wrapper {wrapper_pid} did not detach before kill (pgid={pgid})"
+        )
+
+        # End the spawning session: SIGTERM the parent's whole process group.
+        parent_pgid = os.getpgid(proc.pid)
+        os.killpg(parent_pgid, signal.SIGTERM)
+
+        # The detached wrapper must survive and finish, transitioning the card.
+        deadline = time.monotonic() + 25
+        transitioned = False
+        while time.monotonic() < deadline:
+            calls = _log_lines(hermes_log)
+            if any(("complete t_test123" in c or "block t_test123" in c) for c in calls):
+                transitioned = True
+                break
+            time.sleep(0.3)
+        assert transitioned, (
+            "wrapper did not transition the card after parent-group SIGTERM — "
+            f"pipeline stalled. hermes calls: {_log_lines(hermes_log)}"
+        )
+        # validator relay COMPLETES the card on the CONFIRMED prose verdict.
+        full = "\n".join(_log_lines(hermes_log))
+        assert "complete t_test123" in full and "CONFIRMED" in full, full
+    finally:
+        for sig in (signal.SIGKILL,):
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except Exception:
+                pass
+        try:
+            proc.communicate(timeout=10)
+        except Exception:
+            proc.kill()
+        # Reap any surviving detached wrapper.
+        if wrapper_pid_file.exists():
+            raw = wrapper_pid_file.read_text().strip()
+            if raw.isdigit():
+                try:
+                    os.kill(int(raw), signal.SIGKILL)
+                except Exception:
+                    pass
