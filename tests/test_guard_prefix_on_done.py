@@ -57,6 +57,15 @@ def _run_guard(disp, fk: FakeKanban, **kwargs) -> int:
     ("security-analyst-daedalus", "security-approved: PR #42"),
     ("security-analyst-daedalus", "security-changes-requested: CVE found"),
     ("security-analyst-daedalus", "security: cleared — no vulnerabilities"),
+    # #1350: reasonable local-model verdict variance is accepted (no churn).
+    ("security-analyst-daedalus", "security: passed"),
+    ("security-analyst-daedalus", "SECURITY: no vulnerabilities found"),
+    ("security-analyst-daedalus", "SECURITY REVIEW: approved"),
+    ("security-analyst-daedalus", "security-analyst: cleared"),
+    ("security-analyst-daedalus", "no vulnerabilities found"),
+    ("reviewer-daedalus",         "lgtm everything looks great"),
+    ("reviewer-daedalus",         "approved — LGTM"),
+    ("qa-daedalus",               "passed: all suites green"),
     ("accessibility-daedalus",    "approved: WCAG 2.1 AA"),
     ("accessibility-daedalus",    "a11y-approved: PR #42"),
     ("accessibility-daedalus",    "accessibility-na: PR #42"),
@@ -85,8 +94,7 @@ def test_guard_does_not_fire_for_well_formed_done_card(role, summary):
     ("qa-daedalus",               "all tests pass — checked out"),    # missing qa-passed: prefix
     ("qa-daedalus",               ""),                                 # empty summary
     ("reviewer-daedalus",         "reviewed: approved"),              # legacy template form
-    ("reviewer-daedalus",         "lgtm everything looks great"),     # not a canonical prefix
-    ("security-analyst-daedalus", "no vulnerabilities found"),        # not a canonical prefix
+    ("security-analyst-daedalus", "investigating the auth flow"),     # narration, no verdict
     ("accessibility-daedalus",    "the PR is approved for a11y"),     # 'approved' mid-string
     ("documentation-daedalus",    "docs: posted completion report"),  # old template form (colon vs space)
     ("documentation-daedalus",    "posted: docs for PR #42"),         # 'docs posted' not at start
@@ -298,3 +306,81 @@ def test_guard_fires_for_legacy_done_card_on_open_issue():
     assert reason.startswith("coding-agent-failed:"), (
         f"Expected 'coding-agent-failed:' prefix, got: {reason!r}"
     )
+
+
+# ── #1350: local-model verdict variance accepted without churn (AC1) ──────────
+
+
+@pytest.mark.parametrize("summary", [
+    "security: passed",
+    "SECURITY: no vulnerabilities found",
+    "SECURITY REVIEW: approved",
+    "security-analyst: cleared",
+    "Security Analysis: cleared — no issues",
+])
+def test_guard_accepts_local_model_security_variance(summary):
+    """Reasonable local-LLM security verdict variance must not trip the guard (#1350 AC1)."""
+    disp = _load_dispatch()
+    fk = FakeKanban()
+    _seed_done(fk, "security-analyst-daedalus", 42, summary)
+
+    count = _run_guard(disp, fk)
+
+    assert count == 0, f"Guard should accept local-model variance: {summary!r}"
+    assert len(fk.archived) == 0
+    assert len(fk.created) == 0
+
+
+# ── #1350: dedup — at most one done card per (issue, role) (AC3) ──────────────
+
+
+def test_dedup_archives_duplicate_done_gate_card():
+    """Two done cards for the same (issue, role) collapse to one; no recreate (#1350 AC3)."""
+    disp = _load_dispatch()
+    fk = FakeKanban()
+    first = _seed_done(fk, "security-analyst-daedalus", 42, "security-approved: PR #42")
+    second = _seed_done(fk, "security-analyst-daedalus", 42, "security-approved: PR #42")
+
+    count = _run_guard(disp, fk)
+
+    # No guard trigger (both well-formed) and exactly one duplicate archived.
+    assert count == 0
+    assert len(fk.archived) == 1, "Exactly one duplicate done card archived"
+    assert len(fk.created) == 0, "Dedup must NOT recreate a replacement card"
+    # The most-recent card survives; the older duplicate is archived.
+    assert fk.archived == [first]
+    assert fk.tasks[second]["status"] == "done"
+
+
+def test_dedup_keeps_well_formed_over_botched_duplicate():
+    """When duplicates disagree, the well-formed completion survives, the botched one is archived."""
+    disp = _load_dispatch()
+    fk = FakeKanban()
+    good = _seed_done(fk, "reviewer-daedalus", 7, "review-approved: PR #7")
+    botched = _seed_done(fk, "reviewer-daedalus", 7, "still thinking about it")
+
+    count = _run_guard(disp, fk)
+
+    # The botched card is a duplicate → archived by dedup WITHOUT a recreate,
+    # so the guard never fires and no coding-agent-failed card is spawned.
+    assert count == 0
+    assert botched in fk.archived
+    assert good not in fk.archived
+    assert len(fk.created) == 0, "Dedup archives the duplicate without recreating"
+
+
+def test_no_duplicate_gate_cards_accumulate_on_clean_run():
+    """A clean single-card completion per role leaves the board untouched (#1350 AC2)."""
+    disp = _load_dispatch()
+    fk = FakeKanban()
+    _seed_done(fk, "qa-daedalus", 9, "qa-passed: PR #9")
+    _seed_done(fk, "reviewer-daedalus", 9, "review-approved: PR #9")
+    _seed_done(fk, "security-analyst-daedalus", 9, "security: cleared")
+    _seed_done(fk, "documentation-daedalus", 9, "docs posted: PR #9")
+
+    count = _run_guard(disp, fk)
+
+    assert count == 0
+    assert len(fk.archived) == 0
+    assert len(fk.created) == 0
+    assert len(fk.blocked_calls) == 0
