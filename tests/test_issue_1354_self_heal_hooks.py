@@ -27,7 +27,11 @@ if str(_repo_root) not in sys.path:
 
 from conftest import _load_dispatch  # noqa: E402
 
-_HOOK_FILES = ("daedalus-advance.sh", "daedalus_resolve_project.py", "daedalus-ready.sh")
+_HOOK_FILES = (
+    "daedalus-advance.sh",
+    "daedalus_resolve_project.py",
+    "daedalus-ready.sh",
+)
 
 
 @pytest.fixture
@@ -93,8 +97,10 @@ class TestSelfHealAgentHooks:
         for name in _HOOK_FILES:
             (hooks_dir / name).write_text(_source_text(name))
 
-        with mock.patch("scripts.postinstall._install_advance_hook") as adv, \
-             mock.patch("scripts.postinstall._install_webhook_handler") as wh:
+        with (
+            mock.patch("scripts.postinstall._install_advance_hook") as adv,
+            mock.patch("scripts.postinstall._install_webhook_handler") as wh,
+        ):
             healed = disp._self_heal_agent_hooks()
 
         assert healed is False
@@ -109,8 +115,10 @@ class TestSelfHealAgentHooks:
         # Isolated HERMES_HOME (as the conftest sets) — NOT HOME/.hermes.
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated" / "hermes-home"))
 
-        with mock.patch("scripts.postinstall._install_advance_hook") as adv, \
-             mock.patch("scripts.postinstall._install_webhook_handler") as wh:
+        with (
+            mock.patch("scripts.postinstall._install_advance_hook") as adv,
+            mock.patch("scripts.postinstall._install_webhook_handler") as wh,
+        ):
             healed = disp._self_heal_agent_hooks()
 
         assert healed is False
@@ -133,7 +141,11 @@ class TestSelfHealAgentHooks:
     def test_run_invokes_self_heal(self, disp, monkeypatch):
         """run() calls the self-heal once per tick before the dispatch body."""
         called = {"n": 0}
-        monkeypatch.setattr(disp, "_self_heal_agent_hooks", lambda: called.__setitem__("n", called["n"] + 1))
+        monkeypatch.setattr(
+            disp,
+            "_self_heal_agent_hooks",
+            lambda: called.__setitem__("n", called["n"] + 1),
+        )
         monkeypatch.setattr(disp, "_run_tick", lambda *a, **k: {"ok": True})
         result = disp.run({"repo": "x/y"})
         assert result == {"ok": True}
