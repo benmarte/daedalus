@@ -1,3 +1,5 @@
+## [feat/docs: document supported local models + preflight developer-stage capability (qwen3.6 crash-loops)](https://github.com/benmarte/daedalus/issues/1351) — [PR #1358](https://github.com/benmarte/daedalus/pull/1358)
+
 ## [Pipeline stalls: daedalus-delegate.sh killed by Hermes SIGTERM before kanban transition](https://github.com/benmarte/daedalus/issues/1356) — [PR #1357](https://github.com/benmarte/daedalus/pull/1357)
 
 ## [direct_delegate integration: daedalus must be the sole dispatcher for FRESH cards (daemon + iterate-gating + tick-cache)](https://github.com/benmarte/daedalus/issues/1339) — [PR #1340](https://github.com/benmarte/daedalus/pull/1340)
