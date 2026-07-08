@@ -38,6 +38,15 @@ tracking:
   #                   # so 30 min = 6 missed beats = a confident dead worker).
   #   reset: true     # true (default): auto-reclaim (re-block crash-class →
   #                   # re-dispatch). false: warn-only, no reclaim.
+  #
+  # Merged-issue orphan sweep (issue #1373): the one-shot merged-PR reap runs
+  # once (when the developer card lands), but triage-recovery / guard-prefix
+  # machinery can mint `[recover N]` / `guard:` cards AFTER that reap, orphaning
+  # them in `blocked` forever. Each tick this sweep archives any such non-terminal
+  # card whose issue's PR is merged (checked against the provider, not the board's
+  # Done column). Enabled by default; set enabled: false to disable.
+  # merged_orphan_sweep:
+  #   enabled: true
 
 # ── VCS provider ──────────────────────────────────────────────────────────────
 # All access is via token-authenticated HTTPS APIs. Tokens come ONLY from
@@ -397,6 +406,37 @@ planner:
 pipeline:
   # upfront_dag: false
   # native_gates: false
+
+  # ── Developer PR grace window (#1375) ─────────────────────────────────────
+  # developer_pr_grace_secs (default: 120)
+  #   After the developer's inner coding-agent process exits, delegate.sh checks
+  #   for the opened PR on its branch. A slow-but-healthy developer is frequently
+  #   still mid-`gh pr create` at exit — indistinguishable from a dead one by a
+  #   single check. Declaring `coding-agent-failed` immediately makes crash-retry
+  #   re-spawn a SECOND developer onto the same branch/worktree while the first is
+  #   still finishing (concurrent-delegate data-loss hazard, observed on #1371).
+  #   So when the first check finds no PR, delegate.sh polls for up to this many
+  #   seconds before concluding failure; a PR that appears in-window completes
+  #   normally with `PR #N opened`. Set to 0 to disable the grace poll (revert to
+  #   the pre-#1375 immediate-fail behaviour).
+  # developer_pr_grace_secs: 120
+
+  # ── Accessibility-stage UI gate (#1371) ──────────────────────────────────
+  # The accessibility review only adds value for PRs that touch UI. The
+  # downstream fan-out tests the developer's PR diff (changed files) against
+  # this fileset: a backend-only PR (no match) creates NO accessibility card
+  # and spawns no accessibility agent — the determination is deterministic, so
+  # we no longer pay a (crash-prone) agent spawn just to conclude "no UI".
+  # UI-touching PRs are unaffected (accessibility card still created). Fail-open:
+  # if the PR diff can't be fetched, the accessibility card is created anyway.
+  #
+  # Both keys are optional; when omitted the built-in defaults below are used.
+  # A file counts as UI when its name ends with one of `ui_extensions` OR
+  # matches one of `ui_globs` (`**` = any dirs, `*` = one path segment).
+  # accessibility:
+  #   ui_extensions: [".jsx", ".tsx", ".vue", ".svelte", ".css", ".scss",
+  #                   ".sass", ".less", ".html", ".htm"]
+  #   ui_globs: ["dashboard/src/**", "**/components/**", "**/*.stories.*"]
 
   # ── Label-protocol projection (#1292) ────────────────────────────────────
   # label_projection (default: false — behaviour unchanged)

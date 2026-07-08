@@ -126,6 +126,22 @@ role's task and auto-attaches the matching `autonomous-ai-agents/<agent>` skill,
 local LLM pipes the task to the coding agent and relays its output as the completion signal.
 See the [README](README.md#delegating-to-claude-code-or-codex) for the full reference.
 
+### Supported local models (when `coding_agent: hermes`)
+Full hands-off autonomy on the **local** path is **model-dependent** — the model has to be
+strong enough to carry the *developer* stage (plan → edit → test → open PR), which is the
+make-or-break role. A model that stalls there strands the pipeline.
+
+- ✅ **Ornith-1.0-35B — known-good baseline.** Completes validator → … → docs → auto-merge
+  hands-off (verified in the E2E matrix). Run a model **at least this capable** for
+  unattended local autonomy.
+- ❌ **qwen3.6 — known-weak.** Crash-loops at the developer stage and cannot reliably
+  produce a PR. If this (or a comparably weak model) is your local default, delegate the
+  coding-heavy roles to an external agent (see above) instead.
+
+The dispatcher logs a single **warn-only** heads-up each tick when the `hermes` path is
+configured with a known-weak model — it never blocks dispatch. See the
+[README](README.md#supported-local-models) for the capability table.
+
 ## Project conventions the agents MUST follow (example)
 > These are repo-specific. Encode them in the triage-card body (the dispatcher's
 > `vcs.target_branch` drives the base branch) — the roster provisioner stays

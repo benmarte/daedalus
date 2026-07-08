@@ -98,28 +98,53 @@ def _on_session_end(session_id, completed, interrupted, model, platform, **kwarg
     threading.Thread(target=_run, name="daedalus-advance", daemon=True).start()
 
 
-def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
-    """Sync the global Hermes model config into the profile before it runs.
+def _iter_daedalus_profiles(hermes_home: str) -> "list[str]":
+    """Return the names of every ``*-daedalus`` profile under ``hermes_home``.
 
-    Fires when any kanban task is claimed. For daedalus profiles (name ends
-    with '-daedalus'), copies model/providers/fallback_providers/custom_providers
-    from ~/.hermes/config.yaml into the profile's config.yaml so the profile
+    Sorted for deterministic ordering. Returns an empty list when the profiles
+    directory is missing. Never raises.
+    """
+    profiles_dir = os.path.join(hermes_home, "profiles")
+    try:
+        if not os.path.isdir(profiles_dir):
+            return []
+        return sorted(
+            name
+            for name in os.listdir(profiles_dir)
+            if name.endswith("-daedalus")
+            and os.path.isdir(os.path.join(profiles_dir, name))
+        )
+    except OSError:
+        return []
+
+
+def _sync_profile_model(profile_name: str, hermes_home: Optional[str] = None) -> bool:
+    """Copy the global Hermes model config into one ``*-daedalus`` profile.
+
+    Shared core of both the ``kanban_task_claimed`` JIT hook and the
+    ``on_model_change`` eager hook (ADR-007, issues #1367 / #1368). Copies
+    model/providers/fallback_providers/custom_providers from
+    ``~/.hermes/config.yaml`` into the profile's config.yaml so the profile
     always uses whatever model is selected in Hermes — no manual re-provisioning
     needed after a model switch.
 
-    Per-profile override: set ``_daedalus_model_override: true`` in the
-    profile's config.yaml to opt out and lock that profile to a specific model.
+    Per-profile override: a profile with ``_daedalus_model_override: true`` in
+    its config.yaml is left untouched (locked to a specific model). Only the
+    manual force-sync escape hatch (``core.sync_profiles``) overrides that lock.
+
+    Returns ``True`` when the profile's config.yaml was rewritten, ``False``
+    otherwise (no change, missing config, or override lock). Never raises —
+    exceptions are logged at DEBUG to satisfy the Hermes hook contract.
     """
-    if not assignee or not str(assignee).endswith("-daedalus"):
-        return
     try:
         import yaml
-        hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        if hermes_home is None:
+            hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
         global_cfg_path = os.path.join(hermes_home, "config.yaml")
-        profile_cfg_path = os.path.join(hermes_home, "profiles", str(assignee), "config.yaml")
+        profile_cfg_path = os.path.join(hermes_home, "profiles", str(profile_name), "config.yaml")
 
         if not os.path.isfile(global_cfg_path) or not os.path.isfile(profile_cfg_path):
-            return
+            return False
 
         with open(global_cfg_path) as f:
             global_cfg = yaml.safe_load(f) or {}
@@ -127,7 +152,7 @@ def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
             profile_cfg = yaml.safe_load(f) or {}
 
         if profile_cfg.get("_daedalus_model_override"):
-            return
+            return False
 
         sync_keys = ("model", "providers", "fallback_providers", "custom_providers")
         changed = False
@@ -155,9 +180,78 @@ def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
         if changed:
             with open(profile_cfg_path, "w") as f:
                 yaml.safe_dump(profile_cfg, f, default_flow_style=False, sort_keys=False)
-            logger.debug("daedalus: synced model config into profile %s", assignee)
+            logger.debug("daedalus: synced model config into profile %s", profile_name)
+        return changed
     except Exception as exc:
-        logger.debug("daedalus kanban_task_claimed sync failed: %s", exc)
+        logger.debug("daedalus profile model sync failed for %s: %s", profile_name, exc)
+        return False
+
+
+def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
+    """Sync the global Hermes model config into the profile before it runs.
+
+    CANONICAL just-in-time model-sync path (ADR-007, issues #1367 / #1368). Fired
+    in the dispatcher right before each worker spawns, it keeps the one profile
+    about to run on the operator's active model. The eager, all-profile
+    ``on_model_change`` consumer (``_on_model_change``) freshens every profile the
+    instant the model changes; the poll-fingerprint path
+    (``core.dispatch.resolvers._resync_profiles_to_model``) is a demoted fallback
+    and ``core.sync_profiles`` is the manual operator escape hatch.
+
+    Fires when any kanban task is claimed. For daedalus profiles (name ends
+    with '-daedalus'), copies model/providers/fallback_providers/custom_providers
+    from ~/.hermes/config.yaml into the profile's config.yaml so the profile
+    always uses whatever model is selected in Hermes — no manual re-provisioning
+    needed after a model switch.
+
+    Per-profile override: set ``_daedalus_model_override: true`` in the
+    profile's config.yaml to opt out and lock that profile to a specific model.
+    """
+    if not assignee or not str(assignee).endswith("-daedalus"):
+        return
+    _sync_profile_model(str(assignee))
+
+
+def _on_model_change(
+    old_model=None,
+    new_model=None,
+    old_provider=None,
+    new_provider=None,
+    source=None,
+    **kwargs,
+):
+    """Eagerly resync every ``*-daedalus`` profile when Hermes' global model changes.
+
+    Consumer for the upstream ``on_model_change`` hook (issue #1368, ADR-007).
+    Hermes fires this — observer-only, AFTER the new value is durably written to
+    ``config.yaml`` — from every model-mutation chokepoint (``hermes model``, the
+    Config web page save path, ``hermes config set model.*``). Unlike the
+    ``kanban_task_claimed`` JIT hook (which only freshens the one profile about to
+    run), this loops over EVERY ``*-daedalus`` profile so a profile that never
+    gets claimed is still updated the moment the operator switches models —
+    letting the poll-fingerprint fallback be retired once the hook is proven.
+
+    Per-profile ``_daedalus_model_override`` locks are respected (the shared
+    ``_sync_profile_model`` skips them); only ``core.sync_profiles`` force-sync
+    overrides a lock.
+
+    Registered forward-compatibly: Hermes stores unknown hook names (warns but
+    keeps them) and will begin firing this once the upstream hook lands, so
+    registering it ahead of that release is inert and safe. Never raises, to
+    satisfy the Hermes hook contract.
+    """
+    try:
+        hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        synced = sum(
+            1 for name in _iter_daedalus_profiles(hermes_home)
+            if _sync_profile_model(name, hermes_home)
+        )
+        logger.info(
+            "daedalus: on_model_change resynced %d profile(s) (%s → %s, source=%s)",
+            synced, old_model, new_model, source,
+        )
+    except Exception:
+        logger.debug("daedalus on_model_change sync failed", exc_info=True)
 
 
 def _read_env_value(env_path: str, key: str) -> Optional[str]:
@@ -545,8 +639,10 @@ def register(ctx) -> None:
     can configure its provider/model independently of the main chat model.
     Also registers an on_session_end hook so any worker completion triggers
     dispatch immediately instead of waiting for the next 60-min cron tick,
-    and a kanban_task_claimed hook to keep daedalus profile model configs
-    in sync with the global Hermes model selection.
+    a kanban_task_claimed hook to keep the profile about to run in sync with
+    the global Hermes model selection, and an on_model_change hook (#1368) that
+    eagerly resyncs every daedalus profile the instant the operator switches
+    models (forward-compatible — inert until the upstream Hermes hook lands).
 
     Finally, it self-heals the host environment on every load: installs the
     httpx dependency if it's missing (Hermes provides no post-install hook —
@@ -566,6 +662,9 @@ def register(ctx) -> None:
         )
         ctx.register_hook("on_session_end", _on_session_end)
         ctx.register_hook("kanban_task_claimed", _on_kanban_task_claimed)
+        # Eager, all-profile model sync (#1368). Forward-compatible: Hermes stores
+        # unknown hook names and begins firing this once the upstream hook lands.
+        ctx.register_hook("on_model_change", _on_model_change)
     except Exception:
         logger.debug("daedalus register() failed", exc_info=True)
 

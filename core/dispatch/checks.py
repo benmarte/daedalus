@@ -2211,6 +2211,10 @@ def _check_completed_pm(
         getattr(d, "_has_downstream_tasks", _has_downstream_tasks)
         if d else _has_downstream_tasks
     )
+    _dev_state_fn = (
+        getattr(d, "_developer_task_state", _developer_task_state)
+        if d else _developer_task_state
+    )
     _fetch_issue = (
         getattr(d, "_fetch_issue_with_retry", _fetch_issue_with_retry_impl)
         if d else _fetch_issue_with_retry_impl
@@ -2266,7 +2270,22 @@ def _check_completed_pm(
         if _has_downstream(
             slug, n, validator_profile=p["validator"], pm_profile=p["pm"]
         ):
-            continue  # team triage already exists
+            continue  # team triage already exists (active card)
+        # #1349: distinguish a genuinely-completed pipeline (terminal cards from
+        # THIS cycle) from stale cards left by a crashed prior cycle. A done
+        # developer card carrying a PR number proves the team already ran to
+        # completion — do NOT re-enter team creation on every subsequent tick.
+        # Stale/empty done developer cards (no PR) still fall through so the epic
+        # #1008 re-triage path keeps working. _has_downstream_tasks stays
+        # status-blind (unchanged) for its other callers.
+        _dev_state, _ = _dev_state_fn(slug, n, developer_profile=p["developer"])
+        if _dev_state == "complete":
+            logger.debug(
+                "dispatch: PM #%s pipeline already completed (developer PR "
+                "present) — skipping team re-trigger",
+                n,
+            )
+            continue
         issue = issues_map.get(n)
         if not issue and provider is not None:
             fetched = _fetch_issue(provider, n)
@@ -2833,6 +2852,149 @@ _DONE_GUARD_PREFIXES: Dict[str, tuple] = {
 _GUARD_PREFIX_IK_PREFIX = "guard-prefix-"
 
 
+# ── #1350: broad completion-signal vocabulary + dedup ─────────────────────────
+# The colon-terminated whitelist above (_DONE_GUARD_PREFIXES) is too brittle for
+# local models (Ornith-35B et al.), which emit reasonable verdict variance the
+# whitelist rejects — e.g. ``security: passed``, ``SECURITY: no vulnerabilities
+# found``, ``SECURITY REVIEW: approved``, ``security-analyst: cleared``. The
+# guard then archives + recreates the card, and F11 end-of-tick dispatch re-runs
+# it, producing duplicate gate cards and merge-gate latency.
+#
+# ``_ROLE_COMPLETION_SIGNALS`` is the accept vocabulary: a SUPERSET of the
+# canonical prefixes AND the advance-gate approval/fail tokens in
+# ``core/iterate/executors.py`` (``_reviewer_passed_for_issue`` /
+# ``_security_passed_for_issue`` etc.). Being a superset guarantees that nothing
+# the routing layer would recognise as a verdict is rejected by the guard, so we
+# never trade churn for a stall. Tokens are matched with ``startswith`` (never
+# mid-string, preserving the #1125 F1 anti-false-positive rule) against the
+# lowercased summary AND a label-stripped variant.
+_ROLE_COMPLETION_SIGNALS: Dict[str, tuple] = {
+    "qa-daedalus": (
+        "qa-passed", "qa-failed", "qa-deferred",
+        "passed", "failed", "deferred",
+    ),
+    "reviewer-daedalus": (
+        "review-approved", "review-changes-requested",
+        "approved", "changes-requested", "changes requested",
+        "lgtm", "sign-off", "signoff", "looks good", "no findings",
+    ),
+    "security-analyst-daedalus": (
+        "security-approved", "security-changes-requested",
+        "security-passed", "security passed", "security approved",
+        "security: cleared", "security cleared",
+        "approved", "cleared", "passed", "flagged",
+        "changes-requested", "changes requested",
+        "no findings", "no vulnerab",
+    ),
+    "accessibility-daedalus": (
+        "approved", "a11y-approved", "accessibility-na", "a11y-na",
+        "a11y-skipped", "skipped",
+        "changes requested", "changes-requested", "a11y-changes-requested",
+    ),
+    "documentation-daedalus": (
+        "docs posted", "docs-posted", "documentation posted",
+    ),
+}
+
+# A leading ``<label>:`` the global ``_strip_role_label`` intentionally preserves
+# because bare ``security:`` is itself a valid signal (``security: cleared``).
+# The guard strips these role-ish labels as an EXTRA candidate variant only, so
+# ``SECURITY REVIEW: approved`` → ``approved`` matches a verdict token. Colon
+# separator only — this strips prose labels, never a hyphenated signal token.
+_GUARD_LABEL_RE = re.compile(
+    r"^\s*(?:security[-\s]?review|security[-\s]?analysis|security[-\s]?analyst|"
+    r"security|accessibility[-\s]?review|a11y[-\s]?review|"
+    r"reviewer|review|qa|documentation|docs)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _guard_signal_ok(assignee: str, summary_lowered: str) -> bool:
+    """True if a done gate card's summary carries a recognised role verdict (#1350).
+
+    ``summary_lowered`` is the lowercased, ``lstrip``-ped summary (already run
+    through the global :func:`_strip_role_label`). Matched with ``startswith``
+    against the broad :data:`_ROLE_COMPLETION_SIGNALS` vocabulary, on both the
+    summary as-is AND a variant with a leading role-ish label stripped, so
+    local-model prefix variance (``SECURITY: no vulnerabilities found``,
+    ``security-analyst: cleared``) is accepted without archive+recreate churn.
+    """
+    signals = _ROLE_COMPLETION_SIGNALS.get(assignee)
+    if not signals or not summary_lowered:
+        return False
+    candidates = [summary_lowered]
+    stripped = _GUARD_LABEL_RE.sub("", summary_lowered, count=1).lstrip()
+    if stripped and stripped != summary_lowered:
+        candidates.append(stripped)
+    return any(c.startswith(sig) for c in candidates for sig in signals)
+
+
+def _dedup_done_gate_cards(
+    slug: str,
+    done_tasks: List[Dict[str, Any]],
+    guarded_profiles: Dict[str, tuple],
+    *,
+    dry_run: bool = False,
+) -> tuple:
+    """Enforce at most one done card per (issue, guarded-role) (#1350 AC3).
+
+    Groups done gate cards by (issue number, assignee). For any group with more
+    than one card, keeps a single survivor — preferring a well-formed completion
+    (:func:`_guard_signal_ok`), tie-broken by most-recent (highest card id) — and
+    archives the rest WITHOUT recreating a replacement (they are duplicates, not
+    failures). Returns ``(survivors, archived_count)`` where ``survivors`` is the
+    de-duplicated done-card list the prefix guard then scans.
+    """
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    passthrough: List[Dict[str, Any]] = []
+    for task in done_tasks:
+        assignee = (task.get("assignee") or "").strip()
+        if assignee not in guarded_profiles:
+            passthrough.append(task)
+            continue
+        n = extract_issue_number(task.get("title") or "")
+        if n is None:
+            passthrough.append(task)
+            continue
+        groups.setdefault((n, assignee), []).append(task)
+
+    def _card_id(t: Dict[str, Any]) -> str:
+        return str(t.get("id") or t.get("task_id") or "")
+
+    def _recency_key(t: Dict[str, Any]) -> tuple:
+        # Prefer numeric suffix ordering (t1 < t2 < … < t10); fall back to string.
+        cid = _card_id(t)
+        m = re.search(r"(\d+)$", cid)
+        return (int(m.group(1)) if m else -1, cid)
+
+    survivors: List[Dict[str, Any]] = list(passthrough)
+    archived = 0
+    for (n, assignee), cards in groups.items():
+        if len(cards) == 1:
+            survivors.append(cards[0])
+            continue
+        # Choose the survivor: well-formed completions first, then most recent.
+        def _rank(t: Dict[str, Any]) -> tuple:
+            summ = (_get_task_summary(t, slug) or "").lower().lstrip()
+            return (_guard_signal_ok(assignee, summ), _recency_key(t))
+        ordered = sorted(cards, key=_rank)
+        keeper = ordered[-1]
+        survivors.append(keeper)
+        for dup in ordered[:-1]:
+            tid = _card_id(dup)
+            logger.warning(
+                "dispatch: dedup_done_gate_cards: archiving duplicate %s done card "
+                "%s for issue #%s (keeping %s)",
+                assignee, tid, n, _card_id(keeper),
+            )
+            if dry_run:
+                archived += 1
+                continue
+            if tid and _kanban().archive_task(slug, tid):
+                archived += 1
+    return survivors, archived
+
+
 def _guard_prefix_on_done(
     slug: str,
     profiles: Optional[Dict[str, str]] = None,
@@ -2894,8 +3056,21 @@ def _guard_prefix_on_done(
         if active_profile in _DONE_GUARD_PREFIXES:
             profile_to_prefixes[active_profile] = _DONE_GUARD_PREFIXES[active_profile]
 
+    # #1350 AC3: collapse duplicate done cards for the same (issue, role) to a
+    # single survivor BEFORE the prefix scan, so churn from a prior tick can
+    # never accumulate two ``security-analyst:done`` cards on the board.
+    done_tasks, deduped = _dedup_done_gate_cards(
+        slug, _kanban().list_tasks(slug, status="done"), profile_to_prefixes,
+        dry_run=dry_run,
+    )
+    if deduped:
+        logger.info(
+            "dispatch: guard_prefix_on_done: de-duplicated %d done gate card(s)",
+            deduped,
+        )
+
     triggered = 0
-    for task in _kanban().list_tasks(slug, status="done"):
+    for task in done_tasks:
         assignee = (task.get("assignee") or "").strip()
         expected_prefixes = profile_to_prefixes.get(assignee)
         if expected_prefixes is None:
@@ -2935,8 +3110,13 @@ def _guard_prefix_on_done(
 
         # Well-formed completion check depends on protocol.prefix_fallback.
         if prefix_fallback:
-            # Phase-1/2 (default): prefix line satisfies the guard.
-            if any(summary_check.startswith(pf.lower()) for pf in expected_prefixes):
+            # Phase-1/2 (default): a recognised role verdict satisfies the guard.
+            # #1350: matched against the broad _ROLE_COMPLETION_SIGNALS vocabulary
+            # (canonical prefixes ∪ advance-gate tokens) with label-variant
+            # stripping, so local-model prefix variance ('security: passed',
+            # 'SECURITY: no vulnerabilities found', 'security-analyst: cleared')
+            # is accepted without archive+recreate churn.
+            if _guard_signal_ok(assignee, summary_check):
                 continue
         else:
             # Phase-3 (JSON primary): a valid outcome record is required.

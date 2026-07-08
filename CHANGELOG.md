@@ -1,3 +1,31 @@
+## [Capture gate-agent crash diagnostics + confirm bounded crash-recovery convergence](https://github.com/benmarte/daedalus/issues/1372) — [PR #1378](https://github.com/benmarte/daedalus/pull/1378)
+
+## [Reap orphaned triage-recovery / guard: cards after issue merge](https://github.com/benmarte/daedalus/issues/1373) — [PR #1377](https://github.com/benmarte/daedalus/pull/1377)
+
+## [Developer stage double-dispatch: false-failure re-spawn causes concurrent delegates + QA-before-PR churn](https://github.com/benmarte/daedalus/issues/1375) — [PR #1376](https://github.com/benmarte/daedalus/pull/1376)
+
+## [Gate accessibility stage on real UI changes (skip creation for backend-only PRs)](https://github.com/benmarte/daedalus/issues/1371) — [PR #1374](https://github.com/benmarte/daedalus/pull/1374)
+
+## [Add upstream Hermes on_model_change hook so Daedalus can retire poll-based profile sync](https://github.com/benmarte/daedalus/issues/1368) — [PR #1370](https://github.com/benmarte/daedalus/pull/1370)
+
+## [Investigate Hermes API for detecting model changes to sync Daedalus profiles](https://github.com/benmarte/daedalus/issues/1367) — [PR #1369](https://github.com/benmarte/daedalus/pull/1369)
+
+## [feat: add a --version flag to the dispatcher CLI](https://github.com/benmarte/daedalus/issues/1328) — [PR #1366](https://github.com/benmarte/daedalus/pull/1366)
+
+## [fix: gate cards flap/duplicate on local-LLM runs due to inconsistent role-signal prefixes (guard_prefix churn)](https://github.com/benmarte/daedalus/issues/1350) — [PR #1365](https://github.com/benmarte/daedalus/pull/1365)
+
+## [fix: PM re-triggers every tick after a pipeline fully completes (_has_downstream_tasks ignores terminal cards)](https://github.com/benmarte/daedalus/issues/1349) — [PR #1364](https://github.com/benmarte/daedalus/pull/1364)
+
+## [fix: auto-merge gate blocks legit merges when gate-card summary is JSON-only (_role_gate_passed startswith misses structured verdict)](https://github.com/benmarte/daedalus/issues/1360) — [PR #1363](https://github.com/benmarte/daedalus/pull/1363)
+
+## [postinstall never runs after 'hermes plugins update' — advance hook goes stale, pipeline stalls](https://github.com/benmarte/daedalus/issues/1354) — [PR #1355](https://github.com/benmarte/daedalus/pull/1355)
+
+## [direct_delegate: accessibility cards (iterate.py downstream) lack delegation marker → not dispatchable](https://github.com/benmarte/daedalus/issues/1344) — [PR #1359](https://github.com/benmarte/daedalus/pull/1359)
+
+## [feat/docs: document supported local models + preflight developer-stage capability (qwen3.6 crash-loops)](https://github.com/benmarte/daedalus/issues/1351) — [PR #1358](https://github.com/benmarte/daedalus/pull/1358)
+
+## [Pipeline stalls: daedalus-delegate.sh killed by Hermes SIGTERM before kanban transition](https://github.com/benmarte/daedalus/issues/1356) — [PR #1357](https://github.com/benmarte/daedalus/pull/1357)
+
 ## [direct_delegate integration: daedalus must be the sole dispatcher for FRESH cards (daemon + iterate-gating + tick-cache)](https://github.com/benmarte/daedalus/issues/1339) — [PR #1340](https://github.com/benmarte/daedalus/pull/1340)
 
 ## [provision_roster.sh: persist per-role platform_toolsets.cli so the toolset trim survives re-provisioning](https://github.com/benmarte/daedalus/issues/1319) — [PR #1322](https://github.com/benmarte/daedalus/pull/1322)

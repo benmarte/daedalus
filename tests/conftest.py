@@ -617,6 +617,8 @@ class FakeProvider:
         close_issue_fail_for: Optional[set[int]] = None,
         post_issue_comment_fail_for: Optional[set[int]] = None,
         board_configured: bool = False,
+        pr_files: Optional[Dict[int, List[str]]] = None,
+        get_pr_files_raises: bool = False,
     ) -> None:
         self.name = name
         # #1290: arbiter/enforcement tests need a "configured" board. Default
@@ -651,6 +653,23 @@ class FakeProvider:
         # records it here; add_label tracks labels per issue number.
         self.created_issues: List[Dict[str, Any]] = []
         self.labels: Dict[int, List[str]] = {}
+        # #1371: changed-file lists per PR number for the accessibility UI gate.
+        # Maps pr_number → [filename, ...]; a PR absent from the map returns [].
+        self._pr_files: Dict[int, List[str]] = pr_files or {}
+        self._get_pr_files_raises = get_pr_files_raises
+        self.get_pr_files_calls: List[int] = []
+
+    def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
+        """Return changed files for *pr_number* as provider-shaped dicts (#1371).
+
+        Mirrors the real provider's ``get_pr_files`` — each entry carries at
+        least ``filename``. ``get_pr_files_raises`` simulates a provider error so
+        tests can exercise the fail-open path.
+        """
+        self.get_pr_files_calls.append(pr_number)
+        if self._get_pr_files_raises:
+            raise RuntimeError("simulated provider error")
+        return [{"filename": f} for f in self._pr_files.get(pr_number, [])]
 
     def get_pr_ci_status(self, pr_number: int) -> str:
         if isinstance(self._ci, dict):

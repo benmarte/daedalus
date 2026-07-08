@@ -329,3 +329,89 @@ def detect_file_overlap(
         "matched_files": matched_files,
         "matched_keywords": matched_keywords if overlaps else [],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI-fileset detection (#1371) — gate the accessibility stage on real UI changes
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default extensions that mark a changed file as "UI". Lower-case, dot-prefixed.
+# Configurable via ``pipeline.accessibility.ui_extensions`` in daedalus.yaml.
+DEFAULT_UI_EXTENSIONS: tuple[str, ...] = (
+    ".jsx", ".tsx", ".vue", ".svelte",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".htm",
+)
+
+# Default path globs that mark a changed file as "UI" regardless of extension.
+# Configurable via ``pipeline.accessibility.ui_globs`` in daedalus.yaml.
+# ``**`` matches any run of characters (including path separators); ``*`` matches
+# any run of non-separator characters; a leading ``**/`` also matches at the repo
+# root (zero intermediate directories).
+DEFAULT_UI_GLOBS: tuple[str, ...] = (
+    "dashboard/src/**",
+    "**/components/**",
+    "**/*.stories.*",
+)
+
+
+def _compile_ui_glob(pattern: str) -> re.Pattern[str]:
+    """Compile a shell-style path glob into an anchored regex.
+
+    Supports ``**`` (any chars incl. ``/``), ``*`` (any non-``/`` chars) and
+    ``?`` (a single non-``/`` char). A leading ``**/`` is optional so it also
+    matches paths at the repo root. Everything else is matched literally.
+    """
+    regex = ""
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern.startswith("**/", i):
+            regex += r"(?:.*/)?"
+            i += 3
+        elif pattern.startswith("**", i):
+            regex += r".*"
+            i += 2
+        elif pattern[i] == "*":
+            regex += r"[^/]*"
+            i += 1
+        elif pattern[i] == "?":
+            regex += r"[^/]"
+            i += 1
+        else:
+            regex += re.escape(pattern[i])
+            i += 1
+    return re.compile("^" + regex + "$")
+
+
+def is_ui_file(
+    filename: str,
+    *,
+    extensions: "tuple[str, ...] | list[str] | None" = None,
+    globs: "tuple[str, ...] | list[str] | None" = None,
+) -> bool:
+    """Return True if *filename* is a UI file per the extension/glob fileset.
+
+    Extension matching is case-insensitive; glob matching runs against the raw
+    (forward-slash) path. Passing ``None`` uses the module defaults.
+    """
+    if not filename:
+        return False
+    exts = DEFAULT_UI_EXTENSIONS if extensions is None else tuple(extensions)
+    patterns = DEFAULT_UI_GLOBS if globs is None else tuple(globs)
+    lower = filename.lower()
+    if any(lower.endswith(ext.lower()) for ext in exts):
+        return True
+    return any(_compile_ui_glob(p).match(filename) for p in patterns)
+
+
+def pr_touches_ui(
+    filenames: "list[str] | tuple[str, ...] | None",
+    *,
+    extensions: "tuple[str, ...] | list[str] | None" = None,
+    globs: "tuple[str, ...] | list[str] | None" = None,
+) -> bool:
+    """Return True if ANY of *filenames* is a UI file per the fileset (#1371)."""
+    if not filenames:
+        return False
+    return any(is_ui_file(f, extensions=extensions, globs=globs) for f in filenames)

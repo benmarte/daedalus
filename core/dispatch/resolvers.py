@@ -99,6 +99,19 @@ _DEFAULT_CODING_AGENT_MAX_TURNS = 100
 # Model prefixes compatible with claude-code.
 _CLAUDE_MODEL_PREFIXES = ("claude", "anthropic/")
 
+# Local models known to crash-loop at the developer stage under the ``hermes``
+# coding_agent delegation path (issue #1351). The developer stage is
+# make-or-break for full local autonomy — a model too weak there cannot reliably
+# produce a PR, stranding the pipeline. Ornith-1.0-35B is the known-good
+# baseline. Entries are compared after lowercasing and stripping non-alphanumeric
+# separators, so "openrouter/qwen3.6", "ollama/qwen3.6:35b", and "qwen3-6" all
+# match the "qwen3.6" entry. Warn-only — this list never blocks dispatch.
+_KNOWN_WEAK_LOCAL_MODELS = ("qwen3.6",)
+
+# Process-level guard so the capability preflight logs at most one warning per
+# distinct model string, no matter how many ticks run in a single process.
+_WARNED_WEAK_MODELS: set[str] = set()
+
 # Sub-issue number extractor (used alongside _SUB_ISSUE_CHECKLIST_RE).
 _SUB_ISSUE_NUM_RE = re.compile(r"#(\d+)")
 
@@ -388,6 +401,55 @@ def _resolve_coding_agent_max_wait(execution: Dict[str, Any]) -> int:
     return val if val > 0 else _DEFAULT_CODING_AGENT_MAX_WAIT
 
 
+def _normalize_model_name(model: Optional[str]) -> str:
+    """Lowercase *model* and strip non-alphanumeric separators.
+
+    Lets a single weak-model entry (``"qwen3.6"``) match provider-prefixed and
+    tag-suffixed identifiers (``"openrouter/qwen3.6"``, ``"ollama/qwen3.6:35b"``,
+    ``"qwen3-6"``) via a lenient substring compare.
+    """
+    return re.sub(r"[^a-z0-9]", "", (model or "").lower())
+
+
+def _preflight_local_model_capability(
+    execution: Dict[str, Any], coding_agent: Optional[str] = None
+) -> Optional[str]:
+    """Warn once when a known-weak local model drives the ``hermes`` coding path.
+
+    The ``hermes`` coding agent runs each pipeline role on the operator's local
+    Hermes profile brains. A model too weak for the developer stage crash-loops
+    and never produces a PR, so full hands-off autonomy silently stalls (#1351).
+
+    This is a **warn-only** preflight: it logs a single warning (deduped per
+    distinct model string via :data:`_WARNED_WEAK_MODELS`) and never blocks
+    dispatch. It applies only to the ``hermes`` coding_agent path — external
+    agents (claude-code/codex/opencode) run their own capable models.
+
+    Returns the matched weak-model string (for tests/telemetry) or ``None``.
+    """
+    agent = coding_agent or _resolve_coding_agent(execution)
+    if agent != "hermes":
+        return None
+    model = _resolve_active_model_provider().get("model")
+    if not model:
+        return None
+    normalized = _normalize_model_name(model)
+    for weak in _KNOWN_WEAK_LOCAL_MODELS:
+        if _normalize_model_name(weak) in normalized:
+            if model not in _WARNED_WEAK_MODELS:
+                _WARNED_WEAK_MODELS.add(model)
+                logger.warning(
+                    "dispatch: configured local model %r is known to crash-loop "
+                    "at the developer stage under coding_agent=hermes (#1351); "
+                    "full hands-off autonomy is unreliable. Use a known-good "
+                    "baseline such as Ornith-1.0-35B, or set an external "
+                    "coding_agent (claude-code/codex/opencode).",
+                    model,
+                )
+            return model
+    return None
+
+
 # ── Numeric pipeline-limit resolvers ─────────────────────────────────────────
 
 
@@ -638,6 +700,14 @@ def _resync_profiles_to_model(
     old_values: Optional[Dict[str, str]],
 ) -> int:
     """Update model.default + model.provider in all *-daedalus Hermes profiles.
+
+    DEMOTED to a fallback (ADR-007, issue #1367): for model sync this is
+    redundant with the canonical ``kanban_task_claimed`` JIT hook
+    (``daedalus/__init__.py:_on_kanban_task_claimed``), which keeps any profile
+    that actually runs fresh at spawn time. This per-tick poll path is retained
+    only because it *also* detects ``coding_agent`` changes and covers profiles
+    that are never claimed within a tick. Its model-sync duty becomes retireable
+    once the upstream ``on_model_change`` hook (#1368) lands.
 
     Skips profiles whose ``model.default`` is non-empty *and* differs from the
     previous global default (``old_values["model_default"]``), treating them as

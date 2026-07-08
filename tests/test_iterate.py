@@ -1590,6 +1590,58 @@ def test_create_downstream_dry_run():
     mk_comment.assert_not_called()
 
 
+def test_create_downstream_delegation_wrapped_when_coding_agent():
+    """#1344: downstream review cards carry the delegation marker when an external
+    coding agent is configured — so ``direct_dispatch`` dispatches them instead of
+    skipping (``_DELEGATION_MARKER not in body``). The accessibility card is the
+    only review role created solely by this path, so it was the sole one to stall.
+    """
+    from core.dispatch.bodies import _DELEGATION_MARKER
+    disp = _load_dispatch()  # noqa: F841 — _disp() finds this frame in the stack
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+        with mock.patch.object(
+            kanban, "create_task",
+            side_effect=["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"],
+        ) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks(
+                    "slug", 19, card, pr_number=22,
+                    coding_agent="claude-code", coding_agent_cmd="claude -p",
+                )
+    bodies = {
+        call.kwargs["idempotency_key"]: call.kwargs["body"]
+        for call in mk_create.call_args_list
+    }
+    check("accessibility body carries the delegation marker",
+          _DELEGATION_MARKER in bodies["accessibility-19"])
+    check("every downstream review body carries the delegation marker",
+          all(_DELEGATION_MARKER in b for b in bodies.values()))
+    # The generic base body must survive the wrap (delegation is additive).
+    check("base body preserved under the delegation wrap",
+          all("CI may still be running" in b for b in bodies.values()))
+
+
+def test_create_downstream_no_delegation_without_coding_agent():
+    """Default path is byte-identical: no external coding agent → plain body, no
+    delegation marker. Guards the non-delegate flow from behaviour drift (#1344)."""
+    from core.dispatch.bodies import _DELEGATION_MARKER
+    card = {"id": "t_dev", "body": "benmarte/daedalus#19", "workspace": "dir:/w"}
+    with mock.patch.object(kanban, "list_tasks", return_value=[]):
+        with mock.patch.object(
+            kanban, "create_task",
+            side_effect=["t_qa", "t_rev", "t_sec", "t_acc", "t_doc"],
+        ) as mk_create:
+            with mock.patch.object(kanban, "comment", return_value=True):
+                iterate._create_downstream_review_tasks("slug", 19, card, pr_number=22)
+    bodies = [call.kwargs["body"] for call in mk_create.call_args_list]
+    check("no delegation marker when no coding agent is configured",
+          all(_DELEGATION_MARKER not in b for b in bodies))
+    check("hermes agent also yields a plain body",
+          iterate._wrap_downstream_delegation(
+              "body-x", "accessibility", 19, "hermes", "") == "body-x")
+
+
 def test_execute_advance_triggers_downstream():
     """_execute_advance calls _create_downstream_review_tasks after completing."""
     card = {

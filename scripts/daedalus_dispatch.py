@@ -155,8 +155,10 @@ from core.dispatch.resolvers import (  # noqa: F401, E402
     _is_epic,
     _is_model_compatible_with_coding_agent,
     _log_resync,
+    _normalize_model_name,
     _notify_targets,
     _parse_follow_ups,
+    _preflight_local_model_capability,
     _resolve_active_model_provider,
     _resolve_agent_for_role,
     _resolve_checklist_threshold,
@@ -2174,6 +2176,40 @@ def _fire_webhook_notification(
     thread.start()
 
 
+def _summarize_crash_telemetry(
+    crash_actions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Per-stage crash telemetry for the dispatch history record (#1372).
+
+    Collapses the crash-retry actions of a tick into two history fields:
+    ``crash_counts_by_role`` (role → number of crash actions, so crash rates
+    per pipeline stage are queryable over time) and ``crash_diagnostics`` (one
+    redacted record per action carrying the captured failure cause). Pure and
+    total — an empty action list yields empty aggregates.
+    """
+    counts_by_role: Dict[str, int] = {}
+    for action in crash_actions:
+        role = action.get("role") or "unknown"
+        counts_by_role[role] = counts_by_role.get(role, 0) + 1
+    diagnostics = [
+        {
+            "task_id": action.get("task_id"),
+            "issue": action.get("issue"),
+            "role": action.get("role") or "unknown",
+            "class": action.get("class") or "crash",
+            "action": action.get("action"),
+            "attempt": action.get("attempt"),
+            "max_attempts": action.get("max_attempts"),
+            "diagnostics": (action.get("diagnostics") or "")[:2000],
+        }
+        for action in crash_actions
+    ]
+    return {
+        "crash_counts_by_role": counts_by_role,
+        "crash_diagnostics": diagnostics,
+    }
+
+
 def _send_crash_retries_exhausted_notification(
     *,
     action: Dict[str, Any],
@@ -2196,6 +2232,9 @@ def _send_crash_retries_exhausted_notification(
     elapsed = action.get("elapsed_minutes")
     last_error = (action.get("summary") or "no failure details")[:300]
     provider_history = (action.get("provider_history") or "").strip()
+    # Redacted worker-log tail captured at escalation (#1372) — the failure
+    # cause, so a human triaging the escalation sees WHY the agent died.
+    diagnostics = (action.get("diagnostics") or "").strip()
     body = (
         "⚠️ **Crash Retries Exhausted**\n\n"
         f"Issue #{issue_n} (card `{task_id}`, {action.get('assignee') or 'unknown'}) "
@@ -2205,6 +2244,11 @@ def _send_crash_retries_exhausted_notification(
         + (
             f"**Per-provider history** (#1207):\n{provider_history}\n"
             if provider_history
+            else ""
+        )
+        + (
+            f"**Diagnostics** (redacted tail):\n```\n{diagnostics[:800]}\n```\n"
+            if diagnostics and diagnostics != last_error
             else ""
         )
         + "**Status**: hard-blocked (`crash-retries-exhausted`) — manual "
@@ -2791,6 +2835,76 @@ def _reconcile_vcs_board(resolved: Dict[str, Any], provider, *, dry_run: bool = 
     return provider, notes
 
 
+# Files that scripts/postinstall.py provisions into ~/.hermes/agent-hooks/.
+# `hermes plugins update daedalus` runs `git pull` + copies *.example files but
+# NEVER re-runs postinstall.py, so these go stale/missing after an update
+# (issue #1354); the self-heal below re-syncs them on drift. Keep in sync with
+# postinstall._install_advance_hook + _install_webhook_handler.
+_AGENT_HOOK_FILES = (
+    "daedalus-advance.sh",
+    "daedalus_resolve_project.py",
+    "daedalus-ready.sh",
+)
+
+
+def _self_heal_agent_hooks() -> bool:
+    """Re-sync postinstall-provisioned agent-hooks when they drift from source.
+
+    `hermes plugins update daedalus` git-pulls + copies *.example files but never
+    invokes scripts/postinstall.py, so new or changed hook scripts under
+    scripts/ are never re-copied to ~/.hermes/agent-hooks/ (issue #1354). A stale
+    or missing daedalus-advance.sh then makes agents' on_session_end advance hook
+    silently fail, stalling the pipeline up to ~60 min until the cron fallback.
+
+    Called once per dispatch tick. On the first tick after an update it detects
+    the drift and re-runs the idempotent installer helpers (which between them
+    cover every agent-hooks file); once current it is a cheap no-op (a few file
+    reads and compares).
+
+    Contract: never raises (log + return on any failure), no network, and skips
+    entirely under test isolation. The conftest points HERMES_HOME at a tmp dir
+    while the installers write to HOME/.hermes; a divergence between the two means
+    we are NOT in a live install, so touching the real home would be wrong.
+
+    Returns True when a re-sync was performed, else False (incl. on skip/failure).
+    """
+    try:
+        real_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+        hermes_home = os.environ.get("HERMES_HOME")
+        if hermes_home and Path(hermes_home).resolve() != (real_home / ".hermes").resolve():
+            # Isolated/test environment — the installers write to HOME/.hermes,
+            # not this HERMES_HOME. Do nothing so tests never touch the real home.
+            return False
+        source_dir = Path(__file__).resolve().parent
+        hooks_dir = real_home / ".hermes" / "agent-hooks"
+        drifted = False
+        for name in _AGENT_HOOK_FILES:
+            src = source_dir / name
+            if not src.is_file():
+                continue  # source not shipped in this build — nothing to sync
+            dst = hooks_dir / name
+            try:
+                if not dst.exists() or dst.read_text() != src.read_text():
+                    drifted = True
+                    break
+            except OSError:
+                drifted = True  # unreadable installed copy → treat as drift
+                break
+        if not drifted:
+            return False
+        from scripts.postinstall import _install_advance_hook, _install_webhook_handler
+
+        _install_advance_hook()
+        _install_webhook_handler()
+        logger.info(
+            "self-heal: re-synced agent-hooks from plugin source after update (#1354)"
+        )
+        return True
+    except Exception as exc:  # never let self-heal break a tick
+        logger.warning("self-heal: agent-hooks re-sync failed: %s", exc)
+        return False
+
+
 def run(
     resolved: Dict[str, Any],
     *,
@@ -2808,6 +2922,9 @@ def run(
     exception) collapses those repeated reads to one subprocess per distinct
     ``(slug, status)`` key, while mutations invalidate it so reads never go stale.
     """
+    # Self-heal agent-hooks that a `hermes plugins update` left stale (#1354).
+    # Drift-guarded + test-isolation-safe; never raises.
+    _self_heal_agent_hooks()
     kanban.enable_tick_cache()
     try:
         return _run_tick(
@@ -2880,6 +2997,11 @@ def _run_tick(
     profiles = _resolve_profiles(execution)
     role_skills: Dict[str, List[str]] = _resolve_role_skills(execution)
     coding_agent = _resolve_coding_agent(execution)
+    # Warn-only capability preflight (#1351): when the hermes coding_agent path
+    # runs pipeline roles on a local model known to crash-loop at the developer
+    # stage (e.g. qwen3.6), log a single heads-up so operators aren't surprised
+    # by a silently-stalled pipeline. Never blocks dispatch.
+    _preflight_local_model_capability(execution, coding_agent)
     coding_agent_cmd = _resolve_coding_agent_cmd(execution)
     # Ensure a sane turn budget so substantial tasks don't silently hit claude's
     # 25-turn default; respects an explicit --max-turns and non-claude agents (#143).
@@ -3125,6 +3247,21 @@ def _run_tick(
         except Exception as exc:  # never let recovery break a dispatch tick
             logger.warning("dispatch: triage-recovery failed: %s", exc)
 
+    # ── merged-issue orphan sweep (issue #1373) ──────────────────────────────
+    # The one-shot merged-PR reap runs once (when the developer card lands), but
+    # triage-recovery / guard-prefix machinery can mint `[recover N]` / `guard:`
+    # cards AFTER that reap, orphaning them in blocked forever — board clutter
+    # that also fools the serial-queue gate. This every-tick sweep archives any
+    # such non-terminal card whose issue's PR is merged (per the provider, not
+    # the board's Done column). Configurable via tracking.merged_orphan_sweep.
+    # {enabled}; degrades gracefully.
+    orphan_cfg = (resolved.get("tracking") or {}).get("merged_orphan_sweep") or {}
+    if orphan_cfg.get("enabled", True):
+        try:
+            sweeper.sweep_merged_orphans(slug, provider, dry_run=dry_run)
+        except Exception as exc:  # never let the sweep break a dispatch tick
+            logger.warning("dispatch: merged-orphan sweep failed: %s", exc)
+
     # ── crash-retry reconciler (issue #1205) ─────────────────────────────────
     # Crash-class blocked / gave-up cards (worker died, session limit, provider
     # connection error) are auto-unblocked with time-bounded, backed-off
@@ -3162,6 +3299,12 @@ def _run_tick(
         )
     crash_retried = sum(1 for a in crash_actions if a.get("action") == "retried")
     crash_escalated = [a for a in crash_actions if a.get("action") == "escalated"]
+    # Per-stage crash telemetry (#1372): counts per role + the captured,
+    # redacted failure diagnostics, both persisted into history.jsonl so crash
+    # rates and causes per pipeline stage are queryable over time.
+    _crash_telemetry = _summarize_crash_telemetry(crash_actions)
+    crash_counts_by_role = _crash_telemetry["crash_counts_by_role"]
+    crash_diagnostics = _crash_telemetry["crash_diagnostics"]
     for _esc in crash_escalated:
         _send_crash_retries_exhausted_notification(
             action=_esc, resolved=resolved, dry_run=dry_run
@@ -3255,6 +3398,8 @@ def _run_tick(
             "stale_running": stale_running,
             "crash_retried": crash_retried,
             "crash_escalated": [a.get("task_id") for a in crash_escalated],
+            "crash_counts_by_role": crash_counts_by_role,
+            "crash_diagnostics": crash_diagnostics,
             "enrollment_failures": sorted(
                 set(getattr(provider, "enrollment_failures", []))
             )[:500],
@@ -4137,6 +4282,8 @@ def _run_tick(
         "stale_running": stale_running,
         "crash_retried": crash_retried,
         "crash_escalated": [a.get("task_id") for a in crash_escalated],
+        "crash_counts_by_role": crash_counts_by_role,
+        "crash_diagnostics": crash_diagnostics,
         "enrollment_failures": sorted(
             set(getattr(provider, "enrollment_failures", []))
         ),
@@ -4742,6 +4889,27 @@ def _drain_rerun_requests() -> None:
         )
 
 
+def _resolve_plugin_version() -> str:
+    """Return the plugin version from ``plugin.yaml``, or ``"unknown"``.
+
+    Read-only and never raises (issue #1328): any failure — missing/unreadable
+    manifest, no ``version:`` field, malformed line — resolves to ``"unknown"``
+    so the ``--version`` path always exits 0. Parses the single ``version:`` line
+    directly (no YAML dependency) to keep this path dependency-free.
+    """
+    try:
+        for line in (
+            (_PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8").splitlines()
+        ):
+            stripped = line.strip()
+            if stripped.startswith("version:"):
+                value = stripped.split(":", 1)[1].strip().strip("\"'")
+                return value or "unknown"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def main() -> int:
     """Process-level mutex wrapper.
 
@@ -4755,6 +4923,12 @@ def main() -> int:
     A SIGALRM watchdog (Unix only) force-exits after _LOCK_WATCHDOG_SECS so a
     stuck tick cannot starve queued advance-hook invocations for hours (#1115).
     """
+    # --version is a read-only report (issue #1328): print the plugin version and
+    # exit WITHOUT acquiring the process mutex or running a dispatch tick. Handled
+    # in _main_inner so --help lists the flag alongside the argparse definition.
+    if "--version" in sys.argv[1:]:
+        return _main_inner()
+
     lock = FileLock(_MUTEX_LOCK_PATH)
     try:
         lock.acquire(timeout=0)
@@ -4874,6 +5048,12 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
         help="Print the last N dispatch-history entries (default 10) and exit.",
     )
     parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print the plugin version (from plugin.yaml) and exit 0, without "
+        "running a dispatch tick.",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Run an offline pipeline self-test (seeds fake "
@@ -4890,6 +5070,13 @@ def _main_inner(argv: Optional[List[str]] = None) -> int:
     # passes an explicit argv when rerunning a scope dropped on contention
     # (issue #1160).
     args = parser.parse_args(argv)
+
+    # --version is a read-only report (issue #1328): print the plugin version and
+    # exit 0 before any dispatch work. Never raises — _resolve_plugin_version()
+    # falls back to "unknown" if the manifest can't be read.
+    if args.version:
+        print(_resolve_plugin_version())
+        return 0
 
     # --self-test is a hermetic, GitHub-free smoke of the pipeline wiring: seed
     # fake data, drive a real tick, print PASS/FAIL, and exit non-zero on failure
