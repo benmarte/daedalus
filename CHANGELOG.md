@@ -1,3 +1,5 @@
+## [Add upstream Hermes on_model_change hook so Daedalus can retire poll-based profile sync](https://github.com/benmarte/daedalus/issues/1368) — [PR #1370](https://github.com/benmarte/daedalus/pull/1370)
+
 ## [Investigate Hermes API for detecting model changes to sync Daedalus profiles](https://github.com/benmarte/daedalus/issues/1367) — [PR #1369](https://github.com/benmarte/daedalus/pull/1369)
 
 ## [feat: add a --version flag to the dispatcher CLI](https://github.com/benmarte/daedalus/issues/1328) — [PR #1366](https://github.com/benmarte/daedalus/pull/1366)
