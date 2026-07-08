@@ -1,3 +1,5 @@
+## [Capture gate-agent crash diagnostics + confirm bounded crash-recovery convergence](https://github.com/benmarte/daedalus/issues/1372) — [PR #1378](https://github.com/benmarte/daedalus/pull/1378)
+
 ## [Reap orphaned triage-recovery / guard: cards after issue merge](https://github.com/benmarte/daedalus/issues/1373) — [PR #1377](https://github.com/benmarte/daedalus/pull/1377)
 
 ## [Developer stage double-dispatch: false-failure re-spawn causes concurrent delegates + QA-before-PR churn](https://github.com/benmarte/daedalus/issues/1375) — [PR #1376](https://github.com/benmarte/daedalus/pull/1376)
