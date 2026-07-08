@@ -34,6 +34,9 @@
 #     [--max-wait <secs>]           Timeout in seconds (default: 3600)
 #     [--heartbeat-interval <secs>] Heartbeat period (default: 300)
 #     [--poll-interval <secs>]      PID check granularity (default: 5; tests use 1)
+#     [--pr-grace-secs <secs>]      Developer PR grace window (default: 120). After
+#                                   the inner agent exits with no PR yet, poll for
+#                                   the PR this long before declaring failure (#1375).
 #     [--transition]                If set, wrapper calls hermes kanban block at end
 #
 # Exit codes:
@@ -90,6 +93,10 @@ set -uo pipefail
 _max_wait=3600
 _heartbeat_interval=300
 _poll_interval=5        # PID liveness check granularity; tests override to 1
+_pr_grace_secs=120      # developer PR grace window (#1375): after the inner agent
+                        # exits with no PR yet, poll this long before declaring
+                        # coding-agent-failed. A slow-but-healthy developer is
+                        # frequently mid-`gh pr create` at exit.
 _task_file=""
 _cmd=""
 _card=""
@@ -121,6 +128,7 @@ while [ $# -gt 0 ]; do
     --max-wait)           _max_wait="${2:?--max-wait requires a value}";              shift 2 ;;
     --heartbeat-interval) _heartbeat_interval="${2:?--heartbeat-interval requires a value}"; shift 2 ;;
     --poll-interval)      _poll_interval="${2:?--poll-interval requires a value}";    shift 2 ;;
+    --pr-grace-secs)      _pr_grace_secs="${2:?--pr-grace-secs requires a value}";    shift 2 ;;
     --transition)         _transition=1;                                              shift 1 ;;
     --relay-verdict)      _relay=1;                                                    shift 1 ;;
     --role)               _role="${2:-}";                                              shift 2 ;;
@@ -218,23 +226,33 @@ echo "[delegate] starting — card=$_card board=$_board max-wait=${_max_wait}s h
 echo "[delegate] cmd: $_cmd"
 echo "[delegate] out: $_out"
 
-# ── developer role: isolated per-issue worktree (#1339 developer delegate) ────────
+# ── developer role: isolated per-delegate worktree (#1339 + #1375) ────────
 # The developer writes code + opens a PR, so — unlike the review roles — it needs its
 # OWN git worktree on a deterministic branch (fix/issue-<N>) forked from the base. This
 # is the same isolation the legacy `daedalus-worktree-spawn.sh` gave it (fixes the
 # shared-workdir branch/PR cross-wire, #1131), but spawned DIRECTLY here (no qwen hop).
 # The coding-agent command then runs with the worktree as its cwd.
+#
+# #1375 per-delegate isolation: append timestamp + PID suffix so each delegate gets a
+# unique worktree path. The deterministic `.worktrees/dev-<N>` path caused concurrent
+# delegates (from false-failure re-spawns) to clobber each other's checkout — two agents
+# editing one tree is a data-loss hazard. The per-delegate suffix eliminates the collision
+# surface; the single-flight guard in direct_dispatch.py prevents the re-spawn in the first
+# place, but this is defense-in-depth. Old worktrees accumulate under `.worktrees/` and
+# must be pruned by a sweeper (TBD); the hazard of clobbering a live delegate is worse
+# than disk bloat until that exists.
 if [ "$_role" = "developer" ] && [ -n "$_repo" ] && [ -n "$_branch" ]; then
-  _wt="$_repo/.worktrees/dev-${_branch##*issue-}"
+  _wt="$_repo/.worktrees/dev-${_branch##*issue-}-$(date +%s)-$$"
   {
     echo "[delegate] developer worktree: repo=$_repo base=$_base branch=$_branch wt=$_wt"
     git -C "$_repo" fetch origin "$_base" -q 2>&1 || true
-    git -C "$_repo" worktree remove -f "$_wt" 2>&1 || true
-    rm -rf "$_wt" 2>&1 || true
     git -C "$_repo" worktree prune 2>&1 || true
-    git -C "$_repo" worktree add -f "$_wt" -B "$_branch" "origin/$_base" 2>&1 \
-      || git -C "$_repo" worktree add -f "$_wt" -B "$_branch" "$_base" 2>&1 \
-      || echo "[delegate] WORKTREE_SETUP_FAILED for $_wt (base=$_base)"
+    git -C "$_repo" worktree add -b "$_branch" "$_wt" "origin/$_base" 2>&1 \
+      || git -C "$_repo" worktree add -b "$_branch" "$_wt" "$_base" 2>&1 \
+      || { echo "[delegate] branch exists — try -B fallback" >&2
+           git -C "$_repo" worktree add -f "$_wt" -B "$_branch" "origin/$_base" 2>&1 \
+             || git -C "$_repo" worktree add -f "$_wt" -B "$_branch" "$_base" 2>&1 \
+             || echo "[delegate] WORKTREE_SETUP_FAILED for $_wt (base=$_base)"; }
   } >>"$_out" 2>&1
   if [ -d "$_wt" ]; then
     _cmd="cd $(printf '%q' "$_wt") && $_cmd"
@@ -323,6 +341,21 @@ _kill_child() {
 # `complete --metadata` transport only applies to COMPLETION handoffs (see
 # core/iterate/executors.py::_execute_advance). Eliminating free-text transport
 # on this blocked/gate path awaits the #1290 DAG work (Phase 2).
+# ── helper: detect the developer's open PR on the deterministic branch ────────
+# Echoes the PR number (numeric only) or empty. Numeric-only validation rejects
+# any non-integer to prevent injection into the block-reason string (CWE-74).
+# Called once by _do_transition, then repeatedly by the #1375 grace poll.
+_detect_developer_pr() {
+  local _n=""
+  if command -v gh >/dev/null 2>&1 && [ -n "$_repo" ]; then
+    _n="$(cd "$_repo" 2>/dev/null && gh pr list --head "$_branch" --state open \
+              --json number --jq '.[0] | select(.number) | .number' 2>/dev/null || echo "")"
+    _n="$(printf '%s' "$_n" | tr -d '[:space:]')"
+    case "$_n" in *[!0-9]*|'') _n="" ;; esac
+  fi
+  printf '%s' "$_n"
+}
+
 _do_transition() {
   local _status="$1" _ec="$2"
   local _reason
@@ -332,13 +365,28 @@ _do_transition() {
     # deterministic branch (gh auto-detects the repo from the checkout); complete the
     # card with it so the QA gate opens. No PR => the agent failed/crashed => block as
     # coding-agent-failed so crash-retry re-spawns from a fresh worktree (self-heal).
+    #
+    # PR grace poll (#1375): a slow-but-healthy developer is frequently still
+    # mid-`gh pr create` when its inner process exits — indistinguishable from a
+    # dead one by a single PR check. Declaring `coding-agent-failed` immediately
+    # makes crash-retry re-spawn a *second* developer onto the same branch/worktree
+    # while the first is still finishing (concurrent-delegate data-loss hazard). So
+    # when the first check finds no PR, poll for up to `--pr-grace-secs` seconds
+    # before concluding failure. A PR that appears in-window completes normally.
     export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
     local _pr_num=""
-    if command -v gh >/dev/null 2>&1 && [ -n "$_repo" ]; then
-      _pr_num="$(cd "$_repo" 2>/dev/null && gh pr list --head "$_branch" --state open \
-                    --json number --jq '.[0] | select(.number) | .number' 2>/dev/null || echo "")"
-      _pr_num="$(printf '%s' "$_pr_num" | tr -d '[:space:]')"
-      case "$_pr_num" in *[!0-9]*|'') _pr_num="" ;; esac
+    _pr_num="$(_detect_developer_pr)"
+    if [ -z "$_pr_num" ] && [ "${_pr_grace_secs:-0}" -gt 0 ]; then
+      local _grace_start _grace_now _grace_elapsed
+      _grace_start="$(date +%s)"
+      echo "[delegate] no PR yet on ${_branch} — entering ${_pr_grace_secs}s PR grace poll (#1375)"
+      while [ -z "$_pr_num" ]; do
+        _grace_now="$(date +%s)"
+        _grace_elapsed=$(( _grace_now - _grace_start ))
+        [ "$_grace_elapsed" -ge "$_pr_grace_secs" ] && break
+        sleep "$_poll_interval"
+        _pr_num="$(_detect_developer_pr)"
+      done
     fi
     if [ -n "$_pr_num" ]; then
       _reason="PR #${_pr_num} opened — ${_branch}"

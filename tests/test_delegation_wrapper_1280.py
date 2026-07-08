@@ -74,6 +74,7 @@ def _run_delegate(
     max_wait: int = 30,
     heartbeat_interval: int = 300,
     poll_interval: int = 5,
+    pr_grace_secs: int | None = None,
     transition: bool = False,
     relay: bool = False,
     role: str = "",
@@ -114,10 +115,16 @@ def _run_delegate(
         "--heartbeat-interval", str(heartbeat_interval),
         "--poll-interval", str(poll_interval),
     ]
+    if pr_grace_secs is not None:
+        cmd += ["--pr-grace-secs", str(pr_grace_secs)]
     if transition:
         cmd += ["--transition", "--repo", repo, "--branch", branch]
     if relay:
         cmd += ["--relay-verdict"]
+        # The developer relay path (direct_dispatch) passes --repo/--branch without
+        # --transition so delegate.sh can detect the opened PR (#1339/#1375).
+        if role == "developer":
+            cmd += ["--repo", repo, "--branch", branch]
     if role:
         cmd += ["--role", role]
 
@@ -773,6 +780,103 @@ def test_numeric_pr_validation_blocks_injection(tmp_path):
         )
 
 
+# ── (#1375) developer PR grace poll ───────────────────────────────────────────
+# A slow-but-healthy developer that is still mid-`gh pr create` when its inner
+# process exits must NOT be declared coding-agent-failed (which triggers a
+# concurrent re-spawn). delegate.sh polls for the PR for --pr-grace-secs before
+# concluding failure; a PR that appears in-window completes normally.
+
+def _slow_pr_gh_body(cnt_path: Path, pr: int = 77) -> str:
+    """gh stub body: return no PR on the first call, then PR #pr thereafter —
+    simulating a developer that opens its PR shortly after the inner agent exits."""
+    return (
+        f'n=$(cat "{cnt_path}" 2>/dev/null || echo 0); n=$((n+1)); '
+        f'echo "$n" > "{cnt_path}"; '
+        f'if [ "$n" -ge 2 ]; then echo {pr}; fi\n'
+    )
+
+
+def test_developer_slow_pr_completes_within_grace(tmp_path):
+    """test (a): a PR that appears within the grace window → the developer card
+    COMPLETES with 'PR #N opened' — no coding-agent-failed, no re-spawn (#1375)."""
+    # The developer path does `cd "$_repo"` before `gh pr list`, so --repo must be a
+    # real directory. HOME → tmp so the wrapper's near-real-time advance dispatch
+    # (``$HOME/.hermes/scripts/daedalus-cron.sh``) is absent and never fires for real.
+    cnt = tmp_path / "gh-grace-cnt"
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'exit 0'",   # inner agent exits with no PR yet
+        relay=True,
+        role="developer",
+        repo=str(tmp_path),
+        branch="fix/issue-42-slowpr",
+        poll_interval=1,
+        pr_grace_secs=15,
+        gh_body=_slow_pr_gh_body(cnt),
+        extra_env={"HOME": str(tmp_path / "home")},
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    full = "\n".join(_log_lines(hermes_log))
+    assert "complete t_test123" in full, f"developer must COMPLETE with the PR: {full}"
+    assert "PR #77 opened" in full, f"expected 'PR #77 opened' in: {full}"
+    assert "coding-agent-failed" not in full, (
+        f"slow-but-healthy developer must NOT be declared failed: {full}"
+    )
+    # Prove the grace poll actually ran (the PR was NOT there on the first check).
+    assert "PR grace poll" in result.stdout, (
+        f"grace poll should have engaged (no PR on first check): {result.stdout}"
+    )
+
+
+def test_developer_no_pr_after_grace_blocks_failed(tmp_path):
+    """A genuinely dead developer (no PR ever) still blocks coding-agent-failed
+    after a BOUNDED grace window — the guard never hangs forever (#1375)."""
+    start = time.time()
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'exit 0'",
+        relay=True,
+        role="developer",
+        repo=str(tmp_path),
+        branch="fix/issue-42-nopr",
+        poll_interval=1,
+        pr_grace_secs=3,
+        gh_body="",   # gh always returns empty → no PR ever
+        extra_env={"HOME": str(tmp_path / "home")},
+    )
+    elapsed = time.time() - start
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    full = "\n".join(_log_lines(hermes_log))
+    assert "coding-agent-failed: no PR detected" in full, (
+        f"a dead developer must still block coding-agent-failed: {full}"
+    )
+    assert "block t_test123" in full, f"crash must BLOCK for crash-retry: {full}"
+    # Bounded: the poll gave up near the 3s grace, not the 30s+ max-wait.
+    assert elapsed < 25, f"grace poll must be bounded, took {elapsed:.1f}s"
+
+
+def test_developer_grace_zero_fails_immediately(tmp_path):
+    """--pr-grace-secs 0 disables the poll → pre-#1375 immediate-fail behaviour."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'exit 0'",
+        relay=True,
+        role="developer",
+        repo=str(tmp_path),
+        branch="fix/issue-42-instant",
+        poll_interval=1,
+        pr_grace_secs=0,
+        gh_body="",
+        extra_env={"HOME": str(tmp_path / "home")},
+    )
+    assert result.returncode == 0, result.stderr
+    full = "\n".join(_log_lines(hermes_log))
+    assert "coding-agent-failed: no PR detected" in full
+    assert "PR grace poll" not in result.stdout, (
+        f"grace poll must NOT engage when disabled: {result.stdout}"
+    )
+
+
 # ── (m) --relay-verdict: relay the inner agent's emitted verdict ──────────────
 
 def test_relay_verdict_blocks_card_with_emitted_verdict(tmp_path):
@@ -858,30 +962,6 @@ def test_relay_verdict_validator_role_completes_card(tmp_path):
     assert "CONFIRMED" in full
 
 
-def test_relay_verdict_validator_backfills_summary_when_self_completed(tmp_path):
-    """#1361: a complete-role card must ALWAYS get its summary backfilled via
-    `kanban edit --summary`, even when `complete` returns 0 (a no-op when the inner
-    agent already self-completed the card). The old `complete --result || edit` skipped
-    the backfill whenever `complete` succeeded, leaving latest_summary empty — which
-    stalled _check_confirmed_validators into an empty-summary re-spawn loop (9 duplicate
-    validator cards observed live on #1360). The stub `hermes` always exits 0, mimicking
-    a successful/no-op complete, so this fails on the old short-circuit and passes now."""
-    result, hermes_log, _ = _run_delegate(
-        tmp_path, agent_cmd=_validator_agent(tmp_path), relay=True, role="validator"
-    )
-    assert result.returncode == 0, result.stderr
-    calls = _log_lines(hermes_log)
-    full = "\n".join(calls)
-    edit_calls = [ln for ln in calls if "edit t_test123" in ln and "--summary" in ln]
-    assert edit_calls, (
-        "validator completion must ALWAYS backfill the summary via `kanban edit "
-        f"--summary` (even when `complete` exits 0); recorded hermes calls:\n{full}"
-    )
-    assert "CONFIRMED" in "\n".join(edit_calls), (
-        f"the backfilled summary must carry the relayed verdict:\n{full}"
-    )
-
-
 def test_relay_verdict_review_role_still_blocks_card(tmp_path):
     """Gate roles (qa/reviewer/security/…) must still BLOCK on relay so
     classify_blocked routes the emitted signal — the role-aware branch only
@@ -906,6 +986,30 @@ def test_relay_verdict_validator_crash_still_blocks(tmp_path):
     assert "block t_test123" in full, f"crash must BLOCK: {full}"
     assert "coding-agent-failed" in full
     assert "complete t_test123" not in full
+
+
+def test_relay_verdict_validator_backfills_summary_when_self_completed(tmp_path):
+    """#1361: a complete-role card must ALWAYS get its summary backfilled via
+    `kanban edit --summary`, even when `complete` returns 0 (a no-op when the inner
+    agent already self-completed the card). The old `complete --result || edit` skipped
+    the backfill whenever `complete` succeeded, leaving latest_summary empty — which
+    stalled _check_confirmed_validators into an empty-summary re-spawn loop (9 duplicate
+    validator cards observed live on #1360). The stub `hermes` always exits 0, mimicking
+    a successful/no-op complete, so this fails on the old short-circuit and passes now."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path, agent_cmd=_validator_agent(tmp_path), relay=True, role="validator"
+    )
+    assert result.returncode == 0, result.stderr
+    calls = _log_lines(hermes_log)
+    full = "\n".join(calls)
+    edit_calls = [ln for ln in calls if "edit t_test123" in ln and "--summary" in ln]
+    assert edit_calls, (
+        "validator completion must ALWAYS backfill the summary via `kanban edit "
+        f"--summary` (even when `complete` exits 0); recorded hermes calls:\n{full}"
+    )
+    assert "CONFIRMED" in "\n".join(edit_calls), (
+        f"the backfilled summary must carry the relayed verdict:\n{full}"
+    )
 
 
 # ── (n) self-detach into a new session — survive Hermes' group SIGTERM (#1356) ──
