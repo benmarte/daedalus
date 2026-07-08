@@ -1,3 +1,5 @@
+## [Investigate Hermes API for detecting model changes to sync Daedalus profiles](https://github.com/benmarte/daedalus/issues/1367) — [PR #1369](https://github.com/benmarte/daedalus/pull/1369)
+
 ## [feat: add a --version flag to the dispatcher CLI](https://github.com/benmarte/daedalus/issues/1328) — [PR #1366](https://github.com/benmarte/daedalus/pull/1366)
 
 ## [fix: gate cards flap/duplicate on local-LLM runs due to inconsistent role-signal prefixes (guard_prefix churn)](https://github.com/benmarte/daedalus/issues/1350) — [PR #1365](https://github.com/benmarte/daedalus/pull/1365)
