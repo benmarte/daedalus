@@ -1,5 +1,14 @@
 """Explicit profile model sync — user-triggered resync bypassing manual-override skip.
 
+Role (ADR-007, issue #1367): this is the MANUAL operator escape hatch, not part
+of the automatic sync path. It is semantically distinct from the automatic paths
+because ``force=True`` deliberately overrides per-profile ``_daedalus_model_override``
+locks — something neither the canonical ``kanban_task_claimed`` JIT hook
+(``daedalus/__init__.py``) nor the poll-fingerprint fallback
+(``core.dispatch.resolvers._resync_profiles_to_model``) does. It backs the
+dashboard "sync profiles" button and the ``--sync-profiles-model`` CLI, and stays
+regardless of the upstream ``on_model_change`` hook proposed in #1368.
+
 This module provides:
 - `sync_profiles_to_model()` — force sync all (or selected) *-daedalus profiles
 - `get_profile_models()` — inspect current profile models vs global
