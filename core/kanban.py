@@ -396,6 +396,25 @@ def run_outcome(slug: str, task_id: str) -> dict | None:
     return None
 
 
+def worker_log_tail(slug: str, task_id: str, *, tail_bytes: int = 6000) -> str:
+    """Return the tail of a task's worker log, or "" when unavailable.
+
+    Reads ``hermes kanban log <task_id> --tail <bytes>`` (the inner agent's
+    captured stdout/stderr under ``<kanban-root>/kanban/logs/``). Used by the
+    crash-retry reconciler to capture *why* an inner agent died (#1372). Never
+    raises — a missing log / CLI failure yields "".
+    """
+    rc, out, err = _hk(["--board", slug, "log", task_id, "--tail", str(int(tail_bytes))])
+    if rc != 0:
+        logger.debug(
+            "kanban: worker_log_tail %s unavailable: %s",
+            task_id,
+            (err or out or "").strip()[:200],
+        )
+        return ""
+    return (out or "").strip()
+
+
 def edit_summary(slug: str, task_id: str, summary: str) -> bool:
     """Rewrite a task's recorded result summary (``hermes kanban edit --result``).
 

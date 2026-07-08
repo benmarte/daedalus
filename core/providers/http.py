@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import warnings
 from typing import Any
@@ -27,6 +28,66 @@ DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 RETRY_BACKOFF = [1.0, 2.0, 4.0]  # seconds; Retry-After header wins when present
+
+# ── shared secret redaction ──────────────────────────────────────────────────
+# The instance ``HTTPClient._redact`` scrubs the ONE provider token this client
+# was built with. Diagnostic capture (crash-retry, #1372) has no client in hand
+# but must scrub arbitrary worker-log text before it lands on a card or in
+# history.jsonl, so this module-level helper generalises the same "replace the
+# credential with <REDACTED>" approach: it blanks the values of known
+# secret-bearing env vars AND matches common credential shapes by pattern.
+
+REDACTION_PLACEHOLDER = "<REDACTED>"
+
+# Env vars whose *values* are secrets and must never appear in captured output.
+_SECRET_ENV_VARS = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "AZURE_DEVOPS_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "SLACK_WEBHOOK_URL",
+    "DISCORD_WEBHOOK_URL",
+    "HERMES_TOKEN",
+)
+
+# Credential shapes that must be scrubbed regardless of env (a token pasted into
+# a worker log, a Bearer header, git creds embedded in a clone URL).
+_SECRET_PATTERNS = (
+    re.compile(r"gh[posur]_[A-Za-z0-9]{20,}"),  # GitHub PAT / OAuth / server / user
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),  # GitHub fine-grained PAT
+    re.compile(r"glpat-[A-Za-z0-9\-_]{16,}"),  # GitLab PAT
+    re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}"),  # Slack token
+    re.compile(r"sk-(?:ant-)?[A-Za-z0-9\-_]{16,}"),  # OpenAI / Anthropic key
+    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]{15,}=*"),  # Authorization header
+)
+
+# Credentials embedded in a URL: ``https://user:token@host`` — keep the scheme.
+_URL_CRED_RE = re.compile(r"(https?://)[^:@/\s]+:[^@/\s]+@")
+
+
+def redact_secrets(text: str) -> str:
+    """Return *text* with credentials replaced by ``<REDACTED>``.
+
+    Generalises :meth:`HTTPClient._redact` for callers that have no client
+    instance (crash diagnostics, #1372). Best-effort and never raises: it
+    blanks the values of known secret env vars, then any credential-shaped
+    substring, then user:pass in URLs. Non-secret text passes through unchanged
+    so redacting clean output is a no-op.
+    """
+    if not text:
+        return text or ""
+    for name in _SECRET_ENV_VARS:
+        val = os.environ.get(name)
+        if val and len(val) >= 6:
+            text = text.replace(val, REDACTION_PLACEHOLDER)
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub(REDACTION_PLACEHOLDER, text)
+    text = _URL_CRED_RE.sub(r"\1" + REDACTION_PLACEHOLDER + "@", text)
+    return text
 
 
 class ProviderError(Exception):
