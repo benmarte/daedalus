@@ -101,6 +101,14 @@ def _on_session_end(session_id, completed, interrupted, model, platform, **kwarg
 def _on_kanban_task_claimed(task_id, board, assignee, run_id, **kwargs):
     """Sync the global Hermes model config into the profile before it runs.
 
+    CANONICAL automatic model-sync path (ADR-007, issue #1367). Hermes emits no
+    ``on_model_change`` signal, so this event-driven, just-in-time sync — fired
+    in the dispatcher right before each worker spawns — is how a profile is kept
+    on the operator's active model. The poll-fingerprint path
+    (``core.dispatch.resolvers._resync_profiles_to_model``) is a demoted fallback
+    and ``core.sync_profiles`` is the manual operator escape hatch. See #1368 for
+    the proposed upstream hook that would let this become fully eager.
+
     Fires when any kanban task is claimed. For daedalus profiles (name ends
     with '-daedalus'), copies model/providers/fallback_providers/custom_providers
     from ~/.hermes/config.yaml into the profile's config.yaml so the profile

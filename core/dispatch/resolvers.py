@@ -701,6 +701,14 @@ def _resync_profiles_to_model(
 ) -> int:
     """Update model.default + model.provider in all *-daedalus Hermes profiles.
 
+    DEMOTED to a fallback (ADR-007, issue #1367): for model sync this is
+    redundant with the canonical ``kanban_task_claimed`` JIT hook
+    (``daedalus/__init__.py:_on_kanban_task_claimed``), which keeps any profile
+    that actually runs fresh at spawn time. This per-tick poll path is retained
+    only because it *also* detects ``coding_agent`` changes and covers profiles
+    that are never claimed within a tick. Its model-sync duty becomes retireable
+    once the upstream ``on_model_change`` hook (#1368) lands.
+
     Skips profiles whose ``model.default`` is non-empty *and* differs from the
     previous global default (``old_values["model_default"]``), treating them as
     intentional per-profile overrides the user has set manually.
