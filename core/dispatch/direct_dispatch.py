@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core import kanban
 from core.dispatch.bodies import _DELEGATION_MARKER, _inner_task_body, _ROLE_TMP_PREFIX
@@ -99,9 +99,99 @@ _RELAY_MODE_OVERRIDE = (
 )
 
 
+# Default developer PR grace window (#1375). Mirrors the delegate.sh default so a
+# repo that never sets ``pipeline.developer_pr_grace_secs`` gets the same 120s poll.
+_DEFAULT_PR_GRACE_SECS = 120
+
+
+def _running_processes() -> List[str]:
+    """Return the command line of every process on the host (best-effort).
+
+    Used by the developer single-flight guard (#1375) to detect a live delegate /
+    inner coding-agent still working a branch. Never raises — returns [] if ``ps``
+    is unavailable, so the guard fails open (a transient ps failure must never
+    permanently block the developer stage)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "args"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # pragma: no cover - defensive (ps missing / timeout)
+        return []
+    return [ln for ln in out.stdout.splitlines() if ln.strip()]
+
+
+def _developer_delegate_in_flight(
+    slug: str,
+    issue: int,
+    branch: str,
+    cid: str,
+    *,
+    kanban_mod: Any = kanban,
+    ps_lines: Optional[List[str]] = None,
+    developer_profile: str = "",
+) -> bool:
+    """Developer single-flight guard (#1375): is a live developer delegate already
+    working this issue/branch?
+
+    The concurrent-delegate hazard is a re-spawn (crash-retry unblock, or a second
+    ``todo`` card) firing a second developer onto the SAME ``.worktrees/dev-<n>``
+    checkout while the first is still editing it — two agents clobbering one tree.
+    The ``kanban.claim`` gate only protects re-claim of the *same running card*; it
+    does NOT catch a detached delegate whose card was already blocked+unblocked, nor
+    a distinct second developer card for the same issue. This guard closes both:
+
+      1. A live delegate / inner-agent PROCESS referencing this branch or its
+         deterministic worktree path (``ps`` scan) — the authoritative liveness
+         signal that survives card churn.
+      2. Another RUNNING developer card for the same issue (a second card minted
+         for one issue) — a board-level double-dispatch.
+
+    Fail-open (returns False) on any inspection error so a transient failure never
+    permanently blocks the developer stage. ``ps_lines`` is injectable for tests.
+    """
+    if not branch or not issue:
+        return False
+    # (1) live process referencing this branch or its worktree path
+    try:
+        lines = _running_processes() if ps_lines is None else ps_lines
+        worktree_frag = f".worktrees/dev-{issue}"
+        for ln in lines:
+            if branch in ln or worktree_frag in ln:
+                logger.info(
+                    "single-flight: live developer delegate for #%s detected in "
+                    "process table — suppressing second dispatch (#1375): %s",
+                    issue, ln[:160],
+                )
+                return True
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("single-flight: ps scan failed for #%s: %s", issue, exc)
+    # (2) another running developer card for the same issue (board double-dispatch)
+    if developer_profile:
+        try:
+            for t in kanban_mod.list_tasks(slug):
+                tid = str(t.get("id") or t.get("task_id") or "")
+                if not tid or tid == cid:
+                    continue
+                if (t.get("assignee") or "").strip() != developer_profile:
+                    continue
+                if extract_issue_number(t.get("title") or "") != issue:
+                    continue
+                if (t.get("status") or "").lower() == "running":
+                    logger.info(
+                        "single-flight: developer card %s for #%s already running — "
+                        "suppressing second dispatch of %s (#1375)",
+                        tid, issue, cid,
+                    )
+                    return True
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("single-flight: card scan failed for #%s: %s", issue, exc)
+    return False
+
+
 def _default_spawn(
     *, card: str, board: str, cmd: str, role: str, taskf: str, outf: str,
-    repo: str = "", branch: str = "", base: str = "",
+    repo: str = "", branch: str = "", base: str = "", pr_grace_secs: int = 0,
 ) -> None:
     """Spawn the one-shot delegate wrapper detached (its own session), so it
     survives this dispatch process exiting. It heartbeats (refreshing the claim),
@@ -125,6 +215,8 @@ def _default_spawn(
         argv += ["--branch", branch]
     if base:
         argv += ["--base", base]
+    if pr_grace_secs:
+        argv += ["--pr-grace-secs", str(pr_grace_secs)]
     subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
@@ -161,6 +253,14 @@ def direct_dispatch(
     # per-repo config field; fall back to the resolved ``repo`` path if present.
     repo_path = str((resolved or {}).get("workdir") or (resolved or {}).get("repo_path") or "")
     base_branch = str(((resolved or {}).get("vcs") or {}).get("target_branch") or "dev")
+    # Developer PR grace window (#1375) — passed to delegate.sh so a slow-but-healthy
+    # developer that opens its PR shortly after the inner agent exits is not declared
+    # coding-agent-failed (which would trigger a concurrent re-spawn).
+    _pipeline_cfg = (resolved or {}).get("pipeline") or {}
+    try:
+        pr_grace_secs = int(_pipeline_cfg.get("developer_pr_grace_secs", _DEFAULT_PR_GRACE_SECS))
+    except (TypeError, ValueError):
+        pr_grace_secs = _DEFAULT_PR_GRACE_SECS
 
     role_by_assignee = {
         (a or "").strip(): r
@@ -230,6 +330,24 @@ def direct_dispatch(
         taskf = f"/tmp/{pfx}-{issue}-{cid}-task.txt"
         outf = f"/tmp/{pfx}-{issue}-{cid}-out.txt"
 
+        # Developer single-flight guard (#1375): never spawn a second developer
+        # delegate for an issue while one is still live on its branch/worktree. A
+        # crash-retry unblock (or a duplicate developer card) would otherwise fire a
+        # concurrent agent onto the same `.worktrees/dev-<n>` checkout — a data-loss
+        # hazard the `kanban.claim` gate below does NOT cover (it only guards the same
+        # running card). Checked BEFORE claim so a suppressed re-spawn leaves the card
+        # untouched for a clean re-dispatch once the live delegate finishes.
+        if is_dev and _developer_delegate_in_flight(
+            slug, issue, branch, str(cid),
+            developer_profile=(card.get("assignee") or "").strip(),
+        ):
+            logger.info(
+                "direct-dispatch: developer delegate already in flight for #%s — "
+                "skipping second dispatch of card %s (#1375)",
+                issue, cid,
+            )
+            continue
+
         if dry_run:
             logger.info(
                 "direct-dispatch: [dry-run] would spawn %s wrapper for #%s (card %s)",
@@ -251,7 +369,8 @@ def direct_dispatch(
             continue
         try:
             spawn(card=cid, board=slug, cmd=cmd, role=role, taskf=taskf, outf=outf,
-                  repo=repo_path, branch=branch, base=base_branch)
+                  repo=repo_path, branch=branch, base=base_branch,
+                  pr_grace_secs=(pr_grace_secs if is_dev else 0))
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("direct-dispatch: spawn failed for %s (%s): %s", role, cid, exc)
             continue
