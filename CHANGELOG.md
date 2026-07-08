@@ -1,3 +1,5 @@
+## [feat: add a --version flag to the dispatcher CLI](https://github.com/benmarte/daedalus/issues/1328) — [PR #1366](https://github.com/benmarte/daedalus/pull/1366)
+
 ## [fix: gate cards flap/duplicate on local-LLM runs due to inconsistent role-signal prefixes (guard_prefix churn)](https://github.com/benmarte/daedalus/issues/1350) — [PR #1365](https://github.com/benmarte/daedalus/pull/1365)
 
 ## [fix: PM re-triggers every tick after a pipeline fully completes (_has_downstream_tasks ignores terminal cards)](https://github.com/benmarte/daedalus/issues/1349) — [PR #1364](https://github.com/benmarte/daedalus/pull/1364)
