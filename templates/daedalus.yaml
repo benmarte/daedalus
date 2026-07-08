@@ -38,6 +38,15 @@ tracking:
   #                   # so 30 min = 6 missed beats = a confident dead worker).
   #   reset: true     # true (default): auto-reclaim (re-block crash-class →
   #                   # re-dispatch). false: warn-only, no reclaim.
+  #
+  # Merged-issue orphan sweep (issue #1373): the one-shot merged-PR reap runs
+  # once (when the developer card lands), but triage-recovery / guard-prefix
+  # machinery can mint `[recover N]` / `guard:` cards AFTER that reap, orphaning
+  # them in `blocked` forever. Each tick this sweep archives any such non-terminal
+  # card whose issue's PR is merged (checked against the provider, not the board's
+  # Done column). Enabled by default; set enabled: false to disable.
+  # merged_orphan_sweep:
+  #   enabled: true
 
 # ── VCS provider ──────────────────────────────────────────────────────────────
 # All access is via token-authenticated HTTPS APIs. Tokens come ONLY from
