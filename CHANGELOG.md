@@ -1,3 +1,5 @@
+## [Reap orphaned triage-recovery / guard: cards after issue merge](https://github.com/benmarte/daedalus/issues/1373) — [PR #1377](https://github.com/benmarte/daedalus/pull/1377)
+
 ## [Developer stage double-dispatch: false-failure re-spawn causes concurrent delegates + QA-before-PR churn](https://github.com/benmarte/daedalus/issues/1375) — [PR #1376](https://github.com/benmarte/daedalus/pull/1376)
 
 ## [Gate accessibility stage on real UI changes (skip creation for backend-only PRs)](https://github.com/benmarte/daedalus/issues/1371) — [PR #1374](https://github.com/benmarte/daedalus/pull/1374)
