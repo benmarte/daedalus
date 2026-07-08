@@ -1,3 +1,5 @@
+## [Gate accessibility stage on real UI changes (skip creation for backend-only PRs)](https://github.com/benmarte/daedalus/issues/1371) — [PR #1374](https://github.com/benmarte/daedalus/pull/1374)
+
 ## [Add upstream Hermes on_model_change hook so Daedalus can retire poll-based profile sync](https://github.com/benmarte/daedalus/issues/1368) — [PR #1370](https://github.com/benmarte/daedalus/pull/1370)
 
 ## [Investigate Hermes API for detecting model changes to sync Daedalus profiles](https://github.com/benmarte/daedalus/issues/1367) — [PR #1369](https://github.com/benmarte/daedalus/pull/1369)
