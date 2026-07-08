@@ -83,6 +83,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from core.file_overlap import pr_touches_ui
 from core.iterate import outcomes
 from core.iterate.classify import MAX_FIX_ATTEMPTS
 from core.util import extract_issue_number, extract_pr_number_from_summary
@@ -521,6 +522,9 @@ def _execute_advance(
     native_decompose: bool = False,
     coding_agent: str = "none",
     coding_agent_cmd: str = "",
+    provider: Any = None,
+    ui_extensions: tuple[str, ...] | list[str] | None = None,
+    ui_globs: tuple[str, ...] | list[str] | None = None,
     **_kwargs: Any,
 ) -> bool:
     """Complete a developer card to advance the chain (CI no longer gates this).
@@ -588,6 +592,7 @@ def _execute_advance(
             pr_number=pr, dry_run=dry_run, upfront_dag=upfront_dag,
             native_decompose=native_decompose,
             coding_agent=coding_agent, coding_agent_cmd=coding_agent_cmd,
+            provider=provider, ui_extensions=ui_extensions, ui_globs=ui_globs,
         )
     else:
         logger.warning(
@@ -716,6 +721,42 @@ def _wrap_downstream_delegation(
         return body
 
 
+def _accessibility_needed(
+    provider: Any,
+    pr_number: int | None,
+    *,
+    ui_extensions: tuple[str, ...] | list[str] | None = None,
+    ui_globs: tuple[str, ...] | list[str] | None = None,
+) -> bool:
+    """Return True if the PR touches UI files (an accessibility review is warranted).
+
+    Gate the accessibility stage deterministically on the developer's actual PR
+    diff (#1371): fetch the changed-file list from the provider and test it
+    against the configurable UI fileset. A backend-only PR returns False so the
+    fan-out can skip creating the (crash-prone) accessibility worker entirely.
+
+    Fail-OPEN: whenever the changed files can't be determined — no provider, no
+    PR number, an empty file list, or a provider error — return True so we never
+    silently drop an accessibility review we should have run. Only an
+    affirmatively backend-only diff skips the stage.
+    """
+    if provider is None or not pr_number:
+        return True
+    try:
+        files = provider.get_pr_files(pr_number)
+    except Exception as exc:  # provider methods shouldn't raise, but be safe
+        logger.warning(
+            "iterate: get_pr_files(PR #%s) raised %s — keeping accessibility (fail-open)",
+            pr_number, exc,
+        )
+        return True
+    filenames = [f.get("filename", "") for f in (files or []) if f.get("filename")]
+    if not filenames:
+        # Unknown/empty diff → keep accessibility rather than guess backend-only.
+        return True
+    return pr_touches_ui(filenames, extensions=ui_extensions, globs=ui_globs)
+
+
 def _downstream_parents(
     role_suffix: str,
     dev_id: str,
@@ -753,6 +794,7 @@ def _create_downstream_swarm(
     *,
     pr_number: int | None = None,
     dry_run: bool = False,
+    skip_accessibility: bool = False,
 ) -> list[str]:
     """Native #1294 QA fan-out: one ``hermes kanban swarm`` for the review→qa→docs stage.
 
@@ -790,8 +832,17 @@ def _create_downstream_swarm(
     workers = [
         f"reviewer-daedalus:#{issue_number} Reviewer review ({pr_ref})",
         f"security-analyst-daedalus:#{issue_number} Security review ({pr_ref})",
-        f"accessibility-daedalus:#{issue_number} Accessibility review ({pr_ref})",
     ]
+    # #1371: only add the accessibility worker when the PR touches UI files.
+    if not skip_accessibility:
+        workers.append(
+            f"accessibility-daedalus:#{issue_number} Accessibility review ({pr_ref})"
+        )
+    else:
+        logger.info(
+            "iterate: reviews swarm for issue #%s omits accessibility worker "
+            "(no UI files in PR)", issue_number,
+        )
     root = kanban.swarm(
         slug,
         f"Review + document {pr_ref} for issue #{issue_number}",
@@ -807,6 +858,7 @@ def _create_downstream_swarm(
         )
         return _create_downstream_review_tasks(
             slug, issue_number, card, pr_number=pr_number, dry_run=dry_run,
+            skip_accessibility=skip_accessibility,
         )
     if tid:
         kanban.comment(
@@ -828,6 +880,10 @@ def _create_downstream_review_tasks(
     native_decompose: bool = False,
     coding_agent: str = "none",
     coding_agent_cmd: str = "",
+    provider: Any = None,
+    ui_extensions: tuple[str, ...] | list[str] | None = None,
+    ui_globs: tuple[str, ...] | list[str] | None = None,
+    skip_accessibility: bool | None = None,
 ) -> list[str]:
     """Create qa/reviewer/security/accessibility/docs tasks after a developer card completes.
 
@@ -854,6 +910,18 @@ def _create_downstream_review_tasks(
     world the per-tick post-developer creation would double-own the downstream
     cards, so it no-ops here. When the flag is OFF (the default) this runs exactly
     as before — byte-identical.
+
+    ``provider`` / ``ui_extensions`` / ``ui_globs`` / ``skip_accessibility``
+    (#1371): gate accessibility-card CREATION on real UI changes. The developer's
+    PR diff (fetched via ``provider.get_pr_files``) is tested against the
+    configurable UI fileset; a backend-only PR skips the accessibility worker
+    entirely rather than paying a crash-prone agent spawn just to decide "no UI".
+    When ``skip_accessibility`` is left ``None`` the decision is computed here
+    (fail-open — see :func:`_accessibility_needed`); a caller may pass an
+    explicit bool to reuse an already-made decision (the swarm fallback does).
+    Skipping accessibility also degrades the docs multi-parent to
+    ``(reviewer, security)`` automatically, because ``_downstream_parents`` only
+    parents docs to roles present in ``role_ids``.
     """
     if upfront_dag:
         logger.debug(
@@ -861,10 +929,17 @@ def _create_downstream_review_tasks(
             "issue #%s no-ops (upfront DAG owns the stages)", issue_number,
         )
         return []
+    # #1371: decide once whether the PR warrants an accessibility review. A
+    # caller may pre-decide (swarm fallback); otherwise compute from the diff.
+    if skip_accessibility is None:
+        skip_accessibility = not _accessibility_needed(
+            provider, pr_number, ui_extensions=ui_extensions, ui_globs=ui_globs,
+        )
     # #1294: native QA swarm fan-out (only when upfront_dag is OFF).
     if native_decompose:
         return _create_downstream_swarm(
             slug, issue_number, card, pr_number=pr_number, dry_run=dry_run,
+            skip_accessibility=skip_accessibility,
         )
     kanban = _pkg().kanban
     created: list[str] = []
@@ -894,16 +969,27 @@ def _create_downstream_review_tasks(
             if tid_existing:
                 key_to_id[ikey] = tid_existing
 
+    # #1371: drop the accessibility role from the fan-out for backend-only PRs.
+    # Docs then degrades to (reviewer, security) for free — _downstream_parents
+    # only parents docs to roles that ended up in role_ids.
+    review_roles = list(_DOWNSTREAM_REVIEW_ROLES)
+    if skip_accessibility:
+        review_roles = [r for r in review_roles if r[0] != "accessibility"]
+        logger.info(
+            "iterate: skipping accessibility card for issue #%s (no UI files in PR)",
+            issue_number,
+        )
+
     # Map role_suffix → created/recovered card id so the parent chain can be
     # resolved per-role (dev → qa → [reviewer, security, accessibility] → docs),
     # mirroring the primary dispatch path. Pre-seed from already-existing cards.
     role_ids: dict[str, str] = {}
-    for role_suffix, _assignee in _DOWNSTREAM_REVIEW_ROLES:
+    for role_suffix, _assignee in review_roles:
         recovered = key_to_id.get(f"{role_suffix}-{issue_number}")
         if recovered:
             role_ids[role_suffix] = recovered
 
-    for role_suffix, assignee in _DOWNSTREAM_REVIEW_ROLES:
+    for role_suffix, assignee in review_roles:
         ikey = f"{role_suffix}-{issue_number}"
         if ikey in existing_keys:
             logger.info("iterate: downstream task with key '%s' already exists — skip", ikey)

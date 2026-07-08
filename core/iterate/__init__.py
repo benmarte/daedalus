@@ -61,6 +61,7 @@ import subprocess as subprocess  # re-exported: tests patch core.iterate.subproc
 from typing import Any
 
 from core import kanban
+from core.file_overlap import DEFAULT_UI_EXTENSIONS, DEFAULT_UI_GLOBS
 from core.providers.base import CIStatus, issue_linked_to_pr as issue_linked_to_pr
 
 logger = logging.getLogger("daedalus.iterate")
@@ -348,6 +349,14 @@ def run_iterate(
     # only — classify_blocked still routes off the block-reason string — so flag-on
     # adds the tag without changing flow and flag-off omits --kind (byte-identical).
     _native_gates = bool(_pipeline_cfg.get("native_gates", False))
+    # #1371: accessibility-stage gating on real UI changes. The downstream
+    # fan-out tests the developer's PR diff against this fileset; a backend-only
+    # PR skips accessibility-card creation (and spawns no accessibility agent).
+    # Empty/absent config falls back to the module defaults — byte-identical to
+    # pre-#1371 behaviour for UI PRs (accessibility still created).
+    _a11y_cfg = _pipeline_cfg.get("accessibility") or {}
+    _ui_extensions = tuple(_a11y_cfg.get("ui_extensions") or DEFAULT_UI_EXTENSIONS)
+    _ui_globs = tuple(_a11y_cfg.get("ui_globs") or DEFAULT_UI_GLOBS)
     # #1344: resolve the external coding agent + CLI command so downstream review
     # tasks (created on developer-card advance) are delegation-wrapped and thus
     # dispatchable by direct_dispatch. Resolves globally — matching direct_dispatch
@@ -679,6 +688,8 @@ def run_iterate(
                 native_decompose=_native_decompose,
                 coding_agent=_coding_agent,
                 coding_agent_cmd=_coding_agent_cmd,
+                ui_extensions=_ui_extensions,
+                ui_globs=_ui_globs,
             )
 
             # Gate on ok=True: prevents notification when the executor fails
