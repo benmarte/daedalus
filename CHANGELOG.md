@@ -1,3 +1,5 @@
+## [Developer stage double-dispatch: false-failure re-spawn causes concurrent delegates + QA-before-PR churn](https://github.com/benmarte/daedalus/issues/1375) — [PR #1376](https://github.com/benmarte/daedalus/pull/1376)
+
 ## [Gate accessibility stage on real UI changes (skip creation for backend-only PRs)](https://github.com/benmarte/daedalus/issues/1371) — [PR #1374](https://github.com/benmarte/daedalus/pull/1374)
 
 ## [Add upstream Hermes on_model_change hook so Daedalus can retire poll-based profile sync](https://github.com/benmarte/daedalus/issues/1368) — [PR #1370](https://github.com/benmarte/daedalus/pull/1370)
