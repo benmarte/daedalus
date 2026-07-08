@@ -398,6 +398,23 @@ pipeline:
   # upfront_dag: false
   # native_gates: false
 
+  # ── Accessibility-stage UI gate (#1371) ──────────────────────────────────
+  # The accessibility review only adds value for PRs that touch UI. The
+  # downstream fan-out tests the developer's PR diff (changed files) against
+  # this fileset: a backend-only PR (no match) creates NO accessibility card
+  # and spawns no accessibility agent — the determination is deterministic, so
+  # we no longer pay a (crash-prone) agent spawn just to conclude "no UI".
+  # UI-touching PRs are unaffected (accessibility card still created). Fail-open:
+  # if the PR diff can't be fetched, the accessibility card is created anyway.
+  #
+  # Both keys are optional; when omitted the built-in defaults below are used.
+  # A file counts as UI when its name ends with one of `ui_extensions` OR
+  # matches one of `ui_globs` (`**` = any dirs, `*` = one path segment).
+  # accessibility:
+  #   ui_extensions: [".jsx", ".tsx", ".vue", ".svelte", ".css", ".scss",
+  #                   ".sass", ".less", ".html", ".htm"]
+  #   ui_globs: ["dashboard/src/**", "**/components/**", "**/*.stories.*"]
+
   # ── Label-protocol projection (#1292) ────────────────────────────────────
   # label_projection (default: false — behaviour unchanged)
   #   false — no VCS label writes; the reconciler is byte-inert (no provider
