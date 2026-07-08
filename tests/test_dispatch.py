@@ -3574,6 +3574,42 @@ def test_main_inner_self_test_unchanged(monkeypatch):
     check("self-test fail → 1", disp._main_inner(["--self-test"]) == 1)
 
 
+# ── --version flag (issue #1328) ──────────────────────────────────────────────
+
+
+def test_main_inner_version_prints_version_and_skips_tick(monkeypatch, capsys):
+    """--version prints a version-like string, exits 0, and never runs a tick."""
+
+    def _no_tick(*a, **k):
+        raise AssertionError("--version must not run a dispatch tick")
+
+    # Any attempt to dispatch (single-repo or registry sweep) would call one of
+    # these; if --version short-circuits correctly, none is reached.
+    monkeypatch.setattr(disp, "run", _no_tick)
+    monkeypatch.setattr(disp, "_resolve_repo_from_cwd", _no_tick)
+    monkeypatch.setattr(disp.registry, "list_projects", _no_tick)
+
+    rc = disp._main_inner(["--version"])
+    out = capsys.readouterr().out.strip()
+
+    check("--version → 0", rc == 0)
+    check("--version prints non-empty", bool(out))
+    check("--version prints version-like string", out[0].isdigit() and "." in out)
+
+
+def test_resolve_plugin_version_reads_manifest():
+    """_resolve_plugin_version() returns the version from plugin.yaml verbatim."""
+    version = disp._resolve_plugin_version()
+    check("resolves a version", version != "unknown")
+    check("version is dotted", version[0].isdigit() and "." in version)
+
+
+def test_resolve_plugin_version_unknown_on_missing_manifest(monkeypatch, tmp_path):
+    """Unresolvable manifest → 'unknown' (never raises), so --version exits 0."""
+    monkeypatch.setattr(disp, "_PLUGIN_ROOT", tmp_path)  # no plugin.yaml here
+    check("missing manifest → unknown", disp._resolve_plugin_version() == "unknown")
+
+
 if __name__ == "__main__":
     print("Follow-up extraction tests")
     print("-" * 60)
