@@ -2176,6 +2176,40 @@ def _fire_webhook_notification(
     thread.start()
 
 
+def _summarize_crash_telemetry(
+    crash_actions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Per-stage crash telemetry for the dispatch history record (#1372).
+
+    Collapses the crash-retry actions of a tick into two history fields:
+    ``crash_counts_by_role`` (role → number of crash actions, so crash rates
+    per pipeline stage are queryable over time) and ``crash_diagnostics`` (one
+    redacted record per action carrying the captured failure cause). Pure and
+    total — an empty action list yields empty aggregates.
+    """
+    counts_by_role: Dict[str, int] = {}
+    for action in crash_actions:
+        role = action.get("role") or "unknown"
+        counts_by_role[role] = counts_by_role.get(role, 0) + 1
+    diagnostics = [
+        {
+            "task_id": action.get("task_id"),
+            "issue": action.get("issue"),
+            "role": action.get("role") or "unknown",
+            "class": action.get("class") or "crash",
+            "action": action.get("action"),
+            "attempt": action.get("attempt"),
+            "max_attempts": action.get("max_attempts"),
+            "diagnostics": (action.get("diagnostics") or "")[:2000],
+        }
+        for action in crash_actions
+    ]
+    return {
+        "crash_counts_by_role": counts_by_role,
+        "crash_diagnostics": diagnostics,
+    }
+
+
 def _send_crash_retries_exhausted_notification(
     *,
     action: Dict[str, Any],
@@ -2198,6 +2232,9 @@ def _send_crash_retries_exhausted_notification(
     elapsed = action.get("elapsed_minutes")
     last_error = (action.get("summary") or "no failure details")[:300]
     provider_history = (action.get("provider_history") or "").strip()
+    # Redacted worker-log tail captured at escalation (#1372) — the failure
+    # cause, so a human triaging the escalation sees WHY the agent died.
+    diagnostics = (action.get("diagnostics") or "").strip()
     body = (
         "⚠️ **Crash Retries Exhausted**\n\n"
         f"Issue #{issue_n} (card `{task_id}`, {action.get('assignee') or 'unknown'}) "
@@ -2207,6 +2244,11 @@ def _send_crash_retries_exhausted_notification(
         + (
             f"**Per-provider history** (#1207):\n{provider_history}\n"
             if provider_history
+            else ""
+        )
+        + (
+            f"**Diagnostics** (redacted tail):\n```\n{diagnostics[:800]}\n```\n"
+            if diagnostics and diagnostics != last_error
             else ""
         )
         + "**Status**: hard-blocked (`crash-retries-exhausted`) — manual "
@@ -3257,6 +3299,12 @@ def _run_tick(
         )
     crash_retried = sum(1 for a in crash_actions if a.get("action") == "retried")
     crash_escalated = [a for a in crash_actions if a.get("action") == "escalated"]
+    # Per-stage crash telemetry (#1372): counts per role + the captured,
+    # redacted failure diagnostics, both persisted into history.jsonl so crash
+    # rates and causes per pipeline stage are queryable over time.
+    _crash_telemetry = _summarize_crash_telemetry(crash_actions)
+    crash_counts_by_role = _crash_telemetry["crash_counts_by_role"]
+    crash_diagnostics = _crash_telemetry["crash_diagnostics"]
     for _esc in crash_escalated:
         _send_crash_retries_exhausted_notification(
             action=_esc, resolved=resolved, dry_run=dry_run
@@ -3350,6 +3398,8 @@ def _run_tick(
             "stale_running": stale_running,
             "crash_retried": crash_retried,
             "crash_escalated": [a.get("task_id") for a in crash_escalated],
+            "crash_counts_by_role": crash_counts_by_role,
+            "crash_diagnostics": crash_diagnostics,
             "enrollment_failures": sorted(
                 set(getattr(provider, "enrollment_failures", []))
             )[:500],
@@ -4232,6 +4282,8 @@ def _run_tick(
         "stale_running": stale_running,
         "crash_retried": crash_retried,
         "crash_escalated": [a.get("task_id") for a in crash_escalated],
+        "crash_counts_by_role": crash_counts_by_role,
+        "crash_diagnostics": crash_diagnostics,
         "enrollment_failures": sorted(
             set(getattr(provider, "enrollment_failures", []))
         ),

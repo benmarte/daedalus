@@ -62,6 +62,18 @@ ESCALATED_MARKER = "<!-- daedalus:crash-retry-exhausted -->"
 # Summary prefix a card gets when its crash retries are exhausted.
 EXHAUSTED_PREFIX = "crash-retries-exhausted:"
 
+# Comment marker stamped on a card when a crash re-dispatch attaches the
+# inner agent's captured failure diagnostics (#1372). Human-visible + lets a
+# reader distinguish the diagnostics attachment from other bot comments.
+DIAG_MARKER = "<!-- daedalus:crash-diagnostics -->"
+
+# How many trailing lines of the worker log to keep as the crash diagnostic.
+_DIAG_TAIL_LINES = 40
+
+# Profile-suffix stripped from an assignee to recover the pipeline role
+# (``developer-daedalus`` → ``developer``) for per-stage crash telemetry.
+_ROLE_SUFFIX = "-daedalus"
+
 # Crash signatures, grouped by trigger class (#1207 provider failover).
 # Mirrors iterate.classify_blocked's ``_crash_markers`` plus the transient
 # provider/session failures from the #1205 incident and #1200. Order matters:
@@ -225,6 +237,56 @@ def _card_evidence(slug: str, card: dict[str, Any]) -> str:
         if tid:
             parts.append(kanban.get_latest_summary(slug, tid))
     return " ".join(p for p in parts if p).strip()
+
+
+def _redact(text: str) -> str:
+    """Scrub credentials from *text* via the shared HTTP redaction helper (#1372).
+
+    Best-effort: if the provider layer can't be imported the raw text is
+    returned unchanged (still a string). Never raises.
+    """
+    try:
+        from core.providers.http import redact_secrets
+
+        return redact_secrets(text or "")
+    except Exception:  # noqa: BLE001 — redaction must never break a tick
+        return text or ""
+
+
+def _role_of(card: dict[str, Any]) -> str:
+    """Best-effort pipeline role of *card* for per-stage crash telemetry (#1372).
+
+    Prefers the assignee (``developer-daedalus`` → ``developer``); falls back
+    to the leading token of a ``<role>: #N …`` title; ``unknown`` otherwise.
+    """
+    asg = str(card.get("assignee") or "").strip().lower()
+    if asg.endswith(_ROLE_SUFFIX):
+        asg = asg[: -len(_ROLE_SUFFIX)]
+    if asg:
+        return asg
+    title = str(card.get("title") or "")
+    head = title.split(":", 1)[0].strip().lower() if ":" in title else ""
+    token = head.split()[0] if head else ""
+    return token or "unknown"
+
+
+def _capture_diagnostics(slug: str, tid: str) -> str:
+    """Redacted tail of the crashed worker's log, or "" when none (#1372).
+
+    Reads the inner agent's captured stdout/stderr via
+    ``kanban.worker_log_tail`` and scrubs credentials with the shared HTTP
+    redaction helper. Best-effort: a missing log / helper failure yields "" so
+    the caller falls back to the block evidence. Never raises.
+    """
+    try:
+        raw = kanban.worker_log_tail(slug, tid)
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never break a tick
+        logger.debug("crash-retry: worker log capture failed for %s: %s", tid, exc)
+        return ""
+    if not raw:
+        return ""
+    tail = "\n".join(raw.splitlines()[-_DIAG_TAIL_LINES:])
+    return _redact(tail).strip()
 
 
 def _gave_up_evidence_from_events(slug: str, task_id: str) -> str | None:
@@ -474,6 +536,9 @@ def _reconcile_card(
         attempts > 0 and ts - first_ts > cfg["crash_retry_window_hours"] * 3600
     )
     if exhausted:
+        # Capture the crashed worker's log tail so the escalation records WHY
+        # the agent kept dying (#1372) — skipped in dry-run (no CLI reads).
+        diagnostics = "" if dry_run else _capture_diagnostics(slug, tid)
         return _escalate(
             slug,
             workdir,
@@ -487,6 +552,7 @@ def _reconcile_card(
             issue_n,
             ts,
             dry_run,
+            diagnostics=diagnostics,
         )
 
     # Backoff: attempt n+1 is allowed only after schedule[n] minutes.
@@ -527,6 +593,8 @@ def _reconcile_card(
             return None  # wait for a cooldown to expire / apply retry next tick
         if outcome == "exhausted":
             entry["provider"] = _provider_snapshot(plan)
+            # Non-dry-run here (dry_run returned above) — capture diagnostics.
+            diagnostics = _capture_diagnostics(slug, tid)
             return _escalate(
                 slug,
                 workdir,
@@ -540,6 +608,7 @@ def _reconcile_card(
                 issue_n,
                 ts,
                 dry_run,
+                diagnostics=diagnostics,
             )
         provider_state = outcome
         provider_name = str(provider_state.get("name") or "")
@@ -559,6 +628,9 @@ def _reconcile_card(
     elif entry.get("provider"):
         new_entry["provider"] = entry["provider"]
     dispatch_state.set_crash_retry(workdir, tid, new_entry)
+    # Capture the crashed worker's log tail BEFORE re-dispatch so it reflects
+    # the run that just died (#1372). Redacted; "" when no log is available.
+    log_tail = _capture_diagnostics(slug, tid)
     reason = (
         f"crash-retry: auto re-dispatch attempt {attempt_n}/{max_attempts} "
         + (f"via {provider_name} " if provider_name else "")
@@ -574,6 +646,18 @@ def _reconcile_card(
             attempt_n,
         )
         return None
+    # Attach the captured diagnostics to the card — but only when a real worker
+    # log was captured; the unblock reason above already carries the block
+    # evidence, so an evidence-only comment would just be noise (#1372).
+    if log_tail:
+        kanban.comment(
+            slug,
+            tid,
+            f"{DIAG_MARKER}\n"
+            f"🔍 **Crash diagnostics** (attempt {attempt_n}/{max_attempts}, "
+            f"class: `{trigger}`) — captured before re-dispatch:\n\n"
+            f"```\n{log_tail[:1500]}\n```",
+        )
     logger.info(
         "crash-retry: unblocked %s (#%s) — attempt %d/%d, %.0f min since first crash",
         tid,
@@ -593,6 +677,9 @@ def _reconcile_card(
         "title": card.get("title") or "",
         "assignee": card.get("assignee") or "",
         "provider": provider_name,
+        "role": _role_of(card),
+        "class": trigger,
+        "diagnostics": (log_tail or _redact(evidence))[:2000],
     }
 
 
@@ -786,8 +873,14 @@ def _escalate(
     issue_n: int | None,
     ts: float,
     dry_run: bool,
+    diagnostics: str = "",
 ) -> dict[str, Any] | None:
-    """Exhausted retries → real hard block + diagnostics + notify action."""
+    """Exhausted retries → real hard block + diagnostics + notify action.
+
+    *diagnostics* is the redacted worker-log tail captured at escalation time
+    (#1372); when present it is folded into the card comment and returned in
+    the action so the notification + history record carry the failure cause.
+    """
     if dry_run:
         logger.info(
             "[dry-run] crash-retry: would escalate %s (#%s) — %d/%d attempts "
@@ -822,6 +915,11 @@ def _escalate(
         f"⚠️ **Crash retries exhausted** — {attempts}/{max_attempts} automatic "
         f"re-dispatches over {elapsed_min:.0f} min failed.\n\n"
         f"Last failure: {last_error[:300]}\n\n"
+        + (
+            f"Diagnostics (redacted tail):\n```\n{diagnostics[:1500]}\n```\n\n"
+            if diagnostics
+            else ""
+        )
         + (f"Per-provider history:\n{provider_history}\n\n" if provider_history else "")
         + f"The card stays hard-blocked. Recovery: fix the underlying cause, then "
         f"`hermes kanban unblock {tid}` (this resets the crash-retry counter)."
@@ -853,6 +951,9 @@ def _escalate(
         "title": card.get("title") or "",
         "assignee": card.get("assignee") or "",
         "provider_history": provider_history,
+        "role": _role_of(card),
+        "class": entry.get("class") or classify(evidence) or "crash",
+        "diagnostics": (diagnostics or _redact(last_error))[:2000],
     }
 
 
