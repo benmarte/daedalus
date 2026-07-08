@@ -35,6 +35,7 @@ import time
 
 from core import kanban
 from core.db import connect_wal
+from core.util import extract_issue_number
 
 logger = logging.getLogger("daedalus.sweeper")
 
@@ -492,3 +493,85 @@ def recover_triaged_cards(
         )
         recovered.append(tid)
     return recovered
+
+
+# Terminal states a card can be in — never touched by the merged-orphan sweep.
+_TERMINAL_STATUSES = ("done", "complete", "completed", "cancelled", "archived")
+# Recovery/guard artifact cards minted by the bounded triage-recovery
+# (``[recover N]``) and guard-prefix (``… guard: …``) machinery. Their titles
+# carry suffixes the one-shot merged-PR reap runs *before* they exist, so they
+# strand in ``blocked`` when minted after that reap already ran (#1373).
+_ORPHAN_TITLE_RE = re.compile(r"\bguard:|\[recover \d+\]")
+
+
+def sweep_merged_orphans(
+    slug: str,
+    provider,
+    *,
+    dry_run: bool = False,
+) -> list[str]:
+    """Archive orphaned ``guard:`` / ``[recover N]`` cards whose issue's PR merged (#1373).
+
+    The one-shot merged-PR reconciler (``kanban.close_issue_tasks`` /
+    ``_execute_reconcile_merged``) reaps an issue's cards exactly once — when the
+    developer card lands. But the bounded triage-recovery and guard-prefix
+    machinery can *mint* new cards (``[recover N]``, ``… guard: unexpected …``)
+    **after** that reap has already run, orphaning them in ``blocked`` on the
+    board forever. Board clutter aside, a stranded card looks like active work to
+    the serial-queue "nothing in-progress/blocked" gate.
+
+    This every-tick sweep closes the gap by re-checking the merge state from the
+    **provider** (not the board's Done column): any non-terminal recovery/guard
+    card whose issue has a merged PR is archived. Keyed on issue number and
+    tolerant of title suffixes, so it also mops up pre-existing strays.
+
+    Degrades gracefully: any failure logs a warning and is contained. Returns the
+    ids of the cards archived (or that *would* be archived under ``dry_run``).
+    """
+    if provider is None:
+        return []
+    try:
+        cards = kanban.list_tasks(slug)
+    except Exception as exc:  # never let the sweep break a dispatch tick
+        logger.warning("sweeper: merged-orphan sweep: list_tasks failed: %s", exc)
+        return []
+
+    merged_cache: dict[int, bool] = {}
+    archived: list[str] = []
+    for card in cards:
+        status = (card.get("status") or "").lower()
+        if status in _TERMINAL_STATUSES:
+            continue
+        title = card.get("title") or ""
+        if not _ORPHAN_TITLE_RE.search(title):
+            continue
+        # Issue number lives at the head of the guard/recover title (``#N …``);
+        # fall back to the body for defensiveness.
+        n = extract_issue_number(title) or extract_issue_number(card.get("body") or "")
+        if n is None:
+            continue
+        if n not in merged_cache:
+            try:
+                merged_cache[n] = provider.pr_state_for_issue(n) == "merged"
+            except Exception as exc:  # provider methods never raise, but be safe
+                logger.warning("sweeper: merged-orphan sweep: merge check failed for #%s: %s", n, exc)
+                merged_cache[n] = False
+        if not merged_cache[n]:
+            continue
+        tid = card.get("id") or card.get("task_id")
+        if not tid:
+            continue
+        if dry_run:
+            logger.info(
+                "[dry-run] sweeper: merged-orphan sweep would archive %s (issue #%s merged): %r",
+                tid, n, title,
+            )
+            archived.append(str(tid))
+            continue
+        if _archive_with_retry(slug, str(tid)):
+            logger.info(
+                "sweeper: merged-orphan sweep archived %s for merged issue #%s: %r",
+                tid, n, title,
+            )
+            archived.append(str(tid))
+    return archived

@@ -583,7 +583,132 @@ def test_recover_triaged_reset_false_reports_only():
     check("reports recoverable, no mutation", out == ["t_v"] and not create.called and not archive.called)
 
 
+# ── merged-issue orphan sweep (issue #1373) ───────────────────────────────────
+
+
+class _FakeProvider:
+    """Minimal provider double: maps issue number → PR state, counts lookups."""
+
+    def __init__(self, states: dict[int, str | None]):
+        self._states = states
+        self.calls: list[int] = []
+
+    def pr_state_for_issue(self, n: int) -> str | None:
+        self.calls.append(n)
+        return self._states.get(n)
+
+
+def _orphan(tid, title, status="blocked", body=""):
+    return {"id": tid, "title": title, "status": status, "body": body}
+
+
+def test_merged_orphan_archives_guard_card():
+    """AC2: a guard:-suffixed blocked card for a merged issue is archived."""
+    card = _orphan("t_288292a2", "#1368 security-analyst-daedalus guard: unexpected completion")
+    prov = _FakeProvider({1368: "merged"})
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as arch,
+    ):
+        out = sweeper.sweep_merged_orphans("b", prov)
+    check("guard card archived for merged issue", out == ["t_288292a2"])
+    check("archive_task called on the guard card", arch.call_args[0] == ("b", "t_288292a2"))
+
+
+def test_merged_orphan_archives_recover_card():
+    """A [recover N]-suffixed card for a merged issue is archived."""
+    card = _orphan("t_r", "#1368 QA: feat [recover 2]")
+    prov = _FakeProvider({1368: "merged"})
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        out = sweeper.sweep_merged_orphans("b", prov)
+    check("recover card archived for merged issue", out == ["t_r"])
+
+
+def test_merged_orphan_skips_unmerged_issue():
+    """A guard card whose issue's PR is still open (or absent) is left alone."""
+    cards = [
+        _orphan("t_open", "#100 reviewer-daedalus guard: unexpected completion"),
+        _orphan("t_none", "#200 qa-daedalus guard: unexpected completion"),
+    ]
+    prov = _FakeProvider({100: "open", 200: None})
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=cards),
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as arch,
+    ):
+        out = sweeper.sweep_merged_orphans("b", prov)
+    check("no orphan archived when issue unmerged/no-PR", out == [] and not arch.called)
+
+
+def test_merged_orphan_skips_non_orphan_card():
+    """A normal (non-guard/recover) card for a merged issue is NOT touched."""
+    card = _orphan("t_dev", "#1368 developer: implement fix")
+    prov = _FakeProvider({1368: "merged"})
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as arch,
+    ):
+        out = sweeper.sweep_merged_orphans("b", prov)
+    check("non-orphan card left alone", out == [] and not arch.called)
+
+
+def test_merged_orphan_skips_terminal_card():
+    """A done guard card is terminal — the sweep never re-archives it."""
+    card = _orphan("t_done", "#1368 qa-daedalus guard: unexpected completion", status="done")
+    prov = _FakeProvider({1368: "merged"})
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as arch,
+    ):
+        out = sweeper.sweep_merged_orphans("b", prov)
+    check("terminal guard card skipped", out == [] and not arch.called)
+
+
+def test_merged_orphan_dry_run_does_not_archive():
+    card = _orphan("t_288292a2", "#1368 security-analyst-daedalus guard: unexpected completion")
+    prov = _FakeProvider({1368: "merged"})
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=[card]),
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True) as arch,
+    ):
+        out = sweeper.sweep_merged_orphans("b", prov, dry_run=True)
+    check("dry-run reports the card", out == ["t_288292a2"])
+    check("dry-run does not archive", not arch.called)
+
+
+def test_merged_orphan_no_provider_returns_empty():
+    with mock.patch.object(sweeper.kanban, "list_tasks") as lt:
+        out = sweeper.sweep_merged_orphans("b", None)
+    check("None provider → [] and no board read", out == [] and not lt.called)
+
+
+def test_merged_orphan_caches_merge_check_per_issue():
+    """Two orphan cards for the same issue → one provider lookup (cached)."""
+    cards = [
+        _orphan("t_a", "#1368 qa-daedalus guard: unexpected completion"),
+        _orphan("t_b", "#1368 reviewer-daedalus guard: unexpected completion"),
+    ]
+    prov = _FakeProvider({1368: "merged"})
+    with (
+        mock.patch.object(sweeper.kanban, "list_tasks", return_value=cards),
+        mock.patch.object(sweeper.kanban, "archive_task", return_value=True),
+    ):
+        out = sweeper.sweep_merged_orphans("b", prov)
+    check("both orphans archived", out == ["t_a", "t_b"])
+    check("merge state fetched once per issue", prov.calls == [1368])
+
+
 ALL_TESTS = [
+    test_merged_orphan_archives_guard_card,
+    test_merged_orphan_archives_recover_card,
+    test_merged_orphan_skips_unmerged_issue,
+    test_merged_orphan_skips_non_orphan_card,
+    test_merged_orphan_skips_terminal_card,
+    test_merged_orphan_dry_run_does_not_archive,
+    test_merged_orphan_no_provider_returns_empty,
+    test_merged_orphan_caches_merge_check_per_issue,
     test_recover_triaged_recreates_nondeveloper_role,
     test_recover_triaged_skips_developer,
     test_recover_triaged_bounded_at_max,

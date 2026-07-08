@@ -3205,6 +3205,21 @@ def _run_tick(
         except Exception as exc:  # never let recovery break a dispatch tick
             logger.warning("dispatch: triage-recovery failed: %s", exc)
 
+    # ── merged-issue orphan sweep (issue #1373) ──────────────────────────────
+    # The one-shot merged-PR reap runs once (when the developer card lands), but
+    # triage-recovery / guard-prefix machinery can mint `[recover N]` / `guard:`
+    # cards AFTER that reap, orphaning them in blocked forever — board clutter
+    # that also fools the serial-queue gate. This every-tick sweep archives any
+    # such non-terminal card whose issue's PR is merged (per the provider, not
+    # the board's Done column). Configurable via tracking.merged_orphan_sweep.
+    # {enabled}; degrades gracefully.
+    orphan_cfg = (resolved.get("tracking") or {}).get("merged_orphan_sweep") or {}
+    if orphan_cfg.get("enabled", True):
+        try:
+            sweeper.sweep_merged_orphans(slug, provider, dry_run=dry_run)
+        except Exception as exc:  # never let the sweep break a dispatch tick
+            logger.warning("dispatch: merged-orphan sweep failed: %s", exc)
+
     # ── crash-retry reconciler (issue #1205) ─────────────────────────────────
     # Crash-class blocked / gave-up cards (worker died, session limit, provider
     # connection error) are auto-unblocked with time-bounded, backed-off
