@@ -1,8 +1,8 @@
 ## [Automate CHANGELOG.md via CI on PR-merge (decouple from dispatcher; cover manual merges)](https://github.com/benmarte/daedalus/issues/1386) — [PR #1399](https://github.com/benmarte/daedalus/pull/1399)
 
-## [**Remove the dispatcher-side path**: delete the `provider.append_changelog(...)` call block in `scripts/daedalus_dispatch.py` (~L3764–3776). Decide whether to keep `VCSProvider.append_changelog` / `github.append_changelog` (they may be reused by the new script) or remove them; if kept, ensure nothing else calls the old trigger. No double entries after this lands.](https://github.com/benmarte/daedalus/issues/1391) — [PR #1395](https://github.com/benmarte/daedalus/pull/1395)
+## [fix: remove dispatcher-side CHANGELOG writer](https://github.com/benmarte/daedalus/pull/1395) — [PR #1395](https://github.com/benmarte/daedalus/pull/1395)
 
-## [Prepends an entry to `CHANGELOG.md` on `dev` in the **existing format**, newest first: + Commits as `docs: update CHANGELOG.md [skip ci]` so it does not re-trigger CI. + **Idempotent**: if an entry for `PR #<n>` already exists in CHANGELOG.md, do nothing (no duplicate). This also makes the transition safe while the dispatcher path still exists.](https://github.com/benmarte/daedalus/issues/1388) — [PR #1396](https://github.com/benmarte/daedalus/pull/1396)
+## [feat: idempotent CHANGELOG.md prepend script for CI PR-merge](https://github.com/benmarte/daedalus/pull/1396) — [PR #1396](https://github.com/benmarte/daedalus/pull/1396)
 
 ## [fix: deliver Antigravity prompt positionally per docs via daedalus-agy-run.sh](https://github.com/benmarte/daedalus/issues/1380) — [PR #1383](https://github.com/benmarte/daedalus/pull/1383)
 
