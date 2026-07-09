@@ -1,3 +1,5 @@
+## [Prepends an entry to `CHANGELOG.md` on `dev` in the **existing format**, newest first: + Commits as `docs: update CHANGELOG.md [skip ci]` so it does not re-trigger CI. + **Idempotent**: if an entry for `PR #<n>` already exists in CHANGELOG.md, do nothing (no duplicate). This also makes the transition safe while the dispatcher path still exists.](https://github.com/benmarte/daedalus/issues/1388) — [PR #1396](https://github.com/benmarte/daedalus/pull/1396)
+
 ## [fix: deliver Antigravity prompt positionally per docs via daedalus-agy-run.sh](https://github.com/benmarte/daedalus/issues/1380) — [PR #1383](https://github.com/benmarte/daedalus/pull/1383)
 
 ## [feat: enable Antigravity (agy) coding agent — resolver + dashboard picker](https://github.com/benmarte/daedalus/issues/1380) — [PR #1382](https://github.com/benmarte/daedalus/pull/1382)
