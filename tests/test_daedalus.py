@@ -4092,7 +4092,6 @@ def test_core_util_schedule_to_crontab_is_source_of_truth():
 _FakeProvider.get_pr_files = lambda self, pr: []
 _FakeProvider.post_issue_comment = lambda self, n, body: True
 _FakeProvider.board_ensure_status_option = lambda self, *a: True
-_FakeProvider.append_changelog = lambda self, *a: False
 
 
 # ── issue #1104: empty-summary retry for PM and developer roles ─────────────

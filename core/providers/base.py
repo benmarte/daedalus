@@ -725,11 +725,6 @@ class VCSProvider(abc.ABC):
         on error. Default: unsupported (None) so callers need not check provider type."""
         return None
 
-    def append_changelog(self, base_branch: str, entry: str) -> bool:
-        """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the VCS API.
-        Returns True on success; defaults to False (providers that support it override)."""
-        return False
-
     # ── URL builders (for rich notification links) ───────────────────────────
     def issue_url(self, issue_number: int) -> str:
         """Canonical web URL for an issue/work-item. Returns '' if not known."""

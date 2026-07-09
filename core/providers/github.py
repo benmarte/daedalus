@@ -613,45 +613,6 @@ class GitHubProvider(VCSProvider):
                 self._log.warning("ensure_labels: create %r failed: %s", ldef["name"], e)
         return created
 
-    def append_changelog(self, base_branch: str, entry: str) -> bool:
-        """Prepend ``entry`` to CHANGELOG.md on ``base_branch`` via the Contents API.
-
-        Creates the file if absent. Skips silently when no write token is available.
-        """
-        path = "CHANGELOG.md"
-        url = f"/repos/{self.repo}/contents/{path}"
-        try:
-            existing = self._http.get_json(url, params={"ref": base_branch})
-        except ProviderError:
-            existing = None
-        import base64 as _b64
-        old_content = ""
-        sha = None
-        if existing and isinstance(existing, dict):
-            sha = existing.get("sha")
-            try:
-                old_content = _b64.b64decode(existing.get("content") or "").decode("utf-8", errors="replace")
-            except Exception:
-                old_content = ""
-        new_content = entry.rstrip("\n") + "\n\n" + old_content
-        payload: dict[str, Any] = {
-            "message": "docs: update CHANGELOG.md [skip ci]",
-            "content": _b64.b64encode(new_content.encode()).decode(),
-            "branch": base_branch,
-        }
-        if sha:
-            payload["sha"] = sha
-        try:
-            if sha:
-                self._http.put_json(url, payload)
-            else:
-                self._http.post_json(url, payload)
-        except ProviderError as e:
-            self._log.warning("append_changelog failed: %s", e)
-            return False
-        self._log.info("append_changelog: prepended entry to CHANGELOG.md on %s", base_branch)
-        return True
-
     # ── GraphQL (Projects v2) ────────────────────────────────────────────────
     def _graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
         try:
