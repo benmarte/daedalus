@@ -1,3 +1,7 @@
+## [fix: deliver Antigravity prompt positionally per docs via daedalus-agy-run.sh](https://github.com/benmarte/daedalus/issues/1380) — [PR #1383](https://github.com/benmarte/daedalus/pull/1383)
+
+## [feat: enable Antigravity (agy) coding agent — resolver + dashboard picker](https://github.com/benmarte/daedalus/issues/1380) — [PR #1382](https://github.com/benmarte/daedalus/pull/1382)
+
 ## [Research: add Antigravity CLI (agy) as a delegatable coding agent](https://github.com/benmarte/daedalus/issues/1380) — [PR #1381](https://github.com/benmarte/daedalus/pull/1381)
 
 ## [Capture gate-agent crash diagnostics + confirm bounded crash-recovery convergence](https://github.com/benmarte/daedalus/issues/1372) — [PR #1378](https://github.com/benmarte/daedalus/pull/1378)

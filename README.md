@@ -647,6 +647,7 @@ process.
 | `claude-code` | Delegate to the Claude Code CLI (one-shot `-p` mode). |
 | `codex` | Delegate to the OpenAI Codex CLI (`exec` mode). |
 | `opencode` | Delegate to the OpenCode CLI (`run` mode). |
+| `antigravity` | Delegate to the Antigravity CLI `agy` (one-shot `--print` mode, via the `daedalus-agy-run.sh` launcher). Auth is OS-keyring/browser-based (no env token) — sign in once with `agy` under the same OS user the workers run as. |
 | `none` | No delegation — same as `hermes`, the role codes directly. |
 
 **Enable it project-wide** in `.hermes/daedalus.yaml`:

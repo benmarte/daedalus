@@ -333,6 +333,7 @@ execution:
 | `claude-code` | Delegate to the Claude Code CLI (`-p` one-shot mode). |
 | `codex` | Delegate to the OpenAI Codex CLI (`exec` mode). |
 | `opencode` | Delegate to the OpenCode CLI (`run` mode). |
+| `antigravity` | Delegate to the Antigravity CLI `agy` (one-shot `--print` mode). Auth is OS-keyring/browser-based (no env token) — sign in once with `agy` under the worker's OS user. |
 | `none` | No delegation (same effect as `hermes`). |
 
 - `coding_agent_cmd` is the full shell command the task body is piped into. Omit it to use
