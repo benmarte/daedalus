@@ -168,6 +168,78 @@ _AC_SECTION_RE = re.compile(
     r"^##\s+acceptance\s+criteria\b", re.MULTILINE | re.IGNORECASE
 )
 
+# ── Deliverable-vs-acceptance-criteria checklist attribution (issue #1402) ────
+#
+# A checklist item under an acceptance-criteria / test-plan / verification
+# heading is a *verification step for one unit of work*, NOT an independent
+# deliverable. Decomposing such items produced overlapping sub-tasks and
+# garbage multi-sentence titles on epic #1386. Both epic *detection*
+# (``is_epic`` density heuristic) and *decomposition*
+# (``_extract_sub_issues_from_body`` in core/iterate/executors.py) count only
+# the genuine-deliverable checklist items surfaced by
+# ``_deliverable_checklist_items`` below, so the two stages agree on what
+# "a deliverable" is.
+
+#: Section headings whose checklist items are verification steps, not
+#: deliverables — acceptance criteria, test plans, done-checklists.
+_AC_SECTION_KEYWORDS_RE = re.compile(
+    r"\b(?:"
+    r"acceptance\s+criteria"
+    r"|test(?:s|ing|\s+plan)?"
+    r"|verif(?:y|ication)"
+    r"|how\s+to\s+test"
+    r"|definition\s+of\s+done"
+    r"|done\s+when"
+    r"|qa\s+checklist"
+    r")\b",
+    re.IGNORECASE,
+)
+#: A markdown ATX heading (``## Foo``).
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+#: A line that is entirely ``**bold**`` (optionally trailed by a colon) — a
+#: common "heading" style in issue bodies that use bold instead of ``##``.
+_BOLD_HEADING_RE = re.compile(r"^\s*\*\*(.+?)\*\*\s*:?\s*$")
+#: A single checklist item line (``- [ ] text`` / ``* [x] text``). Not anchored
+#: with re.MULTILINE — matched per line by _deliverable_checklist_items.
+_CHECKLIST_ITEM_RE = re.compile(r"^\s*[-*+]\s*\[[ xX]\]\s*(.+)")
+
+
+def _section_heading(line: str) -> str | None:
+    """Return the heading text if *line* is a markdown or bold-only heading."""
+    m = _HEADING_RE.match(line)
+    if m:
+        return m.group(1)
+    m = _BOLD_HEADING_RE.match(line)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _deliverable_checklist_items(body: str) -> list[str]:
+    """Return checklist item texts that are genuine independent deliverables.
+
+    Walks *body* line by line, tracking the current section heading. Checklist
+    items under an acceptance-criteria / test-plan / verification heading (see
+    ``_AC_SECTION_KEYWORDS_RE``) are verification steps for one unit of work and
+    are skipped; every other checklist item is returned in document order
+    (issue #1402).
+    """
+    items: list[str] = []
+    in_ac_section = False
+    for line in (body or "").splitlines():
+        heading = _section_heading(line)
+        if heading is not None:
+            in_ac_section = bool(_AC_SECTION_KEYWORDS_RE.search(heading))
+            continue
+        if in_ac_section:
+            continue
+        m = _CHECKLIST_ITEM_RE.match(line)
+        if m:
+            text = m.group(1).strip()
+            if text:
+                items.append(text)
+    return items
+
 
 def _label_names(labels: Any) -> list[str]:
     """Extract label names from either list-of-dicts or list-of-strings shape."""
@@ -256,9 +328,12 @@ def is_epic(issue: Any, epic_config: dict[str, Any] | None = None) -> bool:
     if _is_single_ac_bug(body):
         return False
 
-    # Checklist density: >= min_checklist plain checkboxes indicate an epic
-    # (only reached when the AC-exclusion above did not fire).
-    if len(_CHECKLIST_LINE_RE.findall(body)) >= min_checklist:
+    # Checklist density: >= min_checklist genuine-deliverable checkboxes indicate
+    # an epic (only reached when the AC-exclusion above did not fire). Checklist
+    # items that live under an acceptance-criteria / test-plan / verification
+    # heading are verification steps, not deliverables, and do not count toward
+    # the density threshold (issue #1402).
+    if len(_deliverable_checklist_items(body)) >= min_checklist:
         return True
 
     # Body size + decomposition language: large body alone is insufficient —

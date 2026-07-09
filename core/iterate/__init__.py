@@ -183,6 +183,7 @@ from core.iterate.executors import (  # noqa: E402
     _reviewer_passed_for_issue as _reviewer_passed_for_issue,
     _role_cards_for_issue as _role_cards_for_issue,
     _role_gate_passed as _role_gate_passed,
+    _sanitize_sub_issue_title as _sanitize_sub_issue_title,
     _security_passed_for_issue as _security_passed_for_issue,
     _strip_code_blocks as _strip_code_blocks,
     _sub_issue_body as _sub_issue_body,

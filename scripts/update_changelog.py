@@ -51,15 +51,39 @@ COMMIT_MESSAGE = "docs: update CHANGELOG.md [skip ci]"
 #: Default CHANGELOG path, relative to the repo root.
 DEFAULT_PATH = "CHANGELOG.md"
 
+#: Max characters for a CHANGELOG entry title (issue #1402, defense-in-depth).
+MAX_TITLE_LEN = 120
+
+
+def sanitize_title(title: str) -> str:
+    """Collapse a title to a single line and cap its length (issue #1402).
+
+    Defense-in-depth backstop: a garbage multi-line or over-long PR/issue title
+    (as produced by the planner's former over-decomposition of AC checklists)
+    must not corrupt CHANGELOG.md. All whitespace runs — including newlines — are
+    collapsed to single spaces and the result is capped with an ellipsis. Normal
+    single-line titles pass through unchanged.
+    """
+    collapsed = " ".join((title or "").split())
+    if len(collapsed) > MAX_TITLE_LEN:
+        clipped = collapsed[:MAX_TITLE_LEN].rstrip()
+        if " " in clipped:
+            clipped = clipped[: clipped.rfind(" ")].rstrip()
+        collapsed = clipped + "…"
+    return collapsed
+
 
 def format_entry(title: str, entry_url: str, pr_number: int, pr_url: str) -> str:
     """Render a single newest-first CHANGELOG entry line (no trailing newline).
+
+    The title is sanitized (single line, length-capped) as a defense-in-depth
+    backstop against garbage titles (issue #1402).
 
     Format::
 
         ## [<title>](<entry_url>) — [PR #<n>](<pr_url>)
     """
-    return f"## [{title}]({entry_url}) — [PR #{pr_number}]({pr_url})"
+    return f"## [{sanitize_title(title)}]({entry_url}) — [PR #{pr_number}]({pr_url})"
 
 
 def entry_present(content: str, pr_number: int) -> bool:
