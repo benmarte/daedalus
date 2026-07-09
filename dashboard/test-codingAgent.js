@@ -43,7 +43,7 @@ check("default for claude-code", ca.defaultCmdFor("claude-code"),
 check("default for codex", ca.defaultCmdFor("codex"), "codex exec --full-auto");
 check("default for opencode", ca.defaultCmdFor("opencode"), "opencode run");
 check("default for antigravity", ca.defaultCmdFor("antigravity"),
-  "agy --print --dangerously-skip-permissions --print-timeout 20m");
+  "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh");
 check("default for hermes is ''", ca.defaultCmdFor("hermes"), "");
 check("default for unknown is ''", ca.defaultCmdFor("nope"), "");
 

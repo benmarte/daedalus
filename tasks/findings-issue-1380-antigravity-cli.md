@@ -71,15 +71,26 @@ non-interactive one-shot: "runs the prompt and exits". To make it safe in a
   never arrives → a spurious `CODING_AGENT_TIMEOUT` an hour later. Raising the
   inner bound avoids that.
 
-**Recommended default invocation** (the wired default):
+**Wired default invocation** — a dedicated launcher, `daedalus-agy-run.sh`:
 
 ```
-agy --print --dangerously-skip-permissions --print-timeout 20m
+$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh
+# which execs:  agy --print "$(cat)" --dangerously-skip-permissions --print-timeout 20m "$@"
 ```
 
-**Caveat (gate #2):** the prompt reaches the agent via **stdin**, not a
-positional arg — see Q3 and the TL;DR. This is the single behavior that must be
-confirmed before enabling.
+**Gate #2 — RESOLVED.** The prompt reaches a delegated agent via **stdin** (the
+spawn wrappers do `bash -c "$cmd" < task`), but agy takes the prompt
+**positionally** (`agy --print '<prompt>'`) and stdin support is undocumented.
+Baking a `"$(cat)"` substitution straight into `run_cmd` is unsafe — the
+developer path interpolates the command through an *outer* pid-capturing
+`bash -c '… exec …'` that would expand `$(cat)` before the `< task` redirect is
+in effect (reading the wrong stdin), while the delegate path expands it once, so
+no single quoted form is correct on both. The launcher sidesteps this: it is a
+single-token command to the interpolation layer, and the substitution runs only
+inside it, in a shell whose stdin *is* the piped task. It reads the task and
+passes it positionally per the docs, forwarding any injected `--model` after —
+so prompt delivery no longer depends on undocumented stdin behavior. Verified by
+`test_agy_launcher_passes_piped_task_as_positional_print_prompt`.
 
 ### 2. Auth in a worker terminal — the biggest unknown
 
@@ -144,7 +155,7 @@ coding_agents:
   - name: claude-code
     cmd: '…'
   - name: antigravity
-    cmd: 'agy --print --dangerously-skip-permissions --print-timeout 20m'
+    cmd: '$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh'
 ```
 
 Transient-trigger attribution (`session limit`, `quota`, `crash`, `timeout`)
@@ -160,13 +171,15 @@ All wired in this PR (inert — no role default changed):
 | # | Location | Change |
 |---|----------|--------|
 | 1 | `core/provider_failover.py` `VALID_CODING_AGENTS` | add `"antigravity"` |
-| 2 | `core/dispatch/resolvers.py` `_CODING_AGENT_DEFAULTS` | add `"antigravity": "agy --print --dangerously-skip-permissions --print-timeout 20m"` |
+| 2 | `core/dispatch/resolvers.py` `_CODING_AGENT_DEFAULTS` | add `"antigravity"` → `daedalus-agy-run.sh` launcher (positional-prompt bridge) |
 | 3 | `scripts/daedalus_dispatch.py` `_build_delegation_instructions` | add `if agent == "antigravity":` delegation branch (mirrors `codex`/`opencode`) |
 | 4 | `scripts/daedalus_dispatch.py` `_AGENT_SKILL` map | add `"antigravity": "autonomous-ai-agents/antigravity-cli"` |
 | 5 | `core/dispatch/bodies.py` `_CLOUD_AGENT_LABELS` | add `"antigravity": "Antigravity"` (delegation-block label) |
 | 6 | `templates/daedalus.yaml` `execution:` docs | document the `antigravity` option, its caveats, and the failover-chain enum |
 
-**Default `run_cmd`:** `agy --print --dangerously-skip-permissions --print-timeout 20m`
+**Default `run_cmd`:** `$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh`
+(execs `agy --print "$(cat)" --dangerously-skip-permissions --print-timeout 20m "$@"` —
+the positional-prompt bridge; see the "Gate #2 — RESOLVED" note above).
 
 The `_CLOUD_AGENT_LABELS` entry (#5) is the touch-point the issue text missed —
 without it the delegation block would render the raw `antigravity` string

@@ -506,15 +506,16 @@ def _build_delegation_instructions(
             + separator_tail
         )
     if agent == "antigravity":
-        # Antigravity CLI (`agy`) one-shot, same delegation shape as codex/opencode
-        # (#1380). `--print` is the non-interactive mode; the bare fallback keeps
-        # the headless-safety flags so a non-TTY worker never hangs on a permission
-        # prompt or agy's 5m inner print-timeout. NOTE: the prompt is piped via
-        # stdin (both daedalus-worktree-spawn.sh and daedalus-delegate.sh do
-        # `< "$task"`); confirm `agy --print` reads stdin before enabling for any
-        # role — the docs only document a positional/`--prompt` prompt.
+        # Antigravity CLI (`agy`) one-shot (#1380). Unlike codex/opencode, agy takes
+        # the prompt POSITIONALLY (`agy --print '<prompt>'`) and does not document
+        # stdin support — but the spawn wrappers pipe the task to stdin. The bare
+        # fallback therefore routes through daedalus-agy-run.sh, which reads the
+        # piped task and hands it to agy positionally (a `"$(cat)"` baked straight
+        # into run_cmd is unsafe: the developer path's outer pid-capturing shell
+        # would expand it before the `< task` redirect exists). The launcher keeps
+        # the headless-safety flags and `exec`s agy so the wait-loop tracks its PID.
         run_cmd = effective_cmd or (
-            "agy --print --dangerously-skip-permissions --print-timeout 20m"
+            "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh"
         )
         return (
             f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"

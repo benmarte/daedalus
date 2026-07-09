@@ -19,7 +19,9 @@ var CODING_AGENT_DEFAULTS = {
   "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
   "codex": "codex exec --full-auto",
   "opencode": "opencode run",
-  "antigravity": "agy --print --dangerously-skip-permissions --print-timeout 20m",
+  // agy takes the prompt positionally (docs: `agy --print '<prompt>'`), so the
+  // default routes through a launcher that feeds the piped task in positionally.
+  "antigravity": "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh",
 };
 
 // Whether the CLI Command override field should render for this agent.
