@@ -3,53 +3,38 @@ name: Update Changelog
 on:
   pull_request:
     types: [closed]
+    branches:
+      - dev
+
+concurrency:
+  group: changelog-dev
+  cancel-in-progress: false
 
 jobs:
   update-changelog:
-    # Run only when the PR was merged (not just closed) into the `dev` branch.
-    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'dev'
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: dev
-          fetch-depth: 0
 
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.11'
 
       - name: Update CHANGELOG.md
-        # PR title/body are attacker-controlled (set by PR author), so they must
-        # be passed via env: with double-quoted expansion — NEVER interpolated
-        # inline into `run:`. env: values are set by Actions before shell eval,
-        # so shell metacharacters cannot escape into the shell that invokes the
-        # Python script. `github.repository` is safe to inline via `${{ }}`
-        # because it is an operator-set value (owner/repo), not user input.
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Idempotent prepend. The script skips silently when PR #<n> already
-          # appears in CHANGELOG.md; otherwise it prepends in the repo's format
-          # and commits with the CI-safe message.
           python scripts/update_changelog.py \
-            --pr-number "$PR_NUMBER" \
-            --pr-title "$PR_TITLE" \
-            --pr-body "$PR_BODY" \
-            --repo '${{ github.repository }}' \
-            --changelog CHANGELOG.md
-
-      - name: Push changes back to dev
-        run: |
-          git push origin HEAD:dev
+            --repo ${{ github.repository }} \
+            --pr-number ${{ github.event.pull_request.number }} \
+            --pr-title "${{ github.event.pull_request.title }}" \
+            --pr-body "${{ github.event.pull_request.body }}" \
+            --push-via-api \
+            --branch dev

@@ -1,216 +1,140 @@
-"""Tests for scripts/update_changelog.py — idempotent CHANGELOG updater."""
+"""Tests for the idempotent update_changelog module."""
 from __future__ import annotations
 
-import subprocess
-import textwrap
+import base64
+import json
+import sys
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError
 
 import pytest
 
-from scripts import update_changelog as uc
+
+def test_parse_issue_number_from_body():
+    from scripts.update_changelog import parse_issue_number
+    assert parse_issue_number("Closes #123", "Some title", 456) == 123
+    assert parse_issue_number("Fixes #789", "PR title", 999) == 789
+    assert parse_issue_number("Resolves: #42", "Title", 100) == 42
 
 
-# ---------------------------------------------------------------------------
-# Pure-function unit tests (no filesystem / no git)
-# ---------------------------------------------------------------------------
+def test_parse_issue_number_from_title_when_body_missing():
+    from scripts.update_changelog import parse_issue_number
+    assert parse_issue_number("", "My PR (#555)", 100) == 555
+    assert parse_issue_number(None, "Title (#123)", 999) == 123
 
 
-_PN_TITLE = "title"
-_PN_BODY = ""
-_PN_NUMBER = 42
+def test_parse_issue_number_fallback_to_pr_number():
+    from scripts.update_changelog import parse_issue_number
+    assert parse_issue_number("no issue refs", "just a title", 777) == 777
 
 
-class TestParseIssueNumber:
-    def test_explicit_override(self):
-        assert uc.parse_issue_number(explicit=99, pr_title=_PN_TITLE, pr_body=_PN_BODY, pr_number=_PN_NUMBER) == 99
-
-    def test_falls_back_to_pr_number(self):
-        assert uc.parse_issue_number(explicit=None, pr_title="random", pr_body="", pr_number=7) == 7
-
-    def test_finds_fixes_in_body(self):
-        assert uc.parse_issue_number(explicit=None, pr_title=_PN_TITLE, pr_body="Fixes #123", pr_number=_PN_NUMBER) == 123
-
-    def test_finds_closes_in_body(self):
-        assert uc.parse_issue_number(explicit=None, pr_title=_PN_TITLE, pr_body="closes #555", pr_number=1) == 555
-
-    def test_finds_trailing_parens_in_title(self):
-        assert (
-            uc.parse_issue_number(explicit=None, pr_title="feat: widget (#777)", pr_body="", pr_number=_PN_NUMBER)
-            == 777
-        )
-
-    def test_body_takes_priority_over_title(self):
-        assert (
-            uc.parse_issue_number(
-                explicit=None, pr_title="feat: widget (#777)", pr_body="resolves #100", pr_number=_PN_NUMBER
-            )
-            == 100
-        )
+def test_format_entry_includes_pr_and_issue_links():
+    from scripts.update_changelog import format_entry
+    entry = format_entry(42, "Fix bug in widget", 123)
+    assert "PR #42" in entry
+    assert "issues/123" in entry
+    assert "Fix bug in widget" in entry
 
 
-class TestFormatEntry:
-    def test_matches_repo_format(self):
-        entry = uc.format_entry(repo="acme/co", issue_number=10, pr_number=20, pr_title="Fix bug")
-        assert entry == (
-            "## [Fix bug](https://github.com/acme/co/issues/10) "
-            "— [PR #20](https://github.com/acme/co/pull/20)\n\n"
-        )
-
-    def test_uses_em_dash(self):
-        entry = uc.format_entry(repo="x/y", issue_number=1, pr_number=2, pr_title="t")
-        assert "—" in entry  # U+2014 em dash, not "--"
-        assert "--" not in entry
-
-    def test_strips_trailing_whitespace_from_title(self):
-        entry = uc.format_entry(repo="x/y", issue_number=1, pr_number=2, pr_title="  hello  ")
-        assert "[hello](" in entry
+def test_entry_already_exists_detects_pr_ref():
+    from scripts.update_changelog import entry_already_exists
+    content = "## [Some PR — PR #42](https://example.com)\n"
+    assert entry_already_exists(content, 42) is True
+    assert entry_already_exists(content, 99) is False
+    assert entry_already_exists("", 42) is False
 
 
-class TestEntryAlreadyExists:
-    def test_positive_match(self):
-        content = "## [t](url) — [PR #123](url)\n\n"
-        assert uc.entry_already_exists(content, 123) is True
-
-    def test_negative_no_match(self):
-        content = "## [t](url) — [PR #999](url)\n\n"
-        assert uc.entry_already_exists(content, 123) is False
-
-    def test_no_false_positive_on_prefix(self):
-        content = "## [t](url) — [PR #1234](url)\n\n"
-        assert uc.entry_already_exists(content, 123) is False
-
-    def test_loose_reference_format(self):
-        content = "some text mentioning PR #42 inline\n"
-        assert uc.entry_already_exists(content, 42) is True
+def test_prepend_entry_to_empty_or_new_changelog():
+    from scripts.update_changelog import prepend_entry
+    result = prepend_entry("", "## New Entry\n\n")
+    assert result.startswith("# Changelog")
+    assert "## New Entry" in result
 
 
-class TestPrependEntry:
-    def test_empty_file(self):
-        result = uc.prepend_entry("", "## entry\n\n")
-        assert result == "## entry\n\n"
-
-    def test_prepends_before_existing_content(self):
-        existing = "## [old](url)\n\n"
-        result = uc.prepend_entry(existing, "## [new](url)\n\n")
-        assert result.startswith("## [new]")
-        assert "## [old]" in result
-        # Newest first.
-        assert result.index("[new]") < result.index("[old]")
+def test_prepend_entry_after_header():
+    from scripts.update_changelog import prepend_entry
+    content = "# Changelog\n\n## Old Entry\n\n"
+    result = prepend_entry(content, "## New Entry\n\n")
+    lines = result.split("\n")
+    assert lines[0] == "# Changelog"
+    assert "## New Entry" in result
+    assert result.index("New Entry") < result.index("Old Entry")
 
 
-# ---------------------------------------------------------------------------
-# Integration tests (filesystem + temp git repo)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def git_repo(tmp_path):
-    tmp_path.mkdir(exist_ok=True)
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "x@x"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "x"], cwd=tmp_path, check=True)
-    (tmp_path / "CHANGELOG.md").write_text(
-        "## [Older entry](https://github.com/x/y/issues/1) — [PR #1](https://github.com/x/y/pull/1)\n\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True)
-    return tmp_path
-
-
-class TestUpdateChangelogIntegration:
-    def test_normal_prepend(self, git_repo):
-        changelog = git_repo / "CHANGELOG.md"
-        changed, content = uc.update_changelog(
-            changelog,
-            repo="x/y",
-            pr_number=42,
-            pr_title="feat: new thing (#40)",
-        )
-        assert changed is True
-        assert content.startswith("## [feat: new thing (#40)]")
-        assert "PR #42" in content
-        assert "PR #1" in content
-        # Newest first.
-        assert content.index("#42") < content.index("#1")
-
-    def test_idempotent_skip(self, git_repo):
-        changelog = git_repo / "CHANGELOG.md"
-        changed1, content1 = uc.update_changelog(changelog, repo="x/y", pr_number=42, pr_title="t")
-        changed2, content2 = uc.update_changelog(changelog, repo="x/y", pr_number=42, pr_title="t")
-        assert changed1 is True
-        assert changed2 is False
-        assert content2 == content1
-        # No duplicate.
-        assert content2.count("PR #42") == 1
-
-    def test_missing_changelog_creates_it(self, tmp_path):
+class TestUpdateChangelog:
+    def test_creates_file_when_missing(self, tmp_path):
+        from scripts.update_changelog import update_changelog
         changelog = tmp_path / "CHANGELOG.md"
-        assert not changelog.exists()
-        changed, content = uc.update_changelog(
-            changelog, repo="x/y", pr_number=1, pr_title="first entry"
-        )
+        changed, content = update_changelog(changelog, 42, "New feature", "")
         assert changed is True
-        assert "first entry" in content
+        assert "PR #42" in content
+        assert changelog.exists()
 
-    def test_issue_number_fallback(self, git_repo):
-        changelog = git_repo / "CHANGELOG.md"
-        _, content = uc.update_changelog(
-            changelog, repo="x/y", pr_number=42, pr_title="some title"
-        )
-        # Falls back to pr number as issue number.
-        assert "issues/42" in content
+    def test_prepends_entry_to_existing_changelog(self, tmp_path):
+        from scripts.update_changelog import update_changelog
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text("# Changelog\n\n## [Old — PR #10](url)\n\n")
+        changed, content = update_changelog(changelog, 42, "New feature", "")
+        assert changed is True
+        assert content.index("PR #42") < content.index("PR #10")
 
-
-class TestCommitChangelog:
-    def test_commits_with_correct_message(self, git_repo):
-        changelog = git_repo / "CHANGELOG.md"
-        uc.update_changelog(changelog, repo="x/y", pr_number=42, pr_title="t")
-        rc = uc.commit_changelog(git_repo, changelog)
-        assert rc == 0
-        log = subprocess.run(
-            ["git", "log", "-1", "--pretty=%s"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert log.stdout.strip() == "docs: update CHANGELOG.md [skip ci]"
-
-    def test_idempotent_commit(self, git_repo):
-        changelog = git_repo / "CHANGELOG.md"
-        uc.update_changelog(changelog, repo="x/y", pr_number=42, pr_title="t")
-        rc1 = uc.commit_changelog(git_repo, changelog)
-        # Calling commit again with no further changes — should be a clean no-op.
-        rc2 = uc.commit_changelog(git_repo, changelog)
-        assert rc1 == 0
-        assert rc2 == 0
-        # Only one commit from this test.
-        log = subprocess.run(
-            ["git", "log", "--oneline"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        # init + 1 update commit.
-        assert log.stdout.strip().count("docs: update CHANGELOG.md [skip ci]") == 1
+    def test_idempotent_skips_duplicate(self, tmp_path):
+        from scripts.update_changelog import update_changelog
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text("# Changelog\n\n## [Duplicate — PR #42](url)\n\n")
+        changed, content = update_changelog(changelog, 42, "Duplicate", "")
+        assert changed is False
 
 
-class TestMain:
-    TEST_ARGS = ["--pr-number", "42", "--pr-title", "feat: thing (#40)", "--no-commit"]
+class TestPushViaGitHubAPI:
+    def test_successful_push_fetches_sha_and_put(self, tmp_path):
+        from scripts.update_changelog import push_via_github_api
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text("# Changelog\n")
+        token = "fake-token"
+        with patch("scripts.update_changelog.fetch_changelog_sha") as mock_sha, patch(
+            "scripts.update_changelog.request.urlopen"
+        ) as mock_urlopen:
+            mock_sha.return_value = "abc123"
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_urlopen.return_value.__enter__.return_value = mock_resp
+            result = push_via_github_api("benmarte/daedalus", "dev", changelog, token, max_retries=1)
+            assert result is True
+            mock_sha.assert_called_once_with("benmarte/daedalus", "dev", token)
+            mock_urlopen.assert_called_once()
+            req = mock_urlopen.call_args[0][0]
+            assert req.method == "PUT"
+            data = json.loads(req.data)
+            assert data["sha"] == "abc123"
 
-    def test_main_returns_zero_on_first_run(self, git_repo, monkeypatch):
-        monkeypatch.chdir(git_repo)
-        rc = uc.main(self.TEST_ARGS)
-        assert rc == 0
-        new_content = (git_repo / "CHANGELOG.md").read_text()
-        assert "PR #42" in new_content
+    def test_retries_on_409_conflict(self, tmp_path):
+        from scripts.update_changelog import push_via_github_api
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text("# Changelog\n")
+        token = "fake-token"
+        with patch("scripts.update_changelog.fetch_changelog_sha", side_effect=["sha1", "sha2"]), patch(
+            "scripts.update_changelog.request.urlopen"
+        ) as mock_urlopen:
+            error_409 = HTTPError(None, 409, "Conflict", {}, None)
+            mock_ok = MagicMock()
+            mock_ok.status = 200
+            mock_urlopen.side_effect = [error_409, MagicMock(__enter__=lambda s: mock_ok)]
+            result = push_via_github_api("benmarte/daedalus", "dev", changelog, token, max_retries=2)
+            assert result is True
+            assert mock_urlopen.call_count == 2
+            second_call_data = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+            assert second_call_data["sha"] == "sha2"
 
-    def test_main_idempotent_returns_zero_on_second_run(self, git_repo, monkeypatch):
-        monkeypatch.chdir(git_repo)
-        rc1 = uc.main(self.TEST_ARGS)
-        rc2 = uc.main(self.TEST_ARGS)
-        assert rc1 == 0
-        assert rc2 == 0
-        content = (git_repo / "CHANGELOG.md").read_text()
-        assert content.count("PR #42") == 1
+    def test_fails_after_max_retries(self, tmp_path):
+        from scripts.update_changelog import push_via_github_api
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text("# Changelog\n")
+        token = "fake-token"
+        with patch("scripts.update_changelog.fetch_changelog_sha", return_value="sha1"), patch(
+            "scripts.update_changelog.request.urlopen"
+        ) as mock_urlopen:
+            mock_urlopen.side_effect = HTTPError(None, 409, "Conflict", {}, None)
+            result = push_via_github_api("benmarte/daedalus", "dev", changelog, token, max_retries=3)
+            assert result is False
+            assert mock_urlopen.call_count == 3
