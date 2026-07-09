@@ -10,7 +10,7 @@
 
 // Agents that delegate to an external CLI subagent and therefore expose the
 // "CLI Command" override field. "hermes" (and any other value) hides it.
-var CLI_AGENTS = ["claude-code", "codex", "opencode"];
+var CLI_AGENTS = ["claude-code", "codex", "opencode", "antigravity"];
 
 // Default CLI command per agent — shown as the input placeholder, auto-filled
 // into coding_agent_cmd when the agent is selected, and used by the dispatcher
@@ -19,6 +19,7 @@ var CODING_AGENT_DEFAULTS = {
   "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
   "codex": "codex exec --full-auto",
   "opencode": "opencode run",
+  "antigravity": "agy --print --dangerously-skip-permissions --print-timeout 20m",
 };
 
 // Whether the CLI Command override field should render for this agent.

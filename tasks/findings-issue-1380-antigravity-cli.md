@@ -1,8 +1,18 @@
 # Findings — Antigravity CLI (`agy`) as a delegatable coding agent (#1380)
 
-**Status:** research spike + minimal PoC wiring (inert)
+**Status:** enabled (user-directed) — selectable as `coding_agent: antigravity`
 **Verdict:** ✅ **viable-with-caveats**
 **Author:** developer agent · base branch `dev`
+
+> **Update (enablement).** The two pre-flip gates below were previously kept
+> inert via the resolver allow-list. Per an explicit operator decision, the
+> resolver now accepts `antigravity` and the dashboard exposes it in the coding-
+> agent dropdown, so it is selectable for any role. The two caveats below are
+> **still empirically unverified** (no `agy` binary in the build/CI environment):
+> keyring auth surviving into a headless worker, and prompt delivery over stdin.
+> Both are only exercisable on a host where `agy` is installed and signed in as
+> the same OS user the workers run as. Validate there before relying on it in
+> production; local same-user spawns are the low-risk first target.
 
 ---
 
@@ -175,9 +185,13 @@ instead of the `Antigravity` label; the PM flagged this.
 - **SSH / CI / container / headless-only host: YES** — browser/paste-code auth
   cannot complete unattended and there is no API-key fallback.
 
-This is why the integration ships **inert**. Do not switch any role to
-`antigravity` until (a) sign-in has been pre-seeded on the target host and (b)
-the stdin prompt-delivery behavior (Q1/Q3) is confirmed.
+The integration originally shipped **inert** for these reasons. It has since
+been **enabled** (see the enablement note at the top) per operator decision, so
+`antigravity` is now selectable. Before switching a *production* role to it,
+still confirm (a) sign-in has been pre-seeded on the target host for the worker
+OS user and (b) the stdin prompt-delivery behavior (Q1/Q3). Local same-user
+spawns are the safe first target; SSH/CI/container workers remain blocked until
+(a) is satisfied.
 
 ---
 

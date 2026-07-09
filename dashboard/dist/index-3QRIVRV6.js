@@ -153,11 +153,12 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
   // src/codingAgent.js
   var require_codingAgent = __commonJS({
     "src/codingAgent.js"(exports, module) {
-      var CLI_AGENTS = ["claude-code", "codex", "opencode"];
+      var CLI_AGENTS = ["claude-code", "codex", "opencode", "antigravity"];
       var CODING_AGENT_DEFAULTS = {
         "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p",
         "codex": "codex exec --full-auto",
-        "opencode": "opencode run"
+        "opencode": "opencode run",
+        "antigravity": "agy --print --dangerously-skip-permissions --print-timeout 20m"
       };
       function isCliAgent(agent) {
         return CLI_AGENTS.indexOf(agent) !== -1;
@@ -1801,7 +1802,8 @@ var __HERMES_DAEDALUS_DASHBOARD__ = (() => {
                 React.createElement("option", { value: "hermes" }, "Hermes \u2014 delegate via built-in subagent"),
                 React.createElement("option", { value: "claude-code" }, "Claude Code"),
                 React.createElement("option", { value: "codex" }, "Codex"),
-                React.createElement("option", { value: "opencode" }, "OpenCode")
+                React.createElement("option", { value: "opencode" }, "OpenCode"),
+                React.createElement("option", { value: "antigravity" }, "Antigravity")
               ),
               React.createElement(
                 "div",
