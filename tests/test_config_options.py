@@ -353,6 +353,11 @@ class TestResolveCodingAgent:
     def test_valid_opencode(self):
         assert sd._resolve_coding_agent({"coding_agent": "opencode"}) == "opencode"
 
+    def test_valid_antigravity(self):
+        assert (
+            sd._resolve_coding_agent({"coding_agent": "antigravity"}) == "antigravity"
+        )
+
     def test_valid_none(self):
         assert sd._resolve_coding_agent({"coding_agent": "none"}) == "none"
 

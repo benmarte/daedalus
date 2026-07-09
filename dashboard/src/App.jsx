@@ -1393,7 +1393,8 @@ function ConfigModal(props) {
             React.createElement("option", { value: "hermes" }, "Hermes — delegate via built-in subagent"),
             React.createElement("option", { value: "claude-code" }, "Claude Code"),
             React.createElement("option", { value: "codex" }, "Codex"),
-            React.createElement("option", { value: "opencode" }, "OpenCode")
+            React.createElement("option", { value: "opencode" }, "OpenCode"),
+            React.createElement("option", { value: "antigravity" }, "Antigravity")
           ),
           React.createElement("div", { style: { fontSize: "11px", color: "#888", marginTop: "2px" } },
             "When set, the developer agent uses delegate_task to hand off coding work to a CLI agent subagent."
