@@ -1674,6 +1674,75 @@ def test_build_delegation_instructions_none_returns_empty():
     assert disp._build_delegation_instructions("none") == ""
 
 
+# ── issue #1380: Antigravity CLI (`agy`) as a delegatable coding agent ────────
+
+
+def test_coding_agent_defaults_includes_antigravity():
+    """_CODING_AGENT_DEFAULTS carries the headless `agy --print` one-shot (#1380).
+
+    The default must keep --print (non-interactive), --dangerously-skip-permissions
+    (no permission prompt on a non-TTY worker) and --print-timeout (agy has no
+    --max-turns; the 5m default would guillotine a long dev run mid-PR).
+    """
+    default = disp._CODING_AGENT_DEFAULTS.get("antigravity")
+    assert default == "agy --print --dangerously-skip-permissions --print-timeout 20m", (
+        f"antigravity default wrong: {default!r}"
+    )
+
+
+def test_build_delegation_instructions_antigravity_default_cmd():
+    """When coding_agent_cmd is empty, antigravity uses the built-in `agy --print` default."""
+    body = disp._build_delegation_instructions("antigravity", cmd="")
+    assert "AGENT DELEGATION" in body
+    assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
+    assert "agy --print --dangerously-skip-permissions --print-timeout 20m" in body, (
+        f"expected the agy --print default in instructions, got:\n{body}"
+    )
+    # Label mapping (_CLOUD_AGENT_LABELS) renders "Antigravity", not the raw slug.
+    assert "USE ANTIGRAVITY:" in body, (
+        f"expected the Antigravity label in the delegation header, got:\n{body}"
+    )
+
+
+def test_build_delegation_instructions_antigravity_custom_cmd_overrides_default():
+    """A custom coding_agent_cmd overrides the antigravity default."""
+    body = disp._build_delegation_instructions("antigravity", cmd="/opt/agy -p")
+    assert "/opt/agy -p" in body, f"expected custom cmd in instructions, got:\n{body}"
+    assert "agy --print --dangerously-skip-permissions" not in body
+
+
+def test_antigravity_spawns_via_worktree_for_developer():
+    """The developer antigravity spawn goes through the worktree wrapper + PID capture.
+
+    Mirrors test_delegation_spawn_captures_pid_and_separate_stderr for the new
+    agent so it inherits the same #141 liveness + worktree-isolation contract.
+    """
+    body = disp._build_delegation_instructions(
+        "antigravity", cmd="", role="developer", issue_number=141
+    )
+    assert "echo $$ > /tmp/dev-141-pid.txt" in body
+    assert "background=True" in body
+    assert "daedalus-worktree-spawn.sh" in body
+    assert "/tmp/dev-141-err.txt" in body
+
+
+def test_antigravity_is_valid_coding_agent_and_failover_eligible():
+    """antigravity is accepted in VALID_CODING_AGENTS so it joins failover chains (#1380)."""
+    from core import provider_failover
+
+    assert "antigravity" in provider_failover.VALID_CODING_AGENTS, (
+        "antigravity must be a valid coding-agent name for failover chains"
+    )
+    # A chain entry naming antigravity resolves with no special-casing (its cmd
+    # falls back to the default when omitted).
+    chain = provider_failover.resolve_coding_agent_chain(
+        {"coding_agents": [{"name": "antigravity"}]},
+        defaults=disp._CODING_AGENT_DEFAULTS,
+    )
+    assert [e["name"] for e in chain] == ["antigravity"], chain
+    assert chain[0]["cmd"] == "agy --print --dangerously-skip-permissions --print-timeout 20m"
+
+
 # ── issue #141: dead/hung coding agent must fail fast, not hang forever ───────
 
 

@@ -571,13 +571,23 @@ protocol:
   #   hermes       — use Hermes delegate_task to spawn a subagent
   #                    with the coding-agents skill pre-loaded. The subagent
   #                    runs the configured coding agent CLI (claude-code, codex,
-  #                    or opencode) in one-shot mode.
+  #                    opencode, or antigravity) in one-shot mode.
   #   claude-code  — delegate to Claude Code CLI (one-shot -p mode preferred)
   #   codex        — delegate to OpenAI Codex CLI (exec mode)
   #   opencode     — delegate to OpenCode CLI (run mode)
+  #   antigravity  — delegate to Antigravity CLI `agy` (one-shot --print mode).
+  #                    RESEARCH SPIKE (#1380): wired but NOT yet validated —
+  #                    enabling for any role is gated on two empirical checks
+  #                    (OS-keyring auth pre-seeded for the worker's OS user, and
+  #                    `agy --print` reading its prompt from stdin). Antigravity
+  #                    auth is keyring/browser-based (no API-key env var); a
+  #                    worker only inherits it if a human ran `agy` sign-in once
+  #                    under the same OS user (analogous to the git-cred pre-seed
+  #                    in provision_roster.sh). See
+  #                    tasks/findings-issue-1380-antigravity-cli.md.
   #   none         — no delegation; developer agent does coding directly
   #
-  # When set to a CLI agent (claude-code/codex/opencode), the developer SOUL.md
+  # When set to a CLI agent (claude-code/codex/opencode/antigravity), the developer SOUL.md
   # instructs the agent to spawn the external coding tool via terminal(background=True)
   # rather than implementing code directly. The coding-agents skill is
   # automatically attached to the developer profile when delegation is enabled.
@@ -633,8 +643,8 @@ protocol:
   # usage limit, quota, crash, timeout — see `failover.triggers` below), the
   # crash-retry reconciler (#1205) automatically re-dispatches the SAME card on
   # the next entry instead of retrying the limited provider forever. Names are
-  # the same set as `coding_agent` (hermes | claude-code | codex | opencode);
-  # `cmd` defaults per agent when omitted.
+  # the same set as `coding_agent` (hermes | claude-code | codex | opencode |
+  # antigravity); `cmd` defaults per agent when omitted.
   #
   # Multiple ACCOUNTS of the SAME agent (#1227): you may list several entries
   # with the same `name` as long as they are distinct accounts — e.g. two

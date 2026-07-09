@@ -72,6 +72,16 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
     "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p",
     "codex": "codex exec --full-auto",
     "opencode": "opencode run",
+    # Antigravity CLI one-shot (#1380). `--print` is the non-interactive mode
+    # (plain-text output, no JSON envelope); `--dangerously-skip-permissions`
+    # stops a permission prompt hanging a non-TTY worker (mirrors the claude-code
+    # default's headless-safety flags). `--print-timeout 20m` overrides agy's 5m
+    # default so a longer dev run isn't guillotined by the INNER timeout before it
+    # opens a PR (agy has no `--max-turns`; the outer wait enforces max_wait). See
+    # tasks/findings-issue-1380-antigravity-cli.md — enabling for any role is
+    # gated on two empirical confirmations (keyring auth pre-seed + stdin prompt
+    # delivery) documented there.
+    "antigravity": "agy --print --dangerously-skip-permissions --print-timeout 20m",
 }
 
 # Wall-clock ceiling (seconds) the worker waits for a spawned coding agent.

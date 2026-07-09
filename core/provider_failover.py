@@ -34,7 +34,7 @@ logger = logging.getLogger("daedalus.provider_failover")
 # Coding-agent names accepted in an execution.coding_agents chain entry.
 # "none" is excluded: a chain exists to hand work to a DIFFERENT agent, and
 # "no delegation" is not a provider you can fail over to.
-VALID_CODING_AGENTS = ("hermes", "claude-code", "codex", "opencode")
+VALID_CODING_AGENTS = ("hermes", "claude-code", "codex", "opencode", "antigravity")
 
 # Trigger classes produced by crash_retry.classify(). ``failover.triggers``
 # entries are validated against this set.

@@ -316,6 +316,7 @@ _CLOUD_AGENT_LABELS: Dict[str, str] = {
     "claude-code": "Claude Code",
     "codex": "Codex",
     "opencode": "OpenCode",
+    "antigravity": "Antigravity",
 }
 
 # Boundary between the outer delegation wrapper and the inner coding-agent
