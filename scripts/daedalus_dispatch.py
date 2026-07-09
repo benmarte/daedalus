@@ -3761,19 +3761,10 @@ def _run_tick(
                     )
                     dispatch_state.clear_dispatch(workdir, n)
                     completed.append(n)
-                    # CHANGELOG auto-update: prepend a brief entry using the PR title.
-                    if merged_pr and merged_pr.number and base_branch:
-                        cl_entry = (
-                            f"## [{issue.get('title', f'Issue #{n}')}]"
-                            f"({provider.issue_url(n)}) — "
-                            f"[PR #{merged_pr.number}]({provider.pr_url(merged_pr.number)})\n"
-                        )
-                        if not provider.append_changelog(base_branch, cl_entry):
-                            logger.debug(
-                                "dispatch: CHANGELOG update skipped for #%s "
-                                "(provider doesn't support it or no write token)",
-                                n,
-                            )
+                    # CHANGELOG.md is written at merge-time by CI (changelog.yml
+                    # + scripts/update_changelog.py, epic #1386) — the single
+                    # writer. The dispatcher no longer touches it (#1391), which
+                    # also covers manual merges and prevents double entries.
             elif pr == "open":
                 # PR open and awaiting review -> In review.
                 # Safety net: if the PR body lacks a closing keyword, inject one

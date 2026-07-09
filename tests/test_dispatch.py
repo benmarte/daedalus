@@ -1575,8 +1575,9 @@ def test_documentation_soul_has_proactive_doc_audit():
 def test_documentation_soul_does_not_edit_changelog():
     """documentation SOUL must not instruct editing CHANGELOG.md in a PR branch (#1179).
 
-    The dispatcher (append_changelog) is the single writer of CHANGELOG.md on the
-    base branch; docs-agent in-branch edits caused concurrent PRs to conflict on
+    CI (changelog.yml + scripts/update_changelog.py, epic #1386) is the single
+    writer of CHANGELOG.md at merge-time — the dispatcher no longer writes it
+    (#1391); docs-agent in-branch edits caused concurrent PRs to conflict on
     line 1 (#1173/#1174). The SOUL must drop CHANGELOG.md from its editable/enumerated
     docs and carry an explicit do-not-touch rule.
     """
@@ -1596,6 +1597,34 @@ def test_documentation_soul_does_not_edit_changelog():
     # Enumerate step explicitly excludes it.
     assert "Exclude `CHANGELOG.md`" in soul
     check("documentation SOUL does not edit CHANGELOG.md (#1179)", True)
+
+
+def test_dispatcher_does_not_write_changelog():
+    """Dispatcher no longer writes CHANGELOG.md — CI is the single writer (#1391).
+
+    The merge-time ``provider.append_changelog(...)`` block and the underlying
+    provider methods are removed so CI (changelog.yml + update_changelog.py,
+    epic #1386) is the sole CHANGELOG writer. Guards against a re-introduced
+    dispatcher path that would produce double entries.
+    """
+    from core.providers.base import VCSProvider
+    from core.providers.github import GitHubProvider
+
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "scripts"
+        / "daedalus_dispatch.py"
+    ).read_text()
+    assert "append_changelog" not in src, (
+        "dispatcher must not call append_changelog (#1391)"
+    )
+    assert not hasattr(VCSProvider, "append_changelog"), (
+        "VCSProvider.append_changelog must be removed (#1391)"
+    )
+    assert not hasattr(GitHubProvider, "append_changelog"), (
+        "GitHubProvider.append_changelog must be removed (#1391)"
+    )
+    check("dispatcher does not write CHANGELOG.md (#1391)", True)
 
 
 # ── _CODING_AGENT_DEFAULTS and per-agent default commands ────────────────────
