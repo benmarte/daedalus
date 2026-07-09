@@ -1,3 +1,5 @@
+## [Research: add Antigravity CLI (agy) as a delegatable coding agent](https://github.com/benmarte/daedalus/issues/1380) — [PR #1381](https://github.com/benmarte/daedalus/pull/1381)
+
 ## [Capture gate-agent crash diagnostics + confirm bounded crash-recovery convergence](https://github.com/benmarte/daedalus/issues/1372) — [PR #1378](https://github.com/benmarte/daedalus/pull/1378)
 
 ## [Reap orphaned triage-recovery / guard: cards after issue merge](https://github.com/benmarte/daedalus/issues/1373) — [PR #1377](https://github.com/benmarte/daedalus/pull/1377)
