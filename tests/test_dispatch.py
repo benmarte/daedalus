@@ -1678,25 +1678,25 @@ def test_build_delegation_instructions_none_returns_empty():
 
 
 def test_coding_agent_defaults_includes_antigravity():
-    """_CODING_AGENT_DEFAULTS carries the headless `agy --print` one-shot (#1380).
+    """_CODING_AGENT_DEFAULTS routes antigravity through the positional-prompt launcher (#1380).
 
-    The default must keep --print (non-interactive), --dangerously-skip-permissions
-    (no permission prompt on a non-TTY worker) and --print-timeout (agy has no
-    --max-turns; the 5m default would guillotine a long dev run mid-PR).
+    Unlike claude-code/codex/opencode (which read the prompt from stdin), agy takes
+    the prompt as a positional `--print` argument, so the default points at
+    daedalus-agy-run.sh, which reads the piped task and passes it positionally.
     """
     default = disp._CODING_AGENT_DEFAULTS.get("antigravity")
-    assert default == "agy --print --dangerously-skip-permissions --print-timeout 20m", (
+    assert default == "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh", (
         f"antigravity default wrong: {default!r}"
     )
 
 
 def test_build_delegation_instructions_antigravity_default_cmd():
-    """When coding_agent_cmd is empty, antigravity uses the built-in `agy --print` default."""
+    """When coding_agent_cmd is empty, antigravity uses the launcher-script default."""
     body = disp._build_delegation_instructions("antigravity", cmd="")
     assert "AGENT DELEGATION" in body
     assert "terminal(" in body, f"expected terminal() in instructions, got:\n{body}"
-    assert "agy --print --dangerously-skip-permissions --print-timeout 20m" in body, (
-        f"expected the agy --print default in instructions, got:\n{body}"
+    assert "daedalus-agy-run.sh" in body, (
+        f"expected the agy launcher default in instructions, got:\n{body}"
     )
     # Label mapping (_CLOUD_AGENT_LABELS) renders "Antigravity", not the raw slug.
     assert "USE ANTIGRAVITY:" in body, (
@@ -1708,7 +1708,49 @@ def test_build_delegation_instructions_antigravity_custom_cmd_overrides_default(
     """A custom coding_agent_cmd overrides the antigravity default."""
     body = disp._build_delegation_instructions("antigravity", cmd="/opt/agy -p")
     assert "/opt/agy -p" in body, f"expected custom cmd in instructions, got:\n{body}"
-    assert "agy --print --dangerously-skip-permissions" not in body
+    assert "daedalus-agy-run.sh" not in body
+
+
+def test_agy_launcher_passes_piped_task_as_positional_print_prompt():
+    """daedalus-agy-run.sh reads the piped task from stdin and passes it as the
+    POSITIONAL `agy --print` prompt, forwarding any extra args (e.g. --model) after
+    it — the documented `agy --print '<prompt>' --model '<engine>'` shape (#1380).
+
+    This is the regression guard for the prompt-delivery gate: the launcher must
+    bridge the wrapper's stdin-piped task to agy's positional prompt so the agent
+    never runs with an empty prompt.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    repo_root = Path(__file__).resolve().parent.parent
+    launcher = repo_root / "scripts" / "daedalus-agy-run.sh"
+    assert launcher.exists(), "daedalus-agy-run.sh missing"
+    assert os.access(launcher, os.X_OK), "daedalus-agy-run.sh is not executable"
+
+    with tempfile.TemporaryDirectory() as td:
+        # Stub `agy` on PATH that just echoes the argv it received.
+        stub = Path(td) / "agy"
+        stub.write_text("#!/usr/bin/env bash\nprintf 'ARGV:'\nfor a in \"$@\"; do printf ' [%s]' \"$a\"; done\nprintf '\\n'\n")
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{td}:{os.environ['PATH']}"}
+        proc = subprocess.run(
+            ["bash", str(launcher), "--model", "Gemini 3.1 Pro (High)"],
+            input="implement the feature\nsecond line",
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    out = proc.stdout
+    # Prompt delivered as ONE positional arg right after --print (multi-line intact).
+    assert "[--print] [implement the feature\nsecond line]" in out, (
+        f"prompt not passed positionally after --print; got:\n{out}"
+    )
+    # Headless-safety flags present and the injected --model forwarded after.
+    assert "[--dangerously-skip-permissions]" in out
+    assert "[--print-timeout] [20m]" in out
+    assert "[--model] [Gemini 3.1 Pro (High)]" in out, f"--model not forwarded; got:\n{out}"
 
 
 def test_antigravity_spawns_via_worktree_for_developer():
@@ -1740,7 +1782,7 @@ def test_antigravity_is_valid_coding_agent_and_failover_eligible():
         defaults=disp._CODING_AGENT_DEFAULTS,
     )
     assert [e["name"] for e in chain] == ["antigravity"], chain
-    assert chain[0]["cmd"] == "agy --print --dangerously-skip-permissions --print-timeout 20m"
+    assert chain[0]["cmd"] == "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh"
 
 
 # ── issue #141: dead/hung coding agent must fail fast, not hang forever ───────

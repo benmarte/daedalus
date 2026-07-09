@@ -576,14 +576,16 @@ protocol:
   #   codex        — delegate to OpenAI Codex CLI (exec mode)
   #   opencode     — delegate to OpenCode CLI (run mode)
   #   antigravity  — delegate to Antigravity CLI `agy` (one-shot --print mode).
-  #                    RESEARCH SPIKE (#1380): wired but NOT yet validated —
-  #                    enabling for any role is gated on two empirical checks
-  #                    (OS-keyring auth pre-seeded for the worker's OS user, and
-  #                    `agy --print` reading its prompt from stdin). Antigravity
-  #                    auth is keyring/browser-based (no API-key env var); a
-  #                    worker only inherits it if a human ran `agy` sign-in once
-  #                    under the same OS user (analogous to the git-cred pre-seed
-  #                    in provision_roster.sh). See
+  #                    ENABLED (#1380). The default routes through
+  #                    scripts/daedalus-agy-run.sh, which reads the piped task and
+  #                    passes it as agy's POSITIONAL --print prompt (docs form
+  #                    `agy --print '<prompt>'`) — so prompt delivery does NOT rely
+  #                    on undocumented stdin support. One operational gate remains:
+  #                    agy auth is OS-keyring/browser-based (no API-key env var), so
+  #                    a worker only authenticates if a human ran `agy` sign-in once
+  #                    under the SAME OS user the workers run as (analogous to the
+  #                    git-cred pre-seed in provision_roster.sh) — local same-user
+  #                    spawns work; SSH/CI/container workers need the pre-seed. See
   #                    tasks/findings-issue-1380-antigravity-cli.md.
   #   none         — no delegation; developer agent does coding directly
   #
