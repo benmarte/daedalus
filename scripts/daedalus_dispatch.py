@@ -505,6 +505,26 @@ def _build_delegation_instructions(
             + after
             + separator_tail
         )
+    if agent == "antigravity":
+        # Antigravity CLI (`agy`) one-shot, same delegation shape as codex/opencode
+        # (#1380). `--print` is the non-interactive mode; the bare fallback keeps
+        # the headless-safety flags so a non-TTY worker never hangs on a permission
+        # prompt or agy's 5m inner print-timeout. NOTE: the prompt is piped via
+        # stdin (both daedalus-worktree-spawn.sh and daedalus-delegate.sh do
+        # `< "$task"`); confirm `agy --print` reads stdin before enabling for any
+        # role — the docs only document a positional/`--prompt` prompt.
+        run_cmd = effective_cmd or (
+            "agy --print --dangerously-skip-permissions --print-timeout 20m"
+        )
+        return (
+            f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
+            f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
+            + _inner_agent_prohibition
+            + copy_steps
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
+            + after
+            + separator_tail
+        )
     return ""
 
 
@@ -3036,6 +3056,7 @@ def _run_tick(
         "claude-code": "autonomous-ai-agents/claude-code",
         "codex": "autonomous-ai-agents/codex",
         "opencode": "autonomous-ai-agents/opencode",
+        "antigravity": "autonomous-ai-agents/antigravity-cli",
     }
     for _role, _agent in role_agents.items():
         _skill = _AGENT_SKILL.get(_agent)
