@@ -3763,10 +3763,13 @@ def _run_tick(
                     completed.append(n)
                     # CHANGELOG auto-update: prepend a brief entry using the PR title.
                     if merged_pr and merged_pr.number and base_branch:
-                        cl_entry = (
-                            f"## [{issue.get('title', f'Issue #{n}')}]"
-                            f"({provider.issue_url(n)}) — "
-                            f"[PR #{merged_pr.number}]({provider.pr_url(merged_pr.number)})\n"
+                        from scripts.lib.changelog_format import format_changelog_entry
+                        cl_entry = format_changelog_entry(
+                            issue_number=n,
+                            issue_title=issue.get("title", f"Issue #{n}"),
+                            pr_number=merged_pr.number,
+                            issue_url=provider.issue_url(n),
+                            pr_url=provider.pr_url(merged_pr.number),
                         )
                         if not provider.append_changelog(base_branch, cl_entry):
                             logger.debug(
