@@ -23,17 +23,33 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Update CHANGELOG.md
-        # PR title is attacker-controlled (set by PR author), so it must be
-        # passed via env: with double-quoted expansion — NEVER interpolated
+        # PR title/body are attacker-controlled (set by PR author), so they must
+        # be passed via env: with double-quoted expansion — NEVER interpolated
         # inline into `run:`. env: values are set by Actions before shell eval,
-        # so shell metacharacters in the title cannot escape into commands.
+        # so shell metacharacters cannot escape into the shell that invokes the
+        # Python script. `github.repository` is safe to inline via `${{ }}`
+        # because it is an operator-set value (owner/repo), not user input.
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          # Placeholder step for automated changelog generation (epic #1386).
-          # Follow-up tasks will add the actual CHANGELOG.md update logic here
-          # (e.g., appending a grouped entry derived on the merged PR title/body).
-          echo "merged PR #${PR_NUMBER}: ${PR_TITLE}" >> /tmp/changelog-entry.txt
-          cat /tmp/changelog-entry.txt
+          # Idempotent prepend. The script skips silently when PR #<n> already
+          # appears in CHANGELOG.md; otherwise it prepends in the repo's format
+          # and commits with the CI-safe message.
+          python scripts/update_changelog.py \
+            --pr-number "$PR_NUMBER" \
+            --pr-title "$PR_TITLE" \
+            --pr-body "$PR_BODY" \
+            --repo '${{ github.repository }}' \
+            --changelog CHANGELOG.md
+
+      - name: Push changes back to dev
+        run: |
+          git push origin HEAD:dev
