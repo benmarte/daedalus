@@ -33,6 +33,7 @@ check("hermes → hermes returns null", ca.cmdForAgentChange("hermes", "hermes")
 check("claude-code is a CLI agent", ca.isCliAgent("claude-code"), true);
 check("codex is a CLI agent", ca.isCliAgent("codex"), true);
 check("opencode is a CLI agent", ca.isCliAgent("opencode"), true);
+check("antigravity is a CLI agent", ca.isCliAgent("antigravity"), true);
 check("hermes is NOT a CLI agent", ca.isCliAgent("hermes"), false);
 check("unknown is NOT a CLI agent", ca.isCliAgent("nope"), false);
 
@@ -41,6 +42,8 @@ check("default for claude-code", ca.defaultCmdFor("claude-code"),
   "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions -p");
 check("default for codex", ca.defaultCmdFor("codex"), "codex exec --full-auto");
 check("default for opencode", ca.defaultCmdFor("opencode"), "opencode run");
+check("default for antigravity", ca.defaultCmdFor("antigravity"),
+  "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh");
 check("default for hermes is ''", ca.defaultCmdFor("hermes"), "");
 check("default for unknown is ''", ca.defaultCmdFor("nope"), "");
 

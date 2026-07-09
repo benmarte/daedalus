@@ -505,6 +505,27 @@ def _build_delegation_instructions(
             + after
             + separator_tail
         )
+    if agent == "antigravity":
+        # Antigravity CLI (`agy`) one-shot (#1380). Unlike codex/opencode, agy takes
+        # the prompt POSITIONALLY (`agy --print '<prompt>'`) and does not document
+        # stdin support — but the spawn wrappers pipe the task to stdin. The bare
+        # fallback therefore routes through daedalus-agy-run.sh, which reads the
+        # piped task and hands it to agy positionally (a `"$(cat)"` baked straight
+        # into run_cmd is unsafe: the developer path's outer pid-capturing shell
+        # would expand it before the `< task` redirect exists). The launcher keeps
+        # the headless-safety flags and `exec`s agy so the wait-loop tracks its PID.
+        run_cmd = effective_cmd or (
+            "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh"
+        )
+        return (
+            f"\n⚠️  AGENT DELEGATION — USE {label.upper()}:\n"
+            f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
+            + _inner_agent_prohibition
+            + copy_steps
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
+            + after
+            + separator_tail
+        )
     return ""
 
 
@@ -3036,6 +3057,7 @@ def _run_tick(
         "claude-code": "autonomous-ai-agents/claude-code",
         "codex": "autonomous-ai-agents/codex",
         "opencode": "autonomous-ai-agents/opencode",
+        "antigravity": "autonomous-ai-agents/antigravity-cli",
     }
     for _role, _agent in role_agents.items():
         _skill = _AGENT_SKILL.get(_agent)

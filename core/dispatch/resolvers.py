@@ -72,6 +72,18 @@ _CODING_AGENT_DEFAULTS: Dict[str, str] = {
     "claude-code": "CLAUDE_CONFIG_DIR=$HOME/.claude claude --dangerously-skip-permissions --strict-mcp-config --setting-sources project -p",
     "codex": "codex exec --full-auto",
     "opencode": "opencode run",
+    # Antigravity CLI one-shot (#1380). Unlike claude-code/codex/opencode, `agy`
+    # takes the prompt as a POSITIONAL `--print` arg (docs: `agy --print
+    # '<prompt>'`) and does not document stdin support, so the default routes
+    # through a dedicated launcher that reads the piped task from stdin and passes
+    # it positionally (`daedalus-agy-run.sh`). Baking a `"$(cat)"` substitution
+    # straight into the command is unsafe — the developer path's outer
+    # pid-capturing shell would expand it before the `< task` redirect exists. The
+    # launcher also keeps the headless-safety flags (--dangerously-skip-permissions
+    # so a non-TTY worker never hangs on a prompt; --print-timeout 20m over agy's
+    # 5m default, since agy has no --max-turns) and `exec`s agy so the wait-loop's
+    # liveness check tracks the agent PID. See tasks/findings-issue-1380-antigravity-cli.md.
+    "antigravity": "$HOME/.hermes/plugins/daedalus/scripts/daedalus-agy-run.sh",
 }
 
 # Wall-clock ceiling (seconds) the worker waits for a spawned coding agent.
@@ -244,7 +256,14 @@ def _resolve_agent_for_role(execution: Dict[str, Any], role: str) -> str:
     entry = profiles.get(role)
     if isinstance(entry, dict):
         role_agent = (entry.get("agent") or "").strip().lower()
-        if role_agent in ("hermes", "claude-code", "codex", "opencode", "none"):
+        if role_agent in (
+            "hermes",
+            "claude-code",
+            "codex",
+            "opencode",
+            "antigravity",
+            "none",
+        ):
             return role_agent
     return _resolve_coding_agent(execution)
 
@@ -372,14 +391,21 @@ def _apply_coding_agent_max_turns(
 def _resolve_coding_agent(execution: Dict[str, Any]) -> str:
     """Return the configured coding agent from execution.coding_agent.
 
-    Returns one of: hermes, claude-code, codex, opencode, none
+    Returns one of: hermes, claude-code, codex, opencode, antigravity, none
     Defaults to 'hermes' if not configured.
     """
     agent = (execution or {}).get("coding_agent")
     if not agent or not isinstance(agent, str):
         return "hermes"
     agent = agent.strip().lower()
-    if agent not in ("hermes", "claude-code", "codex", "opencode", "none"):
+    if agent not in (
+        "hermes",
+        "claude-code",
+        "codex",
+        "opencode",
+        "antigravity",
+        "none",
+    ):
         logger.warning(
             "dispatch: invalid coding_agent %r — defaulting to hermes", agent
         )
