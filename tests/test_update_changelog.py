@@ -38,10 +38,19 @@ ISSUE_URL = "https://github.com/benmarte/daedalus/issues/1388"
 
 
 # ── (a) format ──────────────────────────────────────────────────────────────
-def test_format_entry_matches_committed_format():
-    entry = uc.format_entry("fix: something", ISSUE_URL, 1234, PR_URL)
-    assert entry == f"## [fix: something]({ISSUE_URL}) — [PR #1234]({PR_URL})"
-    assert "\n" not in entry  # single line, no trailing newline
+def test_format_delegates_to_shared_helper(tmp_path):
+    """update_changelog uses scripts.lib.changelog_format — spot-check output."""
+    cl = tmp_path / "CHANGELOG.md"
+    uc.update_changelog(
+        cl,
+        title="fix: something",
+        pr_number=1234,
+        pr_url=PR_URL,
+        entry_url=ISSUE_URL,
+    )
+    content = cl.read_text()
+    assert "## [fix: something](https://github.com/benmarte/daedalus/issues/1388)" in content
+    assert "[PR #1234](https://github.com/benmarte/daedalus/pull/1234)" in content
 
 
 def test_format_entry_defaults_to_pr_url_via_update(tmp_path):

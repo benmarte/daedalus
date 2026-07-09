@@ -45,21 +45,13 @@ import re
 import sys
 from pathlib import Path
 
+from scripts.lib.changelog_format import format_changelog_entry
+
 #: Commit subject the workflow must use so the write does not re-trigger CI.
 COMMIT_MESSAGE = "docs: update CHANGELOG.md [skip ci]"
 
 #: Default CHANGELOG path, relative to the repo root.
 DEFAULT_PATH = "CHANGELOG.md"
-
-
-def format_entry(title: str, entry_url: str, pr_number: int, pr_url: str) -> str:
-    """Render a single newest-first CHANGELOG entry line (no trailing newline).
-
-    Format::
-
-        ## [<title>](<entry_url>) — [PR #<n>](<pr_url>)
-    """
-    return f"## [{title}]({entry_url}) — [PR #{pr_number}]({pr_url})"
 
 
 def entry_present(content: str, pr_number: int) -> bool:
@@ -87,11 +79,15 @@ def update_changelog(
     pr_number: int,
     pr_url: str,
     entry_url: str | None = None,
+    issue_number: int | None = None,
 ) -> bool:
     """Idempotently prepend a merged-PR entry to the CHANGELOG at ``path``.
 
     Creates the file if absent. Returns ``True`` if the file was written, or
     ``False`` if an entry for ``PR #<pr_number>`` already existed (no-op).
+
+    Delegates formatting to ``scripts.lib.changelog_format.format_changelog_entry``
+    so the CI script and the dispatcher share one truth for entry shape.
     """
     p = Path(path)
     old_content = p.read_text(encoding="utf-8") if p.exists() else ""
@@ -99,8 +95,16 @@ def update_changelog(
     if entry_present(old_content, pr_number):
         return False
 
-    entry = format_entry(title, entry_url or pr_url, pr_number, pr_url)
-    p.write_text(prepend_entry(old_content, entry), encoding="utf-8")
+    entry = format_changelog_entry(
+        issue_title=title,
+        pr_number=pr_number,
+        issue_number=issue_number,
+        issue_url=entry_url or "",
+        pr_url=pr_url,
+    )
+    # format_changelog_entry returns a trailing newline; prepend_entry expects
+    # to strip it, so strip here too to preserve existing blank-line semantics.
+    p.write_text(prepend_entry(old_content, entry.rstrip("\n")), encoding="utf-8")
     return True
 
 
@@ -111,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--title", required=True, help="PR (or issue) title.")
     parser.add_argument("--pr-number", required=True, type=int, help="Merged PR number.")
     parser.add_argument("--pr-url", required=True, help="URL of the merged PR.")
+    parser.add_argument(
+        "--issue-number",
+        type=int,
+        default=None,
+        help="Linked issue number (used to build issue_url if --entry-url is absent).",
+    )
     parser.add_argument(
         "--entry-url",
         default=None,
@@ -128,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         title=args.title,
         pr_number=args.pr_number,
         pr_url=args.pr_url,
+        issue_number=args.issue_number,
         entry_url=args.entry_url,
     )
     if wrote:

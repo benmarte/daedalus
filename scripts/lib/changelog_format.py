@@ -9,9 +9,10 @@ from __future__ import annotations
 
 
 def format_changelog_entry(
-    issue_number: int,
     issue_title: str,
     pr_number: int,
+    *,
+    issue_number: int | None = None,
     issue_url: str = "",
     pr_url: str = "",
     repo_url: str = "https://github.com/benmarte/daedalus",
@@ -27,9 +28,17 @@ def format_changelog_entry(
     dispatcher, which knows the provider's ``issue_url``/``pr_url`` helpers)
     pass them explicitly; the CI updater only knows ``pr_number`` and
     ``issue_number`` and lets the helper build canonical URLs.
+
+    ``issue_number`` is optional. When provided, ``issue_url`` is derived from
+    it if not explicitly passed. When omitted, ``issue_url`` falls back to
+    ``pr_url`` (useful for PR-only entries where the linked issue is unknown).
     """
     if not issue_url:
-        issue_url = f"{repo_url}/issues/{issue_number}"
+        if issue_number is not None:
+            issue_url = f"{repo_url}/issues/{issue_number}"
+        else:
+            # No issue_number; fall back to pr_url.
+            issue_url = pr_url or f"{repo_url}/pull/{pr_number}"
     if not pr_url:
         pr_url = f"{repo_url}/pull/{pr_number}"
     return (

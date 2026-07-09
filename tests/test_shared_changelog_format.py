@@ -87,3 +87,43 @@ def test_format_stable_for_dispatcher_caller():
         "[PR #100](https://github.com/benmarte/daedalus/pull/100)\n"
     )
     assert entry == expected
+
+
+def test_format_without_issue_number_falls_back_to_pr_url():
+    """CI updater has no issue_number — entry_url should default to pr_url."""
+    from scripts.lib.changelog_format import format_changelog_entry
+    entry = format_changelog_entry(
+        issue_title="PR title",
+        pr_number=42,
+        pr_url="https://github.com/o/r/pull/42",
+    )
+    assert "https://github.com/o/r/pull/42" in entry
+    # Both the title link and the PR link point to the PR URL
+    assert entry == (
+        "## [PR title](https://github.com/o/r/pull/42) — "
+        "[PR #42](https://github.com/o/r/pull/42)\n"
+    )
+
+
+def test_format_without_any_optional_urls():
+    """No issue_number, no issue_url — just title + pr_number."""
+    from scripts.lib.changelog_format import format_changelog_entry
+    entry = format_changelog_entry(
+        issue_title="Something",
+        pr_number=7,
+    )
+    # issue_url defaults to derived pr_url; pr_url derives from repo_url
+    assert "issues/" not in entry  # no issue_number, so no /issues/
+    assert "pull/7" in entry
+    assert "PR #7" in entry
+
+
+def test_format_issue_number_still_derives_issue_url():
+    """Passing issue_number (but no issue_url) still derives the /issues/N URL."""
+    from scripts.lib.changelog_format import format_changelog_entry
+    entry = format_changelog_entry(
+        issue_title="Title",
+        pr_number=5,
+        issue_number=99,
+    )
+    assert "/issues/99" in entry
