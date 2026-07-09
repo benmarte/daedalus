@@ -17,8 +17,8 @@ Behaviour (matches the existing dispatcher/provider path byte-for-byte):
   issue URL). Either way the second link is always ``[PR #<n>]``.
 
 * **Prepend** — the new entry is placed at the very top, separated from the
-  previous content by a blank line (``entry + "\\n\\n" + old``), exactly like
-  ``GitHubProvider.append_changelog``.
+  previous content by a blank line (``entry + "\\n\\n" + old``), which is the
+  format the dispatcher used before the CI path replaced it (#1391).
 
 * **Idempotent** — if an entry for ``PR #<n>`` already exists anywhere in the
   file, do nothing (no duplicate). This makes the transition safe while the
@@ -74,8 +74,8 @@ def entry_present(content: str, pr_number: int) -> bool:
 def prepend_entry(content: str, entry: str) -> str:
     """Return ``content`` with ``entry`` prepended newest-first.
 
-    Mirrors ``GitHubProvider.append_changelog``: the entry (with trailing
-    newlines stripped) is followed by a blank line, then the prior content.
+    The entry (with trailing newlines stripped) is followed by a blank line,
+    then the prior content.
     """
     return entry.rstrip("\n") + "\n\n" + content
 

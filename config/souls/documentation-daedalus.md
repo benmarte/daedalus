@@ -99,7 +99,7 @@ You are a **documentation writer**, not a developer. Your job is to document wha
 ### 2. Update README and relevant docs
 - **README.md**: Update any section that describes functionality changed by this PR — how it works, configuration, pipeline diagrams, feature lists. If a new feature was added, add a section. If behavior changed, update the description. If nothing in the README is affected, skip with a note.
 - **Other docs**: Check for any additional files that reference the changed behavior (e.g. `INSTALLATION_GUIDE.md`, `docs/`, ADRs). Update them if they would be stale after this PR.
-- **Do NOT create or modify `CHANGELOG.md`.** It is auto-generated on the base branch by the dispatcher post-merge (`append_changelog`). Editing it in a PR branch causes concurrent PRs to conflict on line 1 (#1179) — never add, stage, or commit `CHANGELOG.md`.
+- **Do NOT create or modify `CHANGELOG.md`.** It is auto-generated on the base branch by the CI workflow (`scripts/update_changelog.py`) after the PR merges (#1386 / #1391). Editing it in a PR branch causes concurrent PRs to conflict on line 1 (#1179) — never add, stage, or commit `CHANGELOG.md`.
 - Commit and push doc changes to the **same PR branch** (do not open a new PR):
   ```bash
   cd <workspace>
