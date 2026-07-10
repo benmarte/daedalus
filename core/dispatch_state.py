@@ -88,6 +88,63 @@ def clear_dispatch(workdir: str, issue_number: int) -> None:
     _save(workdir, state)
 
 
+# ── Developer single-flight marker (issue #1404) ──────────────────────────────
+#
+# A persistent, cross-tick marker recording when a developer delegate was last
+# dispatched for an issue. The live-process/running-card single-flight guard
+# (#1375) cannot see a first developer whose card ALREADY went terminal
+# (done-without-PR) before the second dispatch — no process, no running card.
+# This timestamp survives that gap: a bounded-TTL check suppresses a second
+# developer dispatch while the first may still be finalizing its branch/PR, so
+# the second never collides with (or force-resets) the first's worktree/branch.
+# TTL-bounded so a genuinely-dead developer is re-dispatched on a later tick.
+
+
+def mark_developer_dispatch(
+    workdir: str, issue_number: int, ts: float | None = None
+) -> None:
+    """Record *ts* (default now) as the developer-dispatch time for *issue_number*.
+
+    No-op when *workdir* is empty. Preserves any other keys on the issue entry
+    (thread anchors, dispatch timestamps, pipeline state)."""
+    if not workdir:
+        return
+    state = _load(workdir)
+    entry = _issue_entry(state, issue_number)
+    entry["developer_dispatched_at"] = (
+        float(ts) if isinstance(ts, (int, float)) else time.time()
+    )
+    _save(workdir, state)
+
+
+def get_developer_dispatch_age_secs(
+    workdir: str, issue_number: int
+) -> float | None:
+    """Return seconds since a developer was dispatched for *issue_number*, or None.
+
+    None (not an error) when *workdir* is empty, the issue was never dispatched,
+    or the stored record is malformed."""
+    if not workdir:
+        return None
+    entry = _load(workdir).get("issues", {}).get(str(issue_number))
+    if not isinstance(entry, dict):
+        return None
+    ts = entry.get("developer_dispatched_at")
+    if not isinstance(ts, (int, float)):
+        return None
+    return time.time() - float(ts)
+
+
+def clear_developer_dispatch(workdir: str, issue_number: int) -> None:
+    """Remove the developer-dispatch marker for *issue_number* (e.g. after merge)."""
+    if not workdir:
+        return
+    state = _load(workdir)
+    entry = state.get("issues", {}).get(str(issue_number))
+    if isinstance(entry, dict) and entry.pop("developer_dispatched_at", None) is not None:
+        _save(workdir, state)
+
+
 # ── Per-issue platform threads (issue/PR comment mirroring) ───────────────────
 #
 # Each managed issue mirrors its agent conversation into one thread per

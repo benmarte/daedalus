@@ -39,8 +39,33 @@ BR="fix/issue-$n"
 {
   echo "[worktree-spawn] issue=$n base=$base workdir=$WORKDIR wt=$WT branch=$BR"
   git -C "$WORKDIR" fetch origin "$base" -q 2>&1 || true
-  # Clear any stale worktree at this path (e.g. from a prior retry of this issue)
-  # so `worktree add` can recreate it cleanly on a fresh base.
+  # Free branch $BR from ANY worktree that currently holds it (#1404). A concurrent
+  # or crashed prior developer for this issue can leave `fix/issue-<N>` checked out
+  # at a DIFFERENT path; `git worktree add -B` then refuses to force-update it
+  # ("cannot force update the branch ... used by worktree ...") and the run used to
+  # fall back to the shared main tree (losing branch-race protection). Remove every
+  # holder first so the re-create below always succeeds on a fresh base. The
+  # single-flight guard (#1375/#1404) ensures the freed worktree is stale, not live.
+  _main_toplevel="$(git -C "$WORKDIR" rev-parse --show-toplevel 2>/dev/null || true)"
+  while IFS= read -r held; do
+    [ -n "$held" ] || continue
+    # Safety guard (#1404 review): never touch the MAIN working tree. If the branch
+    # happens to be checked out there (pre-#1404 residual state), `git worktree remove -f`
+    # fails (main worktree can't be removed) and a blind `rm -rf` would delete the
+    # repo root. Skip it and let the later `worktree add -B` error path handle it.
+    if [ "$held" = "$_main_toplevel" ]; then
+      echo "[worktree-spawn] skipping main worktree (branch $BR checked out at repo root): $held"
+      continue
+    fi
+    echo "[worktree-spawn] freeing $BR held by worktree: $held"
+    if git -C "$WORKDIR" worktree remove -f "$held" 2>&1; then
+      rm -rf "$held" 2>&1 || true
+    else
+      echo "[worktree-spawn] worktree remove failed for $held — leaving path alone"
+    fi
+  done < <(git -C "$WORKDIR" worktree list --porcelain 2>/dev/null \
+             | awk -v b="branch refs/heads/$BR" '/^worktree /{p=substr($0,10)} $0==b{print p}')
+  # Clear the deterministic path itself too (stale worktree from a prior retry).
   git -C "$WORKDIR" worktree remove -f "$WT" 2>&1 || true
   rm -rf "$WT" 2>&1 || true
   git -C "$WORKDIR" worktree prune 2>&1 || true
@@ -51,8 +76,12 @@ BR="fix/issue-$n"
 } >> "$err"
 
 cd "$WT" 2>/dev/null || {
-  echo "WORKTREE_CD_FAILED: falling back to $WORKDIR (branch race protection lost)" >> "$err"
-  cd "$WORKDIR" || exit 1
+  # Do NOT fall back to the shared main working tree (#1404): running the developer
+  # there loses per-issue branch isolation and lets a second developer clobber the
+  # checkout. Fail hard so the outer wait-loop reports CODING_AGENT_DIED and the
+  # card blocks for a clean re-dispatch instead of silently corrupting the shared tree.
+  echo "WORKTREE_ABORT: $WT unavailable after setup — refusing shared-tree fallback (#1404)" >> "$err"
+  exit 1
 }
 
 # exec so the coding agent inherits this PID — the outer wait-loop's `kill -0`

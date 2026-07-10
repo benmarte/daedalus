@@ -246,6 +246,32 @@ if [ "$_role" = "developer" ] && [ -n "$_repo" ] && [ -n "$_branch" ]; then
   {
     echo "[delegate] developer worktree: repo=$_repo base=$_base branch=$_branch wt=$_wt"
     git -C "$_repo" fetch origin "$_base" -q 2>&1 || true
+    # Free branch $_branch from ANY worktree that currently holds it (#1404) before
+    # creating this delegate's own worktree. A crashed/prior developer for this issue
+    # can leave `fix/issue-<N>` checked out at another path; `worktree add -B` then
+    # refuses to force-update it ("cannot force update the branch ... used by worktree")
+    # and the run used to fall back to the shared repo root (losing branch-race
+    # protection). Remove every stale holder so the add below always succeeds. The
+    # single-flight guard (#1375/#1404) ensures the freed worktree is stale, not live.
+    _main_toplevel="$(git -C "$_repo" rev-parse --show-toplevel 2>/dev/null || true)"
+    while IFS= read -r _held; do
+      [ -n "$_held" ] || continue
+      # Safety guard (#1404 review): never touch the MAIN working tree. If the branch
+      # happens to be checked out there (pre-#1404 residual state), `git worktree remove -f`
+      # fails (main worktree can't be removed) and a blind `rm -rf` would delete the
+      # repo root. Skip it and let the later `worktree add` error path handle it.
+      if [ "$_held" = "$_main_toplevel" ]; then
+        echo "[delegate] skipping main worktree (branch $_branch checked out at repo root): $_held"
+        continue
+      fi
+      echo "[delegate] freeing $_branch held by worktree: $_held"
+      if git -C "$_repo" worktree remove -f "$_held" 2>&1; then
+        rm -rf "$_held" 2>&1 || true
+      else
+        echo "[delegate] worktree remove failed for $_held — leaving path alone"
+      fi
+    done < <(git -C "$_repo" worktree list --porcelain 2>/dev/null \
+               | awk -v b="branch refs/heads/$_branch" '/^worktree /{p=substr($0,10)} $0==b{print p}')
     git -C "$_repo" worktree prune 2>&1 || true
     git -C "$_repo" worktree add -b "$_branch" "$_wt" "origin/$_base" 2>&1 \
       || git -C "$_repo" worktree add -b "$_branch" "$_wt" "$_base" 2>&1 \
@@ -257,7 +283,17 @@ if [ "$_role" = "developer" ] && [ -n "$_repo" ] && [ -n "$_branch" ]; then
   if [ -d "$_wt" ]; then
     _cmd="cd $(printf '%q' "$_wt") && $_cmd"
   else
-    echo "[delegate] WARNING: worktree $_wt missing — running in repo root" >>"$_out" 2>&1
+    # Do NOT fall back to the shared repo root (#1404): running the developer there
+    # loses per-issue branch isolation and lets a second developer clobber the tree.
+    # Block the card as coding-agent-failed so crash-retry re-spawns from a fresh
+    # worktree instead of silently corrupting the shared checkout.
+    echo "[delegate] WORKTREE_ABORT: $_wt missing after setup — refusing repo-root fallback (#1404)" >>"$_out" 2>&1
+    if [ "$_transition" -eq 1 ] || [ "$_relay" -eq 1 ]; then
+      hermes kanban --board "$_board" block "$_card" \
+        "coding-agent-failed: worktree setup failed for $_branch" 2>/dev/null || true
+    fi
+    printf 'DELEGATE_RESULT: {"status":"wrapper-error","exit":2,"out":"%s","duration_s":0}\n' "$_out"
+    exit 2
   fi
 fi
 
