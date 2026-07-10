@@ -297,6 +297,23 @@ if [ "$_role" = "developer" ] && [ -n "$_repo" ] && [ -n "$_branch" ]; then
   fi
 fi
 
+# ── scrub kanban run-env from the inner coding agent (#1409) ──────────────────
+# This wrapper OWNS the card's kanban lifecycle: it transitions the card ONLY
+# after the PR handshake lands (developer) or the verdict is relayed (review
+# roles) — see _do_transition below. If the inner coding agent inherits the
+# kanban run-env (HERMES_KANBAN_TASK / _RUN_ID / _BOARD), it can run a bare
+# `hermes kanban complete` (no --result) that resolves the delegate-owned card to
+# `done` with an EMPTY summary WHILE it is still working — BEFORE the PR exists.
+# QA is gated on the developer card via parents=[dev_id], so it auto-promotes the
+# instant that card reaches `done` and then runs against a PR that does not exist,
+# blocking `qa-failed: no PR` (#1409). The RELAY-MODE directive asks the agent not
+# to touch kanban, but a disobedient/weak agent ignores prose; scrubbing the
+# run-env makes premature self-completion PHYSICALLY impossible — any kanban
+# command the inner agent runs then has no card/run to act on. delegate.sh's own
+# transitions pass the card id + --board explicitly, so they are unaffected.
+_inner_scrub=(env -u HERMES_KANBAN_TASK -u HERMES_KANBAN_RUN_ID \
+              -u HERMES_KANBAN_BOARD -u HERMES_KANBAN_URL)
+
 # ── spawn coding agent in its own process group ───────────────────────────────
 # Finding 2: use setsid to create a new session (pgid = child pid) so that on
 # timeout we can kill -TERM/-KILL -$pgid to reach ALL grandchildren (sub-tools,
@@ -304,13 +321,13 @@ fi
 # the delegate's process group and kill -$pgid would suicide the wrapper.
 # Falls back to perl POSIX::setsid() on macOS where setsid(1) is absent.
 if command -v setsid >/dev/null 2>&1; then
-  setsid bash -c "$_cmd" < "$_task_file" > "$_out" 2>&1 &
+  setsid "${_inner_scrub[@]}" bash -c "$_cmd" < "$_task_file" > "$_out" 2>&1 &
 elif command -v perl >/dev/null 2>&1; then
   perl -e 'use POSIX; POSIX::setsid(); exec @ARGV' -- \
-    bash -c "$_cmd" < "$_task_file" > "$_out" 2>&1 &
+    "${_inner_scrub[@]}" bash -c "$_cmd" < "$_task_file" > "$_out" 2>&1 &
 else
   # No setsid/perl: fall back to bare spawn; grandchild isolation is best-effort
-  bash -c "$_cmd" < "$_task_file" > "$_out" 2>&1 &
+  "${_inner_scrub[@]}" bash -c "$_cmd" < "$_task_file" > "$_out" 2>&1 &
 fi
 _child_pid=$!
 # After setsid the child is its own process group leader (pgid == pid).

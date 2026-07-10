@@ -1225,3 +1225,74 @@ def test_survives_parent_group_sigterm_and_transitions(tmp_path):
                     os.kill(int(raw), signal.SIGKILL)
                 except Exception:
                     pass
+
+
+# ── (#1409) inner agent cannot self-complete the delegate-owned card ───────────
+# Root cause of "developer card done (empty summary) before the PR handshake":
+# the inner coding agent inherits the kanban run-env and runs a bare
+# `hermes kanban complete` that resolves the card to `done` empty WHILE it is
+# still working, before the PR exists. QA (gated on the developer card via
+# parents=[dev_id]) then auto-promotes against a PR that does not exist. The
+# wrapper scrubs HERMES_KANBAN_* from the inner agent's environment so premature
+# self-completion is physically impossible; delegate.sh's own transitions pass the
+# card id explicitly and are unaffected.
+
+def test_inner_agent_kanban_run_env_scrubbed(tmp_path):
+    """The inner coding agent must NOT see the kanban run-env (#1409). A leaked
+    HERMES_KANBAN_TASK / _RUN_ID / _BOARD lets a disobedient agent self-complete
+    the delegate-owned card empty before the PR exists — the QA-runs-against-no-PR
+    bug. The wrapper scrubs them; the agent sees empty values."""
+    envfile = tmp_path / "inner-env.txt"
+    agent_cmd = (
+        "bash -c '"
+        'printf "TASK=[%s] RUN=[%s] BOARD=[%s] URL=[%s]" '
+        '"$HERMES_KANBAN_TASK" "$HERMES_KANBAN_RUN_ID" '
+        '"$HERMES_KANBAN_BOARD" "$HERMES_KANBAN_URL" '
+        f"> {envfile}'"
+    )
+    result, _, _ = _run_delegate(
+        tmp_path,
+        agent_cmd=agent_cmd,
+        max_wait=15,
+        poll_interval=1,
+        extra_env={
+            "HERMES_KANBAN_TASK": "t_leaked",
+            "HERMES_KANBAN_RUN_ID": "r_leaked",
+            "HERMES_KANBAN_BOARD": "leaked-board",
+            "HERMES_KANBAN_URL": "http://leaked",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert envfile.exists(), (
+        f"inner agent did not run; stdout:\n{result.stdout}"
+    )
+    content = envfile.read_text()
+    assert content == "TASK=[] RUN=[] BOARD=[] URL=[]", (
+        "inner coding agent inherited the kanban run-env — it could self-complete "
+        f"the delegate-owned card empty before the PR handshake (#1409): {content!r}"
+    )
+
+
+def test_wrapper_own_transition_survives_scrub(tmp_path):
+    """The env scrub (#1409) must NOT break the wrapper's OWN card transition,
+    which passes the card id + --board explicitly. A relay validator with a leaked
+    run-env in the wrapper's process still COMPLETES its card from the emitted
+    verdict — the scrub only removes the env from the INNER agent, not the wrapper."""
+    result, hermes_log, _ = _run_delegate(
+        tmp_path,
+        agent_cmd="bash -c 'echo CONFIRMED: real bug reproduced'",
+        max_wait=15,
+        poll_interval=1,
+        relay=True,
+        role="validator",
+        extra_env={
+            "HERMES_KANBAN_TASK": "t_leaked",
+            "HERMES_KANBAN_RUN_ID": "r_leaked",
+            "HERMES_KANBAN_BOARD": "leaked-board",
+        },
+    )
+    full = "\n".join(_log_lines(hermes_log))
+    assert "complete t_test123" in full, (
+        f"wrapper must still complete its own card after the env scrub: {full}"
+    )
+    assert "CONFIRMED" in full, full
