@@ -3,15 +3,18 @@
 Tests verify that resolver functions correctly read values from config
 and fall back to sensible defaults when values are missing or invalid.
 """
+
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from scripts.daedalus_dispatch import (
     _resolve_github_api_issue_limit,
     _resolve_github_api_pr_limit,
     _resolve_follow_up_scan_limit,
 )
+from core.dispatch.resolvers import _get_target_broadcast
 
 
 class TestResolveGithubApiIssueLimit:
@@ -135,6 +138,51 @@ class TestResolveFollowUpScanLimit:
         follow_up = {"scan_pr_limit": 1000}
         result = _resolve_follow_up_scan_limit(follow_up)
         assert result == 1000
+
+
+class TestGetTargetBroadcast:
+    """Tests for the per-target thread_broadcast resolver (#1406).
+
+    Default flipped to False so in-thread-only is the out-of-the-box behavior:
+    agent comments stay threaded and are NOT echoed to the channel unless a
+    target explicitly opts in with ``thread_broadcast: true``.
+    """
+
+    def test_defaults_to_false_when_no_notifications(self):
+        """No cron.notifications configured → in-thread-only (False)."""
+        assert _get_target_broadcast("slack:C0", {}) is False
+
+    def test_defaults_to_false_when_target_missing(self):
+        """Target not listed among notifications → in-thread-only (False)."""
+        resolved = {"cron": {"notifications": [{"target": "slack:OTHER"}]}}
+        assert _get_target_broadcast("slack:C0", resolved) is False
+
+    def test_defaults_to_false_when_entry_omits_flag(self):
+        """Matching entry without thread_broadcast → in-thread-only (False)."""
+        resolved = {"cron": {"notifications": [{"target": "slack:C0"}]}}
+        assert _get_target_broadcast("slack:C0", resolved) is False
+
+    def test_explicit_true_opts_into_broadcast(self):
+        """Explicit thread_broadcast: true is preserved (broadcast to channel)."""
+        resolved = {
+            "cron": {
+                "notifications": [{"target": "slack:C0", "thread_broadcast": True}]
+            }
+        }
+        assert _get_target_broadcast("slack:C0", resolved) is True
+
+    def test_explicit_false_stays_false(self):
+        """Explicit thread_broadcast: false is preserved."""
+        resolved = {
+            "cron": {
+                "notifications": [{"target": "slack:C0", "thread_broadcast": False}]
+            }
+        }
+        assert _get_target_broadcast("slack:C0", resolved) is False
+
+    def test_handles_none_cron(self):
+        """None cron section → in-thread-only (False), no crash."""
+        assert _get_target_broadcast("slack:C0", {"cron": None}) is False
 
 
 if __name__ == "__main__":
