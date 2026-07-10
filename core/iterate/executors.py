@@ -195,6 +195,138 @@ def _write_fix_attempts(workdir: str, data: dict[str, int]) -> None:
     tmp.replace(p)
 
 
+# ── QA "no PR" grace-poll (issue #1405) ─────────────────────────────────────
+# A QA card blocked purely because no PR was found is NOT a genuine test
+# failure — a slightly-late developer PR (e.g. one opened after a worktree-
+# collision retry, #1404) can land seconds later. Before that block counts
+# toward the give-up breaker, grace-poll the VCS for a PR on the issue's branch
+# for a bounded window; adopt a PR that appears (re-run QA) instead of failing.
+# The window is bounded per-card via a persistent counter so a PR that never
+# arrives cannot hold the card forever — the normal failure path is preserved.
+
+
+def _qa_no_pr_grace_path(workdir: str) -> str:
+    return str(Path(workdir) / ".hermes" / "daedalus-qa-no-pr-grace.json")
+
+
+def _read_qa_no_pr_grace(workdir: str) -> dict[str, int]:
+    """Read the per-card QA no-PR grace counter file."""
+    try:
+        path = _qa_no_pr_grace_path(workdir)
+        if Path(path).is_file():
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning(
+            "iterate: failed to read qa-no-pr-grace counter for %s: %s", workdir, exc
+        )
+    return {}
+
+
+def _write_qa_no_pr_grace(workdir: str, data: dict[str, int]) -> None:
+    """Write the per-card QA no-PR grace counter file atomically."""
+    path = _qa_no_pr_grace_path(workdir)
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(p)
+
+
+def _bump_qa_no_pr_grace(workdir: str, tid: str) -> int:
+    """Increment and return the QA no-PR grace tick count for a card."""
+    if not workdir or not tid:
+        return 0
+    data = _read_qa_no_pr_grace(workdir)
+    data[tid] = data.get(tid, 0) + 1
+    _write_qa_no_pr_grace(workdir, data)
+    return data[tid]
+
+
+def _is_qa_no_pr_block(handoff_text: str) -> bool:
+    """True when a QA block reason is the 'no PR found' variant (#1405).
+
+    The QA SOUL blocks with ``qa-failed: no PR — developer work incomplete``
+    when it cannot resolve an open PR for the issue. That is a timing symptom
+    (a slightly-late developer PR), not a real test failure, so it earns a
+    bounded grace-poll before the give-up breaker treats it as a developer
+    failure. A genuine test/lint failure (``qa-failed: <failing test>``) does
+    NOT match and routes to QA_FIX exactly as before.
+    """
+    text = (handoff_text or "").lower().lstrip()
+    if not text.startswith("qa-failed"):
+        return False
+    return "no pr" in text
+
+
+def _grace_qa_no_pr(
+    slug: str,
+    card: dict,
+    issue_n: int | None,
+    provider: Any,
+    *,
+    workdir: str = "",
+    max_grace_ticks: int = 3,
+    dry_run: bool = False,
+) -> str:
+    """Bounded grace-poll for a QA card blocked with 'qa-failed: no PR' (#1405).
+
+    Returns one of:
+      "adopted"   — a PR appeared on the issue's branch; the QA card was
+                    unblocked so it re-runs against the real PR.
+      "holding"   — no PR yet, still within the grace window; the caller should
+                    leave the card blocked (no failure counted) and re-check
+                    next tick.
+      "exhausted" — the grace window elapsed with no PR; the caller should fall
+                    through to the normal failure path (QA_FIX / breaker), which
+                    is deliberately left intact (non-goal: don't remove it).
+
+    ``max_grace_ticks`` bounds the total grace actions (holds + adopts) per
+    card so a PR that never arrives cannot hold the card forever.
+    """
+    tid = str(card.get("id") or "")
+    if not tid:
+        return "exhausted"
+    used = _read_qa_no_pr_grace(workdir).get(tid, 0) if workdir else 0
+    if used >= max_grace_ticks:
+        return "exhausted"
+
+    found_pr = None
+    if provider is not None and issue_n:
+        try:
+            found_pr = provider.find_pr_for_issue(issue_n)
+        except Exception as exc:  # provider methods never raise, but be defensive
+            logger.debug(
+                "iterate: qa-no-pr grace — find_pr_for_issue(#%s) failed: %s",
+                issue_n, exc,
+            )
+            found_pr = None
+
+    kanban = _pkg().kanban
+    if found_pr is not None:
+        logger.info(
+            "iterate: qa-no-pr grace — PR #%s appeared for #%s; unblocking QA %s "
+            "to re-run (#1405)",
+            found_pr, issue_n, tid,
+        )
+        if not dry_run:
+            _bump_qa_no_pr_grace(workdir, tid)
+            kanban.unblock_task(
+                slug, tid,
+                f"qa-no-pr-grace: PR #{found_pr} appeared for #{issue_n} — "
+                f"re-running QA (#1405)",
+            )
+        return "adopted"
+
+    logger.info(
+        "iterate: qa-no-pr grace — no PR yet for #%s, holding QA %s (%d/%d) (#1405)",
+        issue_n, tid, used + 1, max_grace_ticks,
+    )
+    if not dry_run:
+        _bump_qa_no_pr_grace(workdir, tid)
+    return "holding"
+
+
 def _increment_fix_attempts(card: dict, workdir: str) -> int:
     """Increment and return the fix attempt count for a card.
 
