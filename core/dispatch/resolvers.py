@@ -859,14 +859,16 @@ def _get_target_broadcast(target: str, resolved: Dict[str, Any]) -> bool:
     """Get broadcast_thread_reply setting for a specific target.
 
     Searches cron.notifications for an entry with matching target and returns
-    its thread_broadcast value (defaulting to True if not specified).
+    its thread_broadcast value (defaulting to False if not specified, i.e.
+    in-thread-only — see issue #1406). A target opts INTO channel broadcast by
+    explicitly setting ``thread_broadcast: true``.
     """
     cron = resolved.get("cron") or {}
     notifications = cron.get("notifications") or []
     for entry in notifications:
         if entry.get("target") == target:
-            return entry.get("thread_broadcast", True)
-    return True  # Default to broadcasting if nothing configured
+            return entry.get("thread_broadcast", False)
+    return False  # Default to in-thread-only if nothing configured
 
 
 # ── Issue body helpers ────────────────────────────────────────────────────────
