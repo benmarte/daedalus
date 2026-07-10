@@ -67,6 +67,20 @@ def _stub_bin_dir(tmp_path: Path, *, hermes_body: str = "", gh_body: str = "") -
     return stub_dir, hermes_log, gh_log
 
 
+def _init_git_repo(path: Path) -> Path:
+    """Init *path* as a git repo on branch ``dev`` with one commit, so the developer
+    worktree setup (``git worktree add ... dev``) succeeds. #1404 removed delegate.sh's
+    shared-repo-root fallback, so the developer role now REQUIRES a real git repo."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "dev", str(path)], capture_output=True, check=True)
+    for k, v in (("user.email", "t@t"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(path), "config", k, v], capture_output=True, check=True)
+    (path / "f.txt").write_text("x")
+    subprocess.run(["git", "-C", str(path), "add", "."], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], capture_output=True, check=True)
+    return path
+
+
 def _run_delegate(
     tmp_path: Path,
     *,
@@ -803,12 +817,13 @@ def test_developer_slow_pr_completes_within_grace(tmp_path):
     # real directory. HOME → tmp so the wrapper's near-real-time advance dispatch
     # (``$HOME/.hermes/scripts/daedalus-cron.sh``) is absent and never fires for real.
     cnt = tmp_path / "gh-grace-cnt"
+    repo_dir = _init_git_repo(tmp_path / "repo")  # #1404: developer needs a real repo
     result, hermes_log, _ = _run_delegate(
         tmp_path,
         agent_cmd="bash -c 'exit 0'",   # inner agent exits with no PR yet
         relay=True,
         role="developer",
-        repo=str(tmp_path),
+        repo=str(repo_dir),
         branch="fix/issue-42-slowpr",
         poll_interval=1,
         pr_grace_secs=15,
@@ -832,12 +847,13 @@ def test_developer_no_pr_after_grace_blocks_failed(tmp_path):
     """A genuinely dead developer (no PR ever) still blocks coding-agent-failed
     after a BOUNDED grace window — the guard never hangs forever (#1375)."""
     start = time.time()
+    repo_dir = _init_git_repo(tmp_path / "repo")  # #1404: developer needs a real repo
     result, hermes_log, _ = _run_delegate(
         tmp_path,
         agent_cmd="bash -c 'exit 0'",
         relay=True,
         role="developer",
-        repo=str(tmp_path),
+        repo=str(repo_dir),
         branch="fix/issue-42-nopr",
         poll_interval=1,
         pr_grace_secs=3,
@@ -857,12 +873,13 @@ def test_developer_no_pr_after_grace_blocks_failed(tmp_path):
 
 def test_developer_grace_zero_fails_immediately(tmp_path):
     """--pr-grace-secs 0 disables the poll → pre-#1375 immediate-fail behaviour."""
+    repo_dir = _init_git_repo(tmp_path / "repo")  # #1404: developer needs a real repo
     result, hermes_log, _ = _run_delegate(
         tmp_path,
         agent_cmd="bash -c 'exit 0'",
         relay=True,
         role="developer",
-        repo=str(tmp_path),
+        repo=str(repo_dir),
         branch="fix/issue-42-instant",
         poll_interval=1,
         pr_grace_secs=0,
