@@ -1,3 +1,5 @@
+## [fix: stop planner over-decomposing acceptance-criteria checklists (#1402)](https://github.com/benmarte/daedalus/pull/1403) — [PR #1403](https://github.com/benmarte/daedalus/pull/1403)
+
 ## [Automate CHANGELOG.md via CI on PR-merge (decouple from dispatcher; cover manual merges)](https://github.com/benmarte/daedalus/issues/1386) — [PR #1399](https://github.com/benmarte/daedalus/pull/1399)
 
 ## [fix: remove dispatcher-side CHANGELOG writer](https://github.com/benmarte/daedalus/pull/1395) — [PR #1395](https://github.com/benmarte/daedalus/pull/1395)
