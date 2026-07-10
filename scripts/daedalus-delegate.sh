@@ -253,11 +253,23 @@ if [ "$_role" = "developer" ] && [ -n "$_repo" ] && [ -n "$_branch" ]; then
     # and the run used to fall back to the shared repo root (losing branch-race
     # protection). Remove every stale holder so the add below always succeeds. The
     # single-flight guard (#1375/#1404) ensures the freed worktree is stale, not live.
+    _main_toplevel="$(git -C "$_repo" rev-parse --show-toplevel 2>/dev/null || true)"
     while IFS= read -r _held; do
       [ -n "$_held" ] || continue
+      # Safety guard (#1404 review): never touch the MAIN working tree. If the branch
+      # happens to be checked out there (pre-#1404 residual state), `git worktree remove -f`
+      # fails (main worktree can't be removed) and a blind `rm -rf` would delete the
+      # repo root. Skip it and let the later `worktree add` error path handle it.
+      if [ "$_held" = "$_main_toplevel" ]; then
+        echo "[delegate] skipping main worktree (branch $_branch checked out at repo root): $_held"
+        continue
+      fi
       echo "[delegate] freeing $_branch held by worktree: $_held"
-      git -C "$_repo" worktree remove -f "$_held" 2>&1 || true
-      rm -rf "$_held" 2>&1 || true
+      if git -C "$_repo" worktree remove -f "$_held" 2>&1; then
+        rm -rf "$_held" 2>&1 || true
+      else
+        echo "[delegate] worktree remove failed for $_held — leaving path alone"
+      fi
     done < <(git -C "$_repo" worktree list --porcelain 2>/dev/null \
                | awk -v b="branch refs/heads/$_branch" '/^worktree /{p=substr($0,10)} $0==b{print p}')
     git -C "$_repo" worktree prune 2>&1 || true

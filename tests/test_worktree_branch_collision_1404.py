@@ -255,6 +255,38 @@ def test_delegate_script_frees_stale_branch_holder(tmp_path):
     assert "/.worktrees/dev-42-" in held, f"branch not under per-delegate worktree: {held}"
 
 
+def test_spawn_script_never_deletes_repo_root_when_main_tree_holds_the_branch(tmp_path):
+    """(#1404 review regression) If the branch fix/issue-<N> happens to be checked
+    out in the MAIN working tree (residual state from pre-#1404), the branch-freeing
+    loop must SKIP the main worktree — `git worktree remove -f` fails on the main
+    tree and the unconditional `rm -rf` that followed would delete the repo root.
+    Verify the repo root directory survives intact."""
+    repo = _make_repo(tmp_path)
+    # Simulate the residual state: on the MAIN repo, create + check out fix/issue-42
+    # directly (not in a worktree). This is what a pre-#1404 fallback left behind.
+    _git(repo, "checkout", "-b", "fix/issue-42")
+    # A sentinel file in the repo root proves `rm -rf` didn't silently eat it.
+    sentinel = repo / "SENTINEL.txt"
+    sentinel.write_text("alive")
+    # Now run the script. It will attempt to free the branch from the main tree —
+    # the new guard detects that held == main toplevel and skips it.
+    task = tmp_path / "task.txt"
+    task.write_text("noop\n")
+    out = tmp_path / "out.txt"
+    err = tmp_path / "err.txt"
+    r = subprocess.run(
+        ["bash", str(_SPAWN_SH), "42", "dev", str(task), str(out), str(err), "true"],
+        cwd=str(repo), capture_output=True, text=True, timeout=60,
+    )
+    # The script may fail (WORKTREE_SETUP_FAILED because the branch is in main) but
+    # it MUST NOT delete the repo root or sentinel.
+    assert repo.exists(), "REPO ROOT DELETED — regression in main-worktree guard"
+    assert sentinel.exists(), "sentinel in repo root was deleted — regression"
+    assert sentinel.read_text() == "alive"
+    err_txt = err.read_text()
+    assert "skipping main worktree" in err_txt or "WORKTREE_SETUP_FAILED" in err_txt, err_txt
+
+
 if __name__ == "__main__":
     # Dual-mode: run standalone without pytest. Auto-discovers test_* functions.
     import tempfile

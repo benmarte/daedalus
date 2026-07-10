@@ -46,11 +46,23 @@ BR="fix/issue-$n"
   # fall back to the shared main tree (losing branch-race protection). Remove every
   # holder first so the re-create below always succeeds on a fresh base. The
   # single-flight guard (#1375/#1404) ensures the freed worktree is stale, not live.
+  _main_toplevel="$(git -C "$WORKDIR" rev-parse --show-toplevel 2>/dev/null || true)"
   while IFS= read -r held; do
     [ -n "$held" ] || continue
+    # Safety guard (#1404 review): never touch the MAIN working tree. If the branch
+    # happens to be checked out there (pre-#1404 residual state), `git worktree remove -f`
+    # fails (main worktree can't be removed) and a blind `rm -rf` would delete the
+    # repo root. Skip it and let the later `worktree add -B` error path handle it.
+    if [ "$held" = "$_main_toplevel" ]; then
+      echo "[worktree-spawn] skipping main worktree (branch $BR checked out at repo root): $held"
+      continue
+    fi
     echo "[worktree-spawn] freeing $BR held by worktree: $held"
-    git -C "$WORKDIR" worktree remove -f "$held" 2>&1 || true
-    rm -rf "$held" 2>&1 || true
+    if git -C "$WORKDIR" worktree remove -f "$held" 2>&1; then
+      rm -rf "$held" 2>&1 || true
+    else
+      echo "[worktree-spawn] worktree remove failed for $held — leaving path alone"
+    fi
   done < <(git -C "$WORKDIR" worktree list --porcelain 2>/dev/null \
              | awk -v b="branch refs/heads/$BR" '/^worktree /{p=substr($0,10)} $0==b{print p}')
   # Clear the deterministic path itself too (stale worktree from a prior retry).
