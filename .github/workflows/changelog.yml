@@ -1,0 +1,77 @@
+name: Update Changelog
+
+# Single writer of CHANGELOG.md (epic #1386). Fires when any PR is MERGED into
+# `dev` and prepends a newest-first entry via scripts/update_changelog.py, then
+# commits it back to `dev` with a `[skip ci]` message. This replaces the old
+# dispatcher-side append_changelog path (removed in #1391) so that EVERY merge —
+# manual or pipeline-driven — is captured, not just tracked-issue closures.
+#
+# Writing on the base branch AFTER merge (never in a PR branch) is deliberate:
+# per-PR CHANGELOG edits collide on line 1 across concurrent PRs (#1179).
+
+on:
+  pull_request:
+    types: [closed]
+
+# Serialize all runs so two near-simultaneous merges can't race on line 1 of
+# CHANGELOG.md. cancel-in-progress: false → queue, never drop an entry.
+concurrency:
+  group: changelog-dev
+  cancel-in-progress: false
+
+jobs:
+  update-changelog:
+    # Only merged PRs (not merely closed) that targeted `dev`. Release PRs target
+    # `main` and are correctly excluded.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          # Persist the default GITHUB_TOKEN so the later git push authenticates.
+          # `dev` is unprotected, so contents:write is sufficient (no PAT needed);
+          # pushes by GITHUB_TOKEN do not re-trigger workflows, and the commit
+          # carries [skip ci] regardless.
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepend CHANGELOG entry
+        # PR title is attacker-controlled (set by the PR author), so it is passed
+        # via env with a double-quoted expansion — NEVER interpolated inline into
+        # the run block. env values are materialized by Actions before shell eval,
+        # so shell metacharacters cannot escape into the command.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          python scripts/update_changelog.py \
+            --title "$PR_TITLE" \
+            --pr-number "$PR_NUMBER" \
+            --pr-url "$PR_URL"
+
+      - name: Commit & push if changed
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "changelog: no change (entry already present) — nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          # Message MUST match update_changelog.COMMIT_MESSAGE so it is skipped by CI.
+          git commit -m "docs: update CHANGELOG.md [skip ci]"
+          # Belt-and-suspenders vs any race despite the concurrency group.
+          git pull --rebase --autostash origin dev
+          git push origin HEAD:dev

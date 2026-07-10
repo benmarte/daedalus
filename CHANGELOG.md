@@ -1,3 +1,17 @@
+## [fix: scrub kanban run-env from inner coding agent to stop premature developer done (#1409)](https://github.com/benmarte/daedalus/pull/1410) — [PR #1410](https://github.com/benmarte/daedalus/pull/1410)
+
+## [fix: grace-poll for a late developer PR before QA 'no PR' trips the breaker (#1405)](https://github.com/benmarte/daedalus/pull/1408) — [PR #1408](https://github.com/benmarte/daedalus/pull/1408)
+
+## [fix: prevent developer double-dispatch worktree collision (#1404)](https://github.com/benmarte/daedalus/pull/1407) — [PR #1407](https://github.com/benmarte/daedalus/pull/1407)
+
+## [fix: stop planner over-decomposing acceptance-criteria checklists (#1402)](https://github.com/benmarte/daedalus/pull/1403) — [PR #1403](https://github.com/benmarte/daedalus/pull/1403)
+
+## [Automate CHANGELOG.md via CI on PR-merge (decouple from dispatcher; cover manual merges)](https://github.com/benmarte/daedalus/issues/1386) — [PR #1399](https://github.com/benmarte/daedalus/pull/1399)
+
+## [fix: remove dispatcher-side CHANGELOG writer](https://github.com/benmarte/daedalus/pull/1395) — [PR #1395](https://github.com/benmarte/daedalus/pull/1395)
+
+## [feat: idempotent CHANGELOG.md prepend script for CI PR-merge](https://github.com/benmarte/daedalus/pull/1396) — [PR #1396](https://github.com/benmarte/daedalus/pull/1396)
+
 ## [fix: deliver Antigravity prompt positionally per docs via daedalus-agy-run.sh](https://github.com/benmarte/daedalus/issues/1380) — [PR #1383](https://github.com/benmarte/daedalus/pull/1383)
 
 ## [feat: enable Antigravity (agy) coding agent — resolver + dashboard picker](https://github.com/benmarte/daedalus/issues/1380) — [PR #1382](https://github.com/benmarte/daedalus/pull/1382)

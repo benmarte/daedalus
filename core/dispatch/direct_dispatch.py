@@ -26,7 +26,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from core import kanban
+from core import dispatch_state, kanban
 from core.dispatch.bodies import _DELEGATION_MARKER, _inner_task_body, _ROLE_TMP_PREFIX
 from core.dispatch.resolvers import (
     _DEFAULT_PROFILES,
@@ -103,6 +103,15 @@ _RELAY_MODE_OVERRIDE = (
 # repo that never sets ``pipeline.developer_pr_grace_secs`` gets the same 120s poll.
 _DEFAULT_PR_GRACE_SECS = 120
 
+# Cross-tick single-flight marker TTL buffer (#1404). The persistent developer
+# marker suppresses a second dispatch for at most ``pr_grace_secs + this`` seconds
+# — long enough to cover the first delegate's post-exit PR-grace poll plus one
+# cron tick (the window where the first card can go done-without-PR yet its
+# branch/worktree still lingers), but short enough that a genuinely-dead
+# developer is re-dispatched promptly on a later tick (a qa-fix round, which
+# follows a full QA run, always lands well past this window).
+_MARKER_TTL_BUFFER_SECS = 120
+
 
 def _running_processes() -> List[str]:
     """Return the command line of every process on the host (best-effort).
@@ -130,22 +139,31 @@ def _developer_delegate_in_flight(
     kanban_mod: Any = kanban,
     ps_lines: Optional[List[str]] = None,
     developer_profile: str = "",
+    workdir: str = "",
+    marker_ttl_secs: float = 0.0,
 ) -> bool:
-    """Developer single-flight guard (#1375): is a live developer delegate already
-    working this issue/branch?
+    """Developer single-flight guard (#1375 + #1404): is a developer delegate
+    already (or very recently) working this issue/branch?
 
     The concurrent-delegate hazard is a re-spawn (crash-retry unblock, or a second
-    ``todo`` card) firing a second developer onto the SAME ``.worktrees/dev-<n>``
-    checkout while the first is still editing it — two agents clobbering one tree.
+    ``todo`` card) firing a second developer onto the SAME per-issue branch /
+    worktree while the first is still editing it — two agents clobbering one tree.
     The ``kanban.claim`` gate only protects re-claim of the *same running card*; it
     does NOT catch a detached delegate whose card was already blocked+unblocked, nor
-    a distinct second developer card for the same issue. This guard closes both:
+    a distinct second developer card for the same issue. This guard closes all three:
 
       1. A live delegate / inner-agent PROCESS referencing this branch or its
          deterministic worktree path (``ps`` scan) — the authoritative liveness
          signal that survives card churn.
       2. Another RUNNING developer card for the same issue (a second card minted
          for one issue) — a board-level double-dispatch.
+      3. A persistent cross-tick marker (#1404) showing a developer was dispatched
+         for this issue within ``marker_ttl_secs`` — closes the gap (1)/(2) miss
+         when the FIRST developer card already went terminal (done-without-PR)
+         before the second dispatch: no live process, no running card, yet the
+         first's branch/worktree still lingers and a second dispatch would collide
+         with (or force-reset) it. TTL-bounded so a dead developer re-dispatches
+         on a later tick.
 
     Fail-open (returns False) on any inspection error so a transient failure never
     permanently blocks the developer stage. ``ps_lines`` is injectable for tests.
@@ -186,6 +204,22 @@ def _developer_delegate_in_flight(
                     return True
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("single-flight: card scan failed for #%s: %s", issue, exc)
+    # (3) persistent cross-tick marker (#1404): a developer was dispatched for this
+    # issue within the grace window. Catches the done-without-PR race where the
+    # first card is already terminal (so (1)/(2) see nothing) but its branch/worktree
+    # still lingers and a second dispatch would collide with it.
+    if workdir and marker_ttl_secs > 0:
+        try:
+            age = dispatch_state.get_developer_dispatch_age_secs(workdir, issue)
+            if age is not None and age < marker_ttl_secs:
+                logger.info(
+                    "single-flight: developer for #%s dispatched %.0fs ago (< %.0fs "
+                    "marker TTL) — suppressing second dispatch (#1404)",
+                    issue, age, marker_ttl_secs,
+                )
+                return True
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("single-flight: marker check failed for #%s: %s", issue, exc)
     return False
 
 
@@ -340,6 +374,8 @@ def direct_dispatch(
         if is_dev and _developer_delegate_in_flight(
             slug, issue, branch, str(cid),
             developer_profile=(card.get("assignee") or "").strip(),
+            workdir=repo_path,
+            marker_ttl_secs=(pr_grace_secs + _MARKER_TTL_BUFFER_SECS),
         ):
             logger.info(
                 "direct-dispatch: developer delegate already in flight for #%s — "
@@ -374,6 +410,15 @@ def direct_dispatch(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("direct-dispatch: spawn failed for %s (%s): %s", role, cid, exc)
             continue
+        # Record the persistent single-flight marker (#1404) AFTER a successful
+        # developer spawn so a later tick suppresses a second dispatch for this
+        # issue even once this card goes terminal (done-without-PR). Best-effort:
+        # a state-write failure must never abort the dispatch it just performed.
+        if is_dev and issue and repo_path:
+            try:
+                dispatch_state.mark_developer_dispatch(repo_path, issue)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("direct-dispatch: marker write failed for #%s: %s", issue, exc)
         logger.info(
             "direct-dispatch: spawned %s wrapper for #%s (card %s) — no local-model hop (#1329)",
             role, issue, cid,

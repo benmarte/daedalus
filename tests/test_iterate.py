@@ -2205,6 +2205,203 @@ def test_run_iterate_red_ci_classified_correctly():
     check("QA-reported failures → no pending cards", pending == [])
 
 
+# ── Issue #1405: QA "no PR" grace-poll ──────────────────────────────────────
+
+
+def test_is_qa_no_pr_block_matches_no_pr_variant():
+    """_is_qa_no_pr_block: only the 'no PR' variant of qa-failed matches (#1405)."""
+    check("no-PR failure matches",
+          iterate._is_qa_no_pr_block("qa-failed: no PR — developer work incomplete"))
+    check("case-insensitive", iterate._is_qa_no_pr_block("QA-FAILED: No PR"))
+    check("leading whitespace tolerated",
+          iterate._is_qa_no_pr_block("  qa-failed: no pr yet"))
+    check("real test failure does NOT match",
+          not iterate._is_qa_no_pr_block("qa-failed: test_foo broke"))
+    check("qa-passed does NOT match", not iterate._is_qa_no_pr_block("qa-passed: PR #7"))
+    check("empty does NOT match", not iterate._is_qa_no_pr_block(""))
+    check("no-pr text without qa-failed prefix does NOT match",
+          not iterate._is_qa_no_pr_block("review-required: no PR yet"))
+
+
+def test_grace_qa_no_pr_holds_when_no_pr():
+    """_grace_qa_no_pr: no PR on the branch → 'holding', counter bumped, no unblock (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    fk = conftest.FakeKanban()
+    prov = FakeProvider()  # no branch_prs → find_pr_for_issue returns None
+    card = {"id": "t_qa", "body": "Issue O/R#77"}
+    with mock.patch.object(iterate, "kanban", fk):
+        result = iterate._grace_qa_no_pr(
+            "slug", card, 77, prov, workdir=wd, max_grace_ticks=3,
+        )
+    check("no PR → holding", result == "holding")
+    check("no unblock while holding", fk.unblocked_calls == [])
+    check("grace counter bumped", iterate._read_qa_no_pr_grace(wd).get("t_qa") == 1)
+
+
+def test_grace_qa_no_pr_adopts_late_pr():
+    """_grace_qa_no_pr: a PR that appears on the branch → 'adopted', QA unblocked (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    fk = conftest.FakeKanban()
+    prov = FakeProvider(branch_prs={"fix/issue-77": 99})
+    fk.seed(assignee="qa-daedalus", title="QA #77", status="blocked", tid="t_qa")
+    card = {"id": "t_qa", "body": "Issue O/R#77"}
+    with mock.patch.object(iterate, "kanban", fk):
+        result = iterate._grace_qa_no_pr(
+            "slug", card, 77, prov, workdir=wd, max_grace_ticks=3,
+        )
+    check("PR appeared → adopted", result == "adopted")
+    check("QA card unblocked", [c[0] for c in fk.unblocked_calls] == ["t_qa"])
+    check("unblock reason names the PR", "PR #99" in fk.unblocked_calls[0][1])
+
+
+def test_grace_qa_no_pr_adopts_suffixed_branch():
+    """_grace_qa_no_pr: adopts a descriptive-suffix branch fix/issue-<n>-<slug> (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    fk = conftest.FakeKanban()
+    prov = FakeProvider(branch_prs={"fix/issue-77-late-pr": 123})
+    fk.seed(assignee="qa-daedalus", title="QA #77", status="blocked", tid="t_qa")
+    card = {"id": "t_qa", "body": "Issue O/R#77"}
+    with mock.patch.object(iterate, "kanban", fk):
+        result = iterate._grace_qa_no_pr(
+            "slug", card, 77, prov, workdir=wd, max_grace_ticks=3,
+        )
+    check("suffixed branch PR adopted", result == "adopted")
+    check("QA card unblocked for suffixed branch", fk.unblocked_calls[0][0] == "t_qa")
+
+
+def test_grace_qa_no_pr_exhausts_after_window():
+    """_grace_qa_no_pr: after max_grace_ticks holds, returns 'exhausted' (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    fk = conftest.FakeKanban()
+    prov = FakeProvider()  # never finds a PR
+    card = {"id": "t_qa", "body": "Issue O/R#77"}
+    with mock.patch.object(iterate, "kanban", fk):
+        r1 = iterate._grace_qa_no_pr("slug", card, 77, prov, workdir=wd, max_grace_ticks=2)
+        r2 = iterate._grace_qa_no_pr("slug", card, 77, prov, workdir=wd, max_grace_ticks=2)
+        r3 = iterate._grace_qa_no_pr("slug", card, 77, prov, workdir=wd, max_grace_ticks=2)
+    check("first tick holds", r1 == "holding")
+    check("second tick holds", r2 == "holding")
+    check("window exhausted on third tick", r3 == "exhausted")
+
+
+def test_grace_qa_no_pr_dry_run_no_side_effects():
+    """_grace_qa_no_pr: dry_run does not bump the counter or unblock (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    fk = conftest.FakeKanban()
+    prov = FakeProvider(branch_prs={"fix/issue-77": 99})
+    fk.seed(assignee="qa-daedalus", title="QA #77", status="blocked", tid="t_qa")
+    card = {"id": "t_qa", "body": "Issue O/R#77"}
+    with mock.patch.object(iterate, "kanban", fk):
+        result = iterate._grace_qa_no_pr(
+            "slug", card, 77, prov, workdir=wd, max_grace_ticks=3, dry_run=True,
+        )
+    check("dry-run still reports adopted", result == "adopted")
+    check("dry-run does not unblock", fk.unblocked_calls == [])
+    check("dry-run does not bump counter", iterate._read_qa_no_pr_grace(wd) == {})
+
+
+def test_run_iterate_qa_no_pr_holds_and_skips_qa_fix():
+    """run_iterate: QA 'no PR' block with no PR yet → held (grace), NOT QA_FIX (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    cards = [{
+        "id": "t_qa",
+        "assignee": "qa-daedalus",
+        "body": "Issue O/R#77",
+        "runs": [{"reason": "qa-failed: no PR — developer work incomplete"}],
+    }]
+    prov = FakeProvider(ci_status="unknown")  # no branch_prs → no PR found
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "list_tasks", return_value=[]):
+            with mock.patch.object(kanban, "unblock_task", return_value=True) as munblock:
+                with mock.patch.object(kanban, "create_task", return_value="t_fix") as mcreate:
+                    counts, *_ = iterate.run_iterate(
+                        "slug", "O/R", provider=prov,
+                        resolved={"workdir": wd, "pipeline": {"qa_no_pr_grace_ticks": 3}},
+                    )
+    check("held by grace-poll", counts["qa_no_pr_grace"] == 1)
+    check("no QA_FIX while holding", counts[iterate.QA_FIX] == 0)
+    check("no unblock while holding", munblock.call_count == 0)
+    check("no fix card created while holding", mcreate.call_count == 0)
+
+
+def test_run_iterate_qa_no_pr_adopts_late_pr():
+    """run_iterate: QA 'no PR' block but a PR appeared → adopt (unblock QA), NOT QA_FIX (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    cards = [{
+        "id": "t_qa",
+        "assignee": "qa-daedalus",
+        "body": "Issue O/R#77",
+        "runs": [{"reason": "qa-failed: no PR — developer work incomplete"}],
+    }]
+    prov = FakeProvider(ci_status="unknown", branch_prs={"fix/issue-77": 99})
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "list_tasks", return_value=[]):
+            with mock.patch.object(kanban, "unblock_task", return_value=True) as munblock:
+                counts, *_ = iterate.run_iterate(
+                    "slug", "O/R", provider=prov,
+                    resolved={"workdir": wd, "pipeline": {"qa_no_pr_grace_ticks": 3}},
+                )
+    check("adopted by grace-poll", counts["qa_no_pr_grace"] == 1)
+    check("no QA_FIX on adopt", counts[iterate.QA_FIX] == 0)
+    check("QA card unblocked to re-run", munblock.call_count == 1)
+
+
+def test_run_iterate_qa_real_failure_unaffected_by_grace():
+    """run_iterate: a genuine qa-failed (test failure) is untouched by the grace-poll (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    cards = [{
+        "id": "t_qa",
+        "assignee": "qa-daedalus",
+        "body": "Issue O/R#77",
+        "runs": [{"reason": "qa-failed: test_foo broke on PR #11"}],
+        "workspace": "dir:/w",
+    }]
+    prov = FakeProvider(ci_status="unknown")
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "list_tasks", return_value=[]):
+            with mock.patch.object(kanban, "show_card", return_value=None):
+                with mock.patch.object(kanban, "create_task", return_value="t_fix"):
+                    with mock.patch.object(kanban, "comment", return_value=True):
+                        with mock.patch.object(kanban, "unblock_task", return_value=True) as munblock:
+                            counts, *_ = iterate.run_iterate(
+                                "slug", "O/R", provider=prov,
+                                resolved={"workdir": wd, "pipeline": {"qa_no_pr_grace_ticks": 3}},
+                            )
+    check("grace not triggered for real failure", counts["qa_no_pr_grace"] == 0)
+    check("real failure routes to QA_FIX", counts[iterate.QA_FIX] == 1)
+    check("real failure does not unblock", munblock.call_count == 0)
+
+
+def test_run_iterate_qa_no_pr_grace_disabled():
+    """run_iterate: qa_no_pr_grace_ticks=0 disables the grace-poll — falls straight through (#1405)."""
+    import tempfile
+    wd = tempfile.mkdtemp()
+    cards = [{
+        "id": "t_qa",
+        "assignee": "qa-daedalus",
+        "body": "Issue O/R#77",
+        "runs": [{"reason": "qa-failed: no PR — developer work incomplete"}],
+    }]
+    prov = FakeProvider(ci_status="unknown", branch_prs={"fix/issue-77": 99})
+    with mock.patch.object(kanban, "list_blocked", return_value=cards):
+        with mock.patch.object(kanban, "list_tasks", return_value=[]):
+            with mock.patch.object(kanban, "unblock_task", return_value=True) as munblock:
+                counts, *_ = iterate.run_iterate(
+                    "slug", "O/R", provider=prov,
+                    resolved={"workdir": wd, "pipeline": {"qa_no_pr_grace_ticks": 0}},
+                )
+    check("grace disabled → not counted", counts["qa_no_pr_grace"] == 0)
+    check("grace disabled → no adopt/unblock", munblock.call_count == 0)
+
+
 # ── Issue #35: escalation dedup tests ───────────────────────────────────────
 
 
@@ -2529,6 +2726,16 @@ if __name__ == "__main__":
         test_run_iterate_accessibility_approved_advances,
         test_run_iterate_accessibility_changes_requested_routes_to_pm,
         test_run_iterate_qa_failed_creates_fix_card,
+        test_is_qa_no_pr_block_matches_no_pr_variant,
+        test_grace_qa_no_pr_holds_when_no_pr,
+        test_grace_qa_no_pr_adopts_late_pr,
+        test_grace_qa_no_pr_adopts_suffixed_branch,
+        test_grace_qa_no_pr_exhausts_after_window,
+        test_grace_qa_no_pr_dry_run_no_side_effects,
+        test_run_iterate_qa_no_pr_holds_and_skips_qa_fix,
+        test_run_iterate_qa_no_pr_adopts_late_pr,
+        test_run_iterate_qa_real_failure_unaffected_by_grace,
+        test_run_iterate_qa_no_pr_grace_disabled,
         test_escalation_dedup_same_issue,
         test_escalation_stamp_prevents_rerun,
         test_escalation_dedup_dry_run,

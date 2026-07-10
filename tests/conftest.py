@@ -682,6 +682,19 @@ class FakeProvider:
     def find_pr_for_branch(self, branch: str) -> Optional[int]:
         return self._branch_prs.get(branch)
 
+    def find_pr_for_issue(self, issue_number: int) -> Optional[int]:
+        # Mirror VCSProvider.find_pr_for_issue: match the deterministic worktree
+        # branch ``fix/issue-<n>`` or a descriptive suffix ``fix/issue-<n>-…``
+        # from the configured ``branch_prs`` map (#1405).
+        if not issue_number:
+            return None
+        exact = f"fix/issue-{issue_number}"
+        prefix = f"{exact}-"
+        for branch, pr in self._branch_prs.items():
+            if branch == exact or branch.startswith(prefix):
+                return pr
+        return None
+
     def is_pr_open(self, pr_number: int) -> bool:
         # Default (no open_prs configured): treat every PR as open so existing
         # advance tests are unaffected. When configured, membership decides.

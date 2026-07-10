@@ -421,6 +421,20 @@ pipeline:
   #   the pre-#1375 immediate-fail behaviour).
   # developer_pr_grace_secs: 120
 
+  # ── QA no-PR grace-poll (#1405) ───────────────────────────────────────────
+  # qa_no_pr_grace_ticks (default: 3)
+  #   When the developer's PR lands a little late (e.g. after a worktree-
+  #   collision retry, #1404), QA can run first, find no PR, and block
+  #   `qa-failed: no PR`. Left alone, the block-loop give-up breaker trips and
+  #   wedges the card in triage even though a valid PR appears seconds later.
+  #   So before that block counts as a developer failure, the dispatcher grace-
+  #   polls the issue's branch (`fix/issue-<n>`) for a PR across this many cron
+  #   ticks: a PR that appears in-window is adopted (QA is unblocked and re-runs
+  #   against it); if none appears within the window the card falls through to
+  #   the normal failure path (the breaker is preserved). Set to 0 to disable
+  #   the grace-poll (revert to the pre-#1405 immediate-fail behaviour).
+  # qa_no_pr_grace_ticks: 3
+
   # ── Accessibility-stage UI gate (#1371) ──────────────────────────────────
   # The accessibility review only adds value for PRs that touch UI. The
   # downstream fan-out tests the developer's PR diff (changed files) against

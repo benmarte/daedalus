@@ -171,18 +171,25 @@ from core.iterate.executors import (  # noqa: E402
     _extract_issue_number_from_card as _extract_issue_number_from_card,
     _extract_sub_issues_from_body as _extract_sub_issues_from_body,
     _fix_attempts_path as _fix_attempts_path,
+    _grace_qa_no_pr as _grace_qa_no_pr,
     _handoff_from_card as _handoff_from_card,
     _increment_fix_attempts as _increment_fix_attempts,
     _is_card_already_escalated as _is_card_already_escalated,
+    _is_qa_no_pr_block as _is_qa_no_pr_block,
     _lock_file_path as _lock_file_path,
+    _bump_qa_no_pr_grace as _bump_qa_no_pr_grace,
     _parse_pr_number as _parse_pr_number,
+    _qa_no_pr_grace_path as _qa_no_pr_grace_path,
     _qa_passed_for_issue as _qa_passed_for_issue,
     _read_fix_attempts as _read_fix_attempts,
+    _read_qa_no_pr_grace as _read_qa_no_pr_grace,
     _release_decompose_lock as _release_decompose_lock,
+    _write_qa_no_pr_grace as _write_qa_no_pr_grace,
     _render_affected_files_section as _render_affected_files_section,
     _reviewer_passed_for_issue as _reviewer_passed_for_issue,
     _role_cards_for_issue as _role_cards_for_issue,
     _role_gate_passed as _role_gate_passed,
+    _sanitize_sub_issue_title as _sanitize_sub_issue_title,
     _security_passed_for_issue as _security_passed_for_issue,
     _strip_code_blocks as _strip_code_blocks,
     _sub_issue_body as _sub_issue_body,
@@ -288,6 +295,8 @@ def run_iterate(
         ESCALATE: 0,
         PLANNER_DECOMPOSE: 0,
         RECONCILE_MERGED: 0,
+        # #1405: QA cards held/adopted by the no-PR grace-poll this tick.
+        "qa_no_pr_grace": 0,
         # Phase-1 telemetry (#1170): tracks how many cards were routed via the
         # structured JSON outcome vs the legacy prefix path.  These counters
         # land in the dispatch history JSONL via routed_actions so Phase-3 can
@@ -349,6 +358,18 @@ def run_iterate(
     # only — classify_blocked still routes off the block-reason string — so flag-on
     # adds the tag without changing flow and flag-off omits --kind (byte-identical).
     _native_gates = bool(_pipeline_cfg.get("native_gates", False))
+    # #1405: bounded grace-poll for QA cards blocked with 'qa-failed: no PR'.
+    # A slightly-late developer PR (e.g. one opened after a worktree-collision
+    # retry, #1404) can land seconds after QA runs and finds no PR. Grace-poll
+    # the issue's branch for this many ticks and adopt a PR that appears (re-run
+    # QA) instead of tripping the give-up breaker. 0 disables the grace-poll
+    # entirely (byte-identical to pre-#1405 behaviour). Default 3.
+    try:
+        _qa_no_pr_grace_ticks = int(_pipeline_cfg.get("qa_no_pr_grace_ticks", 3))
+    except (TypeError, ValueError):
+        _qa_no_pr_grace_ticks = 3
+    if _qa_no_pr_grace_ticks < 0:
+        _qa_no_pr_grace_ticks = 0
     # #1371: accessibility-stage gating on real UI changes. The downstream
     # fan-out tests the developer's PR diff against this fileset; a backend-only
     # PR skips accessibility-card creation (and spawns no accessibility agent).
@@ -419,6 +440,29 @@ def run_iterate(
             detail = kanban.show_card(slug, tid)
             if detail:
                 handoff = (detail.get("latest_summary") or "").strip()
+
+        # ── QA "no PR" grace-poll (#1405) ─────────────────────────────────
+        # A QA card blocked purely because no PR was found is a timing symptom
+        # (a slightly-late developer PR — e.g. one opened after a worktree-
+        # collision retry, #1404), not a real test failure. Before this block
+        # counts toward the give-up breaker, grace-poll the VCS for a PR on the
+        # issue's branch. Adopt a PR that appears (unblock QA → re-run against
+        # it); otherwise hold for a bounded window. Only when the window is
+        # exhausted does the card fall through to the normal failure path
+        # (QA_FIX / breaker), which is left intact (issue #1405 non-goal).
+        if (_qa_no_pr_grace_ticks > 0
+                and assignee == "qa-daedalus"
+                and _is_qa_no_pr_block(handoff)):
+            grace = _grace_qa_no_pr(
+                slug, card, _extract_issue_number_from_card(card), provider,
+                workdir=workdir,
+                max_grace_ticks=_qa_no_pr_grace_ticks,
+                dry_run=dry_run,
+            )
+            if grace in ("adopted", "holding"):
+                counts["qa_no_pr_grace"] = counts.get("qa_no_pr_grace", 0) + 1
+                continue
+            # "exhausted" → fall through to normal classification below.
 
         fix_attempts = _count_fix_attempts(card)
 
