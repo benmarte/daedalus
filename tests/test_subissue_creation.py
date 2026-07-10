@@ -28,6 +28,7 @@ from core.iterate import (  # noqa: E402
     _execute_planner_decompose,
     _extract_sub_issues_from_body,
     _default_sub_issue_titles,
+    _sanitize_sub_issue_title,
     classify_blocked,
 )
 
@@ -86,6 +87,82 @@ def test_extract_asterisk_and_plus_markers():
     assert _extract_sub_issues_from_body(body) == ["Alpha", "Beta"]
 
 
+# ── AC-section awareness (issue #1402) ───────────────────────────────────────
+
+def test_ac_checklist_is_not_decomposed():
+    """Checklist items under an Acceptance Criteria heading are NOT deliverables."""
+    body = (
+        "## Summary\nFix the parser.\n\n"
+        "## Acceptance Criteria\n"
+        "- [ ] Parser handles empty input\n"
+        "- [ ] Tests pass\n"
+        "- [ ] PR opened\n"
+    )
+    assert _extract_sub_issues_from_body(body) == []
+
+
+def test_test_plan_section_is_not_decomposed():
+    body = (
+        "## Test Plan\n"
+        "- [ ] unit tests\n"
+        "- [ ] integration tests\n"
+    )
+    assert _extract_sub_issues_from_body(body) == []
+
+
+def test_bold_heading_ac_section_is_not_decomposed():
+    body = (
+        "**Acceptance Criteria**\n"
+        "- [ ] does the thing\n"
+        "- [ ] does the other thing\n"
+    )
+    assert _extract_sub_issues_from_body(body) == []
+
+
+def test_deliverable_checklist_still_decomposed():
+    """Genuine deliverable checklists (non-AC section) are still extracted."""
+    body = (
+        "## Tasks\n"
+        "- [ ] Build the API\n"
+        "- [ ] Build the UI\n\n"
+        "## Acceptance Criteria\n"
+        "- [ ] Everything works\n"
+    )
+    assert _extract_sub_issues_from_body(body) == ["Build the API", "Build the UI"]
+
+
+def test_top_level_checklist_without_heading_still_decomposed():
+    body = "- [ ] Task A\n- [ ] Task B\n"
+    assert _extract_sub_issues_from_body(body) == ["Task A", "Task B"]
+
+
+# ── _sanitize_sub_issue_title (issue #1402) ──────────────────────────────────
+
+def test_sanitize_prefers_bold_lead_segment():
+    raw = "**Remove the dispatcher-side path**: delete the `provider.append_changelog(...)` call block and all references to it"
+    assert _sanitize_sub_issue_title(raw) == "Remove the dispatcher-side path"
+
+
+def test_sanitize_caps_long_plain_bullet():
+    raw = "Delete " + "very " * 40 + "long bullet"
+    out = _sanitize_sub_issue_title(raw)
+    assert len(out) <= 73  # _MAX_TITLE_LEN (72) + ellipsis
+    assert out.endswith("…")
+
+
+def test_sanitize_single_line_only():
+    assert _sanitize_sub_issue_title("first line\nsecond line") == "first line"
+
+
+def test_sanitize_short_bullet_unchanged():
+    assert _sanitize_sub_issue_title("Build the API") == "Build the API"
+
+
+def test_sanitize_cuts_at_colon_clause():
+    raw = "Add caching: this significantly improves throughput under load"
+    assert _sanitize_sub_issue_title(raw) == "Add caching"
+
+
 # ── _default_sub_issue_titles ────────────────────────────────────────────────
 
 def test_default_titles_returns_three():
@@ -111,6 +188,55 @@ def test_checklist_case_creates_sub_issues(tmp_path):
 
     assert ok is True
     assert prov.create_issue.call_count == 5
+
+
+def test_multisentence_bullet_gets_sanitized_title(tmp_path):
+    """A multi-sentence deliverable bullet becomes a short imperative title (#1402)."""
+    body = (
+        "## Tasks\n"
+        "- [ ] **Remove the dispatcher-side path**: delete the `append_changelog(...)` "
+        "call block and every reference across the codebase and the docs\n"
+    )
+    issue = _make_issue_obj(1, "Epic", body)
+    prov = _make_provider(issue_obj=issue, created_numbers=[10])
+
+    with mock.patch.object(iterate.kanban, "complete", return_value=True), \
+         mock.patch.object(iterate.kanban, "create_triage", return_value="t_x"), \
+         mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
+        _execute_planner_decompose(
+            "slug", _make_card(body=body), "o/r", "PLANNING COMPLETE",
+            provider=prov, workdir=str(tmp_path),
+        )
+
+    assert prov.create_issue.call_count == 1
+    title = prov.create_issue.call_args_list[0].args[0]
+    assert title == "Remove the dispatcher-side path"
+    assert "\n" not in title
+
+
+def test_ac_only_epic_falls_back_to_default_titles(tmp_path):
+    """An epic whose only checklist is an AC section gets 3 generic sub-issues (#1402)."""
+    body = (
+        "## Summary\nOne unit of work.\n\n"
+        "## Acceptance Criteria\n"
+        "- [ ] behaviour A\n- [ ] behaviour B\n- [ ] tests pass\n"
+    )
+    issue = _make_issue_obj(1, "Epic", body)
+    prov = _make_provider(issue_obj=issue, created_numbers=[10, 11, 12])
+
+    with mock.patch.object(iterate.kanban, "complete", return_value=True), \
+         mock.patch.object(iterate.kanban, "create_triage", return_value="t_x"), \
+         mock.patch.object(iterate.kanban, "list_tasks", return_value=[]):
+        _execute_planner_decompose(
+            "slug", _make_card(body=body), "o/r", "PLANNING COMPLETE",
+            provider=prov,
+        )
+
+    # 3 default sub-issues, not one-per-AC-bullet.
+    assert prov.create_issue.call_count == 3
+    titles = [c.args[0] for c in prov.create_issue.call_args_list]
+    assert any("Research" in t for t in titles)
+    assert any("Implementation" in t for t in titles)
 
 
 # ── standard body template with parent backlink ─────────────────────────────

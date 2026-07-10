@@ -86,6 +86,7 @@ from typing import Any
 from core.file_overlap import pr_touches_ui
 from core.iterate import outcomes
 from core.iterate.classify import MAX_FIX_ATTEMPTS
+from core.providers.base import _deliverable_checklist_items
 from core.util import extract_issue_number, extract_pr_number_from_summary
 
 logger = logging.getLogger("daedalus.iterate")
@@ -1593,9 +1594,51 @@ def _execute_escalate(
 
 # ── planner decompose ───────────────────────────────────────────────────────
 
-_CHECKLIST_RE = re.compile(r"^\s*[-*+]\s*\[[ xX]\]\s*(.+)", re.MULTILINE)
+_CHECKLIST_RE = re.compile(r"^\s*[-*+]\s*\[[ xX]\]\s*(.+)")
 _MAX_SUB_ISSUES = 10
 _DECOMPOSE_MARKER_PREFIX = "<!-- daedalus:sub-issues:"
+
+#: Max characters for a generated sub-issue title derived from a checklist
+#: bullet (issue #1402). Bullets are frequently multi-sentence prose.
+_MAX_TITLE_LEN = 72
+
+#: A leading ``**bold**`` segment in a checklist bullet is treated as the
+#: imperative summary of that item (issue #1402).
+_BOLD_LEAD_RE = re.compile(r"^\s*\*\*(.+?)\*\*")
+
+
+def _sanitize_sub_issue_title(raw: str) -> str:
+    """Derive a short, single-line, imperative title from a checklist bullet.
+
+    Acceptance-criteria / checklist bullets are frequently multi-sentence prose
+    with markdown emphasis (issue #1402). This collapses a bullet to a concise
+    title: prefer a leading ``**bold**`` segment, strip residual markdown, cut at
+    the first sentence/clause boundary, and hard-cap the length with an ellipsis.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    # First line only — never let a newline leak into a title.
+    text = text.splitlines()[0].strip()
+    # Prefer a leading **bold** segment as the imperative summary.
+    m = _BOLD_LEAD_RE.match(text)
+    if m:
+        text = m.group(1).strip()
+    # Strip residual markdown emphasis / inline code.
+    text = text.replace("**", "").replace("`", "").strip()
+    # Cut at the first sentence/clause boundary when that yields a concise head.
+    for sep in (": ", ". ", " — ", " – "):
+        head = text.split(sep, 1)[0].strip()
+        if head and len(head) <= _MAX_TITLE_LEN:
+            text = head
+            break
+    # Hard length cap, breaking on a word boundary.
+    if len(text) > _MAX_TITLE_LEN:
+        clipped = text[:_MAX_TITLE_LEN].rstrip()
+        if " " in clipped:
+            clipped = clipped[: clipped.rfind(" ")].rstrip()
+        text = clipped + "…"
+    return text
 
 def _build_decomposed_marker() -> str:
     """Build the new idempotency marker with current UTC timestamp.
@@ -1659,9 +1702,16 @@ def has_decomposed_marker(text: str | None) -> bool:
 
 
 def _extract_sub_issues_from_body(body: str) -> list[str]:
-    """Return checklist item texts from an epic body (capped at _MAX_SUB_ISSUES)."""
-    items = [m.group(1).strip() for m in _CHECKLIST_RE.finditer(body or "")]
-    return [i for i in items if i][:_MAX_SUB_ISSUES]
+    """Return genuine-deliverable checklist item texts from an epic body.
+
+    Checklist items that fall under an acceptance-criteria / test-plan /
+    verification heading are *verification steps for one unit of work*, not
+    independent deliverables, so they are skipped (issue #1402). The
+    section-aware attribution lives in ``core.providers.base`` so epic
+    *detection* (``is_epic``) and *decomposition* agree on what counts as a
+    deliverable. Returned list is capped at ``_MAX_SUB_ISSUES``.
+    """
+    return _deliverable_checklist_items(body)[:_MAX_SUB_ISSUES]
 
 
 def _default_sub_issue_titles(parent_n: int, parent_title: str) -> list[str]:
@@ -1887,7 +1937,10 @@ def _execute_planner_decompose_inner(
 
     checklist_items = _extract_sub_issues_from_body(parent_body)
     if checklist_items:
-        sub_titles = checklist_items
+        # Sanitize each bullet into a short, single-line, imperative title
+        # (issue #1402) but keep the full bullet text as the sub-issue scope so
+        # downstream context/analysis is not truncated.
+        sub_titles = [_sanitize_sub_issue_title(i) for i in checklist_items]
         sub_scopes = checklist_items
     else:
         sub_titles = _default_sub_issue_titles(parent_n, parent_title)

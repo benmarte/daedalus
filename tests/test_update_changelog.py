@@ -106,6 +106,39 @@ def test_commit_message_carries_skip_ci():
     assert "[skip ci]" in uc.COMMIT_MESSAGE
 
 
+# ── (e) title sanitization — defense-in-depth backstop (issue #1402) ─────────
+def test_sanitize_title_passes_normal_title_through():
+    assert uc.sanitize_title("fix: something normal") == "fix: something normal"
+
+
+def test_sanitize_title_collapses_newlines_to_single_line():
+    garbage = "Remove the dispatcher-side path\ndelete the call block\nand references"
+    out = uc.sanitize_title(garbage)
+    assert "\n" not in out
+    assert out == "Remove the dispatcher-side path delete the call block and references"
+
+
+def test_sanitize_title_caps_length_with_ellipsis():
+    out = uc.sanitize_title("word " * 60)  # ~300 chars
+    assert len(out) <= uc.MAX_TITLE_LEN + 1  # +1 for the ellipsis char
+    assert out.endswith("…")
+
+
+def test_format_entry_sanitizes_multiline_title():
+    entry = uc.format_entry("bad\ntitle", ISSUE_URL, 7, PR_URL)
+    assert "\n" not in entry
+    assert entry == f"## [bad title]({ISSUE_URL}) — [PR #7]({PR_URL})"
+
+
+def test_update_changelog_sanitizes_garbage_title(tmp_path):
+    cl = tmp_path / "CHANGELOG.md"
+    uc.update_changelog(cl, title="line one\nline two", pr_number=8, pr_url=PR_URL)
+    content = cl.read_text()
+    # The entry line itself must be single-line (no embedded newline in the title).
+    entry_line = content.splitlines()[0]
+    assert "line one line two" in entry_line
+
+
 # ── CLI smoke ───────────────────────────────────────────────────────────────
 def test_cli_writes_then_skips(tmp_path, capsys):
     cl = tmp_path / "CHANGELOG.md"

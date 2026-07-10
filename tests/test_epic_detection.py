@@ -16,6 +16,7 @@ from core.providers.base import (
     is_epic,
     _EPIC_CHECKLIST_MIN,
     _EPIC_BODY_SIZE_MIN,
+    _deliverable_checklist_items,
     _has_sub_issue_checklist,
     _is_single_ac_bug,
 )
@@ -424,6 +425,43 @@ class TestSemanticSignals:
 
     def test_is_single_ac_bug_false_when_no_ac_section(self):
         assert _is_single_ac_bug("- [ ] plain checklist item\n" * 6) is False
+
+
+# ── AC-vs-deliverable checklist attribution (issue #1402) ────────────────────
+
+
+class TestAcSectionExclusion:
+    def test_ac_bullets_excluded_from_density(self):
+        """Checklist items under an Acceptance Criteria heading do not make an epic."""
+        body = (
+            "## Summary\nOne unit of work.\n\n"
+            "## Acceptance Criteria\n"
+            + "\n".join(f"- [ ] behaviour {i}" for i in range(_EPIC_CHECKLIST_MIN + 2))
+        )
+        assert is_epic(_make_issue(body=body)) is False
+
+    def test_test_plan_bullets_excluded_from_density(self):
+        body = "## Test Plan\n" + "\n".join(
+            f"- [ ] check {i}" for i in range(_EPIC_CHECKLIST_MIN + 1)
+        )
+        assert is_epic(_make_issue(body=body)) is False
+
+    def test_deliverable_bullets_still_make_epic(self):
+        body = "## Tasks\n" + "\n".join(
+            f"- [ ] Build subsystem {i}" for i in range(_EPIC_CHECKLIST_MIN)
+        )
+        assert is_epic(_make_issue(body=body)) is True
+
+    def test_deliverable_items_skips_ac_section(self):
+        body = (
+            "## Tasks\n- [ ] Build API\n- [ ] Build UI\n\n"
+            "## Acceptance Criteria\n- [ ] works end to end\n"
+        )
+        assert _deliverable_checklist_items(body) == ["Build API", "Build UI"]
+
+    def test_deliverable_items_bold_heading_ac(self):
+        body = "**Acceptance Criteria**\n- [ ] does the thing\n"
+        assert _deliverable_checklist_items(body) == []
 
 
 # ── Dispatcher routing (integration, #149) ──────────────────────────────────
