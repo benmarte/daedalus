@@ -409,6 +409,43 @@ pipeline:
   # upfront_dag: false
   # native_gates: false
 
+  # ── Concurrent-duplicate detection (#1413) ────────────────────────────────
+  # concurrent_dedup (default: disabled — behaviour byte-identical when off)
+  #   Two dedup gates for same-root-cause issues processed IN PARALLEL — a case
+  #   the validator's sequential open-PR/issue check structurally cannot catch,
+  #   because at validation time for issue X a concurrently-processing sibling Y
+  #   has no PR yet, so there is nothing to match against. Real-world driver:
+  #   issues #444 and #446 were the same concurrent-migration race, validated in
+  #   parallel, each re-implementing the advisory-lock wrapper on the same file →
+  #   redundant PRs (both manually closed).
+  #
+  #   Layer 1 (dispatch-time hold): before spawning a validator for issue X, the
+  #   dispatcher checks file-reference / keyword overlap (via core.file_overlap)
+  #   against other in-flight issues (managed, or created earlier this tick, and
+  #   still open). On a hit at >= min_confidence, X is HELD — no card is created
+  #   and its board status is left untouched — until the sibling resolves. Every
+  #   tick re-evaluates against the live in-flight set, so the hold releases
+  #   automatically once the sibling's issue closes; the validator then re-checks
+  #   and can legitimately emit DUPLICATE. Held issues appear under
+  #   `concurrent_holds` in the dispatch summary.
+  #
+  #   Layer 2 (pre-merge PR gate): once a PR is open its changed-file set is
+  #   known. The dispatcher compares it against other open PRs and, when the
+  #   NEWER PR shares >= min_shared_files files (suffix-aware) with an older open
+  #   PR, posts a one-shot "suspected duplicate" comment on the newer PR for a
+  #   human to confirm before either merges. It never auto-closes a PR.
+  #
+  #   min_confidence  (default 0.8) — Layer-1 overlap threshold. 0.8 is the
+  #                    file-reference match bar in core.file_overlap, so an
+  #                    explicit shared file (or a full file+keyword match at 1.0)
+  #                    trips the hold while a bare keyword overlap does not. Lower
+  #                    it to also hold on strong keyword-only similarity.
+  #   min_shared_files (default 1) — Layer-2 shared-file threshold.
+  # concurrent_dedup:
+  #   enabled: false
+  #   min_confidence: 0.8
+  #   min_shared_files: 1
+
   # ── Developer PR grace window (#1375) ─────────────────────────────────────
   # developer_pr_grace_secs (default: 120)
   #   After the developer's inner coding-agent process exits, delegate.sh checks
