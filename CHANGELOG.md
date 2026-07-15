@@ -1,3 +1,7 @@
+## [fix: concurrent-duplicate detection for parallel same-root-cause issues (#1413)](https://github.com/benmarte/daedalus/pull/1414) — [PR #1414](https://github.com/benmarte/daedalus/pull/1414)
+
+## [fix: default thread_broadcast to false (in-thread-only notifications) (#1406)](https://github.com/benmarte/daedalus/pull/1412) — [PR #1412](https://github.com/benmarte/daedalus/pull/1412)
+
 ## [fix: scrub kanban run-env from inner coding agent to stop premature developer done (#1409)](https://github.com/benmarte/daedalus/pull/1410) — [PR #1410](https://github.com/benmarte/daedalus/pull/1410)
 
 ## [fix: grace-poll for a late developer PR before QA 'no PR' trips the breaker (#1405)](https://github.com/benmarte/daedalus/pull/1408) — [PR #1408](https://github.com/benmarte/daedalus/pull/1408)

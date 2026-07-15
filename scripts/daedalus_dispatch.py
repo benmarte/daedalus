@@ -102,6 +102,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
 from config import ConfigLoader  # noqa: E402
+from core import concurrent_dedup  # noqa: E402
 from core import crash_retry  # noqa: E402
 from core import goal_mode  # noqa: E402
 from core import native_bounds  # noqa: E402
@@ -3449,6 +3450,22 @@ def _run_tick(
     _pipeline_cfg = resolved.get("pipeline") or {}
     _upfront_dag = bool(_pipeline_cfg.get("upfront_dag", False))
 
+    # Concurrent-duplicate detection (#1413). Default OFF → behaviour byte-identical.
+    #   Layer 1: hold an issue whose in-flight sibling overlaps on files/keywords.
+    #   Layer 2: flag a newer open PR touching the same files as an older open PR.
+    _cd_cfg = _pipeline_cfg.get("concurrent_dedup") or {}
+    _cd_enabled = bool(_cd_cfg.get("enabled", False))
+    _cd_min_conf = float(
+        _cd_cfg.get("min_confidence", concurrent_dedup.DEFAULT_MIN_CONFIDENCE)
+    )
+    _cd_min_shared = int(
+        _cd_cfg.get("min_shared_files", concurrent_dedup.DEFAULT_MIN_SHARED_FILES)
+    )
+    # Per-tick memo of PR changed-file lists so the Layer-2 scan fetches each
+    # open PR's files at most once even when several managed PRs are open.
+    _cd_pr_files_cache: Dict[int, List[str]] = {}
+    concurrent_holds: Dict[int, int] = {}  # held issue -> in-flight sibling (#1413)
+
     # Enforce validator blocks: set 'Blocked' column on VCS board and cancel
     # downstream tasks for any issue whose validator card is currently blocked.
     # Runs each tick so issues blocked mid-cycle are caught immediately.
@@ -3798,6 +3815,76 @@ def _run_tick(
                     # ── PR size gate + forbidden file guard ──────────────────
                     pr_files = provider.get_pr_files(open_pr_obj.number)
                     if pr_files and workdir:
+                        # Concurrent-duplicate gate — Layer 2 (#1413). Now the
+                        # changed-file set is known, flag this PR when it touches
+                        # the same files as an OLDER open PR (a sibling issue's
+                        # redundant fix). This is the backstop the validator
+                        # structurally cannot make at validation time. One-shot
+                        # per PR via the ``dup_warned`` flag; flag-off → inert.
+                        _cd_files = [
+                            f.get("filename", "") for f in pr_files if f.get("filename")
+                        ]
+                        _cd_pr_files_cache[open_pr_obj.number] = _cd_files
+                        if (
+                            _cd_enabled
+                            and _cd_files
+                            and not dispatch_state.has_pr_flag(
+                                workdir, open_pr_obj.number, "dup_warned"
+                            )
+                        ):
+                            _others: List[tuple] = []
+                            for _op in provider.list_prs(state="open"):
+                                if _op.number == open_pr_obj.number:
+                                    continue
+                                if _op.number not in _cd_pr_files_cache:
+                                    _cd_pr_files_cache[_op.number] = [
+                                        f.get("filename", "")
+                                        for f in provider.get_pr_files(_op.number)
+                                        if f.get("filename")
+                                    ]
+                                _others.append(
+                                    (_op.number, _cd_pr_files_cache[_op.number])
+                                )
+                            _pr_dup = concurrent_dedup.find_pr_file_overlap(
+                                _cd_files, _others, min_shared_files=_cd_min_shared
+                            )
+                            # Only flag the NEWER PR (higher number); the older PR
+                            # is the canonical one to keep.
+                            if _pr_dup is not None and open_pr_obj.number > _pr_dup[0]:
+                                _other_pr, _shared = _pr_dup
+                                warn = (
+                                    notify_templates.render_agent_header(
+                                        "daedalus", template=_comment_header_tpl
+                                    )
+                                    + "\n\n"
+                                    "🔁 **Suspected duplicate PR**: this PR changes "
+                                    f"the same file(s) as the older open PR #{_other_pr}:\n\n"
+                                    + "".join(f"- `{fn}`\n" for fn in _shared)
+                                    + "\nThese may be re-implementing the same fix "
+                                    "for the same root cause. A human should confirm "
+                                    f"whether this PR duplicates #{_other_pr} before "
+                                    "either is merged."
+                                )
+                                if dry_run:
+                                    logger.info(
+                                        "[dry-run] PR #%s duplicates open PR #%s "
+                                        "(shared %s) — would warn (#1413)",
+                                        open_pr_obj.number,
+                                        _other_pr,
+                                        _shared,
+                                    )
+                                else:
+                                    provider.post_pr_comment(open_pr_obj.number, warn)
+                                    dispatch_state.set_pr_flag(
+                                        workdir, open_pr_obj.number, "dup_warned"
+                                    )
+                                    logger.warning(
+                                        "dispatch: PR #%s suspected duplicate of open "
+                                        "PR #%s (shared files: %s) — warned (#1413)",
+                                        open_pr_obj.number,
+                                        _other_pr,
+                                        _shared,
+                                    )
                         max_pr_lines = int((execution or {}).get("max_pr_lines", 0))
                         if max_pr_lines:
                             total_lines = sum(f.get("changes", 0) for f in pr_files)
@@ -3922,6 +4009,35 @@ def _run_tick(
                 n,
             )
             continue
+        # Concurrent-duplicate gate — Layer 1 (#1413). Before spawning the
+        # validator, hold this issue when an in-flight sibling (another managed
+        # issue, or one created earlier this tick) overlaps on files/keywords.
+        # The validator's open-PR check can't catch parallel same-root-cause
+        # issues because the sibling has no PR yet; holding until the sibling
+        # resolves lets the validator legitimately emit DUPLICATE next. Every
+        # tick re-evaluates against the live in-flight set, so the hold releases
+        # automatically once the sibling closes. Flag-off → this block is inert.
+        if _cd_enabled:
+            _siblings = concurrent_dedup.gather_inflight_siblings(
+                n, existing, created, issues_map
+            )
+            _dup = concurrent_dedup.find_inflight_duplicate(
+                issue, _siblings, min_confidence=_cd_min_conf
+            )
+            if _dup is not None:
+                _sib_no, _ovl = _dup
+                concurrent_holds[n] = _sib_no
+                logger.info(
+                    "dispatch: #%s held as suspected concurrent-duplicate of "
+                    "in-flight #%s (confidence %.2f, files=%s, keywords=%s) — "
+                    "waiting for sibling to resolve (#1413)",
+                    n,
+                    _sib_no,
+                    _ovl.get("confidence"),
+                    _ovl.get("matched_files"),
+                    _ovl.get("matched_keywords"),
+                )
+                continue
         if len(created) >= max_dispatch:
             break  # cap new tasks per tick
         # New work (deterministic, code): board status -> In progress, then
@@ -4288,6 +4404,7 @@ def _run_tick(
         "slack_delivered": slack_delivered,
         "blocked": blocked_issues,
         "blocked_deps": blocked_deps,
+        "concurrent_holds": concurrent_holds,
         "threads_mirrored": threads_mirrored,
         "pm_triggered": pm_triggered,
         "blocker_triggered": blocker_triggered,
