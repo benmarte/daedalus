@@ -402,6 +402,7 @@ def _build_delegation_instructions(
     issue_number: int = 0,
     base_branch: str = "dev",
     body_position: str = "below",
+    board_slug: str = "",
 ) -> str:
     """Return delegation instruction text to inject into any role's task body.
 
@@ -410,6 +411,9 @@ def _build_delegation_instructions(
     ``issue_number`` scopes the /tmp task/out filenames so concurrent tasks for
     different issues never clobber each other's files (issue #114).
     ``base_branch`` is the branch the developer's isolated worktree forks off.
+    ``board_slug`` is the kanban board slug, injected into the non-developer
+    ``--relay-verdict`` spawn line so the outer agent need not hunt for it
+    (#1416); blank keeps the ``<BOARD_SLUG>`` placeholder.
     ``body_position`` says where the role body sits relative to this block
     ("below" for prepended blocks, "above" for appended ones) so steps 1–2 can
     tell the outer agent to copy ONLY the inner task body — never this block —
@@ -480,7 +484,7 @@ def _build_delegation_instructions(
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
             + copy_steps
-            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch, board_slug)
             + after
             + separator_tail
         )
@@ -491,7 +495,7 @@ def _build_delegation_instructions(
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
             + copy_steps
-            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch, board_slug)
             + after
             + separator_tail
         )
@@ -502,7 +506,7 @@ def _build_delegation_instructions(
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
             + copy_steps
-            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch, board_slug)
             + after
             + separator_tail
         )
@@ -523,7 +527,7 @@ def _build_delegation_instructions(
             f"  Do NOT do this work yourself. Spawn {label} via terminal.\n\n"
             + _inner_agent_prohibition
             + copy_steps
-            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch)
+            + _spawn_step3(pfx, issue_number, run_cmd, role, base_branch, board_slug)
             + after
             + separator_tail
         )
@@ -540,6 +544,7 @@ def _prepend_delegation(
     append: bool = False,
     trailing: str = "\n\n",
     base_branch: str = "dev",
+    board_slug: str = "",
 ) -> str:
     """Inject the agent-delegation block into a role body.
 
@@ -563,6 +568,7 @@ def _prepend_delegation(
         issue_number=issue_number,
         base_branch=base_branch,
         body_position="above" if append else "below",
+        board_slug=board_slug,
     )
     if append:
         return body + block + trailing
@@ -646,6 +652,7 @@ def _apply_coding_agent_failover(
             issue_number=extract_issue_number(card.get("title") or "") or 0,
             base_branch=base_branch,
             body_position=body_position,
+            board_slug=slug,
         )
     new_body = _rewrite_delegation_block(body, block)
     if new_body is None:
@@ -1287,6 +1294,7 @@ def _task_body(
         append=True,
         trailing="",
         base_branch=base_branch,
+        board_slug=_board_slug(repo),
     )
 
 
@@ -1409,6 +1417,7 @@ def _validator_body(
         role="validator",
         issue_number=n,
         append=True,
+        board_slug=_board_slug(repo),
     )
 
 
@@ -1442,6 +1451,7 @@ def _pm_body(
         coding_agent_cmd,
         role="pm",
         issue_number=n,
+        board_slug=_board_slug(repo),
     )
     return _body
 
@@ -1674,6 +1684,7 @@ def _downstream_body(
         append=True,
         trailing="",
         base_branch=base_branch,
+        board_slug=_board_slug(repo),
     )
 
 
@@ -1709,6 +1720,7 @@ def _dev_task_body(
         coding_agent_cmd,
         issue_number=n,
         base_branch=base_branch,
+        board_slug=_board_slug(repo),
     )
     return _body
 
@@ -1737,6 +1749,7 @@ def _qa_task_body(
         coding_agent_cmd,
         role="qa",
         issue_number=n,
+        board_slug=_board_slug(repo),
     )
     return _body
 
@@ -1765,6 +1778,7 @@ def _reviewer_task_body(
         coding_agent_cmd,
         role="reviewer",
         issue_number=n,
+        board_slug=_board_slug(repo),
     )
     return _body
 
@@ -1793,6 +1807,7 @@ def _security_task_body(
         coding_agent_cmd,
         role="security",
         issue_number=n,
+        board_slug=_board_slug(repo),
     )
     return _body
 
@@ -1826,6 +1841,7 @@ def _docs_task_body(
         coding_agent_cmd,
         role="documentation",
         issue_number=n,
+        board_slug=_board_slug(repo),
     )
     return _body
 

@@ -331,7 +331,12 @@ _INNER_BODY_SEPARATOR = (
 
 
 def _spawn_step3(
-    pfx: str, issue_number: int, run_cmd: str, role: str, base_branch: str
+    pfx: str,
+    issue_number: int,
+    run_cmd: str,
+    role: str,
+    base_branch: str,
+    board_slug: str = "",
 ) -> str:
     """Build the step-3 ``terminal(...)`` spawn line for the delegated coding agent.
 
@@ -360,14 +365,21 @@ def _spawn_step3(
     # `--relay-verdict` mode. The wrapper spawns the coding-agent CLI, waits, and
     # transitions YOUR card by relaying the verdict the agent emits (SOUL signal
     # line + JSON OutcomeRecord) — so the outer model never has to wait/parse/
-    # complete the card itself (which weak local models fail at). Substitute
-    # <CARD_ID> with your own kanban card id and <BOARD_SLUG> with the board slug.
+    # complete the card itself (which weak local models fail at).
+    #
+    # The board slug is injected here at body-build time (the dispatcher knows it)
+    # so the outer agent only substitutes <CARD_ID> — which it knows from its own
+    # `work kanban task t_…` query. Leaving <BOARD_SLUG> for the agent to hunt for
+    # sent weak models into 20+ minute loops cat-ing hallucinated state files for a
+    # slug that appears nowhere in their context (#1416). A blank slug (unit tests /
+    # callers that don't thread it) falls back to the <BOARD_SLUG> placeholder.
+    _board = board_slug or "<BOARD_SLUG>"
     return (
         "  3. Spawn the one-shot delegate wrapper in the BACKGROUND, then your\n"
         "     session ENDS (the wrapper owns spawn→wait→transition). Substitute\n"
-        "     <CARD_ID> with your kanban card id and <BOARD_SLUG> with the board slug:\n"
+        "     <CARD_ID> with your kanban card id:\n"
         "       terminal('$HOME/.hermes/plugins/daedalus/scripts/daedalus-delegate.sh "
-        f"--task-file {tmp} --cmd \"{run_cmd}\" --card <CARD_ID> --board <BOARD_SLUG> "
+        f"--task-file {tmp} --cmd \"{run_cmd}\" --card <CARD_ID> --board {_board} "
         f"--out {outf} --role {role} --relay-verdict', background=True)\n"
         "     Do NOT wait, read the output, or complete the card yourself — "
         "--relay-verdict does it.\n"

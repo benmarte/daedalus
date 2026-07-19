@@ -212,6 +212,35 @@ def _get_task_summary(task: Dict[str, Any], slug: str) -> str:
     return _strip_role_label(summary_raw)
 
 
+def _pm_summary_verdict(summary_raw: str) -> Optional[str]:
+    """Return the PM completion verdict for a card summary, or ``None``.
+
+    Accepts either the SOUL-signal prefix (``spec:`` / ``assigned:``) OR a
+    structured JSON OutcomeRecord (``role == "pm"`` with ``verdict`` in
+    ``{"spec", "assigned"}``) as equivalent — mirroring the validator path in
+    ``_check_confirmed_validators``, which already honors a JSON ``confirmed``
+    record as the ``CONFIRMED:`` prefix (#dogfood 2026-07-05).
+
+    Needed because ``daedalus-delegate.sh --relay-verdict`` prefers the fenced
+    JSON outcome block over the SOUL line when it completes a card, so a relayed
+    PM card's summary is JSON-only. The old ``startswith`` checks then saw it as
+    stale and respawned a PM card every advance-hook tick (#1416).
+
+    Returns ``"spec"``, ``"assigned"``, or ``None``. The other PM verdicts
+    (``clarified`` / ``escalated``) return ``None`` — they are not spec
+    completions and must not count as complete or trigger team fan-out.
+    """
+    s = (summary_raw or "").strip().lower()
+    if s.startswith("spec:"):
+        return "spec"
+    if s.startswith("assigned:"):
+        return "assigned"
+    rec = _parse_outcome(summary_raw or "")
+    if rec is not None and rec.role == "pm" and rec.verdict in ("spec", "assigned"):
+        return rec.verdict
+    return None
+
+
 def _pm_task_state(
     slug: str, issue_number: int, pm_profile: str = "project-manager-daedalus"
 ) -> tuple:
@@ -242,8 +271,8 @@ def _pm_task_state(
             has_running = True
             continue
         summary_raw = _get_task_summary(t, slug)
-        s = summary_raw.lower()
-        if s.startswith("spec:") or s.startswith("assigned:"):
+        # Accept both the SOUL-signal prefix and a JSON OutcomeRecord (#1416).
+        if _pm_summary_verdict(summary_raw) is not None:
             has_complete = True
         else:
             stale_count += 1
@@ -422,8 +451,9 @@ def _try_adopt_pm_spec_comment(
             continue
         if (t.get("status") or "").lower() not in ("done", "complete", "completed"):
             continue
-        s = _get_task_summary(t, slug).lower()
-        if s.startswith("spec:") or s.startswith("assigned:"):
+        # A card carrying a valid JSON spec/assigned outcome is already complete —
+        # never adopt (rewrite) it (#1416).
+        if _pm_summary_verdict(_get_task_summary(t, slug)) is not None:
             continue
         tid = str(t.get("id") or t.get("task_id") or "")
         if tid:
@@ -2231,9 +2261,11 @@ def _check_completed_pm(
         # `hermes kanban list --json` omits the summary; fetch it from show.
         summary_raw = _get_task_summary(task, slug)
         summary = summary_raw.lower()
-        # Accept both old "SPEC:" and new "assigned:" PM completion signals.
+        # Accept both the SOUL-signal prefix ("SPEC:"/"assigned:") and a JSON
+        # OutcomeRecord (role=pm, verdict=spec/assigned) as equivalent (#1416).
         # "assigned:" means PM already created all team tasks directly — skip triage creation.
-        if summary.startswith("assigned:"):
+        _pm_verdict = _pm_summary_verdict(summary_raw)
+        if _pm_verdict == "assigned":
             # PM created team tasks directly via SOUL.md. Log and skip — tasks already exist.
             _n2 = extract_issue_number(task.get("title") or "")
             if _n2 is not None:
@@ -2242,7 +2274,7 @@ def _check_completed_pm(
                     _n2,
                 )
             continue
-        if not summary.startswith("spec:"):
+        if _pm_verdict != "spec":
             # Empty/None summary — PM agent crashed or context-limit dropout.
             # Log a warning so operators get visibility instead of a silent drop (#1104).
             if not summary:
