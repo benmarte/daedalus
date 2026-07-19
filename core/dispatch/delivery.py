@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -30,6 +31,15 @@ from core.util import extract_issue_number
 from core.util import extract_pr_number_from_summary
 
 logger = logging.getLogger("daedalus.dispatch")
+
+# Fenced code block matcher (mirrors ``core.iterate.outcomes._FENCED_RE``): the
+# full ``` ```json … ``` ``` block is group(0); its interior is group(1). Used by
+# ``_hide_outcome_blocks`` to HTML-comment-wrap ``daedalus_outcome`` records when
+# mirroring completion summaries into human-facing comments (#1417).
+_OUTCOME_FENCED_RE: re.Pattern[str] = re.compile(
+    r"```(?:json)?\s*(.*?)\s*```",
+    re.DOTALL,
+)
 
 # ── Prompt-body helpers ───────────────────────────────────────────────────────
 
@@ -75,13 +85,44 @@ def _validator_summary_burns_cap(summary: str) -> bool:
     return not s.startswith("confirmed")
 
 
+def _hide_outcome_blocks(summary: str) -> str:
+    """Wrap fenced ``daedalus_outcome`` JSON blocks in HTML comments (#1417).
+
+    Agents append a fenced ``daedalus_outcome`` OutcomeRecord to their kanban
+    summaries (#1170) so ``core.iterate.outcomes.parse`` and ``classify_blocked``
+    can route by ``(role, verdict)``. When those summaries are mirrored into
+    human-facing issue/PR comments (#894) the raw fenced block leaks into the
+    rendered thread as meaningless JSON.
+
+    Wrap each fenced block that contains ``"daedalus_outcome"`` in an HTML comment
+    (``<!-- daedalus:outcome ... -->``). HTML comments are invisible in rendered
+    GitHub/GitLab/Azure DevOps markdown, yet the raw comment body still contains
+    the fenced block verbatim — so ``outcomes.parse`` and the comment read-back
+    paths (``_validator_github_comment_outcome`` in ``checks.py``, spec adoption
+    in ``validator_comment.py``) keep working unchanged (they operate on raw
+    bodies, not rendered HTML). Blocks without ``"daedalus_outcome"`` (e.g. code
+    snippets in prose) are left untouched.
+    """
+
+    def _wrap(m: "re.Match[str]") -> str:
+        block = m.group(0)
+        if '"daedalus_outcome"' not in m.group(1):
+            return block
+        return f"<!-- daedalus:outcome\n{block}\n-->"
+
+    return _OUTCOME_FENCED_RE.sub(_wrap, summary)
+
+
 def _format_completion_comment(role: str, title: str, summary: str) -> str:
     """Render a role's kanban completion summary as a GitHub issue comment body.
 
     Used by ``_post_completion_comments`` (#894). Leads with ``**Agent: <role>**``
-    so the issue thread mirrors the prior agent-posted convention.
+    so the issue thread mirrors the prior agent-posted convention. Any fenced
+    ``daedalus_outcome`` block in the summary is hidden inside an HTML comment so
+    the human thread stays clean while the machine read-back paths still see the
+    raw JSON (#1417).
     """
-    summary = (summary or "").strip()
+    summary = _hide_outcome_blocks((summary or "").strip())
     lines = [f"**Agent: {role}**", ""]
     if title:
         lines.append(f"**Task:** {title}")
