@@ -1086,6 +1086,110 @@ def test_format_completion_comment_handles_empty_summary():
     )
 
 
+# Reviewer-style summary: human prefix + prose + the mandatory fenced outcome
+# block agents append (#1170).  Reused across the #1417 mirror-hiding tests.
+_OUTCOME_SUMMARY = (
+    "review-approved: PR #1410 — correctness and security verified\n\n"
+    "All axes look good; ready to merge.\n\n"
+    "```json\n"
+    '{"daedalus_outcome": 1, "role": "reviewer", "verdict": "approved",\n'
+    ' "refs": {"issue": 1409, "pr": 1410},\n'
+    ' "evidence": {"axes": "correctness readability architecture security"},\n'
+    ' "note": "clean"}\n'
+    "```"
+)
+
+
+def test_format_completion_comment_hides_outcome_block():
+    """The fenced daedalus_outcome block is HTML-comment-wrapped (invisible when
+    rendered) while the human prefix line and prose stay visible (#1417 AC#1)."""
+    disp = _load_dispatch()
+    body = disp._format_completion_comment("reviewer", "#1409 Fix", _OUTCOME_SUMMARY)
+    check(
+        "outcome block wrapped in an HTML comment",
+        "<!-- daedalus:outcome" in body and body.rstrip().endswith("-->"),
+    )
+    check(
+        "human prefix line stays visible",
+        "review-approved: PR #1410" in body,
+    )
+    check("prose stays visible", "ready to merge" in body)
+    # The raw fenced block is preserved verbatim inside the HTML comment.
+    check("raw fenced json preserved", '"daedalus_outcome": 1' in body)
+
+
+def test_format_completion_comment_outcome_round_trips_through_parse():
+    """outcomes.parse extracts the identical OutcomeRecord from the posted comment
+    body after HTML-comment wrapping (#1417 AC#2)."""
+    from core.iterate import outcomes
+
+    disp = _load_dispatch()
+    body = disp._format_completion_comment("reviewer", "#1409 Fix", _OUTCOME_SUMMARY)
+    rec = outcomes.parse(body)
+    check("parse still finds the record in the mirrored comment", rec is not None)
+    check("round-tripped role preserved", rec.role == "reviewer")
+    check("round-tripped verdict preserved", rec.verdict == "approved")
+    check("round-tripped pr ref preserved", rec.pr_ref == 1410)
+
+
+def test_validator_github_comment_outcome_reads_hidden_block():
+    """_validator_github_comment_outcome still detects the outcome from a comment
+    formatted the new (HTML-comment-wrapped) way (#1417 AC#3)."""
+    disp = _load_dispatch()
+    validator_summary = (
+        "CONFIRMED: issue is real and reproducible.\n\n"
+        "```json\n"
+        '{"daedalus_outcome": 1, "role": "validator", "verdict": "confirmed",\n'
+        ' "refs": {"issue": 42}, "note": ""}\n'
+        "```"
+    )
+    body = disp._format_completion_comment("validator", "#42 Bug", validator_summary)
+
+    class _FP:
+        def get_issue_comments(self, n):
+            return [{"user": {"login": "benmarte"}, "body": body}]
+
+    result = disp._validator_github_comment_outcome(_FP(), 42)
+    check("confirmed still detected from wrapped comment", result == "confirmed")
+
+
+def test_format_completion_comment_no_json_unchanged():
+    """Summaries with no fenced block are formatted exactly as before, and a
+    fenced block WITHOUT daedalus_outcome (plain code) is left visible (#1417
+    AC#4)."""
+    disp = _load_dispatch()
+    plain = disp._format_completion_comment("qa", "#7 Fix", "All tests green.")
+    check("plain summary has no HTML comment", "<!-- daedalus:outcome" not in plain)
+    check("plain summary preserved", "All tests green." in plain)
+
+    with_code = disp._format_completion_comment(
+        "developer", "#7 Fix", "Reproduced with:\n\n```python\nprint('hi')\n```"
+    )
+    check(
+        "non-outcome code fence left untouched",
+        "<!-- daedalus:outcome" not in with_code and "print('hi')" in with_code,
+    )
+
+
+def test_format_completion_comment_hides_multiple_blocks():
+    """Multiple fenced daedalus_outcome blocks in one summary are all hidden
+    (#1417 AC#4)."""
+    disp = _load_dispatch()
+    two = (
+        "spec: do the thing\n\n"
+        "```json\n"
+        '{"daedalus_outcome": 0, "role": "pm", "verdict": "spec"}\n'
+        "```\n\n"
+        "and also\n\n"
+        "```json\n"
+        '{"daedalus_outcome": 1, "role": "pm", "verdict": "spec", '
+        '"refs": {"issue": 7}, "note": ""}\n'
+        "```"
+    )
+    body = disp._format_completion_comment("pm", "#7 Fix", two)
+    check("both outcome blocks wrapped", body.count("<!-- daedalus:outcome") == 2)
+
+
 def test_post_completion_comments_posts_once_per_role():
     """The dispatcher posts each completed role's kanban summary to the issue
     via provider.post_issue_comment — replacing agent self-posting (#894)."""
@@ -4568,6 +4672,11 @@ if __name__ == "__main__":
         test_task_body_no_slack,
         test_format_completion_comment_has_role_title_summary,
         test_format_completion_comment_handles_empty_summary,
+        test_format_completion_comment_hides_outcome_block,
+        test_format_completion_comment_outcome_round_trips_through_parse,
+        test_validator_github_comment_outcome_reads_hidden_block,
+        test_format_completion_comment_no_json_unchanged,
+        test_format_completion_comment_hides_multiple_blocks,
         test_post_completion_comments_posts_once_per_role,
         test_post_completion_comments_idempotent_across_ticks,
         test_post_completion_comments_skips_closed_issues,
