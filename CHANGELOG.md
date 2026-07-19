@@ -1,3 +1,5 @@
+## [fix: hide daedalus_outcome JSON in mirrored completion comments (#1417)](https://github.com/benmarte/daedalus/pull/1418) — [PR #1418](https://github.com/benmarte/daedalus/pull/1418)
+
 ## [fix: concurrent-duplicate detection for parallel same-root-cause issues (#1413)](https://github.com/benmarte/daedalus/pull/1414) — [PR #1414](https://github.com/benmarte/daedalus/pull/1414)
 
 ## [fix: default thread_broadcast to false (in-thread-only notifications) (#1406)](https://github.com/benmarte/daedalus/pull/1412) — [PR #1412](https://github.com/benmarte/daedalus/pull/1412)
