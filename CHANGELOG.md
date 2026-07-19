@@ -1,3 +1,5 @@
+## [fix: PM checks honor relay-verdict JSON OutcomeRecord summaries (#1416)](https://github.com/benmarte/daedalus/pull/1419) — [PR #1419](https://github.com/benmarte/daedalus/pull/1419)
+
 ## [fix: hide daedalus_outcome JSON in mirrored completion comments (#1417)](https://github.com/benmarte/daedalus/pull/1418) — [PR #1418](https://github.com/benmarte/daedalus/pull/1418)
 
 ## [fix: concurrent-duplicate detection for parallel same-root-cause issues (#1413)](https://github.com/benmarte/daedalus/pull/1414) — [PR #1414](https://github.com/benmarte/daedalus/pull/1414)
